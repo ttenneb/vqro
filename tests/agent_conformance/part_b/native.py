@@ -87,7 +87,8 @@ class Native:
     def __init__(self, provider, root):
         self.provider, self.root = provider, root
         self.agents, self.plans, self.barriers = {}, {}, {}
-        self.queues, self.receipts, self.items = {}, {}, {}
+        self.queues, self.receipts, self.items, self.drafts = {}, {}, {}, {}
+        self.pull_entries,self.pull_pending,self.context_pending={},{},{}
         self.serial = 0
         self.ledger = root / "native.jsonl"
         self.server = None
@@ -96,6 +97,7 @@ class Native:
     def attach(self, provider):
         self.provider = provider
         provider.oracle = self
+        provider.open_stream = self.open_terminal
         for op in ("agent.send", "agent.interrupt", "agent.queue", "agent.respond", "agent.stop", "agent.receipt"):
             provider.effect(op)(lambda effect, args, op=op: self.effect(op, effect, args))
 
@@ -109,7 +111,7 @@ class Native:
             output.write(data); os.fsync(output.fileno())
         return row
 
-    async def add(self, ref, *, pull=None, state="idle", session="s1", principal=None):
+    async def add(self, ref, *, pull=None, state="idle", session="s1", principal=None,kind="agent",app=None):
         host = self.provider.registration.get("host") or "fixture-process:" + str(os.getpid())
         caps = deepcopy(self.provider.capabilities)
         caps.pop("agent", None); caps["rev"] = 1
@@ -117,19 +119,38 @@ class Native:
                   "run": None, "caps": caps, "incomplete": [], "host": {"id": host, "kind": "process", "owns_lifecycle": False}}
         if pull is not None: native["pull"] = deepcopy(pull)
         if principal is not None: native["principal"] = principal
-        row = {"ref": ref, "incarnation": "i:" + ref, "kind": "agent", "state": "live", "name": ref,
+        if kind=="terminal": native.pop("v");native["caps"]={}
+        row = {"ref": ref, "incarnation": "i:" + ref, "kind": kind, "state": "live", "name": ref,
                "status": {"state": "idle" if state == "idle" else "working"}, "data": {"agent": native,
                    "items":{"retain_bytes":131072,"entities":512,"entity_bytes":524288}}}
+        if app is not None: row["status"]["app"]=app
         self.agents[ref] = row
-        self.queues[ref], self.receipts[ref] = [], {}
+        self.queues[ref], self.receipts[ref], self.drafts[ref] = [], {}, b""
+        self.pull_entries[ref],self.pull_pending[ref],self.context_pending[ref]=[],[],[]
         await self.provider.upsert(deepcopy(row))
         return row
 
     async def publish(self, ref):
         row = self.agents[ref]
         native = row["data"]["agent"]
+        app=row["status"].get("app")
         row["status"] = {"state": "idle" if native["state"] == "idle" else "working"}
+        if app is not None: row["status"]["app"]=app
         await self.provider.upsert(deepcopy(row))
+
+    async def open_terminal(self,stream):
+        from vqro_provider import ProviderError
+        row=self.agents.get(stream.ref)
+        if not row or row["incarnation"]!=stream.incarnation: raise ProviderError("stale","terminal changed")
+        self.append("terminal_attach",ref=stream.ref)
+        def input_bytes(data):
+            if len(self.drafts[stream.ref])+len(data)>65536: raise ProviderError("overloaded","fake draft bound")
+            self.append("terminal_input",ref=stream.ref,bytes=list(data))
+            self.drafts[stream.ref]+=data
+            stream.offer(data)
+        stream.on_input=input_bytes
+        stream.offer(b"fake editor> "+self.drafts[stream.ref])
+        return "repaint"
 
     def journal(self,ref):
         epoch=self.agents[ref]["data"]["agent"]["epoch"]
@@ -269,6 +290,41 @@ class Native:
         if verb == "state": return {"agents": self.agents, "ledger_seq": self.serial,
             "registration": {k: v for k, v in self.provider.registration.items() if "token" not in k}}
         if verb == "add": return await self.add(request["ref"], **request.get("fields", {}))
+        if verb == "entry":
+            ref=request["ref"];supplied=request["records"]
+            if not isinstance(supplied,list) or len(supplied)>16: raise ValueError("fake entry batch bound")
+            entries=[]
+            for row in supplied:
+                entry={"id":"entry:"+str(self.serial+1),**deepcopy(row)}
+                self.append("session_entry",ref=ref,entry=entry)
+                self.pull_entries[ref].append(entry);self.pull_pending[ref].append(entry)
+                entries.append({"delivery":row["delivery"],"entry":entry["id"]})
+            if len(self.pull_entries[ref])>256: raise ValueError("fake session entry bound; evidence not dropped")
+            return {"records":entries}
+        if verb == "session": return {"entries":deepcopy(self.pull_entries[request["ref"]])}
+        if verb == "context":
+            ref=request["ref"];self.context_pending[ref].extend(deepcopy(request["records"]))
+            if len(self.context_pending[ref])>16: raise ValueError("context bound")
+            self.append("context_supplied",ref=ref,records=deepcopy(request["records"]))
+            return {"supplied":True}
+        if verb == "model":
+            ref=request["ref"];entries=self.pull_pending[ref];context=self.context_pending[ref]
+            self.append("model_request",ref=ref,deliveries=[row["delivery"] for row in entries],entries=deepcopy(entries),context=deepcopy(context))
+            self.pull_pending[ref]=[];self.context_pending[ref]=[]
+            self.agents[ref]["data"]["agent"].update(state="running",run="run:"+str(self.serial))
+            await self.publish(ref);return {"deliveries":[row["delivery"] for row in entries]}
+        if verb in ("abort","message_start"):
+            ref=request["ref"];self.append(verb,ref=ref)
+            self.agents[ref]["data"]["agent"]["state"]="idle" if verb=="abort" else "running"
+            await self.publish(ref);return {"observed":True}
+        if verb == "draft":
+            import base64
+            ref=request["ref"]
+            if "data" in request:
+                data=base64.b64decode(request["data"],validate=True)
+                if len(data)>65536: raise ValueError("fake draft bound")
+                self.drafts[ref]=data
+            return {"data":base64.b64encode(self.drafts[ref]).decode()}
         if verb == "set":
             row = self.agents[request["ref"]]
             row["data"]["agent"].update(deepcopy(request.get("fields", {})))
@@ -327,6 +383,8 @@ async def main():
     from vqro_provider import ProviderError
     Provider=item_provider(Provider)
     capabilities["items.stream"]={"retain_bytes":131072,"entities":512,"entity_bytes":524288}
+    capabilities["terminal.output"]={"raw":True}
+    capabilities["terminal.input"]={"stream":True,"effect":False}
     native, provider = None, None
     credential = os.environ.get("VQRO_BRIDGE_TOKEN")
     try:

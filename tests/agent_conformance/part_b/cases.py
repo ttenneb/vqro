@@ -7,7 +7,7 @@ import hashlib
 import json
 import time
 
-from ..results import CheckFailed, FixtureFailed, HarnessGap
+from ..results import CheckFailed, FixtureFailed, HarnessGap, NotApplicable
 from ..wire import RpcError
 from pathlib import Path
 
@@ -498,6 +498,142 @@ async def unconfirmed_claim(ctx):
     ctx.evidence.append({"kind":"unconfirmed_claim","adopted":adopted,"repair":repair,"native_calls":calls})
 
 
+async def terminal(ctx,*,pull=None,marker=True):
+    ctx.serial+=1;ref="terminal"+str(ctx.serial)
+    await ctx.native.call("add",ref=ref,fields={"kind":"terminal","app":"fake-osc-agent" if marker else None})
+    async def found(): return next((row for row in await ctx.resources() if row["backend_ref"]==ref),None)
+    row=await ctx.wait(found,label="public terminal fixture")
+    if pull is not None:
+        await ordinary(ctx,[{"op":"set","key":"doc/agents/terminals/"+row["id"],"value":{"pull":pull},"expect":0}])
+    return row
+
+
+def user_pull(): return {"points":["turn","settle","idle","tool"],"insert":"user","evidence":"entry","tool_boundary":True}
+
+
+async def consumer(ctx,row,name="consumer-1",records=None):
+    return await ctx.command("inbox.reconcile",{"op":await ctx.operation(),"agent":row["id"],"consumer":name,"records":records or []})
+
+
+async def take(ctx,row,*,name="consumer-1",at="turn",**fields):
+    return await ctx.command("inbox.take",{"op":await ctx.operation(),"agent":row["id"],"consumer":name,"at":at,**fields})
+
+
+async def report_pull(ctx,row,taken,stage,*,name="consumer-1",**fields):
+    results=[]
+    for claim in taken["claims"]:
+        results.append(await ctx.command("inbox.report",{"op":await ctx.operation(),"consumer":name,"stage":stage,**claim,**fields}))
+    return results
+
+
+async def insert_pull(ctx,row,taken,*,name="consumer-1"):
+    entries=await ctx.native.call("entry",ref=row["backend_ref"],records=taken["records"])
+    await report_pull(ctx,row,taken,"inserted",name=name)
+    return entries["records"]
+
+
+@case("T1")
+async def terminal_marker_without_plugin_never_types(ctx):
+    plain=await terminal(ctx,marker=False)
+    selection=await ctx.command("scope",{"action":"inspect","scope":"workspace"})
+    ctx.check(plain["id"] not in selection["targets"],"unmarked raw terminal is not inferred to be an agent")
+    marked=await terminal(ctx)
+    await ordinary(ctx,[{"op":"set","key":"doc/agents/terminals/"+plain["id"],"value":{},"expect":0}])
+    selection=await ctx.command("scope",{"action":"inspect","scope":"workspace"})
+    ctx.check({plain["id"],marked["id"]}<=set(selection["targets"]),"backend OSC-shaped app status and explicit marker both map terminal targets")
+    sent=await ctx.send(target=marked["id"])
+    await ctx.scope("resume","agent:"+marked["id"])
+    await held(ctx,sent["delivery"],"integration_unavailable")
+    ctx.check(not ctx.native.records("terminal_input") and not invocations(ctx,delivery=sent["delivery"]),
+              "without plugin input remains held, not keyboard-typed or adapted to send")
+
+
+@case("T4")
+async def released_or_crashed_before_entry(ctx):
+    row=await terminal(ctx,pull=user_pull());await consumer(ctx,row)
+    sent=await ctx.send(target=row["id"],mode="boundary")
+    await ctx.scope("resume","agent:"+row["id"])
+    first=await take(ctx,row);ctx.check(len(first["records"])==1,"safe-point take claims pending input")
+    ctx.check(not (await ctx.native.call("session",ref=row["backend_ref"]))["entries"],"release fixture handler returns with no inserted entry")
+    await report_pull(ctx,row,first,"released")
+    ctx.check((await ctx.get(sent["delivery"]))["state"]=="held","release returns uninserted input to held")
+    second=await take(ctx,row);await insert_pull(ctx,row,second)
+    await ctx.rejected("inbox.report",{"op":await ctx.operation(),"consumer":"consumer-1","stage":"released",**second["claims"][0]},{"conflict"})
+    fresh=await ctx.send(target=row["id"],mode="boundary",text="crash before insertion",send_new=True)
+    third=await take(ctx,row);ctx.check(third["claims"][0]["delivery"]==fresh["delivery"],"fresh claim precedes consumer loss")
+    await ctx.restart()
+    ctx.check((await ctx.get(fresh["delivery"]))["state"]=="unknown","consumer/core crash before insertion preserves unknown")
+
+
+@case("T5")
+async def reconcile_and_history_never_reinsert(ctx):
+    row=await terminal(ctx,pull=user_pull());await consumer(ctx,row)
+    inserted=await ctx.send(target=row["id"],mode="boundary",text="entry witness")
+    absent=await ctx.send(target=row["id"],mode="boundary",text="no entry witness",send_new=True)
+    await ctx.scope("resume","agent:"+row["id"])
+    op=await ctx.operation();args={"op":op,"agent":row["id"],"consumer":"consumer-1","at":"turn"}
+    batch=await ctx.command("inbox.take",args);ctx.check(len(batch["claims"])==2,"two open claims acquired")
+    entries=await ctx.native.call("entry",ref=row["backend_ref"],records=[next(r for r in batch["records"] if r["delivery"]==inserted["delivery"])])
+    await ctx.restart()
+    await consumer(ctx,row,"consumer-2",entries["records"])
+    ctx.check((await ctx.get(inserted["delivery"]))["state"]=="inserted" and (await ctx.get(absent["delivery"]))["state"]=="unknown",
+              "reconcile uses actual delivery-bearing entry, otherwise retains unknown")
+    for claim in batch["claims"]:
+        await ctx.rejected("inbox.report",{"op":await ctx.operation(),"consumer":"consumer-1","stage":"inserted",**claim},{"conflict"})
+    replay=await ctx.command("inbox.take",args)
+    ctx.check(not replay.get("records"),"repeated take returns historical claims, never insertion content",replay=replay)
+    ctx.check(not ctx.native.records("model_request"),"reconcile and replay grant no native model request")
+
+
+@case("T6")
+async def delayed_old_report_cannot_change_new_claim(ctx):
+    row=await terminal(ctx,pull=user_pull());await consumer(ctx,row)
+    sent=await ctx.send(target=row["id"],mode="boundary");await ctx.scope("resume","agent:"+row["id"])
+    first=await take(ctx,row);await report_pull(ctx,row,first,"released")
+    second=await take(ctx,row)
+    ctx.check(first["claims"][0]["claim"]!=second["claims"][0]["claim"],"retake creates a new exact claim")
+    await ctx.rejected("inbox.report",{"op":await ctx.operation(),"consumer":"consumer-1","stage":"inserted",**first["claims"][0]},{"conflict"})
+    ctx.check((await ctx.get(sent["delivery"]))["attempt"]["claim"]==second["claims"][0]["claim"],"late old report leaves new claim untouched")
+
+
+@case("T10")
+async def context_evidence_never_claims_entry(ctx):
+    declaration={"points":["turn","settle","idle"],"insert":"context","evidence":"none"}
+    row=await terminal(ctx,pull=declaration);await consumer(ctx,row)
+    sent=await ctx.send(target=row["id"],mode="boundary",render=["context"],text="context with actual sender")
+    await ctx.scope("resume","agent:"+row["id"]);batch=await take(ctx,row)
+    ctx.check(len(batch["records"])==1,"declared context path takes bounded content")
+    await ctx.native.call("context",ref=row["backend_ref"],records=batch["records"])
+    await ctx.rejected("inbox.report",{"op":await ctx.operation(),"consumer":"consumer-1","stage":"inserted",**batch["claims"][0]},{"invalid"})
+    await report_pull(ctx,row,batch,"supplied")
+    ctx.check((await ctx.get(sent["delivery"]))["state"]=="supplied","context/no-entry reports supplied, never inserted")
+    await ctx.native.call("model",ref=row["backend_ref"])
+    model=ctx.native.records("model_request")[-1]
+    ctx.check(not model["entries"] and model["context"][0]["origin"]["principal"]=="owner",
+              "fake next model envelope presents context with origin, not a user entry")
+
+
+@case("G11")
+async def shared_host_native_tool_provenance(ctx):
+    raise FixtureFailed("native shared-host endpoint tool-to-CLI route unavailable: C2 proves only host bootstrap fallback; A2 fake tool events do not execute a CLI. Asserted hello swaps cannot qualify G11")
+
+
+@case("T12")
+async def claude_style_hook_paths(ctx):
+    entries=(await ctx.peer.call("workspace.snapshot"))["entries"]
+    declarations={}
+    for row in await ctx.resources():
+        key="doc/agents/terminals/"+row["id"]
+        explicit=entries.get(key,{}).get("value",{}).get("pull")
+        native=(row.get("data") or {}).get("agent",{}).get("pull")
+        declarations[key+".pull"]=explicit if explicit is not None else native
+    selected=[value for value in declarations.values() if isinstance(value,dict) and
+              value.get("insert")=="context" and value.get("evidence")=="none"]
+    if not selected:
+        raise NotApplicable("doc/agents/terminals/*/pull (insert=context, evidence=none)",declarations)
+    raise HarnessGap("declared Claude-style hook paths require native hook/transcript fixture; raw assertions cannot qualify framing")
+
+
 @case("G13")
 async def handle_grants_pin_both_ends(ctx):
     original_principal,new_principal="worker:original-reviewer","worker:new-reviewer"
@@ -537,6 +673,53 @@ async def handle_grants_pin_both_ends(ctx):
         ctx.assertions+=sub.assertions
     finally:
         await sub.close();ctx.evidence.extend(sub.evidence)
+
+
+@case("H2")
+async def durable_claim_stays_unknown_on_resume(ctx):
+    sent=await ctx.send();await ctx.restart(fault="claim-after")
+    await ctx.scope("resume");await ctx.wait_cut("after-durable-before-receipt")
+    await ctx.restart()
+    for _ in range(3):
+        await ctx.scope("resume")
+        ctx.check((await ctx.get(sent["delivery"]))["state"]=="unknown","restored durable claim stays unknown through each fresh resume")
+    ctx.check(not invocations(ctx,delivery=sent["delivery"]),"no resume dispatches an uncertain old claim")
+
+
+@case("H3")
+async def native_queue_is_not_physically_suspended(ctx):
+    await ctx.native_set(0,state="running",run="preexisting-native-work")
+    sent=await ctx.send(mode="boundary");await ctx.scope("resume");await settled(ctx,sent["delivery"])
+    ctx.check(not any(row.get("delivery")==sent["delivery"] for row in ctx.native.records("model_request")),"native boundary input is initially held by the runtime")
+    pause=await ctx.scope("pause")
+    ctx.check(pause.get("execution")=="not_asserted","pause reports admission, never physical suspension",reply=pause)
+    before=len(invocations(ctx,delivery=sent["delivery"]))
+    await ctx.native.call("point",ref=ctx.agents[0]["backend_ref"],point="tool")
+    models=[row for row in ctx.native.records("model_request") if row.get("delivery")==sent["delivery"]]
+    ctx.check(len(models)==1 and len(invocations(ctx,delivery=sent["delivery"]))==before==1,
+              "native consumes already-held input while paused without a second coordination delivery")
+
+
+@case("H13")
+async def handle_rebind_moves_no_tree_gate_or_unknown(ctx):
+    await member(ctx,0,"handle-project");await member(ctx,1,"handle-project",ctx.agents[0]["id"])
+    await ctx.command("names",{"op":await ctx.operation(),"handle":"@lead","agent":ctx.agents[0]["id"],"expect":0})
+    before=await ctx.command("scope",{"action":"inspect","scope":"team:"+ctx.agents[0]["id"]})
+    await ctx.native.call("plan",ref=ctx.agents[0]["backend_ref"],op="agent.send",plan={"result":{"outcome":"indeterminate","error":{"kind":"lost","message":"fake uncertain effect"}}})
+    unknown=await ctx.send();await ctx.scope("resume")
+    await ctx.wait_command("inbox.get",lambda row:row.get("state")=="unknown",args={"delivery":unknown["delivery"]})
+    entry=(await ctx.peer.call("workspace.snapshot"))["entries"]["doc/agents/names/@lead"]
+    await ctx.command("names",{"op":await ctx.operation(),"handle":"@lead","agent":ctx.agents[1]["id"],"expect":entry["version"]})
+    after=await ctx.command("scope",{"action":"inspect","scope":"team:"+ctx.agents[0]["id"]})
+    ctx.check(after["targets"]==before["targets"],"name rebind changes no recorded membership tree")
+    old=await ctx.get(unknown["delivery"])
+    ctx.check(old["state"]=="unknown" and old["to"]["agent"]==ctx.agents[0]["id"],"unknown claim remains pinned to the exact predecessor")
+    await ctx.native.call("plan",ref=ctx.agents[0]["backend_ref"],op="agent.send",plan={})
+    original=await ctx.send(target=ctx.agents[0]["id"],mode="boundary",send_new=True);await settled(ctx,original["delivery"])
+    successor=await ctx.send(target="@lead",mode="boundary")
+    await held(ctx,successor["delivery"],"paused")
+    ctx.check(len(invocations(ctx,delivery=original["delivery"]))==1 and not invocations(ctx,delivery=successor["delivery"]),
+              "old exact agent keeps its gate; new handle binding inherits no permit")
 
 
 @case("H6")

@@ -37,6 +37,7 @@ GROUPS = {
         "sender fairness and quotas including send_new",
         "200-open burst/flood leaves declared control and answer headroom",
         "derived sender origin and unsupported rendering held",
+        "eligible priority ordering, sender round-robin/FIFO and pending edit CAS",
     ),
     "H": (
         "crash before claim requires current-epoch resume",
@@ -84,6 +85,8 @@ GROUPS = {
         "context/no-entry means supplied, never inserted, with origin",
         "consumer content filtering never claims unsupported media",
         "declared Claude hook paths preserve supplied/read and native framing evidence",
+        "bounded sequenced advisory terminal status is live-only and never authority",
+        "per-record consumer budget holds oversized input without claim or truncation",
     ),
     "L": (
         "stop closes gate; exact declared host lifecycle or unsupported",

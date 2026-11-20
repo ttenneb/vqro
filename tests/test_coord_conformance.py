@@ -12,16 +12,16 @@ import unittest
 from agent_conformance.part_b.catalog import CASES, BY_ID, select_cases
 from agent_conformance.part_b.native import Native
 from agent_conformance.part_b.runner import run_case, validate_manifest
-from agent_conformance.results import FixtureFailed, HarnessGap, report
+from agent_conformance.results import FixtureFailed, HarnessGap, NotApplicable, report
 
 
 class Catalog(unittest.TestCase):
     def test_complete_part_b_inventory_and_no_silent_selection(self):
-        expected = [*(f"I{i}" for i in range(1,21)), *(f"H{i}" for i in range(1,17)),
-                    *(f"G{i}" for i in range(1,14)), *(f"T{i}" for i in range(1,13)),
+        expected = [*(f"I{i}" for i in range(1,22)), *(f"H{i}" for i in range(1,17)),
+                    *(f"G{i}" for i in range(1,14)), *(f"T{i}" for i in range(1,15)),
                     *(f"L{i}" for i in range(5,12)), "S1"]
         self.assertEqual([case.id for case in CASES], expected)
-        self.assertEqual(len(BY_ID), 69)
+        self.assertEqual(len(BY_ID), 72)
         self.assertEqual([case.id for case in select_cases(["T1", "I1"])], ["I1", "T1"])
         with self.assertRaises(ValueError): select_cases(["I0"])
 
@@ -57,6 +57,23 @@ class Runner(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((row.status, row.component), ("fail", "harness"))
         self.assertEqual(len(Dummy.instances), before)
 
+    async def test_declaration_excludes_whole_case_without_counting_as_pass(self):
+        async def absent(ctx): raise NotApplicable("doc/agents/terminals/*/pull",None)
+        with tempfile.TemporaryDirectory() as root:
+            row=await run_case(BY_ID["T12"],Path(root)/"case",{},"/not/run",factory=Dummy,handlers={"T12":absent})
+        self.assertEqual(row.status,"not-applicable")
+        self.assertEqual(row.declarations["exclusion"],{"path":"doc/agents/terminals/*/pull","actual":None})
+        document=report({},[row],[BY_ID["T12"]],part="B",inventory=CASES)
+        self.assertEqual(document["summary"]["pass"],0)
+        self.assertEqual(document["summary"]["not-applicable"],1)
+
+    async def test_gap_gets_explicit_reason_not_exclusion(self):
+        async def gap(ctx): raise HarnessGap("native framing fixture absent for declared profile")
+        with tempfile.TemporaryDirectory() as root:
+            row=await run_case(BY_ID["T12"],Path(root)/"case",{},"/not/run",factory=Dummy,handlers={"T12":gap})
+        self.assertEqual((row.status,row.reason),("fail","harness_gap"))
+        self.assertNotIn("exclusion",row.declarations)
+
     async def test_setup_or_no_assertion_cannot_certify_case(self):
         async def empty(ctx): pass
         with tempfile.TemporaryDirectory() as root:
@@ -81,7 +98,7 @@ class Runner(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row.evidence[0]["applicability"], "not-applicable")
         document = report({}, [row], [BY_ID["T10"]], part="B", inventory=CASES)
         self.assertFalse(document["complete_inventory"])
-        self.assertEqual(len(document["not_selected"]),68)
+        self.assertEqual(len(document["not_selected"]),71)
         self.assertEqual(document["summary"]["unsupported-declared"],0)
 
     async def test_cleanup_failure_overrides_pass(self):

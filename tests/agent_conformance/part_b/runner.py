@@ -5,10 +5,11 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import re
 import time
 import traceback
 
-from ..results import CheckFailed, FixtureFailed, HarnessGap, Result, markdown, report
+from ..results import CheckFailed, FixtureFailed, HarnessGap, NotApplicable, Result, markdown, report
 from ..wire import RpcError
 from .catalog import CASES
 from .cases import HANDLERS
@@ -24,6 +25,10 @@ def validate_manifest(value):
     count = value.get("agents", 2)
     if type(count) is not int or not 2 <= count <= 200:
         raise ValueError("Part B baseline requires 2..200 declared fake endpoints")
+    specs=value.get("specs",{})
+    if specs and (not isinstance(specs,dict) or set(specs)!={"agent","coordination","conformance"}
+            or not all(isinstance(path,str) and Path(path).is_absolute() for path in specs.values())):
+        raise ValueError("specs must name the three explicit absolute contract paths")
     driver = value.get("core_driver")
     if driver is not None and (not isinstance(driver, list) or not driver or
             not all(isinstance(arg, str) for arg in driver) or not Path(driver[0]).is_absolute()):
@@ -34,7 +39,7 @@ def validate_manifest(value):
 async def run_case(case, root, manifest, vqro, hc=None, *, factory=PublicCoordination, handlers=None):
     start = time.monotonic()
     context, evidence, declarations = None, [], {}
-    status, component, detail = "fail", "harness", "case did not execute"
+    status, component, detail, reason = "fail", "harness", "case did not execute", None
     try:
         handler = (HANDLERS if handlers is None else handlers).get(case.id)
         if handler is None:
@@ -46,6 +51,11 @@ async def run_case(case, root, manifest, vqro, hc=None, *, factory=PublicCoordin
         if context.assertions == 0:
             raise HarnessGap("handler made no applicable policy assertions; setup is not conformance")
         status, component, detail = "pass", None, "public-core policy assertions passed"
+    except NotApplicable as error:
+        status,component,detail="not-applicable",None,str(error)
+        declarations["exclusion"]={"path":error.path,"actual":error.actual}
+    except HarnessGap as error:
+        status,component,detail,reason="fail","harness",str(error),"harness_gap"
     except CheckFailed as error:
         status, component, detail = "fail", error.component, str(error)
     except RpcError as error:
@@ -66,7 +76,7 @@ async def run_case(case, root, manifest, vqro, hc=None, *, factory=PublicCoordin
                                  "component": component, "detail": detail})
                 status, component, detail = "fail", "cleanup", f"owned fixture cleanup failed: {error}"
     result = Result(case.id, case.title, status, component, detail, evidence, declarations,
-                    round((time.monotonic() - start) * 1000), str(root))
+                    round((time.monotonic() - start) * 1000), str(root), reason=reason)
     Path(root).mkdir(parents=True, exist_ok=True)
     (Path(root) / "result.json").write_text(json.dumps(result.json(), indent=2, ensure_ascii=False) + "\n")
     return result
@@ -97,6 +107,18 @@ def freeze(root, manifest, vqro):
         pinned["core_driver"]=[binary(manifest["core_driver"][0],"core-driver"),*manifest["core_driver"][1:]]
     native=root/"native.py"; shutil.copy2(Path(__file__).with_name("native.py"),native)
     pinned["native_fixture"]=str(native)
+    pinned["specs"]={}
+    for name,path in manifest.get("specs",{}).items():
+        data=Path(path).read_bytes();destination=root/"specs"/(name+".md")
+        destination.parent.mkdir(exist_ok=True);destination.write_bytes(data)
+        pinned["specs"][name]={"path":str(destination),"sha256":hashlib.sha256(data).hexdigest()}
+        if name=="conformance":
+            text=data.decode()
+            if "# Part B:" not in text or "## Running" not in text: raise HarnessGap("pinned conformance specification lacks Part B boundaries")
+            text=text.split("# Part B:",1)[1].split("## Running",1)[0]
+            normative=set(re.findall(r"\b[IHGTL][0-9]+\b",text))|{"S1"}
+            if normative!={case.id for case in CASES}:
+                raise HarnessGap("Part B inventory differs from pinned normative specification: "+str(sorted(normative.symmetric_difference({case.id for case in CASES}))))
     return pinned,pinned_vqro
 
 
@@ -108,7 +130,9 @@ async def run_selection(root, manifest, selected, vqro, hc=None):
         if capture_error is None:
             row = await run_case(case, Path(root) / f"{index:02}", manifest, vqro, hc)
         else:
-            row = Result(case.id,case.title,"fail","fixture",f"immutable capture failed: {capture_error}",[],{},0,str(root))
+            row = Result(case.id,case.title,"fail",getattr(capture_error,"component","fixture"),
+                f"immutable capture failed: {capture_error}",[],{},0,str(root),
+                reason="harness_gap" if isinstance(capture_error,HarnessGap) else None)
         rows.append(row)
         print(json.dumps({"case": row.case, "status": row.status, "component": row.component,
                           "detail": row.detail}), flush=True)
@@ -116,7 +140,8 @@ async def run_selection(root, manifest, selected, vqro, hc=None):
     document = report(metadata, rows, selected, part="B", inventory=CASES)
     document["subcase_not_applicable"] = sum(e.get("applicability") == "not-applicable"
         for row in rows for e in row.evidence)
-    document["qualification_complete"] = document["complete_inventory"] and document["passed_selection"]
+    document["qualification_complete"] = (document["complete_inventory"] and document["passed_selection"]
+        and set(manifest.get("specs",{}))=={"agent","coordination","conformance"})
     (Path(root) / "results.json").write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n")
     (Path(root) / "results.md").write_text(markdown(document))
     return document

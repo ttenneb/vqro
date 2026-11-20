@@ -31,7 +31,8 @@ class PublicCoordination(PublicImplementation):
         self.early_bytes=self.early_records=0
         self.native = Native(self.root / "n.sock", self.root / "native.jsonl")
         self.metadata = {"name": manifest["name"], "target_kind": "coordination", "fixture_native": True,
-                         "real_runtime_certification": False, "extension_files": {}}
+                         "real_runtime_certification": False, "extension_files": {},
+                         "spec_revision":manifest.get("spec_revision"),"specs":deepcopy(manifest.get("specs",{}))}
         source = Path(manifest["extensions"])
         if not source.is_absolute() or not (source / "coordination.py").is_file():
             raise FixtureFailed("explicit K2 extension directory with coordination.py required")
