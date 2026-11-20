@@ -107,7 +107,7 @@ pub enum EngineKind {
 impl EngineKind {
     pub const ALL: [EngineKind; 2] = [EngineKind::Libghostty, EngineKind::Vt100];
     /// The engine used when the setting names none (or one this client doesn't know).
-    pub const DEFAULT: EngineKind = EngineKind::Vt100;
+    pub const DEFAULT: EngineKind = EngineKind::Libghostty;
 
     pub fn name(self) -> &'static str {
         match self { EngineKind::Vt100 => "vt100", EngineKind::Libghostty => "libghostty" }
@@ -144,16 +144,27 @@ pub trait Engine {
     fn row_text(&mut self, row: usize) -> Option<(Vec<char>, Vec<u16>, bool)>;
     /// Draw the screen as shown into `area` of `buf` (cells past the screen's size are left alone).
     fn draw(&self, buf: &mut Buffer, area: Rect);
+    /// The OSC 8 hyperlink of a cell on screen as shown (engines that keep links; others None).
+    fn hyperlink_at(&self, _row: u16, _col: u16) -> Option<String> { None }
     /// The screen as shown, as plain text (tests).
     #[cfg(test)]
     fn contents(&self) -> String;
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: make the next start of this engine fail, to exercise the fallback.
+    pub static FAIL_START: std::cell::Cell<Option<EngineKind>> = const { std::cell::Cell::new(None) };
+}
+
 /// Start an engine, or say why it can't start.
 fn start(kind: EngineKind, cols: u16, rows: u16, scrollback: usize) -> Result<Box<dyn Engine>, String> {
+    #[cfg(test)]
+    if FAIL_START.with(|f| f.get() == Some(kind)) { return Err("failed to start (test)".into()); }
     match kind {
         EngineKind::Vt100 => Ok(Box::new(Vt100::new(cols, rows, scrollback))),
-        EngineKind::Libghostty => Err("not built into this client yet".into()),
+        EngineKind::Libghostty => super::ghostty::Ghostty::new(cols, rows, scrollback).map(|g| Box::new(g) as Box<dyn Engine>)
+            .map_err(|e| format!("failed to start ({e})")),
     }
 }
 
@@ -207,6 +218,7 @@ impl Emulator {
     pub fn scrolled(&self) -> usize { self.engine.scrolled() }
     pub fn row_text(&mut self, row: usize) -> Option<(Vec<char>, Vec<u16>, bool)> { self.engine.row_text(row) }
     pub fn draw(&self, buf: &mut Buffer, area: Rect) { self.engine.draw(buf, area) }
+    pub fn hyperlink_at(&self, row: u16, col: u16) -> Option<String> { self.engine.hyperlink_at(row, col) }
     #[cfg(test)]
     pub fn contents(&self) -> String { self.engine.contents() }
 }
@@ -342,8 +354,9 @@ mod tests {
     fn an_engine_that_cannot_start_falls_back_to_vt100_and_says_why() {
         assert_eq!(EngineKind::parse("libghostty"), Some(EngineKind::Libghostty));
         assert_eq!(EngineKind::parse("alacritty"), None, "unknown names are not engines");
+        FAIL_START.with(|f| f.set(Some(EngineKind::Libghostty)));
         let mut e = Emulator::with_engine(EngineKind::Libghostty, 20, 4, 100);
-        // Until slice G2 builds libghostty in, asking for it falls back; the terminal still works.
+        // An engine that can't start falls back to vt100; the terminal still works.
         assert_eq!((e.wanted(), e.engine()), (EngineKind::Libghostty, EngineKind::Vt100));
         assert!(e.fallback().is_some());
         e.process(b"hello");
@@ -351,7 +364,111 @@ mod tests {
         // A fresh terminal (reattach) asks for the same engine again, not for whatever it fell back to.
         let f = e.fresh();
         assert_eq!((f.wanted(), f.engine(), f.fallback().is_some()), (EngineKind::Libghostty, EngineKind::Vt100, true));
+        FAIL_START.with(|f| f.set(None));
+        let g = Emulator::with_engine(EngineKind::Libghostty, 20, 4, 100);
+        assert_eq!((g.engine(), g.fallback()), (EngineKind::Libghostty, None), "libghostty starts");
         let v = Emulator::with_engine(EngineKind::Vt100, 20, 4, 100);
         assert_eq!((v.engine(), v.fallback()), (EngineKind::Vt100, None));
+    }
+
+    fn joined(e: &Emulator) -> String { e.contents().lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim_end().to_string() }
+
+    /// One case of tests/fixtures/client/engines.json against one engine: the mismatches (empty: it passes).
+    fn run_case(kind: EngineKind, case: &serde_json::Value) -> Vec<String> {
+        use serde_json::{json, Value};
+        let (cols, rows) = (case["cols"].as_u64().unwrap_or(20) as u16, case["rows"].as_u64().unwrap_or(4) as u16);
+        let mut e = Emulator::with_engine(kind, cols, rows, 100);
+        assert_eq!(e.engine(), kind, "{} must start", kind.name());
+        e.process(case["input"].as_str().unwrap().as_bytes());
+        let x = &case["expect"];
+        let mut bad = Vec::new();
+        let mut check = |what: &str, got: Value, want: &Value| if &got != want { bad.push(format!("{what}: got {got}, want {want}")) };
+        if let Some(w) = x.get("contents") { check("contents", json!(joined(&e)), w); }
+        if let Some(w) = x.get("cursor") { check("cursor", e.cursor().map(|(r, c, _)| json!([r, c])).unwrap_or(Value::Null), w); }
+        if let Some(w) = x.get("shape") {
+            let shape = e.cursor().map(|c| match c.2 { CursorShape::BlinkBar => "blink-bar", CursorShape::SteadyBar => "steady-bar", CursorShape::BlinkBlock => "blink-block",
+                CursorShape::SteadyBlock => "steady-block", CursorShape::BlinkUnderline => "blink-underline", CursorShape::SteadyUnderline => "steady-underline", CursorShape::Default => "default" });
+            check("shape", json!(shape), w);
+        }
+        if let Some(w) = x.get("effects") {
+            let mut got: Vec<String> = e.take_effects().iter().map(|f| match f {
+                Effect::Bell => "bell".to_string(),
+                Effect::Clipboard(t, d) => format!("clipboard:{}:{}", String::from_utf8_lossy(t), String::from_utf8_lossy(d)),
+                Effect::Notify(b) => format!("notify:{}", String::from_utf8_lossy(b)),
+            }).collect();
+            got.sort();
+            let mut want: Vec<String> = w.as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+            want.sort();
+            check("effects", json!(got), &json!(want));
+        }
+        if let Some(w) = x["modes"].as_object() {
+            let (mode, enc) = e.mouse();
+            let have = json!({"app_cursor": e.application_cursor(), "bracketed_paste": e.bracketed_paste(), "alt_screen": e.alternate_screen(),
+                "mouse": match mode { MouseMode::None => "none", MouseMode::Press => "press", MouseMode::PressRelease => "press-release", MouseMode::ButtonMotion => "button-motion", MouseMode::AnyMotion => "any-motion" },
+                "mouse_encoding": match enc { MouseEncoding::Default => "default", MouseEncoding::Utf8 => "utf8", MouseEncoding::Sgr => "sgr" }});
+            for (k, v) in w { check(&format!("mode {k}"), have[k].clone(), v); }
+        }
+        if let Some(cells) = x["cells"].as_array() {
+            let mut buf = Buffer::empty(Rect::new(0, 0, cols, rows));
+            e.draw(&mut buf, Rect::new(0, 0, cols, rows));
+            for c in cells {
+                let cell = &buf[(c["col"].as_u64().unwrap() as u16, c["row"].as_u64().unwrap() as u16)];
+                if let Some(t) = c.get("text") { check("cell text", json!(cell.symbol()), t); }
+                if let Some(f) = c.get("fg") {
+                    let fg = match cell.fg { Color::Indexed(i) => format!("idx:{i}"), Color::Rgb(r, g, b) => format!("rgb:{r},{g},{b}"), other => format!("{other:?}") };
+                    check("cell fg", json!(fg), f);
+                }
+                if let Some(m) = c.get("mods") {
+                    let names = [("bold", Modifier::BOLD), ("dim", Modifier::DIM), ("italic", Modifier::ITALIC), ("underline", Modifier::UNDERLINED),
+                                 ("reverse", Modifier::REVERSED), ("strike", Modifier::CROSSED_OUT)];
+                    let got: Vec<&str> = names.iter().filter(|(_, b)| cell.modifier.contains(*b)).map(|(n, _)| *n).collect();
+                    check("cell mods", json!(got), m);
+                }
+            }
+        }
+        if let Some(w) = x.get("scrollback_len") { check("scrollback_len", json!(e.scrollback_len()), w); }
+        let by_row = |which: &str| -> Vec<(usize, Value)> {
+            x[which].as_object().map(|o| o.iter().map(|(k, v)| (k.parse::<usize>().unwrap(), v.clone())).collect()).unwrap_or_default()
+        };
+        for (r, w) in by_row("rows") { check(&format!("row {r}"), e.row_text(r).map(|t| json!(t.0.iter().collect::<String>())).unwrap_or(Value::Null), &w); }
+        for (r, w) in by_row("wrapped") { check(&format!("wrapped {r}"), e.row_text(r).map(|t| json!(t.2)).unwrap_or(Value::Null), &w); }
+        for (r, w) in by_row("starts") { check(&format!("starts {r}"), e.row_text(r).map(|t| json!(t.1)).unwrap_or(Value::Null), &w); }
+        if let Some(sb) = x.get("scrolled_back") {
+            e.set_scroll_offset(sb["offset"].as_u64().unwrap() as usize);
+            check("scroll offset", json!(e.scroll_offset()), &sb["offset"]);
+            check("scrolled-back contents", json!(joined(&e)), &sb["contents"]);
+            e.set_scroll_offset(0);
+        }
+        if let Some(al) = x.get("after_live") {
+            e.set_scroll_offset(1);
+            e.set_scroll_offset(0);
+            e.process(al["input"].as_str().unwrap().as_bytes());
+            check("after returning live", json!(joined(&e)), &al["contents"]);
+        }
+        for l in x["links"].as_array().into_iter().flatten() {
+            let got = e.hyperlink_at(l["row"].as_u64().unwrap() as u16, l["col"].as_u64().unwrap() as u16);
+            check("link", json!(got), &l["uri"]);
+        }
+        bad
+    }
+
+    /// Every engine passes the baseline; each passes the fidelity extras it claims. Extras another engine fails are
+    /// reported (printed), not failed: that is what "fidelity" means.
+    #[test]
+    fn engines_pass_the_shared_conformance_suite() {
+        let doc: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/client/engines.json")).unwrap();
+        let mut failures = Vec::new();
+        for case in doc["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let claimed: Vec<&str> = case["engines"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+            for kind in EngineKind::ALL {
+                let required = claimed.is_empty() || claimed.contains(&kind.name());
+                let bad = run_case(kind, case);
+                if bad.is_empty() { continue; }
+                if required { failures.push(format!("{} / {name}: {}", kind.name(), bad.join("; "))); }
+                else { println!("fidelity extra not met by {}: {name}", kind.name()); }
+            }
+        }
+        assert!(failures.is_empty(), "engine conformance:\n{}", failures.join("\n"));
     }
 }

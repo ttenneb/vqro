@@ -1,0 +1,312 @@
+{
+  "about": "Shared terminal engine conformance (libghostty plan G6): each case feeds `input` (bytes, UTF-8) to a fresh engine of `cols` x `rows` (default 20 x 4, 100 lines of history) and checks `expect`. Cases without `engines` are the baseline every engine must pass; cases with `engines` are fidelity extras those engines must pass, recorded but not required for the others. Keys: contents (screen as shown, trailing blanks trimmed), cursor [row, col] or null, shape, effects (bell, clipboard:<sel>:<b64>, notify:<body>; compared as a set: engines may queue different kinds in a different order), modes, cells (text, fg idx:/rgb:, mods), scrollback_len, scrolled_back {offset, contents}, rows {row: text} and wrapped {row: bool} and starts {row: [cell of each char]} by history row number, links [{row, col, uri}]. Run by src/tui/emulator.rs tests.",
+  "cases": [
+    {
+      "name": "plain text and new lines",
+      "input": "one\r\ntwo",
+      "expect": {
+        "contents": "one\ntwo",
+        "cursor": [
+          1,
+          3
+        ]
+      }
+    },
+    {
+      "name": "colours and attributes",
+      "input": "\u001b[31mR\u001b[0m\u001b[1mB\u001b[0m\u001b[2mD\u001b[0m\u001b[3mI\u001b[4mU\u001b[7mV\u001b[0m",
+      "expect": {
+        "cells": [
+          {
+            "row": 0,
+            "col": 0,
+            "text": "R",
+            "fg": "idx:1"
+          },
+          {
+            "row": 0,
+            "col": 1,
+            "text": "B",
+            "mods": [
+              "bold"
+            ]
+          },
+          {
+            "row": 0,
+            "col": 2,
+            "text": "D",
+            "mods": [
+              "dim"
+            ]
+          },
+          {
+            "row": 0,
+            "col": 3,
+            "text": "I",
+            "mods": [
+              "italic"
+            ]
+          },
+          {
+            "row": 0,
+            "col": 4,
+            "text": "U",
+            "mods": [
+              "italic",
+              "underline"
+            ]
+          },
+          {
+            "row": 0,
+            "col": 5,
+            "text": "V",
+            "mods": [
+              "italic",
+              "underline",
+              "reverse"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "true colour",
+      "input": "\u001b[38;2;255;100;0mT",
+      "expect": {
+        "cells": [
+          {
+            "row": 0,
+            "col": 0,
+            "text": "T",
+            "fg": "rgb:255,100,0"
+          }
+        ]
+      }
+    },
+    {
+      "name": "effects: bell, clipboard write, notifications; reads and progress are not passed on",
+      "input": "a\u0007b\u0007\u001b]52;c;aGk=\u0007\u001b]52;c;?\u0007\u001b]9;done\u0007\u001b]9;4;1;50\u0007\u001b]777;notify;T;B\u0007",
+      "expect": {
+        "effects": [
+          "bell",
+          "clipboard:c:aGk=",
+          "notify:9;done",
+          "notify:777;notify;T;B"
+        ]
+      }
+    },
+    {
+      "name": "cursor position, shape and visibility",
+      "input": "ab\u001b[2;3H\u001b[5 q",
+      "expect": {
+        "cursor": [
+          1,
+          2
+        ],
+        "shape": "blink-bar"
+      }
+    },
+    {
+      "name": "hidden cursor",
+      "input": "\u001b[?25l",
+      "expect": {
+        "cursor": null
+      }
+    },
+    {
+      "name": "modes",
+      "input": "\u001b[?1h\u001b[?2004h\u001b[?1002h\u001b[?1006h",
+      "expect": {
+        "modes": {
+          "app_cursor": true,
+          "bracketed_paste": true,
+          "alt_screen": false,
+          "mouse": "button-motion",
+          "mouse_encoding": "sgr"
+        }
+      }
+    },
+    {
+      "name": "alternate screen",
+      "input": "main\u001b[?1049h\u001b[Halt",
+      "expect": {
+        "modes": {
+          "alt_screen": true
+        },
+        "contents": "alt"
+      }
+    },
+    {
+      "name": "history and scrolling back",
+      "rows": 2,
+      "input": "r0\r\nr1\r\nr2\r\nr3",
+      "expect": {
+        "scrollback_len": 2,
+        "contents": "r2\nr3",
+        "scrolled_back": {
+          "offset": 2,
+          "contents": "r0\nr1"
+        },
+        "rows": {
+          "0": "r0",
+          "3": "r3"
+        }
+      }
+    },
+    {
+      "name": "a wrapped line is one logical line",
+      "cols": 10,
+      "input": "0123456789abc",
+      "expect": {
+        "wrapped": {
+          "0": true,
+          "1": false
+        },
+        "rows": {
+          "0": "0123456789",
+          "1": "abc"
+        }
+      }
+    },
+    {
+      "name": "wide CJK characters take two cells",
+      "input": "漢字|",
+      "expect": {
+        "contents": "漢字|",
+        "starts": {
+          "0": [
+            0,
+            2,
+            4
+          ]
+        }
+      }
+    },
+    {
+      "name": "ZWJ emoji sequence is one wide cell",
+      "engines": [
+        "libghostty"
+      ],
+      "input": "👩‍💻|",
+      "expect": {
+        "contents": "👩‍💻|",
+        "starts": {
+          "0": [
+            0,
+            0,
+            0,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "name": "flag emoji is one wide cell",
+      "engines": [
+        "libghostty"
+      ],
+      "input": "🇯🇵|",
+      "expect": {
+        "contents": "🇯🇵|",
+        "starts": {
+          "0": [
+            0,
+            0,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "name": "skin-tone emoji is one wide cell",
+      "engines": [
+        "libghostty"
+      ],
+      "input": "👍🏽|",
+      "expect": {
+        "starts": {
+          "0": [
+            0,
+            0,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "name": "strikethrough",
+      "engines": [
+        "libghostty"
+      ],
+      "input": "\u001b[9mS",
+      "expect": {
+        "cells": [
+          {
+            "row": 0,
+            "col": 0,
+            "text": "S",
+            "mods": [
+              "strike"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "curly underline is drawn as an underline",
+      "engines": [
+        "libghostty"
+      ],
+      "input": "\u001b[4:3mC",
+      "expect": {
+        "cells": [
+          {
+            "row": 0,
+            "col": 0,
+            "text": "C",
+            "mods": [
+              "underline"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "OSC 8 hyperlink on its cells",
+      "engines": [
+        "libghostty"
+      ],
+      "input": "\u001b]8;;https://example.com/x\u001b\\link\u001b]8;;\u001b\\ plain",
+      "expect": {
+        "links": [
+          {
+            "row": 0,
+            "col": 0,
+            "uri": "https://example.com/x"
+          },
+          {
+            "row": 0,
+            "col": 3,
+            "uri": "https://example.com/x"
+          },
+          {
+            "row": 0,
+            "col": 6,
+            "uri": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "back at the live screen, the view follows new output",
+      "rows": 2,
+      "input": "r0\r\nr1\r\nr2",
+      "expect": {
+        "after_live": {
+          "input": "\r\nr3\r\nr4",
+          "contents": "r3\nr4"
+        }
+      }
+    }
+  ]
+}

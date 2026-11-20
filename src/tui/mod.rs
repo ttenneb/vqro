@@ -2129,6 +2129,11 @@ impl App {
     fn link_at(&mut self, view: &str, p: scrollback::Pos) -> Option<crate::ui_model::links::Link> {
         let t = self.terms.get_mut(view)?;
         let scrolled = t.emu.scrolled();
+        // An OSC 8 hyperlink the program put on this cell (engines that keep links) wins over text detection.
+        let top = scrollback::top(&t.emu, scrolled);
+        if let Some(uri) = p.row.checked_sub(top).and_then(|r| u16::try_from(r).ok()).and_then(|r| t.emu.hyperlink_at(r, p.col)) {
+            return Some(crate::ui_model::links::Link { kind: "url", end: uri.chars().count(), text: uri, start: 0, line: None, column: None });
+        }
         let (first, last) = scrollback::line(&mut t.emu, scrolled, p.row);
         let (mut text, mut cells) = (String::new(), Vec::new());
         for at in first.row..=last.row {
@@ -3732,7 +3737,10 @@ mod tests {
     fn program_effects_are_collected_bounded_and_passed_on_verbatim() {
         let mut p = new_parser(80, 24);
         p.process(b"a\x07b\x07\x1b]52;c;aGk=\x07\x1b]52;c;?\x07\x1b]9;done\x07\x1b]9;4;1;50\x07\x1b]777;notify;T;B\x07\x1b]777;other\x07\x1b]8;;http://x\x07");
-        let out = p.take_effects();
+        let mut out = p.take_effects();
+        // Kinds may queue in a different order per engine: compare in a fixed one.
+        let rank = |e: &Effect| match e { Effect::Bell => 0, Effect::Clipboard(..) => 1, Effect::Notify(..) => 2 };
+        out.sort_by_key(rank);
         assert_eq!(out, vec![Effect::Bell, Effect::Clipboard(b"c".to_vec(), b"aGk=".to_vec()), Effect::Notify(b"9;done".to_vec()), Effect::Notify(b"777;notify;T;B".to_vec())],
             "one bell per parse; clipboard reads and progress OSC 9;4 are not passed on");
         assert_eq!(effect_bytes(&out[1]), b"\x1b]52;c;aGk=\x07");
@@ -3869,6 +3877,7 @@ mod tests {
         app.leaves = vec!["t".into()];
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 8)).unwrap();
         let mut draw = |app: &mut App| { terminal.draw(|f| { app.draw_view(f, "t", Rect::new(0, 0, 40, 8), true, &Palette::default(), &Icons::new(None, false)); }).unwrap(); };
+        emulator::FAIL_START.with(|f| f.set(Some(emulator::EngineKind::Libghostty)));
         draw(&mut app);
         assert_eq!(app.terms["t"].emu.engine(), emulator::EngineKind::Vt100);
         app.terms.get_mut("t").unwrap().attaching = false;
@@ -3880,6 +3889,7 @@ mod tests {
         app.terms.get_mut("t").unwrap().attaching = false;
         draw(&mut app);
         assert!(app.message.is_empty(), "each fallback reason is reported once");
+        emulator::FAIL_START.with(|f| f.set(None));
     }
 
     #[tokio::test]

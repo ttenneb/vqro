@@ -173,7 +173,8 @@ mod tests {
     use super::*;
 
     fn parser(lines: &str) -> Emulator {
-        let mut p = Emulator::new(20, 4, 100);
+        // scrollback.rs logic over the reference engine; every engine's history is checked by the engine suite.
+        let mut p = Emulator::with_engine(super::super::emulator::EngineKind::Vt100, 20, 4, 100);
         p.process(lines.as_bytes());
         p
     }
@@ -202,7 +203,7 @@ mod tests {
         assert_eq!((a.row, b.row), (1, 2));
         assert_eq!(text(&mut p, n, a, b), "0123456789012345678901234");
         // A small scrollback drops old rows: positions keep counting, dropped rows read as nothing.
-        let mut p = Emulator::new(10, 2, 2);
+        let mut p = Emulator::with_engine(super::super::emulator::EngineKind::Vt100, 10, 2, 2);
         p.process(b"r0\r\nr1\r\nr2\r\nr3\r\nr4\r\nr5");
         let n = p.scrolled();
         assert_eq!((n, oldest(&p, n)), (4, 2));
