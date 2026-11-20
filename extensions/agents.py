@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Runtime-neutral agent panels and native capability-driven controls. No launcher."""
 import json
-import os
 from pathlib import Path
 import sys
 import threading
@@ -588,11 +587,10 @@ class Agents:
         name = label(r.get("name") or r.get("title") or "Agent") + " " + r["id"]
         session = agent_facts(r).get("session") if isinstance(agent_facts(r).get("session"), dict) else {}
         folder = session.get("cwd") if isinstance(session.get("cwd"), str) and session["cwd"] else None
-        if folder:
-            home = os.path.expanduser("~")
-            folder = "~" + folder[len(home):] if home not in ("", "/") and (folder == home or folder.startswith(home + "/")) else folder
+        folder = agent_transcript.home_short(folder) if folder else None
         state = status(r)
-        style = "warn" if ended(r) or agent_facts(r).get("lifecycle") not in (None, "live") else "ok" if state == "idle" else "accent"
+        waiting = state == "blocked" or bool(self.requests_v0(r) if self.v0(r, "respond") else None)
+        style = "warn" if waiting or ended(r) or agent_facts(r).get("lifecycle") not in (None, "live") else "ok" if state == "idle" else "accent"
         return {"title": " · ".join([name] + ([head(plain(folder), 80)] if folder else [])),
                 "title_right": "● " + state, "title_right_style": style}
 
@@ -639,7 +637,10 @@ class Agents:
             more = f" (and {len(waiting) - 1} more)" if len(waiting) > 1 else ""
             rows.append({"id": "waiting", "pin": "bottom", "style": "warn", "command": "agents.answer", "args": {"resource": rid},
                          "text": f"⚠ {name} is waiting for your answer: " + head(plain(str(waiting[0].get("title") or waiting[0]["request"])), 160) + more,
-                         "description": (str(fallback) + ' · ' if fallback else '') + "Enter: answer…"})
+                         "description": (str(fallback) + ' · ' if fallback else '') + "Enter: answer…",
+                         # [Answer…] (feature actions; mockup Screen D), the same in the menu for other clients.
+                         "actions": [{"text": "Answer…", "command": "agents.answer", "args": {"resource": rid}}],
+                         "menu": [{"label": "Answer…", "command": "agents.answer", "args": {"resource": rid}}]})
         modes = self.modes(r)
         if modes and r.get("available") and not ended(r):
             names = {"start": "start", "boundary": "steer", "settle": "follow-up", "admit": "admit (weaker)",

@@ -134,7 +134,8 @@ class TranscriptRows(unittest.TestCase):
         read, test = group["children"]
         self.assertEqual((read["text"], [b["text"] for b in read["badges"]], read["expanded"]), ("✓ read   ci.yml", ["0.2s"], False))
         self.assertIn("/w/ci.yml:4", [c["text"] for c in read["children"]])
-        self.assertEqual((test["text"], test["style"], test["description"]), ("✗ bash   npm test", "error", "failed"))
+        self.assertEqual((test["text"], test["style"], test["description"]), ("✗ bash   npm test", "error", "line 0 of the test log"), "a failure says why")
+        self.assertEqual(agent_transcript.tool_row("f", {"title": "read", "status": "failed"})["description"], "failed")
         texts = [c["text"] for c in test["children"]]
         self.assertEqual(texts[0], "timeout 10000", "other arguments as name value, never JSON")
         self.assertEqual(texts[-1], "… 18 more lines", "output cut at 12 lines")
@@ -164,6 +165,20 @@ class TranscriptRows(unittest.TestCase):
         self.assertEqual(opened(agent_transcript.tool_row("r", {"title": "write", "input": {"path": "/w/x\nevil"}}, cwd="/w")), [])
         many = agent_transcript.tool_row("r", {"title": "edit", "locations": [{"path": f"/w/{i}"} for i in range(9)]})
         self.assertEqual(len([m for m in many["menu"] if m["command"] == "links.open"]), agent_transcript.OPEN_ITEMS)
+
+    def test_the_agents_work_sits_in_its_labelled_block(self):
+        """Mockup Screens A and C: an Activity continues the agent's block, or the reply's label moves above it."""
+        texts = [r.get("text") for r in self.rows()]
+        i = texts.index("Let me look.")
+        self.assertEqual(texts[i:i + 3], ["Let me look.", "First the CI log.", "Activity · 2 tools · 4.8s · 1 failed"], "no break")
+        work_first = {("tool", "t1"): dict(CONVERSATION[("tool", "t1")], position=1),
+                      ("message", "a"): {"position": 2, "role": "assistant", "final": True, "content": text("Done.")}}
+        self.assertEqual([r.get("text") for r in self.rows(work_first)], ["Pi", "Activity · 1 tool · 0.2s", "Done."])
+        again = {**work_first, ("tool", "t2"): dict(CONVERSATION[("tool", "t1")], position=3),
+                 ("message", "b"): {"position": 4, "role": "assistant", "final": True, "content": text("Next.")}}
+        self.assertEqual([r.get("text") for r in self.rows(again)],
+                         ["Pi", "Activity · 1 tool · 0.2s", "Done.", "Activity · 1 tool · 0.2s", "", "Pi", "Next."],
+                         "each reply keeps one label; later work continues the earlier reply's block")
 
     def test_another_senders_message_folds_after_4_lines_and_blocks_are_spaced(self):
         long = {("message", "a"): {"position": 1, "role": "user", "final": True, "origin": {"kind": "agent", "agent": "r7", "principal": "p:lead"},
@@ -229,8 +244,18 @@ class TranscriptRows(unittest.TestCase):
                 for i in range(200)}
         rows = self.rows(many)
         self.assertLessEqual(len(json.dumps(rows, ensure_ascii=False).encode()), agent_transcript.BUDGET + 200)
-        self.assertIn("earlier blocks not shown", rows[0]["text"])
+        self.assertIn("earlier conversation not shown", rows[0]["text"])
         self.assertTrue(rows[-1]["text"].startswith("199 "), "the newest message is kept")
+        turn = {("message", "go"): {"position": 0, "role": "user", "final": True, "content": text("go")}}
+        for r in range(10):  # one agent turn: ten replies, each followed by five tools with 3 KB of output
+            turn[("message", f"r{r}")] = {"position": 10 * r + 1, "role": "assistant", "final": True, "content": text(f"round {r}")}
+            for i in range(5):
+                turn[("tool", f"t{r}.{i}")] = {"position": 10 * r + 2 + i, "title": "bash", "status": "completed",
+                                               "input": {"command": "x"}, "content": text("y" * 3000)}
+        texts = [r.get("text") for r in self.rows(turn)]
+        self.assertLessEqual(len(json.dumps(self.rows(turn), ensure_ascii=False).encode()), agent_transcript.BUDGET + 200)
+        self.assertIn("round 9", texts, "the turn that is larger than the room left keeps its newest rows, not nothing")
+        self.assertNotIn("go", texts)
 
     def test_text_is_control_safe_and_content_blocks_are_typed(self):
         odd = {("message", "m"): {"position": 1, "role": "assistant", "final": True,
@@ -493,6 +518,8 @@ class AgentPane(unittest.TestCase):
         waiting = next(r for r in items if r.get("id") == "waiting")
         self.assertEqual((waiting["command"], waiting["pin"]), ("agents.answer", "bottom"))
         self.assertIn("Run git push?", waiting["text"])
+        self.assertEqual([a["text"] for a in waiting["actions"]], ["Answer…"], "a visible [Answer…] (mockup Screen D)")
+        self.assertEqual(self.core.live["agents-r2"]["title_right_style"], "warn", "waiting for you: the frame's state warns")
         queue = next(r for r in items if r.get("id") == "queue")
         self.assertEqual(queue["text"], "Messages · 1 held by Pi")
         self.assertEqual(queue["menu"][0]["command"], "agents.clear_queue")

@@ -5,6 +5,7 @@ from the recorded `origin`, never from text; anything the agent doesn't report (
 guessed. Rows use base panel features (`wrap` text, `children`/`expanded`), so every client can show them.
 """
 import json
+import os
 import re
 import time
 
@@ -20,7 +21,9 @@ RECEIPT = {"recorded": "recorded", "held": "held", "admitted": "admitted", "queu
 MARKDOWN_ROW_BYTES = 60 * 1024  # under the 64 KiB per formatted row (core-protocol "Formatted text")
 LINE_BYTES = 4096  # one row; longer lines are cut with a mark (display only, never a request's question)
 TOOL_LINES = 12  # lines of a tool's output shown before "… N more lines" (redesign mockup)
-HIDDEN_ROWS, HIDDEN_BYTES = 200, 16 * 1024  # the rest of an output or a thought, one expand away
+HIDDEN_ROWS, HIDDEN_BYTES = 200, 8 * 1024
+# A tool's output lines and copy, kept small: a turn can have dozens of calls, and the panel's BUDGET is shared.
+OUTPUT_LINE_BYTES, TOOL_COPY_BYTES = 1024, 8 * 1024  # the rest of an output or a thought, one expand away
 STEP_BYTES = 300  # a thinking step inside an Activity shows this much of its first line
 FRAME_BYTES = 8 * 1024  # a framed message's body; longer ones stay plain rows (the panel budget counts both forms)
 OTHER_FOLD = 4  # another agent's (or person's) message folds after this many lines (reply-13)
@@ -66,9 +69,9 @@ def clip(text, size=LINE_BYTES):
 COPY_BYTES = 16 * 1024  # a row's copy payload; larger ones are left out (y then copies the selected line)
 
 
-def copyable(text):
+def copyable(text, limit=COPY_BYTES):
     """The copy payload for a row, or None when it would cost more of the pane's budget than it is worth."""
-    return text if text and len(text.encode()) <= COPY_BYTES else None
+    return text if text and len(text.encode()) <= limit else None
 
 
 def when(ms):
@@ -143,12 +146,12 @@ def thought_text(value):
                      if isinstance(b, dict) and b.get("type") in THOUGHT_BLOCKS).strip()
 
 
-def hidden_rows(texts, style):
+def hidden_rows(texts, style, line_bytes=LINE_BYTES):
     """The rows one expand away (the rest of a tool's output or of a thought), bounded so that one huge output can't
     crowd the conversation out of the panel's budget: HIDDEN_ROWS rows or HIDDEN_BYTES, then a count of the rest."""
     rows, size = [], 0
     for i, line in enumerate(texts):
-        text = clip(plain(line))
+        text = clip(plain(line), line_bytes)
         size += len(text.encode())
         if i >= HIDDEN_ROWS or size > HIDDEN_BYTES:
             rows.append({"type": "text", "style": "dim", "text": f"… {len(texts) - i} more {plural(len(texts) - i)} not shown here"})
@@ -159,7 +162,7 @@ def hidden_rows(texts, style):
 
 def thought_rows(eid, text, limit=THOUGHT_LINES):
     """Thinking as a dim block with a left rule: the first lines, then "▸ more" with the rest one expand away."""
-    out = [line for line in text.split("\n") if line.strip()]
+    out = [line.replace("**", "") for line in text.split("\n") if line.strip()]  # thinking is plain text: no bold marks
     rows = [{"type": "text", "wrap": True, "focusable": True, "style": "dim", "text": "┊ " + clip(plain(line))}
             for line in out[:limit]]
     if len(out) > limit:
@@ -359,10 +362,11 @@ def output_rows(text, limit=TOOL_LINES):
                 row = ""
             row = word if not row else row + "  " + word
         out = packed + ([row] if row else [])
-    rows = [{"type": "text", "wrap": True, "focusable": True, "style": "muted", "text": clip(plain(line))} for line in out[:limit]]
+    rows = [{"type": "text", "wrap": True, "focusable": True, "style": "muted", "text": clip(plain(line), OUTPUT_LINE_BYTES)}
+            for line in out[:limit]]
     if len(out) > limit:
         rows.append({"text": f"… {len(out) - limit} more {plural(len(out) - limit)}", "style": "dim", "expanded": False,
-                     "children": hidden_rows(out[limit:], "muted")})
+                     "children": hidden_rows(out[limit:], "muted", OUTPUT_LINE_BYTES)})
     return rows
 
 
@@ -393,7 +397,7 @@ def tool_row(eid, value, cwd=None):
         children += output_rows(output)
     children += [r for r in content_rows([b for b in value.get("content") or [] if isinstance(b, dict) and b.get("type") != "text"])]
     raw_input = args if isinstance(args, str) else json.dumps(args, ensure_ascii=False, indent=1) if "input" in value else None
-    copy = copyable(ANSI.sub("", output) or raw_input) if (output or raw_input) else None
+    copy = copyable(ANSI.sub("", output) or raw_input, TOOL_COPY_BYTES) if (output or raw_input) else None
     badges = [b for b in (f"{count} lines" if count > 1 else None, took) if b]
     # Open a file it names in an editor beside the pane: links.open (links extension), only on the human's click (AS10e).
     menu = [{"label": "Open " + clip(plain(path.rsplit("/", 1)[-1]), 80) + (f":{line}" if line else "") + " in editor",
@@ -407,14 +411,16 @@ def tool_row(eid, value, cwd=None):
     return {"id": "t:" + eid, **({"menu": menu} if menu else {}), **({"actions": actions} if actions else {}), "text": f"{TOOL_ICON.get(status, '?')} {clip(name, 40)}" + (f"   {main}" if main else ""),
             "style": "error" if status == "failed" else None, **({"copy": copy} if copy else {}),
             **({"badges": [{"text": b, "style": "dim"} for b in badges]} if badges else {}),
-            **({"description": "failed"} if status == "failed" else {}),
+            # A failed call says why on its line (the first line of what it returned), else just "failed".
+            **({"description": clip(plain(next((l.strip() for l in ANSI.sub("", output).split("\n") if l.strip()), "failed")), 200)}
+               if status == "failed" else {}),
             **({"children": children} if children else {}), "expanded": False}
 
 
 def thought_step(eid, text):
     """The agent's thinking between two tool calls, inside an Activity: one dim line (its start); when there is more
     than that line shows, all of it is one expand away."""
-    out = [line for line in text.split("\n") if line.strip()]
+    out = [line.replace("**", "") for line in text.split("\n") if line.strip()]
     first = clip(plain(out[0].strip()), STEP_BYTES) if out else ""
     row = {"id": "th:" + eid, "style": "dim", "text": "┊ " + first}
     if len(out) > 1 or first != plain(out[0].strip()):
@@ -457,6 +463,14 @@ def senders(entities, names):
     return seen
 
 
+def home_short(path):
+    """A folder as people write it: the home folder as ~ (of this extension's host, where the agent's folder is)."""
+    home = os.path.expanduser("~")
+    if home not in ("", "/", "~") and (path == home or path.startswith(home.rstrip("/") + "/")):
+        return "~" + path[len(home.rstrip("/")):]
+    return path
+
+
 def facts_footer(facts, name):
     """One line of the agent's own facts (agent-v0 "Optional view facts"): folder, name, model, context, tokens, cost.
     Only what the agent reports; an absent fact is left out, never guessed or derived."""
@@ -464,7 +478,7 @@ def facts_footer(facts, name):
     usage = facts.get("usage") if isinstance(facts.get("usage"), dict) else {}
     parts = []
     if isinstance(session.get("cwd"), str):
-        parts.append(session["cwd"])
+        parts.append(home_short(session["cwd"]))
     parts.append(name)
     model = session.get("model") if isinstance(session.get("model"), dict) else {}
     if isinstance(model.get("label") or model.get("id"), str):
@@ -535,6 +549,16 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
                        if isinstance(v, dict) and type(v.get("position")) is int and kind in ("message", "tool", "plan", "compaction")),
                       key=lambda t: (t[0], t[1], t[2]))
     blocks, tools, hidden, last_sender = [], [], {}, None
+    tail = {"agent": None, "work": None}  # the last block, if it is the agent's message / its unlabelled work
+
+    def work(rows_):
+        """The agent's work (an Activity, thinking) joins the agent's labelled block (mockup Screens A, C): after the
+        agent's message it continues that block; before one, the message's label moves above it."""
+        if blocks and tail["agent"] == len(blocks) - 1:
+            blocks[-1].extend(rows_)
+        else:
+            blocks.append(rows_)
+            tail["work"] = len(blocks) - 1
 
     def flush_hidden():
         if hidden:
@@ -561,7 +585,7 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
         if all("__thought__" in v for _, v in tools):  # thinking steps with no tool call: just the thinking
             if view["thinking"] != "hide":
                 flush_hidden()
-                blocks.append([row for eid, v in tools for row in thought_rows(eid, v["__thought__"])])
+                work([row for eid, v in tools for row in thought_rows(eid, v["__thought__"])])
             tools.clear()
             return
         mode = view["tools"]
@@ -573,7 +597,7 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
             if mode == "summary":
                 real = [v for _, v in tools if "__thought__" not in v]
                 group["text"], group["style"] = summary_text("Activity", real, view["summary"], len(real)), "dim"
-            blocks.append([group])
+            work([group])
         tools.clear()
 
     for _, kind, eid, value in timeline:
@@ -611,7 +635,14 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
                 flush_hidden()
                 # Another sender's message: a framed block that folds after 4 lines (the human's Q3, reply-13); the
                 # plain rows (folded the same way) for clients without the frame.
-                blocks.append(framed(eid, value, body) if other else body)
+                if key == "agent" and role == "assistant" and blocks and tail["work"] == len(blocks) - 1:
+                    blocks[-1] = body[:1] + blocks[-1] + body[1:]  # the label above the work that led to this reply
+                    tail["agent"], tail["work"] = len(blocks) - 1, None
+                elif key == "agent" and role == "assistant":
+                    blocks.append(body)
+                    tail["agent"] = len(blocks) - 1
+                else:
+                    blocks.append(framed(eid, value, body) if other else body)
         elif kind == "compaction":
             add("system", [{"type": "text", "style": "dim", "text": "· System · context compacted"}], "System · context compacted", [value], eid)
         else:  # plan: shown whole, generically
@@ -623,7 +654,17 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
     for block in reversed(blocks):
         cost = len(json.dumps(block, ensure_ascii=False).encode())
         if out and size + cost > BUDGET:
-            dropped = len(blocks) - len(out)
+            # The block that doesn't fit (a whole agent turn can be large) keeps its newest rows that do.
+            part = []
+            for row in reversed(block):
+                row_cost = len(json.dumps(row, ensure_ascii=False).encode()) + 2
+                if size + row_cost > BUDGET:
+                    break
+                part.insert(0, row)
+                size += row_cost
+            if part:
+                out.append(part)
+            dropped = len(blocks) - len(out) + (1 if part else 0)
             break
         out.append(block)
         size += cost
@@ -633,7 +674,7 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
         del shown[:max(1, len(shown) // 8)]  # one block larger than the budget: keep its newest rows
         dropped = dropped or 1
     if dropped:
-        shown.insert(0, {"type": "text", "style": "dim", "text": f"… {dropped} earlier blocks not shown here (pane limit)"})
+        shown.insert(0, {"type": "text", "style": "dim", "text": "… earlier conversation not shown here (pane limit)"})
     # Coverage is decided from what the agent DECLARED (agent-v0 §4): a tail or state-only snapshot is never shown as
     # complete, in neutral words. Nothing here claims history was cut: positions are not evidence of that.
     timeline = any(isinstance(v, dict) and type(v.get("position")) is int for (_, _), (_, v) in entities.items())
