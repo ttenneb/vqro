@@ -590,9 +590,10 @@ replaced when the Pi bridge is ported.
   `admit`, or the human, never an assumed-idle hook start or hidden mode fallback. Pi's measured idle is exact.
 
 **Further implementation rulings (2026-11-20, spec batch 8).**
-- Final refusal funding: refusals **never borrow the recovery reserve**. Compact cached failures retain kind and
-  fingerprint only within the existing normal/control-intent ceiling; full messages stay in the live reply. Slot
-  preflight and refusal persistence use that same ceiling; no new pool. At the ceiling return the actual refusal
+- Final refusal funding: refusals use **neither the normal 64 KiB / 16-record control-intent headroom nor the recovery
+  reserve**. Compact cached failures retain kind and fingerprint only below the existing content ceiling; full
+  messages stay in the live reply. Slot preflight and refusal persistence use that same ceiling; no new pool.
+  At the ceiling return the actual refusal
   live with `uncached: true`, close the operation epoch and advertise the new window. The old id must then return
   `expired_operation`, including after grants/capacity change or restart; no-recreation has no uncached exception.
   A fresh id in the new window is required for another evaluation. This supersedes both the recovery-funded proposal
@@ -629,7 +630,7 @@ replaced when the Pi bridge is ported.
 - Handle selectors in grants resolve once at issuance: targets to exact agents, subjects to their bound principals;
   rebinding transfers nothing. Team/project selectors remain dynamic over recorded membership.
 - The operation window caches well-formed refusals as well as successes; changed conditions need a new op id for
-  a cached result. The later batch8 normal-ceiling rule returns further refusals live with `uncached: true` and closes
+  a cached result. The later batch8 content-ceiling rule returns further refusals live with `uncached: true` and closes
   the epoch, permanently fencing the old id. Malformed and undeclared-principal calls take no slot; a full window
   refuses `busy` before evaluation.
 - Pull takes declare accepted content types; unsupported mail stays held for that consumer rather than churning
