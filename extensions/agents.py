@@ -26,8 +26,9 @@ V0_OP = {"prompt": "send", "steer": "send", "follow_up": "send", "abort": "inter
 # Lossy like OSC 7501: kept in memory, last writer by seq, gone with the terminal or an extension restart.
 TIER1_STATES = {"idle": "idle", "running": "working", "requires_action": "blocked", "unknown": "unknown"}
 # Bounds keep the whole published table under the core's 1 MiB live-value cap (src/limits.rs): a worst-case entry
-# (64-char id, 64 printable 4-byte characters of app twice, maximum seq) encodes to 700 B, and 1024 of them fit
-# TIER1_BYTES with room to spare. The byte check at admission is the backstop.
+# without facts (64-char id, 64 printable 4-byte characters of app twice, maximum seq) encodes to 700 B, and 1024 of
+# them fit TIER1_BYTES with room to spare. With up to TIER1_FACTS_BYTES of facts an entry is about 1.8 KB, so about
+# 520 such entries fit; the byte check at admission refuses the rest (`overloaded`).
 TIER1_MAX = 1024
 TIER1_BYTES = 1024 * 1024 - 64 * 1024
 TIER1_SEQ_MAX = 2 ** 53 - 1  # exact in every JSON reader
@@ -899,8 +900,8 @@ class Agents:
         becomes `unknown`, a report with seq not above the last one is ignored, and nothing is kept across a
         restart of this extension. Not attributed: any caller can report for any terminal until callers carry
         a principal (C2). Errors go to the caller only, never to a notice. Optional `facts` are view facts the
-        plugin read from its runtime (`tier1_facts`); a report without `facts` keeps the last ones, and a report
-        with `facts` replaces them. They are published as the entry's `facts`, never inferred or merged.
+        plugin read from its runtime (`tier1_facts`); a report without `facts` keeps the last ones while the app is
+        unchanged (a different app starts with none), and a report with `facts` replaces them. They are published as the entry's `facts`, never inferred or merged.
         """
         terminal, app, seq = args.get("terminal"), args.get("app"), args.get("seq")
         if not isinstance(terminal, str) or not terminal or len(terminal) > 64:
@@ -925,7 +926,8 @@ class Agents:
                     raise VqroError("too many reporting terminals; nothing recorded", "overloaded")
                 entry = {"app": app, "state": state, "seq": seq, "at_ms": int(time.time() * 1000),
                          "status": {"state": TIER1_STATES[state], "app": app}}
-                kept = facts if facts is not None else (previous or {}).get("facts")
+                # Kept facts belong to the app that reported them: a different app starts with none.
+                kept = facts if facts is not None else (previous or {}).get("facts") if (previous or {}).get("app") == app else None
                 if kept:
                     entry["facts"] = kept
                 size = len(json.dumps({terminal: entry}, ensure_ascii=False, separators=(",", ":")).encode())

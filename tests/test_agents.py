@@ -797,6 +797,9 @@ class Tier1StatusTests(unittest.TestCase):
         entry = self.core.live["agents.terminal_status"]["data"]["r1"]
         self.assertEqual(entry["facts"], {"session": {"cwd": "/other"}}, "facts are replaced, never merged")
         self.assertEqual(entry["seq"], 3, "a facts-only change is published")
+        self.report({"terminal": "r1", "app": "pi", "state": "running", "seq": 4})
+        self.assertNotIn("facts", self.core.live["agents.terminal_status"]["data"]["r1"],
+                         "a different app never shows the previous app's facts")
 
     def test_bad_view_facts_are_refused_and_record_nothing(self):
         for bad in ({"session": {"cwd": ""}}, {"session": {"model": {"label": "no id"}}},

@@ -537,8 +537,10 @@ only in extension memory, disappear when the terminal ends or is removed, and do
 A report may carry optional `facts {session?: {cwd?, model? {id, label?, effort?}}, usage?}`. These are the view-fact
 shapes of `agent-v0.md` §2.3, holding only what the plugin read from its runtime: absent is unknown, never inferred.
 - Unknown keys are dropped; a known key with the wrong shape refuses the report (`invalid`).
-- At most 1 KiB encoded per terminal, counted in the table budget.
-- A report without `facts` keeps the terminal's last ones; a report with `facts` replaces them (never merged).
+- At most 1 KiB encoded per terminal, counted in the table budget, so terminals with facts reduce how many fit
+  (about 520 with full facts).
+- A report without `facts` keeps the terminal's last ones while its `app` is unchanged (a different app starts with
+  none); a report with `facts` replaces them (never merged).
 - They are published as the entry's `facts` in `agents.terminal_status`, with the same seq rule as `state`.
 - A plugin whose facts are refused reports its state without them.
 
