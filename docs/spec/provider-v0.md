@@ -193,6 +193,10 @@ Public calls stay resource-centric: `resource.spawn {provider?, kind, ...}`, `re
 
 ## 6. Agent runtimes (bridges)
 
+> **Successor draft (D28):** `agent-v0.md` standardises agent facts, `agent.send {mode}`, the item stream, requests
+> and conformance on top of this contract. The Pi capabilities below describe today's bridge until it is ported;
+> the "no shared `deliver(mode)`" rule below is replaced by declared delivery modes.
+
 - **Placement.** A bridge is the program of a backend-owned terminal, started by an extension through
   `resource.spawn {argv: ["vqro-bridge-pi", ...]}`. It runs the runtime as its child over fresh pipes (Pi RPC: JSONL,
   not JSON-RPC; split on LF only; drain stdout and stderr separately). The backend owns the process; vqro never

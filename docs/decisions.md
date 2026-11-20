@@ -54,6 +54,9 @@ moves weekly, and its terms are unchecked (`research/review-1-backends.md`, find
 
 ## D4. Agent model is capability-based, not mode-based (2026-11-16)
 
+> **Refined by D28.** Delivery modes are now declared capability contracts in `spec/agent-v0.md`; adapters still
+> declare only native behaviour, and compositions stay in extensions, labelled.
+
 **Decision.** Agent adapters publish native capabilities (`inject_at_boundary`, `enqueue_after_settle`, `interrupt`,
 `answer_request`, `fork`, `resume`, ...). Core does not define a universal `deliver(mode)`. Extensions name and compose
 delivery strategies, and hold any queues.
@@ -82,6 +85,9 @@ client of the same core protocol.
 **Why.** The owner prefers Rust. A TUI is the cheapest way to reach daily use and works over SSH.
 
 ## D8. Trust is cooperative, with safe defaults (2026-11-16)
+
+> **Refined by D28.** Answering is a coordination grant like any other; the workspace owner principal holds every
+> grant by default.
 
 **Decision.** prim's permissions are a coordination protocol, not a security boundary. Sockets are 0600, every effect
 records its caller, and answering permission requests is reserved to humans unless explicitly granted.
@@ -353,6 +359,9 @@ main `b851d6c`).
 
 ## D24. Undo covers what the user started; agents may change anything (2026-11-17, CONFIRMED)
 
+> **Refined by D28.** Default undo undoes the presser's own principal's changes; other principals' changes stay
+> attributed and explicitly revertable; the inbox is outside global undo. Cooperative coordination grants now exist.
+
 **Decision.** (1) A workspace change an extension makes because the user invoked its command (a theme, keymap or
 icon set picked in Settings) is the user's change: the default undo (`u`) reverts it. Changes an extension makes on
 its own (derived state, reconciling, reacting to events) stay outside the user's undo. (2) Agents may change
@@ -379,6 +388,9 @@ texts use clearly labelled standard text with actual declared metadata, never in
 The explicit dependency allowlist is documented in CONTRIBUTING.md; changes require maintainer approval.
 
 ## D26. Two agent tiers; backends keep agents alive, integration is optional (2026-11-18, CONFIRMED)
+
+> **Refined by D28.** Terminal agents receive messages by pulling at safe points through a plugin or hook; vqro does
+> not type into their terminal by default.
 
 **Decision.**
 1. **Terminal agents (default, every CLI agent).** A CLI agent runs in a backend terminal as standard, with its own
@@ -417,9 +429,95 @@ names; the runtime has no long-term old-name aliases. Earlier decision/research 
 **Consequences.** Brand identifies the project, official builds and maintained extension repository under D25;
 Apache-2.0/DCO terms do not change. No registered-mark claim or public repository/distribution URL is implied.
 
-## D29. One declaration model for extension dependencies and client UI features (2026-11-19, CONFIRMED)
+## D28. vqro's own agent standard: inbox, delivery modes, grants, restart (2026-11-19, CONFIRMED decisions; spec draft)
 
-> Numbered D29 because D28 is the agent standard on its own branch; renumber at merge if needed.
+**Decision.** The human's binding decisions for the agent standard (`spec/agent-v0.md` and `spec/coordination-v0.md`,
+drafts; conformance in `spec/agent-v0-conformance.md`):
+1. **vqro's own standard** is the baseline: core + modules + conformance, no per-protocol profiles, no external
+   baseline. A declared subset is at least equivalent to ACP, measured against a pinned, dated ACP v1 + v2-base
+   snapshot by an executable coverage matrix, not asserted.
+2. **Per-agent inbox.** Any principal with the right grant can send to any agent. Delivery modes `start`, `boundary`,
+   `settle`, `preempt` and `interrupt`, plus the weaker `admit`, are declared capability contracts: adapters declare
+   only native behaviour; compositions (preempt as interrupt + start) live in extensions and are labelled with their
+   steps; no silent fallback to another mode. No replay (D10).
+3. **Restart.** After a vqro restart agents come back paused and unsent mail is held; resume is explicit and
+   cascading (workspace, project, team = coordinator and everyone under it, or one agent). A message caught mid-send
+   stays `unknown` and is never resent.
+4. **Undo.** `u` undoes the presser's own changes. Other principals' changes stay attributed and explicitly
+   revertable. The inbox is outside global undo: withdraw or edit while pending, "too late" after dispatch.
+5. **Grants are coordination, not security.** No human/agent split; grants are additive; each call declares its
+   principal (cooperative, D8); the workspace owner principal holds every grant by default. Sandboxing and operation
+   permissions are out of scope.
+6. **Terminal (tier-1) agents pull** their next message at safe points through a plugin or hook. vqro never types into
+   their terminal by default; guarded typing is an optional extension.
+7. **Adapters in Rust** (D26). No MCP.
+8. **Shape:** A's presentation, C's evidence ladder (recorded → claimed → dispatched/accepted → inserted/handled →
+   completed, plus `admit`; requests with revision and first valid answer), B's exact ids + handles (resolved once;
+   the message pins its target; successors by an explicit recorded handover), additive grants, per-viewer credited
+   item streams with fenced snapshots. The inbox claim lives in the message record, is written outside undo history
+   and is durable before the runtime is invoked; the inbox has its own byte budget.
+
+**Why.** No existing standard covers in-session delivery, a multi-sender inbox, honest evidence and agents that outlive
+their viewers (agent-spike 2026-11-19: three independent proposals, adversarial reviews, two panels, adjacent-domain
+scan, lessons from the Herdr mailbox and old vqro). All three proposals kept dispatch evidence in revertable
+workspace state under global undo; connection ids restart every boot; typing into an agent's terminal corrupted the
+human's draft in the Herdr fork.
+
+**Layering (2026-11-19, after the independent audit).** The human wants both standardised: what an agent integration
+exposes, and how vqro coordinates agents. They are two layered standards with separate audiences, not one fused
+document and not a demotion. `agent-v0.md` is the **agent integration contract** for adapter authors (endpoint model,
+capabilities, facts, evidence, item stream, send, interrupt, requests, modules, lifecycle evidence) and says nothing
+about inboxes, grants, names, teams or pause. `coordination-v0.md` is **vqro's coordination standard** (inbox,
+delivery strategies, pull, handover, pause and scope resume, principals, names, membership, grants, tombstones,
+control), normative for vqro and implemented by a default, replaceable extension on generic core primitives; the core
+has no inbox, team or grant special case. Conformance has a part for each.
+
+**Refines.** D4: modes are declared capability contracts, compositions stay in extensions (no emulation, no core
+policy). D8: answering is a grant like any other; the owner principal holds all grants by default. D24: (1) default
+undo selects the presser's principal, not every client; (2) a cooperative grant system now exists for coordination.
+D26: tier-1 agents receive messages by pull, not by `terminal.input`.
+
+**Consequences.** The specs are drafts. Prototypes P1–P6 (inbox writer seam, principal + undo, item streams, Pi
+semantics, pull at safe points, ACP matrix) and the pause/resume design are folded in; the remaining open points are
+marked with the implementation stream that settles them (C1 budgets, C2 connection-default principals, C4 identity
+reservation, K2 the default coordination extension). Four generic
+core additions follow (item channel on streams, a protected inbox namespace that ordinary transactions and reverts
+cannot reach, per-call principal, identity reservation for tombstoned agents). Handles identify and confer no rights;
+rights come only from the owner rule and explicit grants. ACP is pinned at commit `d8cd473e` (2026-11-19) and claimed
+row by row. Team membership is a recorded forest (project, reports_to). Agent lifecycle: a `stop` control, distinct
+from interrupt (the turn) and pause (the gate); an endpoint is `ended` only on observed native end evidence from the
+runtime or a host that declares it owns the endpoint's lifecycle (D10, D14). An explicit retire is a separate
+`retired` state: routing off, cleanup and handover allowed, native execution unknown, never a claim that the agent
+stopped. Silence is `disconnected`, then after a declared grace (60 s) `unavailable`. Each inbox message gets a
+globally unique delivery id at admission, which is what crosses the runtime seam. `provider-v0.md` section 6 ops are
+replaced when the Pi bridge is ported.
+
+**Human answers (2026-11-19, CONFIRMED).**
+- **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
+  still working shows as working; a runtime with a real pause may offer it as an extra capability. Physical
+  suspension is not promised.
+- **AS2, MCP:** "State the gap openly": no MCP pass-through; the ACP claim is v2 base plus v1 except MCP, with the gap
+  stated; session connection descriptors are not part of v0.
+- **AS3, second implementations:** "Do both in parallel; install is fine": Codex app-server and Claude Code (hooks),
+  both real runtimes, after Pi; an ACP fake is a fixture. Each adapter's definition of done includes a small
+  real-runtime smoke run on a cheap model (about $20 in total approved, smoke only, logged). This settles D5's
+  sequencing question for the standard.
+- **AS4, disappeared agents:** "Keep mail + identity": durable evidence in the protected domain (membership stays
+  ordinary attributed workspace configuration, only referenced from there), a separate bounded and evictable
+  identity-reservation cache (eviction only means a return is a new agent), and
+  refusal of new admissions at the durable budget; evidence is never dropped silently.
+- **AS5, size:** "Accept the split": two standards, no length target.
+- **AS6, principals:** "Default from connection": the principal defaults from the connection vqro already knows (the
+  TUI is the owner, launcher-tagged panes are their agents), a declared label is recorded alongside and grants
+  nothing, and acting for another principal needs an explicit delegation (a core row
+  `doc/principals/delegations/<id> = {from, to, until_ms?, note?}`, exact principals, written only by `from` or the
+  owner). The owner is `doc/principals/owner`, written only by the owner after an audited bootstrap. A live command
+  invocation proof carries the invoking call's effective principal and original initiator separately, for that
+  callback only. This refines decision 5's "each call declares its principal".
+
+Nothing is stable until Pi and the two other real runtimes pass conformance.
+
+## D29. One declaration model for extension dependencies and client UI features (2026-11-19, CONFIRMED)
 
 **Decision.**
 - Extensions and clients declare what they **provide** and what they **need** or merely **work with**, as

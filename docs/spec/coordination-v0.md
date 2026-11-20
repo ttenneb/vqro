@@ -1,0 +1,484 @@
+# vqro coordination standard, v0 (draft)
+
+> **Status (2026-11-19): draft, not implemented** (D28). vqro is a working prototype, and fluid. Prototype results
+> P1–P6 and the R design are folded in. Open points are marked with the implementation stream that settles them:
+> `(pending C1)`, `(pending C2)`, `(pending C4)` or `(pending K2)` (the default coordination extension). Nothing is
+> stable until it passes Part B of `agent-v0-conformance.md` with real runtimes behind it.
+
+**Audience: whoever coordinates agents through vqro**, and authors of a replacement coordination extension. This is
+how vqro delivers messages to agents and organizes them: inbox, delivery strategies and composition, pull, handover,
+pause and scope resume, principals, names, membership, grants, tombstones and control. It is normative for vqro and
+**implemented by a default, replaceable extension** on generic core primitives (a protected operational domain,
+attribution, streams; §9). The core has no inbox, team or grant special case: another extension may replace this one
+using the same primitives. The default extension's id is `coord`, so its commands are `coord.*` (D29 owner prefixes);
+a replacement uses its own prefix with the same semantics. Agents are reached through the integration contract
+(`agent-v0.md`); this document never asks an adapter for more.
+
+## 1. Shape
+
+| Part | What |
+|---|---|
+| Model (§2) | ids, coordination stages on top of the adapter's evidence |
+| Principals, names, membership, grants (§3, §4) | who acts, how agents are named and grouped, who may do what |
+| Inbox (§5) | durable per-agent messages: send, edit, withdraw, claim, retry, order, fairness, composition, handover, pause and scope resume |
+| Control and lifecycle policy (§6) | interrupt, answers, module ops, stop, retire; unavailable agents and tombstones |
+| Pull (§7) | tier-1 agents and plugins take messages at safe points; vqro never types into a terminal by default |
+| Causality (§8), core additions (§9), bounds (§10) | |
+
+## 2. Model
+
+| Id | Meaning |
+|---|---|
+| `delivery` | one inbox message; globally unique, minted at admission; the id passed to `agent.send` and that keys receipts, lookups and replies |
+| `submission`, `op` | caller-chosen per principal, for idempotency only: one send / one coordination call (§5.3) |
+| `control_epoch` | core boot + inbox-owner incarnation (§5.5) |
+| `principal` | coordination identity (§3) |
+| `@handle`, `project:<id>`, `team:<rN>` | names and scopes (§4) |
+
+Coordination stages come before the adapter's evidence (`agent-v0.md` §2.2):
+
+| Stage | Means |
+|---|---|
+| `recorded`, `held` | intent saved, editable; `held` carries a reason (§5.6) |
+| `claimed` | durable claim: the runtime may have been invoked |
+| `unknown` | outcome lost; a fact about evidence, not proof either way; never resent automatically (D10) |
+| `withdrawn`, `expired`, `superseded` | ended before claim; never delivered |
+
+## 3. Principals
+
+Accident-proofing, not security (D8): any same-user process can still bypass it, but ordinary use never misattributes.
+This section is the one definition both standards use; `core-protocol.md` adopts it when C2 lands. The core owns only
+the generic keys below (`doc/principals/…`) and never reads coordination grants (§4).
+
+**Recorded fields** on every transaction, event and `effect.invoke` (P2 built the first four as
+`principal`/`actual_author`/`on_behalf_of_principal`; identifiers ≤ 256 bytes):
+
+| Field | Meaning | Set by |
+|---|---|---|
+| `author` | the actual connection (`client:<epoch>:<id>`, `ext:<name>`); never settable by a request | core |
+| `actor` | the connection's resolved principal (below) | core |
+| `principal` | the **effective** principal: `actor`, or the `on_behalf_of` target under a delegation, or the effective principal a callback proof carries | core |
+| `initiator` | the original invoker's principal, carried unchanged through delegation and callbacks | core |
+| `label` | a label the caller declared; recorded only, never authority | caller |
+
+- **Resolving `actor`** (the human's choice AS6) `(pending C2)`: the TUI is the owner principal; an extension is
+  itself; a pane vqro spawned is the principal its launcher injected. A host that serves several endpoints (an
+  app-server) passes a per-endpoint tag to each tool it runs where the runtime evidences which endpoint ran it;
+  otherwise its calls resolve to the host's own principal (`host:<id>`), never to one of its endpoints by guess. A
+  call with nothing known is `undeclared`: accepted for raw and recovery primitives, never the owner, no coordination
+  grants, no default `u`.
+- **Callback proofs** travel in the `invocation` request field (an opaque proof). A live invocation proof captures
+  the invoking call's effective principal and its original initiator separately; writes made under the proof carry
+  that effective principal and that initiator. Example: A holds a B→A delegation and invokes `on_behalf_of` B; the
+  handler's writes have effective principal B, initiator A (and `author`/`actor` the handler's extension); `u` by B
+  undoes them, `u` by A does not. Propagation is scoped, as in D24: it lasts only for that callback and gives the
+  handler no standing ability. Only an explicit `on_behalf_of` needs a delegation row.
+- **Delegation** `(pending C2)`: `on_behalf_of` carries only the target principal P. The core admits it only if a
+  row `doc/principals/delegations/<id> = {"from": P, "to": <actor>, "until_ms"?, "note"?}` exists and is unexpired:
+  `to` may act on behalf of `from`. Exact principals only: no wildcards and no chains in v0. Rows are ordinary
+  attributed configuration. The core records `actor`, `initiator` and the effective `principal` P; what P may do is
+  still checked by the coordination extension's own grants. A row carries no per-right or per-target scope in v0: `to`
+  acts as `from` for everything until `until_ms`. Scoped delegation is a possible later extension.
+- **Write ownership** (enforced by the core at commit prepare, against the state before the transaction and the
+  request's fixed principal; creates, replacements, deletes and reverts alike): only the owner writes
+  `doc/principals/owner`. For `doc/principals/delegations/<id>`, a create needs the new row's `from` (or the owner); a
+  delete or a revert needs the existing row's `from` (or the owner); a replacement needs both the existing and the new
+  row's `from` (or the owner), so only the owner can change a row's `from`. Rows written in a transaction grant nothing
+  within it. Initializing the owner is an audited system bootstrap, not a `u` target.
+- **Times** are integer Unix epoch milliseconds in fields ending `_ms`, as in the core (`until_ms`, `expires_at_ms`,
+  `last_seen_ms`).
+- **`u` acts for the presser's effective principal** and selects the latest transaction whose `principal` equals it:
+  delegated and forwarded changes are undone by the principal they were made for, never by the delegate's or the
+  extension's `u`; others' changes stay attributed, explicitly revertable and CAS-protected (D28, refining D24).
+  Inbox state is never in global undo.
+- The **workspace owner principal** is `doc/principals/owner = "<principal>"` and holds every coordination right;
+  other rights come only from grants (§4).
+
+*Evidence (P2, `proto/principal-undo` f12f4e2, gate 29/29):* a pane's CLI writes as Alice through the launcher
+environment; Alice's TUI `u` removes it while Bob's later change stays; another principal's change is revertable by
+explicit id; restart keeps principals and grants; history is unaffected (one entry, 202 bytes, after 900 unknown
+assertions); grant lookups over 1024 grants p99 3.6 ms in a debug build. The connection-bound default, the separate
+label and the delegation rows are not built yet.
+
+## 4. Names, membership, grants
+
+**Names.** Handles (at most 4 per agent): `@` + 1–3 `/`-separated segments of `[a-z0-9][a-z0-9-]{0,31}`;
+`doc/agents/names/<handle> = {agent, principal?}`, changed through `coord.names` (right `names`). A handle identifies
+and confers no rights. It is resolved once when an action starts; records keep the exact `rN`. A handle whose agent
+ended or was retired resolves to `ended` or `retired`, and new sends are rejected until it is rebound.
+
+**Membership** `(pending K2)`. `doc/agents/members/<rN> = {project, reports_to}` is the one membership authority:
+ordinary attributed workspace configuration, changed through `coord.membership.set` (right `membership` on the moved
+subtree and its source and destination), which validates the whole result in one write. Like any ordinary change it is
+undone by its author's `u` and revertable explicitly. The protected operational domain never owns or copies
+membership; its records only reference it by `{rN, revision}`. It is a bounded forest: at most one parent, no cycles,
+parent and child in the same project. Moving an agent moves its subtree. `team:<rN>` selects that coordinator and its
+transitive reports. Names, panes, process ancestry and parentage never create membership or rights.
+
+**Grants.** Coordination, not security. Rights come only from the owner rule and explicit additive grants (union of
+matching unexpired grants; no denies, no order), changed through `coord.grants` (attributed).
+
+```jsonc
+// doc/agents/grants/<id>
+{"who": "p:coord" | "@reviewer" | "team:r7" | "project:p1" | "*", "can": ["send:boundary", "interrupt"],
+ "on": "@worker-3" | "agent:r42" | "team:r7" | "project:p1" | "*", "until_ms": null}
+```
+
+- Rights: `send:<mode>`, `send:*`, `send:interrupt_then_start`, `receive` (pull and report), `interrupt`, `answer`,
+  `queue`, `session`, `configure`, `command`, `inbox.edit_any`, `recover`, `handover`, `names`, `membership`,
+  `pause`, `resume`, `stop`, `grants.manage`. Acting for another principal is not a right here: it is a core
+  delegation row (§3).
+- `grants.manage` on X grants or revokes rights on X only, never on a wider `on`, never rights it does not hold.
+  Launchers seed `receive` for an agent's plugin through ordinary grants.
+- A child endpoint's effective controls are the **intersection** of grants and its native capabilities.
+- Checked at `coord.inbox.send` (requested mode), at claim (resolved strategy and each composed step), at take, and in
+  Control. Revocation after claim cannot recall work. These are inbox policy, not enforcement on every possible input:
+  direct `resource.invoke` remains the D24 escape hatch, visible in the core's effect audit.
+
+## 5. Inbox
+
+One extension owns every inbox and is the only dispatcher and waker.
+
+### 5.1 Store
+
+Records, attempts, gates, tombstone summaries and scope-control receipts live in a **protected operational domain**: a
+bounded, non-undo persistence domain written through the same committer but persisted separately from ordinary
+workspace state and its history (P1). A record, its payload revision and its attempt form one atomic versioned record.
+Only the owning extension's operations change it; ordinary `workspace.apply`, reverts, imports and legacy history never
+create, replace or resurrect its records; a transaction mixing protected and ordinary keys is rejected whole. Its
+commits are durable and attributed, never appear as workspace history events and never take a global undo slot; an
+uncertain write publishes the transaction actually adopted. Inbox persistence must not starve workspace writes. The
+wire contract does not fix physical storage.
+
+*Evidence (P1, `proto/inbox-seam` b26cf0a; a measurement model, not a shipped multi-domain core):* with the inbox in
+the shared 8 MB workspace file at 100 txn/s (90% inbox), 5918/9000 commits succeeded, accepted p99 was about 2.7 s and
+276 layout writes were refused; in a separately persisted 2 MB domain on the same committer code, 9000/9000 succeeded,
+inbox p99 6–8 ms, layout p99 31–34 ms. Fences that passed, with no duplicate native write: kills before and after the
+durable claim and after the native effect, injected `durability_unconfirmed`, settled-record GC + restart, old-delete
+ABA, a full 8 MiB undo horizon untouched by 520 inbox writes, 60 edit/withdraw/claim races. Cross-domain atomicity and
+shared publication fences are not implemented.
+
+### 5.2 Record
+
+```jsonc
+{"v": 0, "delivery": "d:7c1e…", "submission": "01JF8Q…",
+ "to": {"agent": "r42", "incarnation": "…", "session": "s1", "as": "@reviewer"},  // pinned at send
+ "follow_current_session": false,
+ "from": {"principal": "p:coord", "actor": "p:coord", "author": "client:12"},   // recorded fields (§3), never from the body
+ "origin": {"principal": "p:coord", "actor": "p:coord", "agent": "r7", "kind": "agent"},  // derived from `from`
+ "quoted": null, "render": null,                                                  // sender-supplied; see §5.6
+ "mode": "boundary", "content": [{"type": "text", "text": "Run the linux tests too."}],  // as agent.send
+ "guard": null, "key": null,
+ "reply_to": null, "thread": null, "retry_of": null, "cause": null, "correlation": null,   // deliveries / §8
+ "expires_at_ms": "…", "supersedes": null, "order": 41,
+ "state": "held", "reason": "agent_busy", "held_by": null,
+ "attempt": null, "result": null, "handed_over_from": null}
+```
+
+### 5.3 Commands and operation identity
+
+Commands are attributed (§3). Every mutating call carries `op`, and `coord.inbox.send` a `submission`: caller-chosen,
+scoped by principal, idempotency only. The inbox advertises its **operation window** (`coord.inbox.window` → `{epoch,
+from, to}`, also in every reply); callers prefix ids with that epoch. An identical repeat inside the window returns
+the original result in its stored compact form (§10); the same id with another payload is `conflict`; an id outside
+the window returns its historical result or `expired_operation` and **never creates a mutation or a native attempt**.
+Result eviction never makes an id admissible again. The window governs call ids only: a pending record stays editable
+by its `delivery`. `coord.inbox.op {op}` returns the result or `unknown`, never "did not happen".
+
+| Command | Effect |
+|---|---|
+| `coord.inbox.send {op, submission, to, mode, strategy?, content, quoted?, render?, send_new?, …}` | grant and quota check, resolve `to` once, admit or reject atomically, return `delivery`; `pending_exists` while the sender already has a pending record for that target, unless `send_new: true`; `strategy: interrupt_then_start` selects that recipe (§5.7) |
+| `coord.inbox.edit` / `coord.inbox.withdraw {op, delivery, expect, …}` | while `recorded`/`held`, CAS on the record; after claim `too_late` |
+| `coord.inbox.take` / `coord.inbox.report` / `coord.inbox.reconcile` | pull (§7) |
+| `coord.inbox.peek {agent, at?, limit?}` | what a take at that point would return, without claiming (needs `receive`) |
+| `coord.inbox.resolve {op, delivery, as: delivered \| not_delivered}` | judgement on an `unknown` record by its sender, recipient or a `recover` holder; recorded beside the evidence, never invokes |
+| `coord.handover {op, …}` | §5.8 |
+| `coord.scope {op, action: pause \| resume, …}` | §5.9 |
+| `coord.inbox.list {target \| sender, state?, page?}` / `coord.inbox.get {delivery}` | bounded pages, indexed lookups; reading consumes nothing |
+
+Results use one **coordination envelope** `{state, reason?, attempt?: {id, steps: [{op, outcome}]}, native?}`, where
+`native` is the provider result, unchanged **in the live reply only**; the inbox stores only the compact outcome
+(§10). "Undo last send" in a client is `coord.inbox.withdraw` of the caller's newest pending record.
+
+### 5.4 Retry
+
+- An `unknown` record is never resent. A principal may send a new submission with `retry_of: <delivery>`; the
+  uncertainty stays visible on both. An adapter with declared, proven native idempotency (`agent-v0.md` §3.4) may
+  allow a reconciled retry, declared separately.
+- A definite `busy` rejection returns the record to `held` with a new attempt id at the next idle, same exact target
+  and guard, no extension of `expires_at_ms`, no immediate retry (at most 3) `(pending K2)`.
+- A `stale` guard or session is held (`session_changed` / `stale_guard`) for explicit edit or review.
+
+### 5.5 Claim and invoke
+
+1. One protected write moves the record from `recorded`/`held` to `claimed`, with `attempt` (id, strategy, effective
+   session, `control_epoch`, claimant), as a CAS on that record: it and any edit or withdraw exclude each other. A
+   durable claim means "the runtime may have been invoked".
+2. Invoke only after that write is **confirmed durable**, and only if the current owner incarnation still matches the
+   attempt's `control_epoch`, checked just before dispatch (a stale owner callback cannot act). On
+   `durability_unconfirmed`, do not invoke; CAS the record back to `held` (`claim_unconfirmed`) and confirm that write
+   before any later dispatch. If vqro restarts first, the record is `unknown`.
+3. Invoke `agent.send` once with `delivery`, `origin`, `cause`, the pinned incarnation and the effective session as
+   guard. `accepted` or `dispatched` → the compact outcome and receipt stage (§10); `rejected` → §5.4 or final;
+   `indeterminate` → `unknown`.
+4. Later receipts update `result.receipt`; a gap changes nothing.
+
+### 5.6 Eligibility, order, fairness
+
+- One claim, or one take batch (§7), in flight per target; each record has its own attempt. Controls never enter the
+  inbox (§6).
+- **Session.** A record is eligible only while the agent's current session is `to.session`, unless the sender set
+  `follow_current_session: true` (visible; rejected together with an explicit session guard). The claim records the
+  effective session and sends it as the guard; a further switch before invoke makes it `stale`. Nothing rewrites
+  `to.session`.
+- **Origin.** The inbox derives `origin` from the recorded `from` (effective principal, actor, the sender's agent and
+  kind); a sender cannot set it. A sender may add `quoted` (asserted provenance of forwarded content, shown as a claim)
+  and `render` (the renderings it accepts, `agent-v0.md` §3.2). If the target declares no accepted rendering, the record
+  is held `origin_unsupported`.
+- **Lanes:** `boundary`, `preempt` and `admit` are never blocked by `start`/`settle` records waiting for idle. Within
+  a lane, order is promised per (sender, target, lane) only. An `unknown` blocks only records whose ordering depends
+  on it.
+- **Fairness and quotas.** Per target, eligible records from different senders are served round-robin within a lane,
+  so one sender cannot starve others. Quotas per sender per target and per sender overall (open records and bytes;
+  `send_new` counts too) reject over the limit with `quota` `(pending K2 for numbers)`.
+- **Hold reasons** (always shown): `paused`, `agent_busy`, `agent_absent`, `agent_ended`, `agent_retired`,
+  `session_changed`, `stale_guard`, `unsupported_mode`, `origin_unsupported`, `integration_unavailable`, `no_grant`,
+  `quota`, `awaiting_route`, `handover_pending`, `claim_unconfirmed`, `ordering_unknown`.
+- **Mode resolution:** the native mode if declared. `start` with `busy: reject` waits for idle. `settle` without native
+  settle waits for idle and goes as `start`, `held_by: vqro`. `boundary` without native support stays held. `preempt`
+  without native support only through §5.7.
+- **Expiry:** `boundary` and `preempt` records carry a finite `expires_at_ms` (sender's or a declared default), checked
+  at admission and before claim or a first composed step. Nothing renews it; expiry after dispatch never means "not
+  delivered". `supersedes` replaces the sender's own unclaimed record.
+
+### 5.7 Composition
+
+Only this extension composes; steps and their outcomes go in the coordination envelope, each step stored as a compact
+outcome reserved at admission (§10).
+- A composition claims a mode only if it meets that mode's contract under its declared prerequisites. Composed
+  `preempt` = `interrupt` then `start`; with runtime-held input that survives an interrupt it qualifies only if the
+  recipe clears that input first (needs `queue`) and nothing else can enter in between; otherwise it is the separately
+  named best-effort strategy `interrupt_then_start`. Pi gets only `interrupt_then_start` (clear, abort, start), partial
+  under interference (P4).
+- Needs `send:preempt` (or `send:interrupt_then_start`) plus each step's rights. One monotonic recipe deadline; before
+  each step it checks the deadline, the gate, exact target, session and run, and the rights. It stops after any
+  unsuccessful or uncertain step; a restart never continues a recipe. Interrupt observed + start rejected is a known
+  partial result, never `rejected`.
+
+### 5.8 Successor handover
+
+`coord.handover {op, from: {agent, incarnation}, to: {agent, incarnation}, deliveries: […], bind?, membership?,
+grants?}` moves pending intent from an ended, retired or replaced agent to a successor; `deliveries` is the exact
+inspected list (bounded; oversized is rejected before any change).
+- Needs `handover` on source and destination, plus `names`, `membership` or `grants.manage` for each change. It moves
+  only listed records still `recorded`/`held`; `claimed` and `unknown` stay.
+- The source's admission is fenced while the move commits. Moved records keep sender, evidence, expiry and session
+  constraints and are held `handover_pending` (not eligible, even at an open destination) until `coord.handover {op,
+  action: complete, plan}` by a `handover` holder on the destination, after every plan stage succeeded. Completing
+  rechecks the destination and keeps any pause; handover never opens a gate.
+- The protected move is one write; name, membership and grant changes are ordinary writes in the same recorded plan,
+  each with its own `op` and expected revision; a failed or stale stage stops the plan, which shows what remains.
+- A plain handle rebind only renames.
+
+### 5.9 Pause and scope resume
+
+- **Pause is an admission gate, not suspension** (confirmed by the human, 2026-11-19). A new `control_epoch` (core
+  boot or inbox-owner change) closes every agent's gate before serving sends or takes. A paused agent gets no new
+  content invocation, pull claim, wake or input-bearing composition step. An agent still working shows as working;
+  clients show "inbox paused" beside the runtime state. A runtime's real pause may be offered as an extra capability.
+  Control, observation and lookups never wait behind the gate.
+- **Restart.** Never-attempted records stay held (`paused`); resuming makes them eligible, a first attempt, not a
+  replay. Claimed records with no outcome become `unknown` and are never made pending again.
+- **Scopes** select over membership: `workspace`, `project:<id>`, `team:<rN>`, `agent:<rN>`.
+- **`coord.scope {op, action, scope, expect: {control_epoch, control_revision, membership_revision}}`** freezes the
+  exact target set at one membership revision (its selection point), records it, and checks `pause` or `resume` on
+  every target, the caller's own agent included, before changing anything (all or nothing; stale revision →
+  `conflict`). A scope action is not a page: it is bounded by the declared **scope capacity** (≥ 200 targets at the
+  target topology); expansion may be paged internally but is frozen atomically, and its results are paged. Over
+  capacity is rejected before any change. Live permits exist only after acceptance is confirmed durable; replay,
+  restore, revert, adapter registration or an old epoch's result never create permits; a non-revertible
+  `control_revision` makes stale requests fail.
+- **Cascade means parent-first release of gates, not coordinator-first native execution.** Each target reports
+  readiness or its hold reason.
+- Membership is ordinary configuration and gates are protected state; there is no atomicity across them. Later
+  membership edits affect future selections only and inherit nothing from earlier resumes. A resume is undone only by
+  a new pause, never by `u`.
+
+## 6. Control and lifecycle policy
+
+`coord.control {op, target, action, args}` (`interrupt | respond | queue | session | configure | command | object |
+stop | retire`) checks the matching right, records principal and caller, invokes the native op once and returns the
+coordination envelope. It never waits behind inbox records and runs on reserved control capacity (§9.4).
+
+| Coordination lifecycle | From | Inbox | Handle, membership |
+|---|---|---|---|
+| `live`, `stopping`, `disconnected`, `unknown`, `ended` | the adapter's lifecycle evidence (`agent-v0.md` §7) | normal; `stopping` closes the gate; otherwise held `agent_absent` / `agent_ended` | `ended` resolves handles to `ended`, membership marked ended |
+| `unavailable` | still no end evidence after a declared grace (default 60 s): cached live facts forgotten, tombstone kept | held `agent_absent` | kept in the tombstone |
+| `retired` | a principal's explicit `retire`, recorded `{by, reason}`; native execution unknown | routing off, held `agent_retired` | handles resolve to `retired` |
+
+- **Stop:** `coord.control {action: stop, args: {how: graceful | host_kill}}`, right `stop`. The gate closes first.
+  `graceful` invokes `agent.stop`. If it is not declared, vqro offers `host_kill` only through an addressable,
+  declared route: the endpoint's `host.resource` is a core resource of the same incarnation whose provider declares a
+  termination primitive (`terminal.kill`), and everything that host serves is shown first. Otherwise `host_kill` is
+  `unsupported` and the endpoint's state stays as observed; vqro never escalates silently. `ended` needs end evidence.
+- At stop or end, held records stay held; claimed records without an outcome become `unknown`. Nothing is resent or
+  rerouted.
+- **Retire** (right `stop`) is an administrative judgement, never a claim that the agent stopped: routing is off,
+  cleanup and handover are allowed, native execution stays unknown until end evidence makes it `ended`.
+- **Silence never ends an agent.** After the grace, retention may forget cached live facts (`resource.forget_cached`,
+  never a native effect); the agent becomes `unavailable`.
+- **Two separate stores** (capacity in §10):
+  - an **identity-reservation cache** in the core, bounded and evictable: while an agent's reservation is present, the
+    same identity reappearing gets its original `rN` back, still paused if it was restart-held; eviction only means a
+    return becomes a new agent with a new `rN` that inherits nothing `(pending C4 for the core change)`;
+  - **durable evidence** in the protected domain: a tombstone summary `{agent, identity, handles, last_seen_ms,
+    last_evidence, held, unknown, membership_ref: {rN, revision} | null}`, reserved when the agent first gets
+    coordination state (so creating it needs no new space), and its held and unknown records. The agent's membership
+    stays ordinary configuration (§4); the summary only references it.
+- **At the durable budget**, admissions that need protected space (new sends, coordination state for a new agent) are
+  refused with a visible `quota` reason. Evidence is never dropped silently: tombstones with no held or unknown
+  records, no membership reference and no pending handover are pruned oldest first (they hold no evidence); the rest
+  stay until a handover, an explicit withdraw or removal, or an explicit **archive** (§6.1). Agent registration
+  itself always succeeds.
+
+### 6.1 Archive
+
+`coord.inbox.archive {op, agents, destination}` (right `recover`) moves durable evidence out of the protected domain
+without ever losing it:
+1. **Freeze:** record a pending archive in the protected domain with the exact bounded set of records and their
+   versions. Records in the set are not changed except by evidence that arrives later (step 4).
+2. **Export:** write a manifest (archive id, delivery ids, versions, content hash) and the records to the destination,
+   and confirm it is durable (synced and read back against the hash).
+3. **Free:** one CAS against the frozen versions replaces the records with a compact archive marker `{archive,
+   locator, manifest_hash, deliveries}`. A record whose version changed meanwhile (a late receipt, an edit) is left in
+   place and reported.
+4. Uncertain export, a failed write or a CAS conflict keeps the evidence and leaves the archive visibly pending;
+   nothing is freed. Repeating the `op` inspects that archive, never exports a different set or frees blindly.
+
+A lookup of an archived delivery returns its locator. A missing or unreadable archive answers `unknown`, never "no
+effect". Archive is never triggered by memory pressure.
+
+## 7. Pull at safe points (P5)
+
+A terminal (tier-1) agent receives messages only by pull, through an in-agent plugin or hook; a structured adapter may
+use it too. The plugin needs the `receive` right on its agent and never reads or writes the runtime's input editor.
+vqro never types into an agent's terminal by default; guarded typing is an optional extension that needs fresh
+editor-empty evidence, reports `dispatched`, labels the mode unverified and obeys the gate.
+
+- **Declaration** `pull {points, insert, evidence}` and a `consumer` incarnation id per load. `points` ⊆ `turn` (tool
+  results recorded, before the next model request) | `settle` (work would otherwise end) | `idle` (nothing running)
+  | `tool` (the model asks for its mail). `insert`: `user` (attributed user message) or `context`. `evidence`:
+  `entry` (a durable runtime record carrying the delivery id) or `none`.
+- **Eligibility is the inbox's:** `turn` serves `boundary`; `settle` serves `boundary` and `settle`; `idle` serves
+  `start`, `boundary` and `settle`; `tool` serves `admit`, plus `boundary` where declared an evidenced boundary.
+  `preempt` is never pulled.
+- **Take:** `coord.inbox.take {op, agent, consumer, at, limit ≤ 16}` claims, as one batch, up to `limit` eligible
+  records in `order` within the page bound (the rest stay held), durably before replying, and returns `{records:
+  [{delivery, from, origin, mode, content, claim}]}`. Each claim binds delivery and version, target and effective
+  session, `control_epoch`, `consumer` and `at`. A paused, ended or unauthorized target returns `{records: [], held:
+  <reason>}`. The plugin inserts every returned record at that point, in order, with its origin. A `turn` take may
+  extend the run by one request.
+- **Report** `coord.inbox.report {op, delivery, claim, stage}` names the current claim and consumer and only moves
+  forward; a stale claim is rejected unchanged. `inserted` (`evidence: entry` only), `supplied` (`insert: context,
+  evidence: none`), `read`, `handled`, as in `agent-v0.md` §2.2. `released`: the plugin returned from the point
+  without inserting it in a handler it controls; the record returns to `held`. Anything else is `unknown`.
+- **Recovery.** A lost reply is recovered with `coord.inbox.op`; a repeated take returns claim history, never content.
+  On every (re)start, before taking, a new consumer calls `coord.inbox.reconcile {op, agent, consumer, records:
+  [{delivery, entry?}]}`: a claim with a durable runtime entry carrying that delivery id becomes `inserted` on its
+  original attempt; every other one becomes `unknown` (always with `evidence: none`). Reconcile grants no claim; later
+  reports from the old consumer are rejected.
+- **Wake:** a pending count, never content, on admission, edit, resume and handover; none while paused.
+- **Terminal agents.** A terminal is an agent target when it reports OSC 7501 with an `app` key or
+  `doc/agents/terminals/<rid>` marks it; without a plugin its records stay held `integration_unavailable` and it stays
+  usable by hand. A plugin's structured endpoint supersedes the marker by a recorded handover. Informative,
+  unverified: Claude Code hooks can pull at `turn` (`PostToolBatch`), `settle` (`Stop`) and `idle` (`asyncRewake`)
+  with `insert: context`; its native session inbox socket is an `admit` route without vqro-side edit after posting.
+
+## 8. Causality
+
+Admissions record `cause` and `correlation` in the qualified form of `agent-v0.md` §2.5 and pass them to
+`agent.send`: a cause the caller supplies is recorded with `provenance: asserted`; one the inbox can prove (a reply to
+a delivery it holds, `retry_of`) as `adapter`. `reply_to`, `thread` and `retry_of` stay as they are. Nothing is
+inferred from timing or text; absent means unknown.
+
+## 9. Core additions (generic; none is agent-specific)
+
+1. **Protected operational domain** (§5.1): one per owning extension, its size declared at registration (§10);
+   bounded, non-undo, separately persisted, written only by its owning extension, fenced against ordinary writes and
+   reverts; production registration, cross-domain rules and publication
+   fences still need design (P1 evidence).
+2. **Attribution** (§3; P2 built `principal`, actual author and initiator): the recorded fields on transactions,
+   events and `effect.invoke`; undeclared calls recorded as such; default undo by effective principal. The connection
+   default, per-endpoint host tags, `label`, the `invocation` proof field and `doc/principals/delegations` rows
+   `(pending C2)`.
+3. **Identity-reservation cache** in `resource.forget_cached` (§6), bounded and evictable `(pending C4)`.
+4. **Reserved admission and control capacity**: the core keeps commit-queue and provider-call capacity for control
+   commands and answers, and a separate budget for stream opens, so neither reconnect bursts nor inbox floods can use
+   up the capacity interrupts and answers need (P1, P3; the C1 commit-worker lanes in §10). Answers and interrupts
+   meet a declared latency bound under that load `(pending C1)`.
+5. **Owner fencing**: an extension's writes and dispatches are checked against its current supervised generation at
+   dispatch and at commit (audit 2026-11-19; the fix is a separate main-branch change and is not evidenced by this
+   draft).
+
+## 10. Bounds and capacity
+
+Every read and action is bounded by count, bytes and work: indexed lookups, bounded traversal, size preflight;
+oversized atomic actions are rejected before any change; read-only recovery works before any migration-triggering
+write.
+
+**Capacity** `(pending C1)`. Each owning extension has **one** operational domain and declares its size when it
+registers it: by default 2 MiB and 1024 records, at most 8 MiB with records scaled (e.g. 4096), always with at least
+10% reserved for control; the core admits at most 16 domains and 32 MiB in aggregate. The commit worker admits 128
+requests / 8 MiB on its normal lane plus 16 requests / 1 MiB on a control lane, with operational (inbox) work on the
+normal lane capped at 80 requests / 4 MiB so it cannot starve layout writes. The default coordination extension
+declares **2 MiB** and 1024 records: C1 measured 9000/9000 commits at 100 txn/s with 2 MiB, while 8 MiB is not
+certified at that rate on this host (8927/9000, layout p99 up to 1.27 s). 4 MiB is pending measurement; 8 MiB remains
+allowed capacity, not certified at 100 txn/s. Every retained item is charged at its
+encoded size:
+
+| Retained item | Bound each | Count | `B` = 2 MiB, 200 agents | `B` = 4 MiB | `B` = 8 MiB |
+|---|---|---|---|---|---|
+| domain audit/header metadata (C1, fixed) | 64 KiB | 1 | 65,536 | 65,536 | 65,536 |
+| control and recovery reserve | | `ceil(B/10)` | 209,716 | 419,431 | 838,861 |
+| tombstone summary (encoded identity ≤ 2 KiB, ≤ 4 handles, evidence, counts, membership ref; legal maximum 2,503 B) | 3 KiB | agents with coordination state | 614,400 | 614,400 | 614,400 |
+| gate | 128 B | agents | 25,600 | 25,600 | 25,600 |
+| operation-window result (compact: state, outcome, receipt stage, error kind, ids) + fingerprint | 256 B | window `W` (1024) | 262,144 | 262,144 | 262,144 |
+| settled index entry (delivery → outcome) | 64 B | 1024 | 65,536 | 65,536 | 65,536 |
+| final record, compact (metadata, attempt, compact result; content dropped) | 1 KiB | 256 retained | 262,144 | 262,144 | 262,144 |
+| handover plan | 4 KiB | 16 open | 65,536 | 65,536 | 65,536 |
+| archive manifest (pending archive) | 4 KiB | 4 | 16,384 | 16,384 | 16,384 |
+| scope receipt | 8 KiB | 16 retained | 131,072 | 131,072 | 131,072 |
+| **fixed subtotal** | | | **1,718,068** | **1,927,783** | **2,347,213** |
+| open record: metadata 2 KiB + content ≤ 32 KiB + compact outcome reserved at admission 1 KiB (per step for a recipe) | ≤ 35 KiB | the rest | 379,084 left | 2,266,521 left | 6,041,395 left |
+
+C1 charges every domain a fixed 64 KiB audit/header reservation inside `B`. With 200 agents, the default 2 MiB domain
+leaves room for about 10 maximum-size open messages or 92 small ones (1 KiB content, 4 KiB charged), beyond which
+admission is refused `quota`; a 4 MiB domain about 63 or 553, and an 8 MiB domain about 168 or 1,474, under its
+4096-record ceiling. A record count is a ceiling, not room for that many maximum payloads.
+Bounds are on the **encoded** size, not raw string limits (an identity of legal strings can encode to 1,989 B). Each
+open record reserves a **compact outcome** per attempt and per recipe step (steps × 1 KiB) at admission, and admission
+is refused `quota` if the reservation doesn't fit. A compact outcome is at most 1 KiB: state, receipt stage, outcome
+kind, error kind, native op, byte size and sha256 of the full native result, and `incomplete: true` whenever native
+data did not fit; an explicit, marked bound, never silent truncation. The full native result is returned unchanged
+only to the live caller (`native`) and stays retrievable only where the adapter retains it (`agent.receipt`, native
+records). A late reply always fits its reservation by construction; if even the compact form cannot be written (a
+store failure), the attempt stays `unknown` and visible for attention, never resent. Beyond the declared size,
+admission is refused `quota`; evidence is never dropped. The **identity-reservation cache** is separate core memory:
+each entry holds the full identity (provider ≤ 128 B, instance ≤ 256 B, ref and incarnation ≤ 128 B each, `rN`) in ≤ 2
+KiB encoded (legal maximum 1,989 B), so `N` = 4096 entries is 8 MiB.
+
+| Item | Bound |
+|---|---|
+| Record content | 32 KiB (larger by link) |
+| Open records | per sender per target, per sender, per target; protected domain total `B` |
+| Tombstones | summaries (≤ 3 KiB encoded) counted in `B`; unprotected pruned oldest first; identity cache `N` entries of ≤ 2 KiB |
+| Scope action | declared scope capacity ≥ 200 targets; results paged |
+| Lists, pages, take batches, handover lists | ≤ 64 items (take ≤ 16), ≤ 256 KiB per page or batch |
+| Composed recipe | one monotonic deadline |
+
+## 11. Out of scope (v0)
+
+Operation permissions and sandboxing; security against same-user processes; task engines and automatic task
+completion; automatic agent activation; physical suspension; cross-workspace or cross-host delivery (D23);
+exactly-once; read markers; priorities beyond lanes and fairness; blocking waits for agents (send, end the turn, the
+reply wakes you).
