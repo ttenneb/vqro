@@ -448,7 +448,15 @@ export class Workspace {
     this.epoch = snap.epoch ?? ""; this.seq = snap.seq ?? 0;
     this.entries = new Map(Object.entries(snap.entries ?? {}).map(([k, e]: [string, Json]) => [k, e?.value]));
     this.versions = new Map(Object.entries(snap.entries ?? {}).map(([k, e]: [string, Json]) => [k, e?.version ?? 0]));
+    const before = this.resources;
     this.resources = new Map((snap.resources ?? []).filter((r: Json) => isStr(r?.id)).map((r: Json) => [r.id, r]));
+    // Finishes stay latched across a reload for resources that remain; a snapshot can cover a finish whose event then
+    // arrives as already seen, so compare with what was cached (a resource never seen before latches nothing).
+    for (const id of [...this.reached.keys()]) if (!this.resources.has(id)) this.reached.delete(id);
+    for (const [id, record] of this.resources) {
+      const finish = before.has(id) ? reached(before.get(id), record) : null;
+      if (finish) this.reached.set(id, this.reached.get(id) === "error" ? "error" : finish);
+    }
     this.commands = new Map((snap.commands ?? []).filter((c: Json) => isStr(c?.name)).map((c: Json) => [c.name, c]));
     this.extensions = new Map(Object.entries(snap.extensions ?? {}));
     this.safeMode = snap.safe_mode === true;

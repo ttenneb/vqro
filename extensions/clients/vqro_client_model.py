@@ -454,9 +454,16 @@ class Workspace:
         self.epoch, self.seq = snap.get("epoch", ""), snap.get("seq", 0)
         self.entries = {k: e.get("value") for k, e in (snap.get("entries") or {}).items()}
         self.versions = {k: e.get("version", 0) for k, e in (snap.get("entries") or {}).items()}
+        before = getattr(self, "resources", {})
         self.resources = {r["id"]: r for r in snap.get("resources") or [] if isinstance(r.get("id"), str)}
         # Finishes (done/error) resources reached since their tab was last shown (tab marks); kept across a reload.
         self.reached = {k: v for k, v in getattr(self, "reached", {}).items() if k in self.resources}
+        # A snapshot can cover a finish whose event then arrives as already seen: compare with what was cached.
+        # A resource never seen before (first load) latches nothing.
+        for rid, record in self.resources.items():
+            finish = reached(before[rid], record) if rid in before else None
+            if finish:
+                self.reached[rid] = latch(self.reached.get(rid), finish)
         self.commands = {c["name"]: c for c in snap.get("commands") or [] if isinstance(c.get("name"), str)}
         self.extensions = dict(snap.get("extensions") or {})
         self.safe_mode = snap.get("safe_mode") is True

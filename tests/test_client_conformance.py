@@ -142,6 +142,19 @@ class Conformance(unittest.TestCase):
         for case in fixture("tabmark.json")["cases"]:
             self.assertEqual(model.tab_mark(case.get("setting"), case["now"], case["seen"], case["reached"]), case["expect"], case["name"])
 
+    def test_snapshot_adoption_keeps_a_covered_finish(self):
+        """Review P2: working, a snapshot already showing done, then the covered (skipped) event: still marked."""
+        snap = lambda seq, rs: {"epoch": "e", "seq": seq, "entries": {}, "resources": rs}
+        r1 = lambda state: [{"id": "r1", "state": "live", "status": {"state": state}}]
+        ws = model.Workspace(); ws.load(snap(0, r1("working")))
+        ws.load(snap(2, r1("done")))
+        ws.apply({"epoch": "e", "seq": 1, "type": "resource", "data": r1("done")[0]})
+        self.assertEqual(ws.reached.get("r1"), "done")
+        fresh = model.Workspace(); fresh.load(snap(5, r1("done")))
+        self.assertEqual(fresh.reached, {}, "a first load latches nothing")
+        ws.load(snap(3, []))
+        self.assertEqual(ws.reached, {}, "a snapshot without the resource prunes its finish")
+
     def test_tab_reached(self):
         for case in fixture("tabreached.json")["cases"]:
             self.assertEqual(model.reached(case["old"], case["new"]), case["expect"], case["name"])

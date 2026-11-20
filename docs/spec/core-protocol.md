@@ -1313,7 +1313,8 @@ written by the tabs extension (`tabs.settings`) and read by every client (render
   agent there waits for you (its `status.state` now); `error` (✗, `error`) or `done` (✓, `ok`) when one reached
   that state since the tab was last shown; `activity` (•, `accent`) when a program title changed since (against
   `seen_of`, remembered when the tab is shown). The most urgent wins. Finishes are latched from resource events
-  (`reached`: a status turning into `done`/`error`) and kept until the tab is shown, because a backend may report
+  and from adopted snapshots against the cached record (`reached`: a status turning into `done`/`error`; a
+  resource seen for the first time latches nothing) and kept until the tab is shown, because a backend may report
   them only for a moment (herdr-core clears the status when the reporting command returns to the shell). All of
   it is client-local and never written. Icon names `blocked`, `error`, `done`, `activity` let an icon set restyle
   them. Output and bells of hidden terminals are not visible to clients (their streams are closed); a backend

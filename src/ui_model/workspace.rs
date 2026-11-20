@@ -67,7 +67,16 @@ impl Workspace {
                 self.versions.insert(k.clone(), e["version"].as_u64().unwrap_or(0));
             }
         }
+        let before = std::mem::take(&mut self.resources);
         self.resources = snap["resources"].as_array().into_iter().flatten().filter_map(|r| Some((r["id"].as_str()?.to_string(), r.clone()))).collect();
+        // A snapshot can cover a finish whose event then arrives as already seen: compare with what was cached, so
+        // the completion stays observable. A resource never seen before (first load) latches nothing.
+        for (id, record) in &self.resources {
+            if let Some(finish) = before.get(id).and_then(|old| super::tabbar::reached(Some(old), record)) {
+                let held = self.reached.get(id).copied();
+                self.reached.insert(id.clone(), super::tabbar::latch(held, finish));
+            }
+        }
         let resources = &self.resources;
         self.reached.retain(|id, _| resources.contains_key(id));
         self.commands = snap["commands"].as_array().into_iter().flatten().filter_map(|c| Some((c["name"].as_str()?.to_string(), c.clone()))).collect();
@@ -338,6 +347,25 @@ mod tests {
         resource(&mut ws, 5, json!({"state": "done"}));
         assert_eq!(ws.reached.get("r1"), Some(&"error"), "the more urgent finish is kept");
         ws.apply(&json!({"epoch": "", "seq": 6, "type": "resource.removed", "data": {"id": "r1"}}));
+        assert!(ws.reached.is_empty());
+    }
+
+    fn snapshot(seq: u64, resources: Value) -> Value { json!({"epoch": "e", "seq": seq, "entries": {}, "resources": resources}) }
+    fn r1(state: &str) -> Value { json!([{"id": "r1", "state": "live", "status": {"state": state}}]) }
+
+    #[test]
+    fn a_snapshot_that_covers_a_finish_keeps_it_observable() {
+        // Review P2: working, then a snapshot (seq 2) already showing done; the covered event (seq 1) is skipped.
+        let mut ws = Workspace::default();
+        ws.load(&snapshot(0, r1("working")));
+        ws.load(&snapshot(2, r1("done")));
+        ws.apply(&json!({"epoch": "e", "seq": 1, "type": "resource", "data": r1("done")[0]}));
+        assert_eq!(ws.reached.get("r1"), Some(&"done"));
+        // Controls: a first load latches nothing (no transition was seen); a snapshot without the resource prunes it.
+        let mut fresh = Workspace::default();
+        fresh.load(&snapshot(5, r1("done")));
+        assert!(fresh.reached.is_empty());
+        ws.load(&snapshot(3, json!([])));
         assert!(ws.reached.is_empty());
     }
 }

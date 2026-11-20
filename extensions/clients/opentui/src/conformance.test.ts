@@ -124,6 +124,19 @@ test("tab marks", async () => {
   for (const c of (await fixture("tabmark.json")).cases) expect(m.tabMark(c.setting, c.now, c.seen, c.reached), c.name).toEqual(c.expect);
 });
 
+test("snapshot adoption keeps a covered finish (review P2) and prunes gone resources (P3)", () => {
+  const snap = (seq: number, rs: any[]) => ({ epoch: "e", seq, entries: {}, resources: rs });
+  const r1 = (state: string) => [{ id: "r1", state: "live", status: { state } }];
+  const ws = new m.Workspace(); ws.load(snap(0, r1("working")));
+  ws.load(snap(2, r1("done")));
+  ws.apply({ epoch: "e", seq: 1, type: "resource", data: r1("done")[0] });
+  expect(ws.reached.get("r1")).toBe("done");
+  const fresh = new m.Workspace(); fresh.load(snap(5, r1("done")));
+  expect(fresh.reached.size).toBe(0);
+  ws.load(snap(3, []));
+  expect(ws.reached.size).toBe(0);
+});
+
 test("tab finishes", async () => {
   for (const c of (await fixture("tabreached.json")).cases) expect(m.reached(c.old, c.new), c.name).toEqual(c.expect);
 });
