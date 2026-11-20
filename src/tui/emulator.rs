@@ -107,9 +107,7 @@ pub enum EngineKind {
 impl EngineKind {
     pub const ALL: [EngineKind; 2] = [EngineKind::Libghostty, EngineKind::Vt100];
     /// The engine used when the setting names none (or one this client doesn't know).
-    /// vt100 until libghostty's history behaves (libghostty plan G4: line-count retention, selections across
-    /// eviction); libghostty is selectable meanwhile.
-    pub const DEFAULT: EngineKind = EngineKind::Vt100;
+    pub const DEFAULT: EngineKind = EngineKind::Libghostty;
 
     pub fn name(self) -> &'static str {
         match self { EngineKind::Vt100 => "vt100", EngineKind::Libghostty => "libghostty" }
@@ -440,6 +438,15 @@ mod tests {
             check("scroll offset", json!(e.scroll_offset()), &sb["offset"]);
             check("scrolled-back contents", json!(joined(&e)), &sb["contents"]);
             e.set_scroll_offset(0);
+        }
+        let mut then = x.get("then");
+        while let Some(t) = then {
+            e.process(t["input"].as_str().unwrap().as_bytes());
+            for (k, w) in t["rows"].as_object().into_iter().flatten() {
+                let r: usize = k.parse().unwrap();
+                check(&format!("then row {r}"), e.row_text(r).map(|t| json!(t.0.iter().collect::<String>())).unwrap_or(Value::Null), w);
+            }
+            then = t.get("then");
         }
         if let Some(al) = x.get("after_live") {
             e.set_scroll_offset(1);

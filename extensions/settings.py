@@ -511,7 +511,7 @@ def refresh(*_):
                       "options":[{"label":"Full (Ctrl-g, Alt-x)","value":"full"},{"label":"Short (C-g, M-x)","value":"short"}],
                       "command":"settings.set", "args":{"tui":"key_labels"},
                       "description":"Display names only; configured key syntax stays unchanged."})
-    interface.append({"type": "select", "text": "Terminal engine", "value": t.get("terminal_engine", "vt100"),
+    interface.append({"type": "select", "text": "Terminal engine", "value": t.get("terminal_engine", "libghostty"),
                       "options": [{"label": "libghostty (Ghostty's emulator)", "value": "libghostty"},
                                   {"label": "vt100 (built-in fallback)", "value": "vt100"}],
                       "command": "settings.set", "args": {"tui": "terminal_engine"},
@@ -520,7 +520,7 @@ def refresh(*_):
     interface.append({"type": "select", "text": "Scrollback lines", "value": t.get("scrollback_lines", 2000),
                       "options": [{"label": f"{n:,}", "value": n} for n in SCROLLBACK],
                       "command": "settings.set", "args": {"tui": "scrollback_lines"},
-                      "description": "per terminal pane; about 6 MB per 1,000 lines at 200 columns; panes opened or reattached after a change use it"})
+                      "description": "per terminal pane; up to about 6 MB per 1,000 lines at 200 columns; panes opened or reattached after a change use it"})
     info = ext.info
     about = [
         {"text": "vqro", "detail": f"{info.get('server')} {info.get('version')} · protocol {info.get('protocol')}", "disabled": True, "style": "plain"},

@@ -199,21 +199,31 @@ pub struct Ghostty {
     notes: Notifications,
     cursor_set: CursorSet,
     effects: Vec<Effect>,
+    /// History lines the user asked for. The library's budget is in bytes and page-granular, so it is given
+    /// enough bytes for these lines and only these many are exposed (`exposed`).
     scrollback: usize,
-    /// Rows the full scrollback dropped. libghostty-vt doesn't report them, so this stays 0 and positions in a full
-    /// history shift as it drops rows (libghostty plan G4 decides how to keep selections on their text).
+    /// Rows no longer numbered as history: dropped by the library, or kept beyond `scrollback` and hidden.
+    /// Counted from a tracked row at the bottom of the history: when rows above it go, its screen row goes down.
     dropped: usize,
+    tracked: ffi::GhosttyTrackedGridRef,
+    tracked_y: u32,
+}
+
+/// Bytes of history the library needs for `lines` rows of `cols` cells: Ghostty keeps 8 bytes per cell and per
+/// row, plus room for styles and grapheme data (twice that). Bounded by the line setting's own bound.
+fn history_bytes(lines: usize, cols: u16) -> usize {
+    lines.saturating_mul((usize::from(cols.max(1)) * 8 + 8) * 2)
 }
 
 impl Ghostty {
     pub fn new(cols: u16, rows: u16, scrollback: usize) -> Result<Self, Error> {
         let mut raw = ptr::null_mut();
-        let options = ffi::GhosttyTerminalOptions { cols: cols.max(1), rows: rows.max(1), max_scrollback: scrollback };
+        let options = ffi::GhosttyTerminalOptions { cols: cols.max(1), rows: rows.max(1), max_scrollback: history_bytes(scrollback, cols) };
         // SAFETY: a valid out-pointer and options; a null allocator means the library's default allocator.
         unsafe { ffi::ghostty_terminal_new(ptr::null(), &mut raw, options) }.ok()?;
         if raw.is_null() { return Err(Error(ffi::GhosttyResult_GHOSTTY_INVALID_VALUE)); }
         let mut engine = Self { raw, collected: Box::default(), notes: Notifications::default(), cursor_set: CursorSet::default(),
-                                effects: Vec::new(), scrollback, dropped: 0 };
+                                effects: Vec::new(), scrollback, dropped: 0, tracked: ptr::null_mut(), tracked_y: 0 };
         let userdata = (&mut *engine.collected as *mut Collected).cast::<c_void>();
         // SAFETY: a live terminal; `userdata` outlives it (owned by `engine`, freed after the terminal in Drop);
         // each callback has the signature its option documents.
@@ -222,6 +232,7 @@ impl Ghostty {
             ffi::ghostty_terminal_set(raw, ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_BELL, (bell_cb as *const ()).cast()).ok()?;
             ffi::ghostty_terminal_set(raw, ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, (clipboard_cb as *const ()).cast()).ok()?;
         }
+        engine.count_dropped(false);
         Ok(engine)
     }
 
@@ -296,8 +307,43 @@ impl Ghostty {
         }
     }
 
-    /// Rows the screen holds above the live area (history kept).
+    /// Rows the screen holds above the live area (history kept by the library).
     fn kept(&self) -> usize { self.get::<usize>(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS).unwrap_or(0) }
+
+    /// History rows exposed: what the library keeps, up to the lines asked for.
+    fn exposed(&self) -> usize { self.kept().min(self.scrollback) }
+
+    fn untrack(&mut self) {
+        if !self.tracked.is_null() {
+            // SAFETY: a handle from ghostty_terminal_grid_ref_track, freed once.
+            unsafe { ffi::ghostty_tracked_grid_ref_free(self.tracked) };
+            self.tracked = ptr::null_mut();
+        }
+    }
+
+    /// After a write: count the rows that left above the tracked row, then track the bottom row again. Only on the
+    /// primary screen (the alternate one has no history, and a tracked row belongs to the screen it was made on).
+    fn count_dropped(&mut self, was_alternate: bool) {
+        if !self.tracked.is_null() && !was_alternate {
+            let mut at = ffi::GhosttyPointCoordinate::default();
+            // SAFETY: a live tracked handle and an out struct of the documented type.
+            let ok = unsafe { ffi::ghostty_tracked_grid_ref_has_value(self.tracked)
+                && ffi::ghostty_tracked_grid_ref_point(self.tracked, ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_SCREEN, &mut at) == ffi::GhosttyResult_GHOSTTY_SUCCESS };
+            // The tracked row itself went (more output than history): everything up to it went.
+            let gone = if ok { self.tracked_y.saturating_sub(at.y) } else { self.tracked_y as usize as u32 + 1 };
+            self.dropped += gone as usize;
+        }
+        self.untrack();
+        if self.alternate_screen() { return; }
+        let y = (self.kept() + usize::from(self.rows())).saturating_sub(1) as u32;
+        let mut tracked = ptr::null_mut();
+        // SAFETY: a live terminal, a screen point inside it and an out-pointer for the handle.
+        if unsafe { ffi::ghostty_terminal_grid_ref_track(self.raw, point(ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_SCREEN, 0, y), &mut tracked) }
+            == ffi::GhosttyResult_GHOSTTY_SUCCESS {
+            self.tracked = tracked;
+            self.tracked_y = y;
+        }
+    }
 }
 
 fn point(tag: ffi::GhosttyPointTag, x: u16, y: u32) -> ffi::GhosttyPoint {
@@ -306,6 +352,7 @@ fn point(tag: ffi::GhosttyPointTag, x: u16, y: u32) -> ffi::GhosttyPoint {
 
 impl Drop for Ghostty {
     fn drop(&mut self) {
+        self.untrack();
         // SAFETY: `raw` came from ghostty_terminal_new and is freed once; `collected` is dropped after this.
         unsafe { ffi::ghostty_terminal_free(self.raw) };
     }
@@ -340,9 +387,15 @@ impl Engine for Ghostty {
     fn process(&mut self, bytes: &[u8]) {
         self.notes.feed(bytes, &mut self.effects);
         self.cursor_set.feed(bytes);
-        // SAFETY: a live terminal and a byte slice; the library accepts any bytes. Callbacks run during this call
-        // and only touch `collected`.
-        unsafe { ffi::ghostty_terminal_vt_write(self.raw, bytes.as_ptr(), bytes.len()) };
+        // In pieces small enough that the tracked bottom row can't scroll out of the whole history within one piece
+        // (a byte scrolls at most one row, bar CSI S), so every dropped row is counted.
+        for piece in bytes.chunks((self.scrollback / 2).max(256)) {
+            let was_alternate = self.alternate_screen();
+            // SAFETY: a live terminal and a byte slice; the library accepts any bytes. Callbacks run during this call
+            // and only touch `collected`.
+            unsafe { ffi::ghostty_terminal_vt_write(self.raw, piece.as_ptr(), piece.len()) };
+            self.count_dropped(was_alternate);
+        }
         let c = &mut *self.collected;
         if mem::take(&mut c.bells) > 0 && !self.effects.contains(&Effect::Bell) && self.effects.len() < MAX_EFFECTS { self.effects.push(Effect::Bell); }
         for data in c.clipboard.drain(..) {
@@ -395,6 +448,7 @@ impl Engine for Ghostty {
         (s.total.saturating_sub(s.offset).saturating_sub(s.len)) as usize
     }
     fn set_scroll_offset(&mut self, n: usize) {
+        let n = n.min(self.exposed());
         // 0 follows the live screen as output arrives; a row pins the view to that content.
         if n == 0 {
             return self.scroll(ffi::GhosttyTerminalScrollViewportTag_GHOSTTY_SCROLL_VIEWPORT_BOTTOM, ffi::GhosttyTerminalScrollViewportValue::default());
@@ -403,13 +457,14 @@ impl Engine for Ghostty {
         let top = (s.total.saturating_sub(s.len) as usize).saturating_sub(n);
         self.scroll(ffi::GhosttyTerminalScrollViewportTag_GHOSTTY_SCROLL_VIEWPORT_ROW, ffi::GhosttyTerminalScrollViewportValue { row: top });
     }
-    fn scrollback_len(&self) -> usize { self.kept() }
+    fn scrollback_len(&self) -> usize { self.exposed() }
     fn scrollback_capacity(&self) -> usize { self.scrollback }
     fn scrolled(&self) -> usize { self.dropped + self.kept() }
     fn row_text(&mut self, row: usize) -> Option<(Vec<char>, Vec<u16>, bool)> {
-        // Screen coordinates: 0 is the oldest kept row; `row` counts dropped rows too.
+        // Screen coordinates: 0 is the oldest kept row; `row` counts dropped rows too. Rows kept beyond the lines
+        // asked for are hidden.
         let y = row.checked_sub(self.dropped)?;
-        if y >= self.kept() + usize::from(self.rows()) { return None; }
+        if y < self.kept() - self.exposed() || y >= self.kept() + usize::from(self.rows()) { return None; }
         let (mut chars, mut starts) = (Vec::new(), Vec::new());
         for col in 0..self.cols() {
             let Some((text, wide, _)) = self.cell(point(ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_SCREEN, col, y as u32), false) else { break };
