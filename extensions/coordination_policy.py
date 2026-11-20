@@ -267,9 +267,9 @@ class Policy:
         lifecycle = resource.get("lifecycle", lifecycle)
         if resource.get("state") in ("retired", "ended"):
             lifecycle = resource["state"]
-        if lifecycle == "ended" or resource.get("state") == "finished":
-            _fail("ended", "agent has ended")
         stone = self.tombstones.get(rid, {})
+        if lifecycle == "ended" or resource.get("state") == "finished" or stone.get("lifecycle", stone.get("state")) == "ended":
+            _fail("ended", "agent has ended")
         if lifecycle == "retired" or stone.get("lifecycle", stone.get("state")) == "retired":
             _fail("retired", "agent is retired")
         return rid

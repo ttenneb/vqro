@@ -244,6 +244,9 @@ class Coordinator:
             if saved:
                 if saved["fingerprint"] != fingerprint:
                     raise CoordinationError("conflict", "operation id used for different intent")
+                refusal = saved["result"].get("refusal")
+                if refusal:
+                    raise CoordinationError(refusal["kind"], refusal["message"], refusal["data"])
                 return self.operation(principal, op)
             meta = work.get("meta")
             if not op.startswith(meta["window_epoch"] + ":"):
@@ -255,45 +258,93 @@ class Coordinator:
                 meta["window_epoch"], meta["window_count"] = nonce("w:"), 0
                 work.put("meta", meta)
                 work.commit(control=True)
-                raise CoordinationError("expired_operation", "bounded result window rolled; inspect its new epoch")
-            result = fn(work, self.policy())
-            first = result.pop("_first", None)
-            after = result.pop("_after", None)
-            uncertain = result.pop("_uncertain", None)
-            write_control = result.pop("_control", control)
-            bucket_key = self._bucket(principal, op)
-            bucket = {key: value for key, value in work.get(bucket_key, {}).items()
-                      if value.get("window") == meta["window_epoch"]}
-            cached_result = copy.deepcopy(result)
-            if command == "inbox.take":
-                cached_result = {"state": result["state"], "take": True}
-            elif command == "inbox.scope":
-                cached_result = {"state": result["state"], "scope": True}
-            elif encoded(cached_result) > 256:
-                cached_result = {key: result[key] for key in ("state", "delivery", "plan", "archive", "reason") if key in result}
-                cached_result["incomplete"] = True
-                if encoded(cached_result) > 256:
-                    cached_result = {"state": result["state"], "incomplete": True}
-            bucket[digest([principal, op])] = {"fingerprint": fingerprint, "result": cached_result, "window": meta["window_epoch"]}
-            work.put(bucket_key, bucket)
-            meta = work.get("meta")
-            meta["window_count"] += 1
-            if meta["window_count"] >= WINDOW:
-                meta["window_epoch"], meta["window_count"] = nonce("w:"), 0
-            work.put("meta", meta)
+                raise CoordinationError("busy", "bounded result window closed before evaluation", {"window": self.window()})
+            # A refusal also needs a slot. Test room for the largest canonical
+            # refusal before consulting policy or evaluating the requested action.
+            trial = Working(self)
+            self._cache_operation(trial, command, principal, op, fingerprint,
+                                  {"state": "rejected", "reserved": " " * 2048}, compact=False)
+            prospective = dict(trial.rows)
+            for key, value in trial.changes.items():
+                prospective[key] = {"version": max((row["version"] for row in trial.rows.values()), default=0) + 1, "value": value["value"]}
             try:
+                self._preflight_reservations(prospective, before=trial.rows, control=control)
+            except PolicyError:
+                meta["window_epoch"], meta["window_count"] = nonce("w:"), 0
+                work.put("meta", meta)
+                try:
+                    work.commit(control=True)
+                except StoreError:
+                    self.current = False
+                    self.permits.clear()
+                    raise
+                self._safe_maintain()
+                raise CoordinationError("busy", "result window closed before evaluation: no reply slot", {"window": self.window()})
+            failure, first, after, uncertain = None, None, None, None
+            write_control = control
+            try:
+                result = fn(work, self.policy())
+                first = result.pop("_first", None)
+                after = result.pop("_after", None)
+                uncertain = result.pop("_uncertain", None)
+                write_control = result.pop("_control", control)
+                self._cache_operation(work, command, principal, op, fingerprint, result)
                 work.commit(control=write_control)
-            except StoreError as error:
-                if uncertain and error.kind in ("durability_unconfirmed", "indeterminate", "timeout"):
-                    uncertain()
-                raise
-            if after:
+            except (PolicyError, StoreError) as error:
+                if isinstance(error, StoreError) and error.kind not in ("quota", "too_large", "invalid", "conflict", "io"):
+                    if uncertain and error.kind in ("durability_unconfirmed", "indeterminate", "timeout"):
+                        uncertain()
+                    raise
+                failure = self._bounded_refusal(error)
+                work = Working(self)  # discard all uncommitted requested changes
+                result = {"state": "rejected", "reason": failure["kind"], "refusal": failure}
+                self._cache_operation(work, command, principal, op, fingerprint, result, compact=False)
+                try:
+                    work.commit(control=control)
+                except (PolicyError, StoreError):
+                    # No refusal can be forgotten and later become an admission.
+                    # A fresh owner rolls the old window before doing anything.
+                    self.current = False
+                    self.permits.clear()
+                    raise
+            if not failure and after:
                 after()
-            if first:
+            if not failure and first:
                 result.update(first)
-            result["window"] = self.window()
             self._safe_maintain()
+            if failure:
+                raise CoordinationError(failure["kind"], failure["message"], failure["data"])
+            result["window"] = self.window()
             return result
+
+    @staticmethod
+    def _bounded_refusal(error):
+        message = str(error).encode("utf-8")[:512].decode("utf-8", "ignore")
+        data = copy.deepcopy(getattr(error, "data", {}))
+        if encoded(data) > 1024:
+            data = {"incomplete": True, "sha256": digest(data), "bytes": encoded(data)}
+        return {"kind": error.kind, "message": message, "data": data}
+
+    def _cache_operation(self, work, command, principal, op, fingerprint, result, *, compact=True):
+        meta = work.get("meta")
+        key = self._bucket(principal, op)
+        bucket = {key: value for key, value in work.get(key, {}).items() if value.get("window") == meta["window_epoch"]}
+        cached = copy.deepcopy(result)
+        if compact and command == "inbox.take":
+            cached = {"state": result["state"], "take": True}
+        elif compact and command == "inbox.scope":
+            cached = {"state": result["state"], "scope": True}
+        elif compact and encoded(cached) > 256:
+            cached = {key: result[key] for key in ("state", "delivery", "plan", "archive", "reason") if key in result}
+            cached["incomplete"] = True
+            if encoded(cached) > 256:
+                cached = {"state": result["state"], "incomplete": True}
+        bucket[digest([principal, op])] = {"fingerprint": fingerprint, "result": cached, "window": meta["window_epoch"]}
+        work.put(key, bucket)
+        meta["window_count"] += 1
+        if meta["window_count"] >= WINDOW:
+            meta["window_epoch"], meta["window_count"] = nonce("w:"), 0
+        work.put("meta", meta)
 
     def _record(self, work, delivery):
         row = work.get("message/" + str(delivery))
@@ -355,6 +406,9 @@ class Coordinator:
                 raise CoordinationError("invalid", "send needs an exact address or readable handle")
             agent = policy.resolve_target(address if isinstance(address, str) else address.get("agent"))
             policy.require(principal, "send:" + (args.get("strategy") or normalized["mode"]), agent)
+            if normalized.get("strategy") == "interrupt_then_start":
+                for step_right in ("queue", "interrupt", "send:start"):
+                    policy.require(principal, step_right, agent)
             if not submission.startswith(work.get("meta")["window_epoch"] + ":"):
                 raise CoordinationError("expired_operation", "submission outside current operation window")
             records = self.records()
@@ -441,11 +495,16 @@ class Coordinator:
                 for key in ("guard", "render", "quoted"):
                     if key in args:
                         record[key] = copy.deepcopy(args[key])
-                policy.require(context["principal"], "send:" + record["mode"], record["to"]["agent"])
+                policy.require(context["principal"], "send:" + (record.get("strategy") or record["mode"]), record["to"]["agent"])
+                if record.get("strategy") == "interrupt_then_start":
+                    for right in ("queue", "interrupt", "send:start"):
+                        policy.require(context["principal"], right, record["to"]["agent"])
                 if encoded(record) > encoded(before):
                     check_admission(self.records(), record["from"]["principal"], record["to"]["agent"], record["content"],
                                     reserved_bytes=self.store.charge(work.rows), reserved_records=len(work.rows),
                                     replaces=record["delivery"], outcome_steps=record.get("outcome_steps", 1), limits=policy.limits)
+                record.pop("review_required", None)
+                record.update(state="held", reason="edited")
             work.put("message/" + record["delivery"], record)
             return {"state": record["state"], "delivery": record["delivery"], "_after": lambda: self._wake(record["to"]["agent"]),
                     "_control": withdraw or encoded(record) <= encoded(before)}
@@ -558,6 +617,8 @@ class Coordinator:
             return "handover_pending"
         if agent not in self.permits or not self.current:
             return "paused"
+        if record.get("review_required"):
+            return "stale_guard"
         stone = (self.store.get(self._agent_key(agent)) or {}).get("value", {}).get(agent, {})
         if stone.get("lifecycle") == "retired":
             return "agent_retired"
@@ -581,7 +642,7 @@ class Coordinator:
         guard = record.get("guard") or {}
         if guard.get("session") is not None and guard["session"] != session:
             return "stale_guard"
-        if guard.get("run") is not None and guard["run"] != native.get("run"):
+        if guard.get("run") is not None and native.get("run") is not None and guard["run"] != native["run"]:
             return "stale_guard"
         if any(prior["state"] == "unknown" and prior["to"]["agent"] == agent
                and prior["from"]["principal"] == record["from"]["principal"]
@@ -589,6 +650,10 @@ class Coordinator:
             return "ordering_unknown"
         right = "send:" + (record.get("strategy") or record["mode"])
         if not policy.allowed(record["from"]["principal"], right, agent):
+            return "no_grant"
+        if record.get("strategy") == "interrupt_then_start" and not all(
+                policy.allowed(record["from"]["principal"], step_right, agent)
+                for step_right in ("queue", "interrupt", "send:start")):
             return "no_grant"
         if record.get("retry_wait"):
             # Busy retry needs a later actual idle transition, never a polling loop.
@@ -614,7 +679,8 @@ class Coordinator:
         if record.get("strategy") == "interrupt_then_start":
             if record["mode"] != "preempt":
                 return "unsupported_mode"
-            if "agent.interrupt" not in caps or "start" not in modes:
+            if ("agent.interrupt" not in caps or "start" not in modes
+                    or "clear" not in caps.get("agent.queue", {}).get("actions", [])):
                 return "unsupported_mode"
         elif record["mode"] not in modes:
             if record["mode"] != "settle" or "start" not in modes:
@@ -645,6 +711,7 @@ class Coordinator:
             record["previous"] = {"attempt": (record.get("attempt") or {}).get("id"), "sha256": digest(record["result"])}
         record.update(state="claimed", reason=None, attempt=attempt, result=None)
         record.pop("retry_wait", None)
+        record.pop("reason_consumer", None)
         work.put("message/" + record["delivery"], record)
         return record
 
@@ -720,7 +787,7 @@ class Coordinator:
         if record.get("strategy") == "interrupt_then_start":
             steps = [("agent.queue", {"v": 0, "action": "clear"}, "queue"),
                      ("agent.interrupt", {"v": 0}, "interrupt"),
-                     ("agent.send", self._send_args(record, "start"), "send:interrupt_then_start")]
+                     ("agent.send", self._send_args(record, "start"), "send:start")]
         else:
             if mode == "settle" and mode not in caps.get("agent.send", {}).get("modes", {}):
                 mode = "start"
@@ -728,6 +795,7 @@ class Coordinator:
         deadline = time.monotonic() + 5.0
         outcomes = []
         for op, args, right in steps:
+            args = dict(args, guard=dict(record.get("guard") or {}, session=record["attempt"]["session"]))
             with self.lock:
                 current = self.get(record["delivery"])
                 valid = (self.current and current["state"] == "claimed" and current["attempt"]["id"] == record["attempt"]["id"]
@@ -745,7 +813,8 @@ class Coordinator:
                     reason = "awaiting_route"
                 elif session != record["attempt"]["session"]:
                     reason = "stale_guard"
-                elif (record.get("guard") or {}).get("run") is not None and record["guard"]["run"] != facts.get("run"):
+                elif ((record.get("guard") or {}).get("run") is not None and facts.get("run") is not None
+                      and record["guard"]["run"] != facts["run"]):
                     reason = "stale_guard"
                 elif not self.policy().allowed(record["from"]["principal"], right, target):
                     reason = "no_grant"
@@ -823,6 +892,8 @@ class Coordinator:
                 record.update(state="unknown" if outcome == "indeterminate" else "partial", reason="partial_recipe" if partial else "native_unknown")
             elif outcome == "rejected" and kind in ("busy", "stale", "paused", "no_grant", "stale_guard", "awaiting_route"):
                 record.update(state="held", reason={"busy": "agent_busy", "stale": "stale_guard"}.get(kind, kind))
+                if kind in ("stale", "stale_guard"):
+                    record["review_required"] = "stale_guard"
                 if kind == "busy":
                     record["failures"] += 1
                     _, facts = self._facts(record["to"]["agent"])
@@ -854,6 +925,11 @@ class Coordinator:
             limit = args.get("limit", 16)
             if type(limit) is not int or not 1 <= limit <= 16:
                 raise CoordinationError("invalid", "take limit is 1..16")
+            accept = args.get("accept", ["text"])
+            if (not isinstance(accept, list) or not 1 <= len(accept) <= 16
+                    or any(not isinstance(kind, str) or not kind or len(kind.encode()) > 64 for kind in accept)
+                    or len(set(accept)) != len(accept)):
+                raise CoordinationError("invalid", "accept must list 1..16 distinct bounded block types")
             consumer, at = args.get("consumer"), args.get("at")
             if at not in ("turn", "settle", "idle", "tool"):
                 raise CoordinationError("invalid", "take must name a declared safe point")
@@ -867,7 +943,18 @@ class Coordinator:
             records = self.records()
             if agent in self.native_inflight or any(r["to"]["agent"] == agent and r["state"] == "claimed" for r in records):
                 return {"state": "held", "records": [], "held": "claim_in_flight"}
-            eligible = [r for r in records if r["to"]["agent"] == agent and r["state"] in PENDING and self._eligibility(r, policy, at=at) is None]
+            eligible, unsupported, changed = [], 0, 0
+            for record in records:
+                if record["to"]["agent"] != agent or record["state"] not in PENDING or self._eligibility(record, policy, at=at) is not None:
+                    continue
+                if any(block["type"] not in accept for block in record["content"]):
+                    unsupported += 1
+                    if changed < 40 and (record.get("reason") != "unsupported_content" or record.get("reason_consumer") != consumer):
+                        record.update(state="held", reason="unsupported_content", reason_consumer=consumer)
+                        work.put("message/" + record["delivery"], record)
+                        changed += 1
+                    continue
+                eligible.append(record)
             supplied, claims = [], []
             for _ in range(limit):
                 record = self.fair.pick(eligible)
@@ -888,7 +975,8 @@ class Coordinator:
                 claims.append({"delivery": row["delivery"], "claim": row["claim"]})
             # The first response carries content only after the whole claim batch commits.
             return {"state": "claimed" if claims else "held", "claims": claims, "records": [],
-                    "_first": {"records": supplied}, "held": None if claims else "no_eligible_input"}
+                    "_first": {"records": supplied}, "unsupported": unsupported,
+                    "held": None if claims else "unsupported_content" if unsupported else "no_eligible_input"}
         return self._mutate("inbox.take", args, context, pull)
 
     def reconcile(self, args, context):
@@ -1103,7 +1191,7 @@ class Coordinator:
                     "close_gate": agent if action in ("stop", "retire") else None}
         def execute(intent):
             if intent["op"] is None:
-                return {"outcome": "rejected", "error": {"kind": "unsupported"}, "data": {"gate": "closed", "execution": "not_stopped"}}
+                return {"outcome": "rejected", "error": {"kind": "unsupported"}, "data": {"gate": "closed", "native_stop": "not_invoked", "execution": "unknown"}}
             resource, _ = self._facts(intent["agent"])
             if not resource or resource.get("incarnation") != intent["incarnation"]:
                 return {"outcome": "rejected", "error": {"kind": "stale"}}

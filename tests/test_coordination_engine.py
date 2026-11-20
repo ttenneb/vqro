@@ -419,7 +419,7 @@ class EngineTests(unittest.TestCase):
         self.resume()
         before = copy.deepcopy(self.store.get("control"))
         self.store.fault = "before"
-        with self.assertRaises(StoreError) as caught:
+        with self.assertRaises(PolicyError) as caught:
             self.resume(action="pause")
         self.assertEqual(caught.exception.kind, "io")
         self.assertEqual(self.engine.permits, {"r1"})
