@@ -382,7 +382,8 @@ def case_window():
                             'content': [{'type': 'text', 'text': 'lost take'}]})
     cmd('inbox.reconcile', {'op': op('window-rec'), 'agent': rid, 'consumer': 'window-c', 'records': []})
     take_op = op('window-take')
-    took = cmd('inbox.take', {'op': take_op, 'agent': rid, 'consumer': 'window-c', 'at': 'tool'})
+    take_args = {'op': take_op, 'agent': rid, 'consumer': 'window-c', 'at': 'tool'}
+    took = cmd('inbox.take', take_args)
     assert len(took['records']) == 1, took
     original = took['records'][0]
     epoch = cmd('inbox.window')['epoch']
@@ -394,21 +395,36 @@ def case_window():
             pass
         count += 1
     assert cmd('inbox.window')['epoch'] != epoch, count
-    for _ in range(64):
+    frozen = cmd('inbox.get', {'delivery': sent['delivery']})
+    historical_replays = 0
+    # Rollover expires admission, not necessarily a lazy-cached result. Observe
+    # actual eviction instead of assuming64 unrelated hash-bucket writes did it.
+    for compacted in range(cmd('inbox.window')['to'] + 1):
+        before = cmd('inbox.window')
+        try:
+            replay = cmd('inbox.take', take_args)
+        except RPCError as error:
+            assert error.kind == 'expired_operation', str(error)
+            assert cmd('inbox.window') == before, 'expired take mutated its operation window'
+            break
+        assert replay.get('historical') is True and replay['records'] == [], replay
+        assert len(replay['claims']) == 1 and replay['claims'][0]['claim'] == original['claim'], replay
+        assert replay['claims'][0]['delivery'] == sent['delivery'], replay
+        assert cmd('inbox.get', {'delivery': sent['delivery']}) == frozen, 'historical take changed its claim'
+        assert cmd('inbox.window') == before, 'historical take mutated its operation window'
+        historical_replays += 1
         try:
             cmd('inbox.report', {'op': op('compact'), 'delivery': 'd:missing', 'claim': 'x', 'stage': 'read'})
         except RPCError:
             pass
+    else:
+        raise AssertionError('fixture could not observe take-result eviction in a bounded operation window')
     history = cmd('inbox.op', {'op': take_op})
     assert history['records'] == [] and len(history['claims']) == 1, history
     assert history['claims'][0]['delivery'] == sent['delivery'] and history['claims'][0]['claim'] == original['claim'], history
-    assert cmd('inbox.get', {'delivery': sent['delivery']})['state'] == 'claimed'
-    try:
-        cmd('inbox.take', {'op': take_op, 'agent': rid, 'consumer': 'window-c', 'at': 'tool'})
-        raise AssertionError('expired take replay was accepted')
-    except RPCError as error:
-        assert error.kind == 'expired_operation', str(error)
-    return {'refusals_to_rotate': count, 'history_claims': 1, 'content_replayed': False}
+    assert cmd('inbox.get', {'delivery': sent['delivery']}) == frozen
+    return {'refusals_to_rotate': count, 'compactions_to_expiry': compacted, 'expiry_observed': True,
+            'historical_replays': historical_replays, 'history_claims': 1, 'content_replayed': False}
 
 
 def case_handover():

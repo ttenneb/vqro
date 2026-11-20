@@ -12,7 +12,8 @@ class ContinuityTests(unittest.TestCase):
         f = fixtures.EngineTests(); f.setUp(); f.setup_pull()
         sent = f.send(mode='admit')
         take_op = f.op()
-        taken = f.engine.take({'op': take_op, 'agent': 'r1', 'consumer': 'c1', 'at': 'tool'}, fixtures.OWNER)
+        take_args = {'op': take_op, 'agent': 'r1', 'consumer': 'c1', 'at': 'tool'}
+        taken = f.engine.take(take_args, fixtures.OWNER)
         token = taken['records'][0]['claim']
         old_epoch = f.engine.window()['epoch']
         for _ in range(1300):
@@ -24,11 +25,26 @@ class ContinuityTests(unittest.TestCase):
                 break
         else:
             self.fail('window did not close')
-        for _ in range(64):
-            try:
-                f.engine.report({'op': f.op(), 'delivery': 'd:missing', 'claim': 'x', 'stage': 'read'}, fixtures.OWNER)
-            except PolicyError:
-                pass
+        frozen, revision = f.engine.get(sent['delivery']), f.store.revision
+        replay = f.engine.take(take_args, fixtures.OWNER)
+        self.assertTrue(replay['historical'])
+        self.assertEqual(replay['records'], [])
+        self.assertEqual(replay['claims'][0]['claim'], token)
+        self.assertEqual(f.store.revision, revision, 'retained historical replay is read-only')
+        # Force actual eviction of the old cached result, rather than relying on
+        # unrelated random buckets. All calls still go through public mutations.
+        while True:
+            compact_op = f.op()
+            if f.engine._bucket(fixtures.OWNER['principal'], compact_op) == f.engine._bucket(fixtures.OWNER['principal'], take_op):
+                break
+        with self.assertRaises(PolicyError):
+            f.engine.report({'op': compact_op, 'delivery': 'd:missing', 'claim': 'x', 'stage': 'read'}, fixtures.OWNER)
+        revision = f.store.revision
+        with self.assertRaises(PolicyError) as expired:
+            f.engine.take(take_args, fixtures.OWNER)
+        self.assertEqual(expired.exception.kind, 'expired_operation')
+        self.assertEqual(f.store.revision, revision, 'expired replay is read-only too')
+        self.assertEqual(f.engine.get(sent['delivery']), frozen)
         history = f.engine.operation(fixtures.OWNER['principal'], take_op)
         self.assertEqual(history['records'], [])
         self.assertEqual(history['claims'][0]['delivery'], sent['delivery'])
