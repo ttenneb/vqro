@@ -39,7 +39,7 @@ class CoordinationError(PolicyError):
 class Working:
     def __init__(self, engine):
         self.engine = engine
-        self.rows = engine.store.snapshot()
+        self.rows = engine.store.view()
         self.changes = {}
 
     def get(self, key, default=None):
@@ -59,7 +59,7 @@ class Working:
         ops = [{"op": "set", "key": key, "value": row["value"], "expect": self.version(key)} if row else
                {"op": "delete", "key": key, "expect": self.version(key)} for key, row in self.changes.items()]
         if ops:
-            prospective = copy.deepcopy(self.rows)
+            prospective = dict(self.rows)
             for key, row in self.changes.items():
                 if row:
                     prospective[key] = {"version": max((r["version"] for r in self.rows.values()), default=0) + 1, "value": row["value"]}
@@ -84,9 +84,12 @@ class Coordinator:
         self.lock = threading.RLock()
         self.permits = set()
         self.attention = {}
+        self.native_inflight = {}
         self.current = True
         self.fair = FairQueue()
+        self.maintenance_error = None
         self._boot()
+        self._safe_maintain()
 
     def policy(self):
         limits = QuotaLimits(domain_bytes=self.store.byte_limit, domain_records=min(self.store.record_limit, 1024), scope_capacity=SCOPE_CAPACITY)
@@ -97,15 +100,30 @@ class Coordinator:
         records = len(rows)
         for key, row in rows.items():
             value = row["value"]
-            if key.startswith("message/") and value.get("state") in OPEN:
-                charge += max(0, record_charge(value) - encoded(value))
+            if key.startswith("message/"):
+                state = value.get("state")
+                if state in OPEN:
+                    remaining = value.get("outcome_steps", 1)
+                    if state == "claimed":
+                        done = sum(step.get("outcome") not in (None, "unknown") for step in (value.get("attempt") or {}).get("steps", []))
+                        remaining = max(0, remaining - done)
+                    elif state == "unknown":
+                        remaining = 1  # a late receipt, never an executable recipe tail
+                    claim_reserve = 1024 if state in PENDING else 0
+                    base = max(encoded(value) + claim_reserve, encoded(value.get("content", [])) + 2048)
+                    charge += base + remaining * 1024 - encoded(value)
+                elif state in ("accepted", "dispatched", "admitted", "queued", "inserted", "supplied", "read"):
+                    charge += max(0, 1024 - encoded(value))
             elif key.startswith("external/") and value.get("state") == "claimed":
                 charge += 1024
+            elif key == "settled":
+                charge += max(0, 128 * len(value) - encoded(value))
+        summaries = {agent: value for key, row in rows.items() if key.startswith("agents/") for agent, value in row["value"].items()}
+        charge += sum(max(0, 2048 - encoded(value)) for value in summaries.values())
         gates = rows.get("control", {}).get("value", {}).get("gates", {})
         for agent in gates:
-            if "agent/" + agent not in rows:
+            if agent not in summaries:
                 charge += 2048
-                records += 1
         return charge, records
 
     def _preflight_reservations(self, rows, before, *, control):
@@ -117,10 +135,24 @@ class Coordinator:
             raise CoordinationError("quota", "outcome/tombstone reservations preserve recovery capacity")
 
     def tombstones(self):
-        return {key[6:]: row["value"] for key, row in self.store.snapshot().items() if key.startswith("agent/")}
+        return {agent: value for key, row in self.store.view().items() if key.startswith("agents/") for agent, value in row["value"].items()}
+
+    @staticmethod
+    def _agent_key(agent):
+        return "agents/" + digest(agent)[0]
+
+    def _agent_get(self, work, agent, default=None):
+        return work.get(self._agent_key(agent), {}).get(agent, copy.deepcopy(default))
+
+    def _agent_put(self, work, agent, value):
+        if encoded(value) > 2048:
+            raise CoordinationError("quota", "tombstone summary exceeds its reserved 2 KiB")
+        page = work.get(self._agent_key(agent), {})
+        page[agent] = value
+        work.put(self._agent_key(agent), page)
 
     def records(self):
-        records = [row["value"] for key, row in self.store.snapshot().items() if key.startswith("message/")]
+        records = [copy.deepcopy(row["value"]) for key, row in self.store.view().items() if key.startswith("message/")]
         for record in records:
             if record["delivery"] in self.attention:
                 record.update(state="unknown", reason=self.attention[record["delivery"]])
@@ -157,6 +189,15 @@ class Coordinator:
     def _bucket(self, principal, op):
         return "ops/" + str(int(digest([principal, op])[:8], 16) % OP_BUCKETS)
 
+    def attention_summary(self):
+        messages = [{"delivery": record["delivery"], "agent": record["to"]["agent"], "state": record["state"]}
+                    for record in self.records() if record["state"] in ("unknown", "claimed", "partial")]
+        controls = [{"reference": key, "principal": row["value"].get("principal"), "caller": row["value"].get("caller"),
+                     "command": row["value"].get("command"), "agent": row["value"].get("intent", {}).get("agent"), "state": row["value"]["state"]}
+                    for key, row in self.store.view().items() if key.startswith("external/") and row["value"]["state"] in ("claimed", "unknown", "partial")]
+        return {"messages": len(messages), "controls": len(controls), "items": (messages + controls)[:64],
+                "incomplete": len(messages) + len(controls) > 64}
+
     def _cached(self, work, principal, op):
         return work.get(self._bucket(principal, op), {}).get(digest([principal, op]))
 
@@ -164,8 +205,21 @@ class Coordinator:
         with self.lock:
             saved = self._cached(Working(self), principal, op)
             if not saved:
+                unresolved = self.store.get("external/" + digest([principal, op]))
+                if unresolved:
+                    return dict(unresolved["value"], window=self.window(), historical=True)
                 return {"state": "unknown", "window": self.window()}
             result = copy.deepcopy(saved["result"])
+            if result.get("take"):
+                take_key = digest([principal, op])
+                claims = [{"delivery": record["delivery"], "claim": record["attempt"]["claim"]}
+                          for record in self.records() if (record.get("attempt") or {}).get("take") == take_key]
+                result = {"state": result["state"] if claims or result["state"] != "claimed" else "unknown", "claims": claims, "records": []}
+            elif result.get("scope"):
+                result = self.scope_result(digest([principal, op]))
+            elif result.get("external"):
+                row = self.store.get("external/" + digest([principal, op]))
+                result = row["value"] if row else {"state": result["state"], "incomplete": True, "native_hash": result.get("native_hash")}
             if "result_ref" in result:
                 row = self.store.get(result["result_ref"])
                 result = row["value"] if row else self.archive_locator(result["result_ref"]) or {"state": "unknown"}
@@ -194,8 +248,14 @@ class Coordinator:
             meta = work.get("meta")
             if not op.startswith(meta["window_epoch"] + ":"):
                 raise CoordinationError("expired_operation", "operation is outside its window; inspect, never recreate")
-            # Cache buckets are lazily replaced after window rollover. Their old
-            # epoch is never admissible again, even when its result is forgotten.
+            # Bound even an adversarial concentration in one hash bucket. Closing
+            # the old epoch cannot make forgotten operation IDs admissible again.
+            bucket = work.get(self._bucket(principal, op), {})
+            if sum(value.get("window") == meta["window_epoch"] for value in bucket.values()) >= 64:
+                meta["window_epoch"], meta["window_count"] = nonce("w:"), 0
+                work.put("meta", meta)
+                work.commit(control=True)
+                raise CoordinationError("expired_operation", "bounded result window rolled; inspect its new epoch")
             result = fn(work, self.policy())
             first = result.pop("_first", None)
             after = result.pop("_after", None)
@@ -205,12 +265,15 @@ class Coordinator:
             bucket = {key: value for key, value in work.get(bucket_key, {}).items()
                       if value.get("window") == meta["window_epoch"]}
             cached_result = copy.deepcopy(result)
-            if encoded(cached_result) > 1024:
-                ref = "result/" + digest([principal, op])
-                if encoded(cached_result) > MAX_NATIVE_RESULT:
-                    raise CoordinationError("too_large", "coordination result exceeds retained result bound")
-                work.put(ref, cached_result)
-                cached_result = {"result_ref": ref}
+            if command == "inbox.take":
+                cached_result = {"state": result["state"], "take": True}
+            elif command == "inbox.scope":
+                cached_result = {"state": result["state"], "scope": True}
+            elif encoded(cached_result) > 256:
+                cached_result = {key: result[key] for key in ("state", "delivery", "plan", "archive", "reason") if key in result}
+                cached_result["incomplete"] = True
+                if encoded(cached_result) > 256:
+                    cached_result = {"state": result["state"], "incomplete": True}
             bucket[digest([principal, op])] = {"fingerprint": fingerprint, "result": cached_result, "window": meta["window_epoch"]}
             work.put(bucket_key, bucket)
             meta = work.get("meta")
@@ -229,6 +292,7 @@ class Coordinator:
             if first:
                 result.update(first)
             result["window"] = self.window()
+            self._safe_maintain()
             return result
 
     def _record(self, work, delivery):
@@ -251,16 +315,20 @@ class Coordinator:
             raise CoordinationError("too_late", "delivery was claimed or disposed; input cannot be recalled")
 
     def _ensure_agent(self, work, agent, policy):
-        if work.get("agent/" + agent):
+        if self._agent_get(work, agent):
             return
-        resource = self.resources().get(agent, {})
+        resource = policy.resources.get(agent, {})
+        native = (resource.get("data") or {}).get("agent") or {}
+        lifecycle = native.get("lifecycle", "unknown")
         row = {"agent": agent, "identity": {key: resource.get(key) for key in ("provider", "instance", "ref", "incarnation")},
-               "handles": [], "last_seen_ms": self.clock(), "last_evidence": None,
-               "held": 0, "unknown": 0, "membership_ref": None, "lifecycle": "live"}
+               "handles": sorted(handle for handle, bound in policy.names.items() if bound["agent"] == agent),
+               "last_seen_ms": self.clock() if resource and resource.get("available") is not False else None,
+               "last_evidence": "native_ended" if lifecycle == "ended" else None,
+               "held": 0, "unknown": 0, "membership_ref": None, "lifecycle": lifecycle}
         key = "doc/agents/members/" + agent
-        if key in self.config():
-            row["membership_ref"] = {"rN": agent, "revision": self.config()[key]["version"]}
-        work.put("agent/" + agent, row)
+        if key in policy.entries:
+            row["membership_ref"] = {"rN": agent, "revision": policy.entries[key]["version"]}
+        self._agent_put(work, agent, row)
 
     def send(self, args, context):
         def admit(work, policy):
@@ -318,9 +386,14 @@ class Coordinator:
             meta["order"] += 1
             work.put("meta", meta)
             sender = {key: context.get(key) for key in ("principal", "actor", "author", "initiator", "label")}
-            origin = {"principal": principal, "actor": context.get("actor", principal), "kind": context.get("kind", "tool")}
-            if context.get("agent"):
-                origin["agent"] = context["agent"]
+            associated = policy._principal_agents.get(principal, set())
+            sender_agent = context.get("agent") or (next(iter(associated)) if len(associated) == 1 else None)
+            sender["kind"] = "agent" if sender_agent else context.get("kind", "tool")
+            if sender_agent:
+                sender["agent"] = sender_agent
+            origin = {"principal": principal, "actor": context.get("actor", principal), "kind": sender["kind"]}
+            if sender_agent:
+                origin["agent"] = sender_agent
             payload = {key: normalized[key] for key in ("mode", "content", "expires_at_ms") if key in normalized}
             record = dict(payload, v=0, delivery=delivery, submission=submission, to=target, **{"from": sender}, origin=origin,
                           state="held", reason="paused", held_by="vqro", order=meta["order"], attempt=None, result=None,
@@ -384,6 +457,8 @@ class Coordinator:
             if archived:
                 return dict(archived, delivery=delivery)
         work = Working(self)
+        if work.get("message/" + str(delivery)) is None:
+            return dict(work.get("settled", {}).get(delivery, {"state": "unknown"}), delivery=delivery, incomplete=True)
         record = self._record(work, delivery)
         return dict(record, revision=work.version("message/" + delivery))
 
@@ -419,6 +494,7 @@ class Coordinator:
             for agent in targets:
                 policy.require(context["principal"], action, agent)
             for agent in targets:
+                self._ensure_agent(work, agent, policy)
                 control["gates"][agent] = action == "resume"
             control["revision"] += 1
             work.put("control", control)
@@ -482,9 +558,11 @@ class Coordinator:
             return "handover_pending"
         if agent not in self.permits or not self.current:
             return "paused"
-        stone = self.tombstones().get(agent, {})
+        stone = (self.store.get(self._agent_key(agent)) or {}).get("value", {}).get(agent, {})
         if stone.get("lifecycle") == "retired":
             return "agent_retired"
+        if stone.get("lifecycle") == "ended":
+            return "agent_ended"
         resource, native = self._facts(agent)
         if not resource or resource.get("available") is False:
             return "agent_absent"
@@ -563,17 +641,21 @@ class Coordinator:
                    "session": effective_session, "control_epoch": self.control_epoch,
                    "claimant": consumer or "dispatcher", "consumer": consumer, "at": at,
                    "claim": nonce("claim:"), "steps": [], "started_ms": self.clock()}
-        record.update(state="claimed", reason=None, attempt=attempt)
+        if record.get("result"):
+            record["previous"] = {"attempt": (record.get("attempt") or {}).get("id"), "sha256": digest(record["result"])}
+        record.update(state="claimed", reason=None, attempt=attempt, result=None)
         record.pop("retry_wait", None)
         work.put("message/" + record["delivery"], record)
         return record
 
-    def dispatch_one(self, agent=None):
-        """One native attempt; event-driven caller owns when this is run again."""
+    def claim_one(self, agent=None):
+        """Claim one eligible input; a bounded service pool executes independent targets."""
         with self.lock:
-            work, policy = Working(self), self.policy()
             records = self.records()
-            in_flight = {r["to"]["agent"] for r in records if r["state"] == "claimed"}
+            if not any(record["state"] in PENDING for record in records):
+                return None
+            work, policy = Working(self), self.policy()
+            in_flight = {r["to"]["agent"] for r in records if r["state"] == "claimed"} | set(self.native_inflight)
             eligible = []
             for record in records:
                 if record["state"] not in PENDING or record["to"]["agent"] in in_flight:
@@ -614,7 +696,21 @@ class Coordinator:
                     except StoreError:
                         self.permits.discard(record["to"]["agent"])
                 raise
-        return self._invoke_claim(selected)
+            self.native_inflight[selected["to"]["agent"]] = selected["attempt"]["id"]
+            return selected
+
+    def execute_claim(self, record):
+        try:
+            return self._invoke_claim(record)
+        finally:
+            with self.lock:
+                self.native_inflight.pop(record["to"]["agent"], None)
+                self._safe_maintain()
+                self._wake(record["to"]["agent"])
+
+    def dispatch_one(self, agent=None):
+        record = self.claim_one(agent)
+        return self.execute_claim(record) if record is not None else None
 
     def _invoke_claim(self, record):
         target = record["to"]["agent"]
@@ -656,7 +752,7 @@ class Coordinator:
                 elif not outcomes and record.get("expires_at_ms") is not None and self.clock() >= record["expires_at_ms"]:
                     reason = "expired"
                 if reason:
-                    return self._finish_attempt(record, outcomes, {"outcome": "rejected", "error": {"kind": reason}}, partial=bool(outcomes))
+                    return self._finish_attempt(record, outcomes, {"outcome": "rejected", "error": {"kind": reason}}, partial=bool(outcomes), coordinated=True)
                 # Persist each composition step before issuing it. A restart never runs a tail.
                 work = Working(self)
                 now = self._record(work, record["delivery"])
@@ -701,7 +797,7 @@ class Coordinator:
         return [{"op": step["op"], "outcome": step["outcome"], "native": self._compact(step["native"], step["op"])}
                 for step in steps]
 
-    def _finish_attempt(self, original, outcomes, native, *, partial):
+    def _finish_attempt(self, original, outcomes, native, *, partial, coordinated=False):
         with self.lock:
             if not self.current:
                 return {"state": "unknown", "reason": "owner_replaced"}
@@ -710,11 +806,17 @@ class Coordinator:
             if record.get("attempt", {}).get("id") != original["attempt"]["id"]:
                 return {"state": "unknown", "reason": "attempt_replaced"}
             result = {"state": "partial" if partial else native.get("outcome", "unknown"),
-                      "attempt": {"id": record["attempt"]["id"], "steps": outcomes}, "native": native}
+                      "attempt": {"id": record["attempt"]["id"], "steps": outcomes}, "native": None if coordinated else native}
+            if coordinated:
+                result["reason"] = (native.get("error") or {}).get("kind")
+            observed_receipt = (record.get("result") or {}).get("receipt")
             compact_steps = self._compact_steps(outcomes)
+            if compact_steps and not coordinated:
+                compact_steps[-1].pop("native")
+                compact_steps[-1]["native_ref"] = "result.native"
             record["attempt"]["steps"] = compact_steps
-            record["result"] = dict(result, native=self._compact(native, outcomes[-1]["op"] if outcomes else None),
-                                    attempt={"id": record["attempt"]["id"], "steps": compact_steps})
+            record["result"] = dict(result, native=None if coordinated else self._compact(native, outcomes[-1]["op"] if outcomes else None),
+                                    attempt={"id": record["attempt"]["id"], "steps_ref": "attempt.steps"})
             outcome = native.get("outcome")
             kind = (native.get("error") or {}).get("kind")
             if outcome == "indeterminate" or partial:
@@ -731,10 +833,14 @@ class Coordinator:
                 record.update(state="expired" if kind == "expired" else "rejected", reason=kind)
             else:
                 record.update(state=outcome, reason=None)
+            if observed_receipt:
+                record["result"].update(receipt=observed_receipt, state="observed")
+                result.update(receipt=observed_receipt, state="observed")
+                record.update(state="accepted" if observed_receipt["stage"] == "admitted" else observed_receipt["stage"], reason=None)
             work.put("message/" + record["delivery"], record)
             try:
                 work.commit(control=True)
-            except StoreError:
+            except (StoreError, PolicyError):
                 self.attention[record["delivery"]] = "outcome_persistence_failed"
                 self.permits.discard(record["to"]["agent"])
                 raise
@@ -759,7 +865,7 @@ class Coordinator:
             if agent not in self.permits:
                 return {"state": "held", "records": [], "held": "paused"}
             records = self.records()
-            if any(r["to"]["agent"] == agent and r["state"] == "claimed" for r in records):
+            if agent in self.native_inflight or any(r["to"]["agent"] == agent and r["state"] == "claimed" for r in records):
                 return {"state": "held", "records": [], "held": "claim_in_flight"}
             eligible = [r for r in records if r["to"]["agent"] == agent and r["state"] in PENDING and self._eligibility(r, policy, at=at) is None]
             supplied, claims = [], []
@@ -771,6 +877,8 @@ class Coordinator:
                 claimed = self._claim(work, record, consumer=consumer, at=at)
                 if claimed is None:
                     continue
+                claimed["attempt"]["take"] = digest([context["principal"], args["op"]])
+                work.put("message/" + claimed["delivery"], claimed)
                 row = {key: claimed.get(key) for key in ("delivery", "from", "origin", "quoted", "render", "mode", "content")}
                 row["claim"] = claimed["attempt"]["claim"]
                 if encoded(supplied + [row]) > 250 * 1024:
@@ -870,8 +978,9 @@ class Coordinator:
         def begin(work, policy):
             intent = prepare(work, policy)
             work.put(key, {"state": "claimed", "command": command, "intent": intent,
-                           "principal": context["principal"], "control_epoch": self.control_epoch,
-                           "attempt": {"id": nonce("a:"), "steps": []}})
+                           "principal": context["principal"], "caller": context.get("author"),
+                           "from": {name: context.get(name) for name in ("principal", "actor", "author", "initiator", "label")},
+                           "control_epoch": self.control_epoch, "attempt": {"id": nonce("a:"), "steps": []}})
             def close():
                 if intent.get("close_gate"):
                     self.permits.discard(intent["close_gate"])
@@ -894,11 +1003,27 @@ class Coordinator:
             work = Working(self)
             record = work.get(key)
             outcome = native.get("outcome", "accepted")
-            record.update(state="unknown" if outcome == "indeterminate" else outcome, native=self._compact(native, command))
+            native_kind = command == "coord.control" and intent.get("op") is not None
+            evidence = self._compact(native, command)
+            state = "unknown" if outcome == "indeterminate" else outcome
+            if intent.get("close_gate") and outcome == "rejected":
+                state = "partial"  # admission closed, even though native stop had no effect
+            record.update(state=state, native=evidence if native_kind else None,
+                          coordination={"gate": "closed"} if intent.get("close_gate") else None)
+            if not native_kind:
+                record["coordination"] = evidence
             record["attempt"]["steps"] = [{"op": command, "outcome": outcome}]
             work.put(key, record)
+            bucket_key = self._bucket(context["principal"], args["op"])
+            bucket = work.get(bucket_key, {})
+            cached = bucket.get(digest([context["principal"], args["op"]]))
+            if cached and outcome != "indeterminate":
+                cached["result"] = {"state": record["state"], "external": True, "native_hash": evidence["sha256"]}
+                work.put(bucket_key, bucket)
             work.commit(control=True)
-            return dict(record, native=native, window=self.window())
+            self._safe_maintain()
+            return dict(record, native=native if native_kind else None,
+                        coordination=record["coordination"] if native_kind else native, window=self.window())
 
     def config_action(self, command, args, context):
         def prepare(work, policy):
@@ -927,23 +1052,35 @@ class Coordinator:
                    "object": ("command", "agent.object"), "stop": ("stop", "agent.stop"), "retire": ("stop", None)}
         if action not in actions:
             raise CoordinationError("invalid", "unknown control action")
+        if action == "retire":
+            def administrative(work, policy):
+                agent = policy.resolve_target(args.get("target"))
+                policy.require(context["principal"], "stop", agent)
+                self._ensure_agent(work, agent, policy)
+                stone = self._agent_get(work, agent)
+                stone.update(lifecycle="retired", retired={"by": context["principal"], "reason": (args.get("args") or {}).get("reason")})
+                self._agent_put(work, agent, stone)
+                control = work.get("control")
+                control["gates"][agent] = False
+                control["revision"] += 1
+                work.put("control", control)
+                close = lambda: self.permits.discard(agent)
+                return {"state": "retired", "execution": "unknown", "native": None, "_after": close, "_uncertain": close}
+            return self._mutate("coord.control", args, context, administrative, control=True)
         right, operation = actions[action]
         def prepare(work, policy):
             agent = policy.resolve_target(args.get("target"))
             policy.require(context["principal"], right, agent)
             resource, native = self._facts(agent)
-            if not resource:
+            if not resource and action != "stop":
                 raise CoordinationError("unavailable", "target is absent")
+            resource = resource or {}
             self._ensure_agent(work, agent, policy)
             if action in ("stop", "retire"):
                 control = work.get("control")
                 control["gates"][agent] = False
                 control["revision"] += 1
                 work.put("control", control)
-            if action == "retire":
-                stone = work.get("agent/" + agent)
-                stone.update(lifecycle="retired", retired={"by": context["principal"], "reason": (args.get("args") or {}).get("reason")})
-                work.put("agent/" + agent, stone)
             method, target = operation, agent
             native_args = dict(args.get("args") or {}, v=0)
             caps = self._caps(resource, native)
@@ -958,12 +1095,15 @@ class Coordinator:
                     raise CoordinationError("conflict", "inspect and explicitly confirm every endpoint served by this host")
                 method, target, native_args = "terminal.kill", host["resource"], {}
             elif operation is not None and operation not in caps:
-                raise CoordinationError("unsupported", "native control is undeclared")
+                if action == "stop":
+                    method = None
+                else:
+                    raise CoordinationError("unsupported", "native control is undeclared")
             return {"agent": agent, "target": target, "incarnation": resource.get("incarnation"), "op": method, "args": native_args,
                     "close_gate": agent if action in ("stop", "retire") else None}
         def execute(intent):
             if intent["op"] is None:
-                return {"outcome": "accepted", "data": {"administrative": "retired", "execution": "unknown"}}
+                return {"outcome": "rejected", "error": {"kind": "unsupported"}, "data": {"gate": "closed", "execution": "not_stopped"}}
             resource, _ = self._facts(intent["agent"])
             if not resource or resource.get("incarnation") != intent["incarnation"]:
                 return {"outcome": "rejected", "error": {"kind": "stale"}}
@@ -1003,7 +1143,7 @@ class Coordinator:
                     raise CoordinationError("invalid", "handover must pin exact agent and incarnation")
                 policy.require(context["principal"], "handover", target["agent"])
             resource, native = self._facts(source["agent"])
-            stone = work.get("agent/" + source["agent"], {})
+            stone = self._agent_get(work, source["agent"], {})
             replaced = resource is not None and resource.get("incarnation", "") != source["incarnation"]
             if not replaced and native.get("lifecycle") != "ended" and stone.get("lifecycle") not in ("retired", "ended"):
                 raise CoordinationError("conflict", "predecessor must be ended, retired or demonstrably replaced")
@@ -1077,10 +1217,20 @@ class Coordinator:
         """Observe native evidence; silence creates unavailable, never ended."""
         forgotten = []
         with self.lock:
+            resources, config, records = self.resources(), self.config(), self.records()
+            counts = {}
+            for record in records:
+                held, unknown = counts.setdefault(record["to"]["agent"], [0, 0])
+                counts[record["to"]["agent"]] = [held + (record["state"] in PENDING), unknown + (record["state"] in ("unknown", "claimed", "partial"))]
+            handles = {}
+            for key, row in config.items():
+                if key.startswith("doc/agents/names/"):
+                    handles.setdefault(row["value"].get("agent"), []).append(key[len("doc/agents/names/"):])
             for agent, old in list(self.tombstones().items()):
-                resource, native = self._facts(agent)
+                resource = resources.get(agent)
+                native = ((resource or {}).get("data") or {}).get("agent") or {}
                 stone = copy.deepcopy(old)
-                if native.get("lifecycle") == "ended":
+                if native.get("lifecycle") == "ended" or stone.get("lifecycle") == "ended":
                     stone.update(lifecycle="ended", last_evidence="native_ended")
                     self.permits.discard(agent)
                 elif stone.get("lifecycle") == "retired":
@@ -1093,21 +1243,18 @@ class Coordinator:
                 else:
                     stone.pop("disconnected_since_ms", None)
                     stone["lifecycle"] = native.get("lifecycle", "live")
-                linked = [r for r in self.records() if r["to"]["agent"] == agent]
-                stone["held"] = sum(r["state"] in PENDING for r in linked)
-                stone["unknown"] = sum(r["state"] in ("unknown", "claimed", "partial") for r in linked)
-                member = self.config().get("doc/agents/members/" + agent)
+                stone["held"], stone["unknown"] = counts.get(agent, [0, 0])
+                member = config.get("doc/agents/members/" + agent)
                 stone["membership_ref"] = {"rN": agent, "revision": member["version"]} if member else None
-                stone["handles"] = sorted(key[len("doc/agents/names/"):] for key, row in self.config().items()
-                                          if key.startswith("doc/agents/names/") and row["value"].get("agent") == agent)[:4]
+                stone["handles"] = sorted(handles.get(agent, []))[:4]
                 if stone != old:
                     work = Working(self)
-                    work.put("agent/" + agent, stone)
+                    self._agent_put(work, agent, stone)
                     work.commit(control=True)
             # Only evidence-free, unreferenced tombstones are eligible for pruning.
             candidates = sorted((row for row in self.tombstones().values() if row["lifecycle"] in ("unavailable", "ended")
                                  and not row["held"] and not row["unknown"] and not row["membership_ref"]),
-                                key=lambda row: row["last_seen_ms"])
+                                key=lambda row: (row["last_seen_ms"] is not None, row["last_seen_ms"] or 0))
             plans = [row["value"] for key, row in self.store.snapshot().items() if key.startswith("plan/") and row["value"]["state"] != "completed"]
             for stone in candidates:
                 if any(stone["agent"] in (plan["from"]["agent"], plan["to"]["agent"]) for plan in plans):
@@ -1115,15 +1262,177 @@ class Coordinator:
                 # Keep a useful bounded tail; pressure never drops protected evidence.
                 if len(self.tombstones()) <= 256:
                     break
-                row = self.store.get("agent/" + stone["agent"])
-                self.store.apply([{"op": "delete", "key": "agent/" + stone["agent"], "expect": row["version"]}], control=True)
+                work = Working(self)
+                key = self._agent_key(stone["agent"])
+                page = work.get(key, {})
+                page.pop(stone["agent"], None)
+                work.put(key, page)
+                work.commit(control=True)
         if forget:
             for agent, incarnation in forgotten:
                 forget(agent, incarnation)
         return forgotten
 
+    def observe_receipts(self, agent, incarnation, projections):
+        """Only typed, correlated adapter receipt observations; never text/completion inference."""
+        if not isinstance(projections, list) or len(projections) > 256:
+            raise CoordinationError("too_large", "receipt projection batch exceeds its bound")
+        changed_any = False
+        with self.lock:
+            resource, native = self._facts(agent)
+            if not self.current or not resource or resource.get("incarnation", "") != incarnation:
+                return False
+            send = self._caps(resource, native).get("agent.send", {})
+            allowed = {
+                None: {"admitted", "queued", "inserted", "handled", "supplied", "read", "completed"},
+                "admitted": {"queued", "inserted", "handled", "supplied", "read", "completed"},
+                "queued": {"inserted", "handled", "supplied", "read", "completed"},
+                "inserted": {"read", "completed"}, "supplied": {"read", "completed"},
+                "read": {"completed"}, "handled": set(), "completed": set(),
+            }
+            for offset in range(0, len(projections), 48):
+                work = Working(self)
+                settled = work.get("settled", {})
+                settled_changed = False
+                changed = []
+                for event in projections[offset:offset + 48]:
+                    receipt = event.get("receipt") or {}
+                    delivery, stage = receipt.get("delivery"), receipt.get("stage")
+                    if stage not in allowed[None] or not isinstance(delivery, str):
+                        continue
+                    if stage in ("inserted", "read", "completed") and send.get("correlation") != "insertion":
+                        continue
+                    if stage == "handled" and send.get("handled", "none") == "none":
+                        continue
+                    record = work.get("message/" + delivery)
+                    if not record:
+                        marker = settled.get(delivery)
+                        if marker and marker.get("agent") == agent and marker.get("state") not in ("withdrawn", "expired", "superseded", "rejected"):
+                            old = marker.get("state")
+                            old = "admitted" if old in ("accepted", "dispatched") else old
+                            if stage in allowed.get(old, set()):
+                                marker["state"] = stage
+                                settled_changed = True
+                        continue
+                    if record["to"]["agent"] != agent or record["state"] in PENDING | {"withdrawn", "expired", "superseded", "rejected", "resolved"}:
+                        continue
+                    result = record.get("result") or {}
+                    old = (result.get("receipt") or {}).get("stage") or (result.get("native") or {}).get("stage")
+                    if stage not in allowed.get(old, set()):
+                        continue
+                    if stage == "supplied" and "context" not in (record.get("render") or []):
+                        continue
+                    projected = {"delivery": delivery, "stage": stage, "source": {"epoch": event.get("epoch"), "seq": event.get("seq")},
+                                 "sha256": digest(receipt), "incomplete": True}
+                    if isinstance(receipt.get("run"), str) and len(receipt["run"].encode()) <= 128:
+                        projected["run"] = receipt["run"]
+                    if encoded(projected) > 1024:
+                        raise CoordinationError("too_large", "receipt evidence exceeds its reserved compact bound")
+                    result["receipt"] = projected
+                    result["state"] = "observed"
+                    record.update(state="accepted" if stage == "admitted" else stage, reason=None, result=result)
+                    record.pop("final_seq", None)
+                    work.put("message/" + delivery, record)
+                    changed.append(delivery)
+                if settled_changed:
+                    work.put("settled", settled)
+                work.commit(control=True)
+                for delivery in changed:
+                    self.attention.pop(delivery, None)
+                changed_any = changed_any or bool(changed) or settled_changed
+            self._safe_maintain()
+        return changed_any
+
+    def _safe_maintain(self):
+        try:
+            self.maintenance()
+            self.maintenance_error = None
+        except (StoreError, PolicyError) as error:
+            self.maintenance_error = {"kind": getattr(error, "kind", "unknown"), "message": str(error)[:512]}
+
+    def maintenance(self):
+        """Bound decided history; never discard unresolved evidence or reopen intent."""
+        if not self.current:
+            return
+        work = Working(self)
+        finals = []
+        frozen = {record_key for name, row in work.rows.items() if name.startswith("archive/")
+                  and row["value"].get("state") in ("frozen", "exporting", "exported", "partial")
+                  for record_key in row["value"].get("frozen", {})}
+        for key, row in work.rows.items():
+            value = row["value"]
+            if key.startswith("message/") and value.get("state") not in OPEN:
+                if (value.get("attempt") or {}).get("id") == self.native_inflight.get(value["to"]["agent"]) and value["to"]["agent"] in self.native_inflight:
+                    continue
+                pull = (value.get("attempt") or {}).get("consumer")
+                if pull and value["state"] not in ("read", "handled", "completed", "resolved", "withdrawn", "expired", "superseded", "rejected"):
+                    continue  # insertion/context supply is not a completed pull report
+                if key in frozen:
+                    continue
+                finals.append((value.get("final_seq", row["version"]), key, row))
+            elif key.startswith("external/") and value.get("state") in ("accepted", "observed", "dispatched", "rejected", "partial"):
+                if key not in frozen:
+                    finals.append((value.get("final_seq", row["version"]), key, row))
+        finals.sort(key=lambda item: (item[0], item[1]))
+        settled = work.get("settled", {})
+        excess = max(0, len(finals) - 256)
+        for _, key, row in finals[:min(excess, 30)]:
+            value = row["value"]
+            if key.startswith("message/"):
+                settled.pop(value["delivery"], None)
+                settled[value["delivery"]] = {"state": value["state"], "agent": value["to"]["agent"], "incomplete": True}
+            work.delete(key)
+        if len(settled) > 1024:
+            for delivery in list(settled)[:len(settled) - 1024]:
+                settled.pop(delivery)
+        if settled != work.get("settled", {}):
+            work.put("settled", settled)
+        # Compact retained native outcomes, not active pull tokens or unknown claims.
+        for _, key, row in finals[excess:]:
+            if len(work.changes) >= 45:
+                break
+            value = row["value"]
+            if value.get("incomplete"):
+                continue
+            if key.startswith("external/"):
+                intent = value.get("intent") or {}
+                compact = {name: copy.deepcopy(value.get(name)) for name in ("state", "command", "principal", "caller", "native", "coordination")}
+                compact.update(intent={name: intent[name] for name in ("agent", "target", "op") if name in intent},
+                               incomplete=True, final_seq=value.get("final_seq", row["version"]))
+                if encoded(compact) > 1024:
+                    compact["intent"] = {"agent": intent.get("agent")}
+                if encoded(compact) > 1024:
+                    raise CoordinationError("too_large", "compact control metadata exceeds its bound; original retained")
+                work.put(key, compact)
+                continue
+            result = value.get("result") or {}
+            compact = {name: copy.deepcopy(value.get(name)) for name in ("v", "delivery", "submission", "intent", "mode", "order", "state", "reason")}
+            compact.update(to={"agent": value["to"]["agent"]}, **{"from": {"principal": value["from"]["principal"]}},
+                           incomplete=True, final_seq=value.get("final_seq", row["version"]),
+                           content_hash=digest(value.get("content", [])),
+                           attempt={"id": (value.get("attempt") or {}).get("id")},
+                           result={"state": result.get("state", value["state"]), "native": result.get("native"),
+                                   "receipt": result.get("receipt"), "incomplete": True})
+            if value.get("handed_over_from"):
+                compact["handed_over_from"] = {"agent": value["handed_over_from"]["agent"]}
+            if encoded(compact) > 1024:
+                compact.pop("content_hash", None)
+                compact.pop("attempt", None)
+                compact["result"] = {"state": value["state"], "sha256": digest(result), "incomplete": True}
+            if encoded(compact) > 1024:
+                raise CoordinationError("too_large", "compact final metadata exceeds its explicit bound; original retained")
+            work.put(key, compact)
+        refs = {entry["result"].get("result_ref") for key, row in work.rows.items() if key.startswith("ops/")
+                for entry in row["value"].values() if isinstance(entry.get("result"), dict)}
+        for key in work.rows:
+            if len(work.changes) >= 60:
+                break
+            if key.startswith("result/") and key not in refs:
+                work.delete(key)
+        work.commit(control=True)
+
     def _archive_frozen(self, key):
-        return any(key in row["value"].get("frozen", {}) for name, row in self.store.snapshot().items()
+        return any(key in row["value"].get("frozen", {}) for name, row in self.store.view().items()
                    if name.startswith("archive/") and row["value"].get("state") in ("frozen", "exporting", "exported", "partial"))
 
     def archive(self, args, context):

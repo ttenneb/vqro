@@ -487,6 +487,60 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(caught.exception.kind, "conflict")
         self.assertEqual(self.engine.permits, set())
 
+    def test_settled_record_gc_never_recreates_a_current_window_submission(self):
+        op = self.op()
+        args = {"op": op, "submission": op, "to": "r1", "mode": "start", "content": [{"type": "text", "text": "first"}]}
+        first = self.engine.send(args, OWNER)
+        self.resume()
+        self.engine.dispatch_one()
+        for _ in range(270):
+            self.send()
+            self.engine.dispatch_one()
+        self.assertIsNone(self.store.get("message/" + first["delivery"]))
+        self.assertEqual(self.engine.get(first["delivery"])["state"], "accepted")
+        count = len(self.ledger)
+        repeated = self.engine.send(dict(args, op=self.op()), OWNER)
+        self.assertEqual(repeated["delivery"], first["delivery"])
+        self.engine.dispatch_one()
+        self.assertEqual(len(self.ledger), count)
+        self.assertLessEqual(len(self.engine.records()), 256)
+
+    def test_window_rollover_and_control_history_do_not_disable_mutations(self):
+        old_op = self.op()
+        original = {"op": old_op, "target": "r1", "action": "interrupt", "args": {}}
+        self.engine.control(original, OWNER)
+        for _ in range(1030):
+            self.engine.control({"op": self.op(), "target": "r1", "action": "interrupt", "args": {}}, OWNER)
+        before = len(self.ledger)
+        try:
+            self.engine.control(original, OWNER)
+        except PolicyError as error:
+            self.assertEqual(error.kind, "expired_operation")
+        self.assertEqual(len(self.ledger), before)
+        externals = [key for key in self.store.snapshot() if key.startswith("external/")]
+        self.assertLessEqual(len(externals), 256)
+        self.assertNotEqual(self.engine.window()["epoch"], old_op.rsplit(":", 1)[0])
+
+    def test_late_compact_result_fits_after_admission_flood(self):
+        first = self.send(content=[{"type": "text", "text": "x" * 30000}])
+        self.resume()
+        native = {"outcome": "accepted", "data": {"receipt": {"stage": "admitted"}, "large": "n" * 100000}}
+        def flooded(*args):
+            for _ in range(16):
+                try:
+                    self.send(send_new=True, content=[{"type": "text", "text": "f" * 15000}])
+                except PolicyError as error:
+                    self.assertEqual(error.kind, "quota")
+                    break
+            return native
+        self.engine.invoke = flooded
+        result = self.engine.dispatch_one()
+        self.assertEqual(result["native"], native)
+        record = self.engine.get(first["delivery"])
+        self.assertEqual(record["state"], "accepted")
+        self.assertTrue(record["result"]["native"]["incomplete"])
+        self.assertIsNone(self.engine.maintenance_error)
+
     def test_silence_becomes_unavailable_never_ended(self):
         self.send()
         self.resources["r1"]["available"] = False

@@ -9,7 +9,7 @@ import json
 import threading
 
 DOMAIN = "coord"
-DOMAIN_BYTES = 8 * 1024 * 1024  # C1 must qualify this allocation; never shard owners.
+DOMAIN_BYTES = 2 * 1024 * 1024  # C1 qualified 2 MiB at 100 txn/s; never shard owners.
 DOMAIN_RECORDS = 1024
 CONTROL_RESERVE = 0.10
 PAGE_ITEMS = 64
@@ -39,6 +39,11 @@ class MemoryStore:
     def charge(self, rows):
         return encoded({"operational/coord/" + key: row for key, row in rows.items()}) + 65536
 
+    def view(self):
+        """Internal immutable-row snapshot; writers replace rows, never mutate them."""
+        with self.lock:
+            return dict(self.entries)
+
     def snapshot(self):
         with self.lock:
             return copy.deepcopy(self.entries)
@@ -57,7 +62,7 @@ class MemoryStore:
             if self.fault == "before":
                 self.fault = None
                 raise StoreError("io", "injected before durable replacement; no change")
-            candidate = copy.deepcopy(self.entries)
+            candidate = dict(self.entries)
             revision = self.revision + 1
             for op in ops:
                 key = op["key"]
@@ -92,6 +97,8 @@ class OperationalStore:
         self.call, self.domain = call, domain
         self.prefix = f"operational/{domain}/"
         self.byte_limit, self.record_limit = DOMAIN_BYTES, DOMAIN_RECORDS
+        self._entries = None
+        self._cache_lock = threading.RLock()
 
     def charge(self, rows):
         return encoded({self.prefix + key: row for key, row in rows.items()}) + 65536
@@ -106,15 +113,27 @@ class OperationalStore:
     def register(self):
         result = self._call("operational.register", {"name": self.domain, "bytes": DOMAIN_BYTES})
         # Size negotiation is intentionally isolated here while C1 pins the API.
+        with self._cache_lock:
+            self._entries = None
         self.snapshot()
         return result
 
     def snapshot(self):
-        result = self._call("operational.snapshot", {"domain": self.domain})
-        limits = result.get("limits", {})
-        self.byte_limit = limits.get("bytes", self.byte_limit)
-        self.record_limit = limits.get("records", self.record_limit)
-        return {self._logical(key): copy.deepcopy(row) for key, row in result["entries"].items()}
+        with self._cache_lock:
+            if self._entries is None:
+                result = self._call("operational.snapshot", {"domain": self.domain})
+                limits = result.get("limits", {})
+                self.byte_limit = limits.get("bytes", self.byte_limit)
+                self.record_limit = limits.get("records", self.record_limit)
+                self._entries = {self._logical(key): copy.deepcopy(row) for key, row in result["entries"].items()}
+            return copy.deepcopy(self._entries)
+
+    def view(self):
+        """Owner-only immutable cache rows; no RPC or full metadata deep copy."""
+        with self._cache_lock:
+            if self._entries is None:
+                self.snapshot()
+            return dict(self._entries)
 
     def _logical(self, key):
         if not key.startswith(self.prefix):
@@ -122,14 +141,30 @@ class OperationalStore:
         return key[len(self.prefix):]
 
     def get(self, key):
-        return self._call("operational.get", {"domain": self.domain, "key": self.prefix + key})["entry"]
+        with self._cache_lock:
+            if self._entries is None:
+                self.snapshot()
+            return copy.deepcopy(self._entries.get(key))
 
     def apply(self, ops, *, control=False, note="coordination"):
         if not ops or len(ops) > PAGE_ITEMS:
             raise StoreError("too_large", "operational batch exceeds its bound")
         wire = [dict(op, key=self.prefix + op["key"]) for op in ops]
-        result = self._call("operational.apply", {"domain": self.domain, "ops": wire, "control": control, "note": note})
-        result = copy.deepcopy(result)
-        for change in result.get("changes", []):
-            change["key"] = self._logical(change["key"])
-        return result
+        with self._cache_lock:
+            if self._entries is None:
+                self.snapshot()
+            try:
+                result = self._call("operational.apply", {"domain": self.domain, "ops": wire, "control": control, "note": note})
+            except StoreError:
+                self._entries = None  # reconcile an adopted/uncertain or conflicting write
+                raise
+            result = copy.deepcopy(result)
+            versions = {self._logical(change["key"]): change.get("version") for change in result.get("changes", [])}
+            for op in ops:
+                if op["op"] == "delete":
+                    self._entries.pop(op["key"], None)
+                else:
+                    self._entries[op["key"]] = {"version": versions[op["key"]], "value": copy.deepcopy(op["value"])}
+            for change in result.get("changes", []):
+                change["key"] = self._logical(change["key"])
+            return result
