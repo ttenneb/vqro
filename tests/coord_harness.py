@@ -99,7 +99,7 @@ class Harness:
         if inbox == "k2core":
             # Product cores do not bootstrap an owner for a test. Use a real raw
             # recovery transaction before requesting the configured owner identity.
-            bootstrap = Client(self.sock)
+            bootstrap = Client(self.sock, principal="p:native-bootstrap")
             bootstrap.call("workspace.apply", {"ops": [{"op": "set", "key": "doc/principals/owner",
                                                        "value": "p:owner"}], "note": "private native pull fixture owner"})
             bootstrap.f.close(); bootstrap.s.close()
@@ -237,9 +237,11 @@ class Harness:
 
 
 class Client:
-    def __init__(self, sock, owner=False):
+    def __init__(self, sock, owner=False, principal=None):
         self.s = socket.socket(socket.AF_UNIX); self.s.connect(sock); self.f = self.s.makefile("rw"); self.n = 0
-        hello = {"client": "tier1-test", **({"identity": {"kind": "owner"}} if owner else {})}
+        identity = ({"kind": "principal", "principal": principal} if principal is not None else
+                    {"kind": "owner"} if owner else None)
+        hello = {"client": "tier1-test", **({"identity": identity} if identity is not None else {})}
         self.me = self.call("hello", hello)["you"]
 
     def call(self, method, params):
