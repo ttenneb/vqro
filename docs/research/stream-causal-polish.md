@@ -27,4 +27,18 @@ Diagnostic label validation is shared with the core, with legacy null wire label
 stream/effect admission budgets/native channel support and errors are preserved. Rust SDK13/context2/causal7
 focused tests pass; Python context2 +existing causal6 pass; original meaningful reds remain retained.
 
+## Shared vectors and the measured numeric-codec edge
+
+29 shared data vectors cover byte4095/4096/4097, container depth64/65, UTF8, finite max/subnormal/negative zero,
+nonfinite overflow and lone surrogate rejection, prior-qualified links and format controls only in known strings.
+The initial uniform-result fixture exposed two REAL differences: for1e-5, Python4096bytes accepts while
+serde_json4098 rejects; for1e-6, Python4097 rejects while serde_json4096 accepts. Original fixture and red log
+are retained (causal-vectors-common-red.json,stream-causal-rust-first.log), not disguised as a pass.
+
+Coordinator explicitly chose the existing core serde_json bound as authoritative, SDK pre-checks advisory near
+numeric representation edges. Only those two labelled vectors have per-codec measured sizes/results;27others
+keep identical expected outcomes. Both suites pass29cases now. No coercion/normalization, bespoke numeric
+formatter, weakened threshold, inferred provenance or changed payload. Either side refuses explicitly. The
+short protocol paragraph records this interoperability limitation rather than promising identical admission.
+
 This note does not claim a whole candidate gate or independent acceptance yet.

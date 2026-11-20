@@ -575,6 +575,10 @@ for type/byte/depth bounds BEFORE cloning/lifting it; malformed large/deep value
   bounds are `invalid`; provenance is preserved exactly, including unknown values. The outer wire's independent
   size/depth admission can reject first.
 
+The core's `serde_json` encoding is authoritative for the byte bound. SDK checks are advisory pre-checks and may
+differ by a few bytes near 4 KiB because of numeric representations; either refusal is an explicit error, never
+silent acceptance. Extra fields remain opaque and are never coerced or numerically normalized to fit the bound.
+
 - Root metadata is accepted only by `resource.spawn`/`kill`/`attach`/`invoke`/`forget`/`forget_cached`,
   `workspace.apply`/`workspace.revert`/`workspace.owner.bootstrap`, and `operational.register`/`operational.apply`. Other request methods,
   including `command.invoke`, `stream.*` and `view.publish`, reject explicit root fields with `invalid` rather
