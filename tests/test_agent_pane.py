@@ -86,6 +86,13 @@ class TranscriptRows(unittest.TestCase):
         self.assertEqual(sender({"kind": "agent", "principal": "p:solo"}), "Message from solo (agent r10)", "an agent over its terminal")
         self.assertEqual(sender({"kind": "human", "principal": "owner"}), "Message from owner")
 
+    def test_a_finished_empty_message_shows_no_bare_label(self):
+        empty = {("message", "s1"): {"position": 1, "role": "system", "content": [], "final": True},
+                 ("message", "m1"): {"position": 2, "role": "assistant", "content": [], "final": False}}
+        texts = [r.get("text") for r in self.rows(empty)]
+        self.assertNotIn("System", texts)
+        self.assertIn("Pi · writing…", texts, "a message still arriving keeps its line")
+
     def test_no_origin_is_never_you_and_another_human_is_named(self):
         bare = {("message", "m"): {"position": 1, "role": "user", "content": text("hi"), "final": True}}
         self.assertEqual(self.rows(bare)[0]["text"], "User")
@@ -104,7 +111,8 @@ class TranscriptRows(unittest.TestCase):
         self.assertTrue(group["expanded"] and test["expanded"], "nothing hidden by default")
 
     def test_tail_coverage_says_so_and_the_budget_keeps_the_newest(self):
-        self.assertIn("Earlier history isn't available", self.rows(coverage="tail")[0]["text"])
+        self.assertEqual(self.rows(coverage="tail")[0], {"type": "text", "style": "dim",
+                         "text": "Showing the history this agent kept; anything earlier isn't shown."})
         many = {("message", f"m{i}"): {"position": i, "role": "assistant", "content": text(f"{i} " + "x" * 2000), "final": True}
                 for i in range(200)}
         rows = self.rows(many)
@@ -287,6 +295,19 @@ class AgentPane(unittest.TestCase):
         self.feed(snapshot(CONVERSATION))
         return self.core.live["agents-r2"]["items"]
 
+    def test_one_header_line_with_the_agents_controls_in_its_menu(self):
+        """relay-8: the conversation pane has one header line (name · folder · state), not the old panel rows."""
+        self.core.resources["r9"] = {"id": "r9", "kind": "terminal", "name": "pi-bridge-1", "state": "live", "provider": "herdr"}
+        self.core.providers["herdr"] = {"name": "herdr", "capabilities": {"terminal.kill": {}}}
+        self.core.resources["r2"]["host"] = "r9"
+        self.core.resources["r2"]["data"] = {"agent": {"v": 0, "state": "idle", "lifecycle": "live", "session": {"cwd": "~/Projects/site"}}}
+        self.agents.event("resource", {"id": "r2"})
+        self.feed(snapshot(CONVERSATION))
+        items = self.core.live["agents-r2"]["items"]
+        self.assertEqual((items[0]["id"], items[0]["text"]), ("header", "Pi r2 · ~/Projects/site"))
+        self.assertEqual([m["label"] for m in items[0]["menu"]], ["Bridge terminal (pi-bridge-1)", "Stop agent…"])
+        self.assertFalse(any(r.get("text") in ("Bridge terminal", "Agent settings…") for r in items), "no old panel rows")
+
     def test_the_composer_offers_auto_and_the_declared_modes_and_sends(self):
         items = self.make_v0()
         composer = next(r for r in items if r.get("type") == "composer")
@@ -298,6 +319,7 @@ class AgentPane(unittest.TestCase):
         self.core.handlers["agents.send"](dict(composer["args"], mode="auto", text="go"))
         sent = [p for m, p in self.core.calls if m == "resource.invoke"][-1]["args"]
         self.assertEqual((sent["mode"], sent["content"]), ("start", [{"type": "text", "text": "go"}]))
+        self.assertEqual(sent["render"], ["user", "attributed_user"], "plain user words when the owner is proven")
 
     def test_auto_on_a_busy_agent_asks_and_sends_nothing(self):
         items = self.make_v0(state="running")

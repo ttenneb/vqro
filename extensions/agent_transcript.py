@@ -390,6 +390,8 @@ def rows(entities, names, coverage=None, view=None):
             continue
         end_tools()
         if kind == "message":
+            if value.get("final") is not False and not content_rows(value.get("content")):
+                continue  # a finished message with nothing to show (an empty system notice): no bare label
             label_, _, key = names.sender(value)
             role = value.get("role")
             show_time = not compact or key != last_sender
@@ -427,7 +429,7 @@ def rows(entities, names, coverage=None, view=None):
         dropped = dropped or 1
     if dropped:
         shown.insert(0, {"type": "text", "style": "dim", "text": f"… {dropped} earlier blocks not shown here (pane limit)"})
-    if coverage in ("tail", "state_only"):
-        shown.insert(0, {"type": "text", "style": "warn", "text": "Earlier history isn't available from the agent (it sent only "
-                         + ("recent history" if coverage == "tail" else "its current state") + ")."})
+    if coverage in ("tail", "state_only"):  # honest, not alarming: the agent says it may not have sent everything
+        shown.insert(0, {"type": "text", "style": "dim", "text": "Showing the history this agent kept; anything earlier isn't shown."
+                         if coverage == "tail" else "Showing the agent's current state only."})
     return shown

@@ -534,6 +534,24 @@ class Agents:
                  [{"label": ("✓ " if f in view["summary"] else "  ") + f, "value": f} for f in agent_transcript.SUMMARY_FIELDS]),
             {"text": "Make default", "command": "agents.view", "args": {"resource": rid, "set": "defaults"}}]}]
 
+    def header_row(self, r):
+        """The agent pane's one header line (mockup §1): name · folder · live state, with the agent's controls in the
+        row's menu (settings, its bridge terminal, stop). Only what the agent reports; nothing guessed."""
+        rid, name = r["id"], plain(str(r.get("name") or r["id"]))
+        session = agent_facts(r).get("session") if isinstance(agent_facts(r).get("session"), dict) else {}
+        folder = session.get("cwd") if isinstance(session.get("cwd"), str) else None
+        menu = []
+        if self.has_settings(r) and r.get("available"):
+            menu.append({"label": "Agent settings…", "command": "agents.config", "args": {"resource": rid}})
+        host = self.ext.resources.get(r.get("host"))
+        if host and host.get("kind") == "terminal":
+            menu.append({"label": "Bridge terminal (" + label(host.get("name") or host["id"], 60) + ")", "command": "tabs.show",
+                         "args": {"resource": host["id"]}})
+        if self.can_stop(r):
+            menu.append({"label": "Stop agent…", "command": "agents.stop", "args": {"resource": rid}})
+        return {"id": "header", "text": " · ".join([f"{name} {rid}"] + ([head(plain(folder), 120)] if folder else [])),
+                "style": "bold", "badges": [{"text": status(r), "style": "dim"}], **({"menu": menu} if menu else {})}
+
     def bottom_rows(self, r):
         """Pinned under the conversation (feature `pin`; otherwise simply last): what the runtime holds, what waits
         for you, the composer. The facts line follows."""
@@ -840,7 +858,10 @@ class Agents:
                   # Identity (principal, actor, initiator) is the core's record of this call (C2); the adapter binds it
                   # and refuses any supplied value that differs (agent-v0 3.2). Only the classification is ours: a
                   # claim that a person typed this, rendered as claimed.
-                  "origin": {"kind": "human"}}
+                  "origin": {"kind": "human"},
+                  # The human's own words as the user (plain), when the core proves the sender is the owner; otherwise the
+                  # adapter frames them with their attribution. Without this, adapters default to a framed rendering.
+                  "render": ["user", "attributed_user"]}
         result = self.ext.vqro.call("resource.invoke", {"resource": r["id"], "op": "agent.send", "args": native})
         outcome = result.get("outcome", "unknown")
         receipt = (result.get("data") or {}).get("receipt") if isinstance(result.get("data"), dict) else None
@@ -1246,7 +1267,7 @@ class Agents:
             with c.lock:
                 seen = agent_transcript.senders(c.view.entities, agent_transcript.Names(self.ext.resources, r["id"], self.ext.owner()))
             content = {"title": title, "follow": True, "search": True, "toolbar": self.view_toolbar(r["id"], self.view_of(r["id"]), seen), "items": [
-                {"text": title, "badges": [{"text": status(r), "style": "dim"}]}, *conversation, *self.bottom_rows(r),
+                self.header_row(r), *conversation, *self.bottom_rows(r),
                 agent_transcript.facts_footer(agent_facts(r), plain(str(r.get("name") or r["id"])))]}
         elif sources:
             # Keep controls/warnings here, but never copy a provider's transcript into another
@@ -1283,12 +1304,12 @@ class Agents:
             if active and type(retry.get("delay_ms")) is int and retry["delay_ms"] >= 0:
                 text += f"; reported delay {retry['delay_ms']} ms"
             content["items"].insert(0, {"type": "text", "style": "warn" if active else "error" if success is False else "dim", "text": label(text)})
-        if self.has_settings(r) and r.get("available"):
+        if self.has_settings(r) and r.get("available") and conversation is None:
             content["items"].insert(0, {"text": "Agent settings…", "description": label(", ".join(
                 f"{c.get('label') or c['id']}: {self.shown_value(c)}" for c in advertised(r, "config")[:4]), 300),
                 "command": "agents.config", "args": {"resource": r["id"]}})
         host = self.ext.resources.get(r.get("host"))
-        if host and host.get("kind") == "terminal":
+        if host and host.get("kind") == "terminal" and conversation is None:
             content["items"].insert(0, {"text": "Bridge terminal", "description": label(host.get("name") or host["id"]),
                                          "command": "tabs.show", "args": {"resource": host["id"]}})
         if ended(r):
