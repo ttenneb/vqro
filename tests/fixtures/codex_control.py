@@ -99,7 +99,7 @@ class CodexMixin:
         await self.event("thread/status/changed", {"threadId": thread["meta"]["id"], "status": thread["meta"]["status"]})
         return run
 
-    async def end_turn(self, thread, aborted=False):
+    async def end_turn(self, thread, aborted=False, failure=None):
         run = thread["run"]
         if run is None:
             return
@@ -112,8 +112,10 @@ class CodexMixin:
         thread["run"] = None
         thread["meta"]["status"] = {"type": "idle"}
         self.active = any(t["run"] is not None for t in self.threads.values())
-        self.record("turn", state="settled", session=session, run=run, aborted=aborted)
-        await self.event("turn/completed", {"threadId": session, "turn": {"id": run, "status": "interrupted" if aborted else "completed", "error": None}})
+        self.record("turn", state="settled", session=session, run=run, aborted=aborted, error=failure)
+        await self.event("turn/completed", {"threadId": session, "turn": {"id": run,
+            "status": "failed" if failure else "interrupted" if aborted else "completed",
+            "error": {"message": failure} if failure else None}})
         await self.event("thread/status/changed", {"threadId": session, "status": {"type": "idle"}})
 
     async def insert_native(self, thread, command, content, run):
@@ -154,6 +156,26 @@ class CodexMixin:
             for action in rule.get("do", []):
                 await self.action(action)
 
+    @staticmethod
+    def normalized_answer(command, request):
+        error = command.get("error")
+        if isinstance(error, dict) and error.get("code") in (-32800, -32601):
+            return {"action": "cancel"}
+        result = command.get("result")
+        method = request["method"] if request else None
+        if method == "permission" and isinstance(result, dict):
+            decision = result.get("decision")
+            if decision == "cancel":
+                return {"action": "cancel"}
+            if decision in ("accept", "acceptForSession", "decline"):
+                return {"choice": decision}
+        if method in ("form", "choice", "confirm", "text") and isinstance(result, dict):
+            answers = result.get("answers")
+            if isinstance(answers, dict) and all(isinstance(v, dict) and isinstance(v.get("answers"), list)
+                    and all(isinstance(s, str) for s in v["answers"]) for v in answers.values()):
+                return {"action": "accept", "content": {k: v["answers"] for k, v in answers.items()}}
+        return {"action": "_invalid"}
+
     async def native(self, command):
         method = command.get("method")
         if method is None:
@@ -161,7 +183,8 @@ class CodexMixin:
             key = json.dumps(command.get("id"), sort_keys=True)
             request = self.requests.pop(key, None)
             self.record("answer", request=command.get("id"), session=request["session"] if request else None,
-                        run=request["run"] if request else None, pending=request is not None, value=command.get("result"), error=command.get("error"))
+                        run=request["run"] if request else None, pending=request is not None, value=command.get("result"), error=command.get("error"),
+                        normalized_response=self.normalized_answer(command, request))
             if request:
                 await self.event("serverRequest/resolved", {"threadId": request["session"], "requestId": command.get("id")})
                 thread = self.threads[request["session"]]
@@ -260,10 +283,20 @@ class CodexMixin:
                 state = row["state"]
                 if state == "start":
                     await self.start_turn(thread)
-                elif state in ("end", "settled"):
+                elif state == "end":
+                    # Canonical timeline's inner model-turn boundary is not Codex's outer turn.
+                    # App-server exposes no separate inner-end notification; never invent one.
+                    self.record("turn", state="end", session=session, run=thread["run"], native_turn_complete=False)
+                elif state == "settled":
                     await self.end_turn(thread, bool(row.get("aborted", False)))
                 else:
                     raise ValueError("unknown turn state")
+            elif verb == "failure":
+                message = row.get("message", "Fixture native turn failure")
+                if not isinstance(message, str) or len(message.encode()) > 4096:
+                    raise ValueError("failure message bound")
+                self.record("failure", session=session, run=thread["run"], message=message)
+                await self.end_turn(thread, failure=message)
             elif verb == "model_call":
                 await self.barrier("model")
                 self.record("model_call", model=row.get("id_ref", "model-1"), session=session,

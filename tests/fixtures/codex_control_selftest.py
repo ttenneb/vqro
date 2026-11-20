@@ -126,15 +126,36 @@ async def checks(args):
         await native.write({"id": "approval-native", "result": {"decision": "accept"}})
         await native.until(lambda: len(native.records("answer")) == 1)
         assert native.records("answer")[0]["pending"]
+        assert native.records("answer")[0]["normalized_response"] == {"choice": "accept"}
         assert not [r for r in native.records("native_reply") if r.get("request") == "approval-native"]
         await native.control("request", request="background-native", method="form", scope="session")
         await native.control("turn", state="settled")
         await native.write({"id": "background-native", "result": {"answers": {"answer": {"answers": ["one"]}}}})
         await native.until(lambda: len(native.records("answer")) == 2)
         assert native.records("answer")[-1]["pending"], "background request must survive foreground settlement"
+        assert native.records("answer")[-1]["normalized_response"] == {"action": "accept", "content": {"answer": ["one"]}}
         assert not (await native.control("state"))["active"]
         assert not (await native.control("state", session=two))["active"]
 
+        for ident, method, response in [
+            ("unknown-native", "_unknown_dialog", {"error": {"code": -32601, "message": "not representable"}}),
+            ("cancel-native", "form", {"error": {"code": -32800, "message": "cancelled"}}),
+            ("deny-native", "permission", {"result": {"decision": "decline"}}),
+        ]:
+            count = len(native.records("answer"))
+            await native.control("request", request=ident, method=method)
+            await native.write({"id": ident, **response})
+            await native.until(lambda: len(native.records("answer")) == count + 1)
+            expected = {"choice": "decline"} if ident == "deny-native" else {"action": "cancel"}
+            assert native.records("answer")[-1]["normalized_response"] == expected
+        await native.until(lambda: len([r for r in native.rows if r.get("method") == "turn/completed"]) == 1)
+        await native.control("turn", state="start")
+        await native.control("turn", state="end")
+        assert (await native.control("state"))["active"], "inner model-turn end must not settle Codex foreground"
+        assert len([r for r in native.rows if r.get("method") == "turn/completed"]) == 1
+        await native.control("failure", message="native fixture failure")
+        await native.until(lambda: any(r.get("method") == "turn/completed" and r["params"]["turn"]["status"] == "failed" for r in native.rows))
+        assert not (await native.control("state"))["active"]
         await native.control("turn", state="start")
         old = [r for r in native.records("turn") if r["state"] == "start"][-1]["run"]
         await native.control("pause_before", phase="acceptance")

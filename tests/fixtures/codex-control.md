@@ -16,6 +16,9 @@ the control path must not exist. Use a private root and an empty inherited envir
   the default is the first created thread, not the most recently used thread.
 - Controlled input never auto-finishes. `turn`, `tool_call`, `model_call`,
   `request`, `retain`, pause/release, dropped replies and exit/crash are explicit.
+  Neutral `turn:end` is an inner model-turn boundary, not Codex outer foreground
+  settlement: it emits no invented native lifecycle event. `turn:settled` emits the
+  real `turn/completed`; `failure` emits native failed completion, not host end.
 - `drop_reply {operation:"send"}` drops the native ACK, not accepted input.
   Acceptance and insertion are independently gated. Steer guards are checked
   atomically after a paused acceptance is released. Interrupted uninserted input
@@ -29,6 +32,10 @@ the control path must not exist. Use a private root and an empty inherited envir
 - `request` supports pinned native permission and tool-user-input forms. Background
   forms use `is_blocking:false` (or `scope:"session"`); foreground completion does
   not answer them. Native response writes have no invented acknowledgement.
+  Answer rows retain the raw result/error and normalize known cancellation errors
+  (-32800/-32601), permission decisions and form answers for the independent oracle;
+  cancellation remains distinct from decline/empty values. No native input-hook
+  consumption or actual tool-to-CLI launch route is claimed by this fixture.
 - `session_switch` creates a new native thread and returns `requires_resume:true`.
   App-server threads do not spontaneously become another thread: use public
   `agent.session` new/resume to change a logical endpoint. Queue modes are not
