@@ -115,6 +115,11 @@ class Vqro:
         if proof is not None and method in ("workspace.apply", "workspace.revert", "command.invoke") and (params is None or isinstance(params, dict)):
             params = dict(params or {})
             params.setdefault("on_behalf_of", proof)
+        # A nested command acts on the same window's layout as the command that runs it.
+        layout = getattr(getattr(self, "_command_context", None), "layout", None)
+        if layout and method == "command.invoke" and isinstance(params, dict) and isinstance(params.get("args", {}), dict) \
+                and "context" not in (params.get("args") or {}):
+            params = dict(params, args=dict(params.get("args") or {}, context={"layout": layout}))
         ev = threading.Event()
         with self.lock:
             if len(self.waiting) >= MAX_PENDING:
@@ -235,8 +240,13 @@ class Vqro:
         if context is None:
             context = self._command_context = threading.local()
         previous = getattr(context, "invocation", None)
+        previous_layout = getattr(context, "layout", None)
         params = msg.get("params") or {}
-        context.invocation = params.get("invocation") if msg.get("method") == "command.invoke" and isinstance(params, dict) else None
+        command = msg.get("method") == "command.invoke" and isinstance(params, dict)
+        context.invocation = params.get("invocation") if command else None
+        # The layout the invoking window shows (`args.context.layout`), for nested commands and helpers.
+        ctx = ((params.get("args") or {}) if command and isinstance(params.get("args"), dict) else {}).get("context")
+        context.layout = ctx.get("layout") if isinstance(ctx, dict) and isinstance(ctx.get("layout"), str) else None
         try:
             result = self.handler(msg["method"], msg.get("params") or {})
             if "id" in msg:
@@ -249,6 +259,7 @@ class Vqro:
             return False
         finally:
             context.invocation = previous
+            context.layout = previous_layout
 
 
 # Namespaces an activation's contribute() reconciles (owner-tagged entries only).
@@ -433,11 +444,30 @@ class Extension:
         value = self.value(f"doc/layout/{layout}") if isinstance(layout, str) and layout else None
         return value if isinstance(value, dict) else {}
 
+    def invocation_layout(self, args=None):
+        """The layout the invoking window shows: `args.context.layout`, else the running command's
+        (nested commands inherit it), else None (event listeners, callers without a window)."""
+        ctx = (args or {}).get("context") if isinstance(args, dict) else None
+        name = ctx.get("layout") if isinstance(ctx, dict) else None
+        if not name:
+            name = getattr(getattr(getattr(self, "vqro", None), "_command_context", None), "layout", None)
+        return name if isinstance(name, str) and name else None
+
+    def context_layout(self, args=None):
+        """Like active_layout(), for the layout the invoking window shows (see invocation_layout);
+        the shared active layout when there is none or it no longer exists."""
+        name = self.invocation_layout(args)
+        if name:
+            with self.cache_lock:
+                entry = self.entries.get(f"layout/{name}")
+                if entry is not None:
+                    return f"layout/{name}", entry["version"], json.loads(json.dumps(entry["value"]))
+        return self.active_layout()
+
     def layout_folder(self, args=None):
-        """The starting folder for something new: the layout the command came from (its
-        `args.context.layout`), else the active layout; None when that layout names none."""
-        ctx = (args or {}).get("context") or {}
-        cwd = self.layout_settings(ctx.get("layout") if isinstance(ctx, dict) else None).get("cwd")
+        """The starting folder for something new: the invoking window's layout (see
+        invocation_layout), else the active layout; None when that layout names none."""
+        cwd = self.layout_settings(self.invocation_layout(args)).get("cwd")
         return cwd if isinstance(cwd, str) and cwd else None
 
     def log(self, *a):

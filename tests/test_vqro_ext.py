@@ -83,6 +83,19 @@ class InvocationAttribution(unittest.TestCase):
         vqro.call("workspace.apply", params)
         self.assertNotIn("on_behalf_of", messages[-1]["params"], "scope ends with reply")
 
+    def test_nested_commands_inherit_the_invoking_window_layout_unless_given_one(self):
+        def handler(method, args):
+            vqro.call("command.invoke", {"name": "nested", "args": {"x": 1}})
+            vqro.call("command.invoke", {"name": "explicit", "args": {"context": {"layout": "other"}}})
+            vqro.call("command.invoke", {"name": "bare"})
+        vqro, messages = self.vqro(handler)
+        vqro._dispatch({"id": 100, "method": "command.invoke", "params": {"invocation": "proof", "args": {"context": {"layout": "ws-a", "path": [0]}}}})
+        sent = {m["params"]["name"]: m["params"].get("args") for m in messages if m.get("method") == "command.invoke"}
+        self.assertEqual(sent, {"nested": {"x": 1, "context": {"layout": "ws-a"}}, "explicit": {"context": {"layout": "other"}},
+                                "bare": {"context": {"layout": "ws-a"}}})
+        vqro.call("command.invoke", {"name": "after"})
+        self.assertNotIn("args", messages[-1]["params"], "scope ends with reply")
+
     def test_events_and_detached_threads_do_not_inherit_a_user_command(self):
         def handler(method, args):
             if method == "command.invoke":

@@ -9,8 +9,10 @@ terminal's OSC 7501 report and roll up to its parents.
 Tabs come from the layouts (`layout/*`): each workspace shows its layout's tabs (the `layout` named in
 the workspaces data), and layouts no workspace claims (`main`, or every layout when the workspaces
 extension is off) are listed under "Layouts", titled by their settings (`doc/layout/<name>`.title).
-Clicking a tab or layout makes that layout active (`workspace/active`) and selects the tab. The current
-layout is marked. Showing/hiding the sidebar applies to every layout, so switching keeps it.
+Clicking a tab or layout shows that layout in the window you clicked in (the reply's
+`{"client": {"layout"}}`), makes it the shared default for new windows (`workspace/active`) and selects
+the tab. Each window marks the layout it shows itself (`current_when` rows), since this content is
+shared. Showing/hiding the sidebar applies to every layout, so switching keeps it.
 
 What to show is a preference in `doc/settings/sidebar` (`show`: workspaces, worktrees, terminals,
 stray). The sidebar's pinned toolbar is one line so it fits a narrow sidebar: a `Show: <preset> ▾` chip
@@ -202,24 +204,24 @@ def active_layout_name():
 
 
 def tab_rows(name):
-    """One row per tab of layout `name`; the shown tab of the active layout is marked."""
+    """One row per tab of layout `name`; the layout's selected tab is marked (●)."""
     root = ext.value(f"layout/{name}")
     found = first_tabs_path(root) if isinstance(root, dict) else None
     if not found:
         return []
     path, tabs = found
-    current = active_layout_name() == name
     rows = []
     for i, tab in enumerate(tabs.get("tabs", [])):
-        shown = current and i == tabs.get("active", 0)
+        selected = i == tabs.get("active", 0)
         rows.append({"id": f"tab:{name}:{i}", "text": tab.get("title") or f"tab {i+1}",
-                     "style": "accent" if shown else None, "icon": "●" if shown else "○", "icon_style": "accent" if shown else "dim",
+                     "icon": "●" if selected else "○", "icon_style": "accent" if selected else "dim",
                      "command": "sidebar.tab", "args": {"layout": name, "path": path, "tab": i}})
     return rows
 
 
-def current_badge(name):
-    return [{"text": "current", "style": "accent"}] if name and name == active_layout_name() else []
+def current_when(name):
+    """Each window marks the workspace it shows itself (`current_when`): the content is shared."""
+    return {"current_when": {"layout": name}} if name else {}
 
 
 def layout_rows(claimed):
@@ -229,8 +231,7 @@ def layout_rows(claimed):
     for name in names:
         settings = ext.value(f"doc/layout/{name}") or {}
         rows.append({"id": f"layout:{name}", "text": settings.get("title") or name, "expanded": True,
-                     "icon": ICON["folder"], "icon_style": "accent" if name == active_layout_name() else "muted",
-                     "badges": current_badge(name), "children": tab_rows(name),
+                     "icon": ICON["folder"], "icon_style": "muted", **current_when(name), "children": tab_rows(name),
                      "command": "sidebar.layout", "args": {"layout": name}})
     return rows
 
@@ -277,7 +278,7 @@ def build():
                     kids.append({
                         "id": f"wt:{t['path']}", "text": os.path.basename(t["path"].rstrip("/")), "expanded": True,
                         "icon": ICON["worktree"], "icon_style": "warn" if t.get("dirty") else "accent",
-                        "badges": current_badge(t.get("layout")) + git_badges(t) + rollup(tt),
+                        "badges": git_badges(t) + rollup(tt), **current_when(t.get("layout")),
                         "children": (tab_rows(t["layout"]) if t.get("layout") else []) + tt,
                         "command": "workspaces.open", "args": {"path": t["path"]},
                         "menu": [{"label": "Switch to its tabs", "command": "workspaces.open", "args": {"path": t["path"]}},
@@ -294,7 +295,7 @@ def build():
                 "icon": ICON["repo" if w.get("git") else "folder"],
                 "icon_style": "error" if w.get("missing") else ("warn" if w.get("dirty") else "accent") if w.get("git") else "muted",
                 "style": "error" if w.get("missing") else "bold",
-                "badges": current_badge(w.get("layout")) + ([{"text": "missing", "style": "error"}] if w.get("missing") else git_badges(w)) + rollup(kids),
+                "badges": ([{"text": "missing", "style": "error"}] if w.get("missing") else git_badges(w)) + rollup(kids), **current_when(w.get("layout")),
                 "children": (tab_rows(w["layout"]) if w.get("layout") else []) + kids,
                 "command": "workspaces.open", "args": {"path": w["path"]}, "menu": menu,
             })
@@ -466,7 +467,7 @@ def toggle(args):
     def attempt():
         # Recomputed from the reloaded cache on each try: a compare-and-set conflict with a concurrent
         # layout write is normal and must not surface to the user as an error.
-        lay = ext.active_layout()
+        lay = ext.context_layout(args)  # what the invoking window shows decides show or hide
         if lay is None:
             raise VqroError("no active layout yet", "invalid")
         want = not has_sidebar(lay[2])
@@ -483,7 +484,9 @@ def toggle(args):
 
 
 def select_ops(layout, path=None, tab=None):
-    """Make `layout` active and, given a tabs path and index, show that tab. Only changed entries."""
+    """Make `layout` the shared default (the last one switched to; new windows open there) and, given a
+    tabs path and index, select that tab. Only changed entries. The invoking window itself is told to
+    show `layout` by the reply (`switch`)."""
     key = f"layout/{layout}"
     root = copy.deepcopy(ext.value(key))  # the cache's own value is never mutated
     if root is None:
@@ -505,7 +508,8 @@ def switch(note, *target):
     def attempt():
         ops = select_ops(*target)
         return ext.apply(ops, note) if ops else {}
-    return ext.retrying(attempt, attempts=8)
+    result = ext.retrying(attempt, attempts=8)
+    return dict(result or {}, client={"layout": target[0]})
 
 
 @ext.command("sidebar.layout", "Switch to a layout (args: layout)")
@@ -521,7 +525,7 @@ def tab_cmd(args):
     tabs = found[1].get("tabs", []) if found else []
     tab = args.get("tab")
     views = views_in(tabs[tab]["node"]) if isinstance(tab, int) and 0 <= tab < len(tabs) else []
-    return dict(result or {}, client={"focus": {"view": views[0]}}) if views else result
+    return dict(result, client=dict(result["client"], focus={"view": views[0]})) if views else result
 
 
 @ext.command("sidebar.view", "Choose what the sidebar shows (opens a popup)")

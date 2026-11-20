@@ -6,8 +6,10 @@ Owns the list (`doc/workspaces/list`) and the git facts. It publishes them as li
 read on changes and on a slow timer, never continuously.
 
 Each workspace (and each worktree) has its own tabs: its own layout, `layout/ws-<id>`, where `<id>` comes
-from the folder's real path, so the same folder always finds the same layout. Opening a workspace makes its
-layout the active one (`workspace/active`), creating it with one shell in the folder the first time. The
+from the folder's real path, so the same folder always finds the same layout. Opening a workspace shows its
+layout in the window you opened it from (the reply's `{"client": {"layout"}}`; other windows keep theirs)
+and makes it the shared default where new windows open (`workspace/active`), creating it with one shell in
+the folder the first time. The
 layout's settings (`doc/layout/<name>` = {cwd, title}) say which folder it starts in; tabs, panes and the
 Pi launcher read that, never this extension. Terminals not in any workspace stay in the `main` layout.
 Removing a workspace removes its layout, never its terminals: they keep running and stay reachable from
@@ -30,12 +32,15 @@ LIST = "doc/workspaces/list"
 MAIN = "main"
 REFRESH_SECS = 20
 lock = threading.Lock()
-last_status = [None]
 last_data = [[]]  # what scan() last published (this extension doesn't receive its own live data)
 
 
 def git(path, *args):
-    r = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, timeout=10)
+    """git's output, or None when it fails or git isn't installed (folders are then plain folders)."""
+    try:
+        r = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
     return r.stdout if r.returncode == 0 else None
 
 
@@ -106,28 +111,10 @@ def scan():
         ext.publish("workspaces", {"data": data, "at": time.time()})
 
 
-def status_segment():
-    """The status bar names the current workspace; clicking it opens the switcher."""
-    active = (ext.value("workspace/active") or {}).get("layout")
-    settings = ext.layout_settings(active) if active else {}
-    label = settings.get("title") or active or ""
-    return {"label": label, "icon": {"name": "folder", "text": "▫"}, "style": "muted"} if label else {"label": ""}
-
-
-def publish_status():
-    seg = status_segment()
-    if seg != last_status[0]:
-        ext.publish("workspaces.current", seg)
-        last_status[0] = seg
-
-
 @ext.on_event
 def on_event(t, d):
     if t == "missed" or t == "entries" and any(c["key"] == LIST for c in d["changes"]):
         threading.Thread(target=scan, daemon=True).start()
-    if t == "missed" or t == "entries" and any(c["key"] == "workspace/active" or c["key"].startswith("doc/layout/")
-                                                for c in d["changes"]):
-        publish_status()
 
 
 def save(items, note, extra=()):
@@ -137,9 +124,16 @@ def save(items, note, extra=()):
 # -- layouts --------------------------------------------------------------------------------------
 
 def select(name):
-    """Ops that make `name` the active layout. The one place a workspace is chosen: a per-window active
-    workspace would replace this shared write with a reply asking the invoking client to show `name`."""
+    """Ops that make `name` the shared default: the workspace last switched to, where new windows open
+    (and what clients without per-window workspaces show). Only if it isn't already."""
+    if (ext.value("workspace/active") or {}).get("layout") == name:
+        return []
     return [{"op": "set", "key": "workspace/active", "value": {"layout": name}, "expect": ext.version("workspace/active")}]
+
+
+def shown_in_window(result, name):
+    """Ask the invoking window to show layout `name` (other windows keep theirs)."""
+    return dict(result or {}, client=dict((result or {}).get("client") or {}, layout=name))
 
 
 def has_tabs(node):
@@ -176,10 +170,10 @@ def frame(node, tabs):
     return out
 
 
-def create(name, cwd, label, resource):
+def create(name, cwd, label, resource, args=None):
     """Ops for a new layout `name` with one tab showing `resource`, started in `cwd`, and selected."""
     view = f"term-{resource['id']}"
-    active = ext.active_layout()
+    active = ext.context_layout(args)  # the invoking window's layout lends its panels (the sidebar)
     tabs = {"tabs": [{"title": title(resource, {}), "node": {"view": view}}], "active": 0}
     ops = [] if ext.value(f"view/{view}") else [{"op": "set", "key": f"view/{view}", "value": {"kind": "terminal", "resource": resource["id"]}}]
     ops += [{"op": "set", "key": f"layout/{name}", "value": frame(active[2] if active else None, tabs), "expect": 0}]
@@ -211,8 +205,9 @@ def walk(node):
         yield from walk(t["node"])
 
 
-def open_layout(name, cwd, label):
-    """Make layout `name` active, creating it with one shell (in `cwd`) if missing. Returns (result, created).
+def open_layout(name, cwd, label, args=None):
+    """Show layout `name` in the invoking window and make it the shared default, creating it with one shell
+    (in `cwd`) if missing. Returns (result, created).
 
     The shell is spawned at most once; only the layout write is retried (compare-and-set), recomputed
     from fresh state, never a second spawn."""
@@ -220,17 +215,16 @@ def open_layout(name, cwd, label):
         def switch():
             if ext.value(f"layout/{name}") is None:
                 raise VqroError("that workspace's layout was removed meanwhile", "conflict")
-            if (ext.value("workspace/active") or {}).get("layout") == name:
-                return {}
-            return ext.apply(select(name), f"workspaces: switch to {label}")
-        return ext.retrying(switch, attempts=8), False
+            ops = select(name)
+            return ext.apply(ops, f"workspaces: switch to {label}") if ops else {}
+        return shown_in_window(ext.retrying(switch, attempts=8), name), False
     resource = ext.vqro.call("resource.spawn", {"cwd": cwd} if cwd else {})["resource"]
 
     def attempt():
         if ext.value(f"layout/{name}") is None:
-            return ext.apply(create(name, cwd, label, resource), f"workspaces: open {label}")
+            return ext.apply(create(name, cwd, label, resource, args), f"workspaces: open {label}")
         return ext.apply(add_tab(name, resource), f"workspaces: open {label}")
-    return ext.retrying(attempt, attempts=8), True
+    return shown_in_window(ext.retrying(attempt, attempts=8), name), True
 
 
 # -- commands -------------------------------------------------------------------------------------
@@ -291,7 +285,7 @@ def open_workspace(args):
     path = norm(args.get("path") or "")
     if not os.path.isdir(path):
         raise VqroError(f"not a folder: {path}", "invalid")
-    result, _ = open_layout(layout_name(path), path, folder_title(path))
+    result, _ = open_layout(layout_name(path), path, folder_title(path), args)
     return result
 
 
@@ -300,25 +294,26 @@ def shell(args):
     path = norm(args.get("path") or "")
     if not os.path.isdir(path):
         raise VqroError(f"not a folder: {path}", "invalid")
-    result, created = open_layout(layout_name(path), path, folder_title(path))
-    return result if created else ext.invoke("tabs.open", {"cwd": path})
+    name = layout_name(path)
+    result, created = open_layout(name, path, folder_title(path), args)
+    # The new tab goes to that workspace, wherever the command came from.
+    return result if created else shown_in_window(ext.invoke("tabs.open", {"cwd": path, "context": {"layout": name}}), name)
 
 
 @ext.command("workspaces.main", "Switch to the main tabs (terminals not in a workspace)")
 def main_layout(args):
-    result, _ = open_layout(MAIN, None, None)
+    result, _ = open_layout(MAIN, None, None, args)
     return result
 
 
 def switcher():
-    """The `workspaces.switch` popup: main, then every workspace and worktree; the current one marked."""
-    active = (ext.value("workspace/active") or {}).get("layout")
+    """The `workspaces.switch` popup: main, then every workspace and worktree. Each window marks the one it
+    shows itself (`current_when`): this content is shared."""
     data = last_data[0]
 
     def row(text, command, name, args=None, depth=0):
-        here = name == active
         out = {"id": f"switch:{name}", "text": ("  " * depth) + text, "command": command, "args": args or {},
-               "style": "accent" if here else None, "badges": [{"text": "current", "style": "accent"}] if here else []}
+               "current_when": {"layout": name}}
         if ext.value(f"layout/{name}") is None:
             out["detail"] = "new"
         return out
@@ -329,7 +324,7 @@ def switcher():
             items.append(row(os.path.basename(t["path"].rstrip("/")), "workspaces.open", t["layout"], {"path": t["path"]}, 1))
     items.append({"type": "separator"})
     items.append({"text": "Add workspace…", "command": "workspaces.add", "input": "Folder path"})
-    return {"title": "Switch workspace", "requires": ["badges"], "items": items}
+    return {"title": "Switch workspace", "items": items}
 
 
 @ext.command("workspaces.switch", "Choose a workspace to switch to (opens a popup)")
@@ -372,9 +367,10 @@ ext.contribute({
     "view/workspaces.switch": {"kind": "panel", "title": "Switch workspace", "items": [{"type": "text", "text": "no content: the workspaces extension is stopped"}]},
     "binding/workspaces.switch": {"key": "w", "command": "workspaces.switch", "label": "switch workspace"},
     "menu/workspaces.switch": {"where": "tabbar", "label": "Switch workspace…", "command": "workspaces.switch", "order": 40},
-    "menu/workspaces.current": {"where": "status", "label": "", "view": "workspaces.current", "command": "workspaces.switch", "order": 1},
+    # Each window names the workspace it shows (its layout's title), from its own context.
+    "menu/workspaces.current": {"where": "status", "label": "", "label_context": "layout_title",
+                                "icon": {"name": "folder", "text": "▫"}, "command": "workspaces.switch", "order": 1},
 })
 scan()
-publish_status()
 threading.Thread(target=timer, daemon=True).start()
 ext.run()

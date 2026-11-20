@@ -31,6 +31,8 @@ class Core:
     active_layout = vqro_ext.Extension.active_layout
     layout_settings = vqro_ext.Extension.layout_settings
     layout_folder = vqro_ext.Extension.layout_folder
+    invocation_layout = vqro_ext.Extension.invocation_layout
+    context_layout = vqro_ext.Extension.context_layout
 
     def apply(self, ops, note):
         candidate = copy.deepcopy(self.entries)
@@ -162,17 +164,25 @@ class WorkspaceTabs(unittest.TestCase):
         # The layout name is stable for the folder, however it is written.
         self.assertEqual(self.ws["layout_name"](self.a + "/"), la)
 
-    def test_shell_adds_a_tab_main_switches_back_and_status_names_the_workspace(self):
-        self.core.handlers["workspaces.shell"]({"path": self.a})  # creates: one shell, not two
+    def test_shell_adds_a_tab_main_switches_back_and_replies_name_the_window_layout(self):
+        reply = self.core.handlers["workspaces.shell"]({"path": self.a})  # creates: one shell, not two
         la = self.ws["layout_name"](self.a)
+        self.assertEqual(reply["client"]["layout"], la)
         self.assertEqual(len(tab_titles(self.core, la)), 1)
-        self.core.handlers["workspaces.shell"]({"path": self.a})
+        # Asked from a window showing main, the new tab still goes to the workspace.
+        reply = self.core.handlers["workspaces.shell"]({"path": self.a, "context": {"layout": "main"}})
+        self.assertEqual(reply["client"]["layout"], la)
         self.assertEqual(len(tab_titles(self.core, la)), 2)
-        self.ws["publish_status"]()
-        self.assertEqual(self.core.live["workspaces.current"]["label"], "alpha")
-        self.core.handlers["workspaces.main"]({})
+        self.assertEqual(tab_titles(self.core, "main"), ["r0"])
+        self.assertEqual(self.core.handlers["workspaces.main"]({})["client"]["layout"], "main")
         self.assertEqual(active(self.core), "main")
         self.assertEqual(len(self.spawns()), 2)
+        # Switching to the workspace already shared still tells this window to show it.
+        self.assertEqual(self.core.handlers["workspaces.main"]({"context": {"layout": la}})["client"]["layout"], "main")
+        # The status bar names each window's own workspace from its context, not shared live content.
+        status = self.core.value("menu/workspaces.current")
+        self.assertEqual((status["label_context"], status["label"]), ("layout_title", ""))
+        self.assertNotIn("workspaces.current", self.core.live)
 
     def test_closing_a_workspace_last_tab_or_only_pane_opens_the_new_shell_in_its_folder(self):
         self.core.handlers["workspaces.open"]({"path": self.a})
@@ -216,15 +226,18 @@ class WorkspaceTabs(unittest.TestCase):
         layouts = {r["args"]["layout"]: r for r in rows if r.get("id", "").startswith("layout:")}
         self.assertEqual(set(layouts), {"main", la})
         self.assertEqual(layouts[la]["text"], "alpha")
-        self.assertEqual(layouts[la]["badges"], [{"text": "current", "style": "accent"}])
+        # Shared content: each window marks the layout it shows itself.
+        self.assertEqual(layouts[la]["current_when"], {"layout": la})
+        self.assertNotIn("badges", layouts[la])
         tabs = layouts[la]["children"]
-        self.assertEqual(len(tabs), 2); self.assertEqual(tabs[1]["style"], "accent")
+        self.assertEqual([t["icon"] for t in tabs], ["○", "●"])
         # Click main's tab: main becomes active, that tab shown.
         main_tab = layouts["main"]["children"][0]
-        self.core.handlers[main_tab["command"]](main_tab["args"])
+        self.assertEqual(self.core.handlers[main_tab["command"]](main_tab["args"])["client"]["layout"], "main")
         self.assertEqual(active(self.core), "main")
-        focus = self.core.handlers["sidebar.tab"](dict(tabs[0]["args"]))["client"]["focus"]["view"]
-        self.assertEqual(active(self.core), la)
+        client = self.core.handlers["sidebar.tab"](dict(tabs[0]["args"]))["client"]
+        focus = client["focus"]["view"]
+        self.assertEqual((active(self.core), client["layout"]), (la, la))
         self.assertEqual(focus, vqro_ext.views_in(next(n for n in walk(self.core.value(f"layout/{la}")) if "tabs" in n)["tabs"][0]["node"])[0])
         self.assertEqual(next(n for n in walk(self.core.value(f"layout/{la}")) if "tabs" in n)["active"], 0)
         # With workspace data: the workspace row holds its tabs; only main stays under Layouts.
@@ -233,6 +246,23 @@ class WorkspaceTabs(unittest.TestCase):
         ws = next(r for r in rows if r.get("id") == "ws:"+self.a)
         self.assertEqual([r["id"] for r in ws["children"][:2]], [f"tab:{la}:0", f"tab:{la}:1"])
         self.assertEqual([r["args"]["layout"] for r in rows if r.get("id", "").startswith("layout:")], ["main"])
+
+    def test_commands_act_on_the_invoking_window_layout(self):
+        self.core.handlers["workspaces.open"]({"path": self.a})
+        la = self.ws["layout_name"](self.a)
+        # The shared default is la; a window showing main opens a tab in main, in main's (no) folder.
+        self.core.handlers["tabs.open"]({"context": {"layout": "main"}})
+        self.assertEqual(len(tab_titles(self.core, "main")), 2)
+        self.assertEqual(len(tab_titles(self.core, la)), 1)
+        self.assertEqual(self.spawns()[-1], {})
+        # A window showing la toggles by la: the sidebar there is shown, so hide it everywhere.
+        has = self.mods["sidebar"]["has_sidebar"]
+        self.core.handlers["sidebar.toggle"]({"context": {"layout": la}})
+        self.assertFalse(has(self.core.value(f"layout/{la}")))
+        # A new workspace opened from the window showing main frames itself on main's panels.
+        self.core.handlers["sidebar.toggle"]({"context": {"layout": "main"}})
+        self.core.handlers["workspaces.open"]({"path": self.b, "context": {"layout": "main"}})
+        self.assertTrue(has(self.core.value(f"layout/{self.ws['layout_name'](self.b)}")))
 
     def test_sidebar_toggle_applies_to_every_layout(self):
         self.core.handlers["workspaces.open"]({"path": self.a})

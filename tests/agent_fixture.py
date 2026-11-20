@@ -24,6 +24,8 @@ class FakeCore:
     # The real cache readers: they use only value().
     layout_settings = Extension.layout_settings
     layout_folder = Extension.layout_folder
+    invocation_layout = Extension.invocation_layout
+    context_layout = Extension.context_layout
 
     def version(self, key):
         return self.entries.get(key, {}).get("version", 0)

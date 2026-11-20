@@ -24,15 +24,15 @@ def focus_view(node, view):
     return any(focus_view(child, view) for child in node.get("children", []))
 
 
-def show(view, title, view_value=None):
-    """Activate the tab showing `view`, or add one."""
+def show(view, title, view_value=None, args=None):
+    """Activate the tab showing `view`, or add one, in the invoking window's layout (`args.context`)."""
     def attempt():
         ops = []
         if view_value is not None and ext.value(f"view/{view}") != view_value:
             ops.append({"op": "set", "key": f"view/{view}", "value": view_value, "expect": ext.version(f"view/{view}")})
         tab = {"title": title, "node": {"view": view}}
         mark_ended({"tabs": [tab]})
-        lay = ext.active_layout()
+        lay = ext.context_layout(args)  # the invoking window's layout (or the shared one)
         if lay is None:
             ops += [
                 {"op": "set", "key": "layout/main", "value": {"tabs": [tab], "active": 0}, "expect": ext.version("layout/main")},
@@ -66,7 +66,7 @@ def open_tab(args):
     if "cwd" not in spawn and ext.layout_folder(args):
         spawn["cwd"] = ext.layout_folder(args)
     r = ext.vqro.call("resource.spawn", spawn)["resource"]
-    return show(f"term-{r['id']}", title_of(r), {"kind": "terminal", "resource": r["id"]})
+    return show(f"term-{r['id']}", title_of(r), {"kind": "terminal", "resource": r["id"]}, args)
 
 
 @ext.command("tabs.show", "Show a resource (args: resource, or picked) or view (args: view, title) in a tab")
@@ -78,12 +78,12 @@ def show_cmd(args):
         if resource is None:
             return result
         rid = resource["id"]
-        return show(f"term-{rid}", title_of(resource), {"kind": "terminal", "resource": rid})
+        return show(f"term-{rid}", title_of(resource), {"kind": "terminal", "resource": rid}, args)
     if "view" in args:
         value = ext.value("view/" + args["view"]) or {}
         if value.get("kind") == "terminal":
             return show_cmd({"resource": value["resource"]})
-        return show(args["view"], args.get("title") or args["view"])
+        return show(args["view"], args.get("title") or args["view"], None, args)
     raise VqroError("needs `resource` or `view`", "invalid")
 
 
