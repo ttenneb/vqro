@@ -529,6 +529,18 @@ and old layouts may show gone resources until explicitly repaired/reset. No iden
 | `stream.resize` | `stream`, `cols`, `rows` | |
 | `stream.close` | `stream` | |
 
+Terminal resource rows expose optional **`principal`**: a core-recorded launcher assignment, not the child's
+current identity or an authority/authentication proof. On an observed `resource.spawn`, core captures the valid
+final `VQRO_PRINCIPAL` tag sent to that exact returned native identity. An explicit launcher tag is preserved;
+otherwise a known ordinary spawner is inherited, while reserved extension/host/system defaults become
+`undeclared` (user shells must not inherit a reserved assertion). Provider/OSC/child `principal` reports and
+opaque `data.principal` never populate or overwrite this core field. A sync arriving before the spawn receipt
+can establish the resource first; only that exact identity is filled. Known assignments survive fact refresh
+and are not rewritten by duplicate spawn receipts. A new incarnation, unobserved/pre-existing resource,
+unsupported environment, invalid tag, or core rehydration without recorded assignment has `principal:null`:
+no inferred backfill or new persistence/delivery promise. The bound is the normal principal string bound;
+`undeclared` is the explicit no-identity tag. This field is public in spawn/list/snapshot/resource events.
+
 `resource.list` optionally filters by exact `provider`, `backend_ref`, vqro `id` and/or hosting-terminal `host`
 (AND), before serializing records.
 Absent filters retain the complete list. Malformed filter types are `invalid`; a nonmatching filter returns an

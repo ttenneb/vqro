@@ -880,7 +880,7 @@ async fn spawn(core: &Shared, author: &Caller, s: Spawn, attribution:Attribution
     let reservation = if s.bridge { Some(crate::provider_wire::BridgeReservation::new(core)?) } else { None };
     let mut env = s.env;
     if route.handle.capabilities["terminal.spawn"]["env"]!=false && !env.contains_key("VQRO_PRINCIPAL") {
-        env.insert("VQRO_PRINCIPAL".into(),attribution.effective().unwrap_or(principal::UNDECLARED).into());
+        env.insert("VQRO_PRINCIPAL".into(),attribution.effective().filter(|id|principal::validate_assertable(id).is_ok()).unwrap_or(principal::UNDECLARED).into());
     }
     // Every terminal can reach vqro (`vqro call` from any pane): its opaque endpoint (D22), unless the
     // provider cannot pass an environment at all. The bridge credential stays opt-in.
@@ -896,13 +896,14 @@ async fn spawn(core: &Shared, author: &Caller, s: Spawn, attribution:Attribution
     for dimension in [s.cols, s.rows].into_iter().flatten() {
         if !(1..=9999).contains(&dimension) { return Err(provider::rejected("invalid", "spawn dimensions must be between 1 and 9999")); }
     }
+    let launcher_principal=env.get("VQRO_PRINCIPAL").filter(|id|id.as_str()==principal::UNDECLARED || principal::validate(id).is_ok()).cloned();
     let (c, operation) = (core.clone(), route.clone());
     let (effect, id) = effect(core, author.into(), attribution, route, "resource.spawn", json!({"op":"terminal.spawn"}), deadline, |_| "observed", move |context| async move {
         let facts = operation.handle.for_effect(context).spawn(SpawnRequest { argv, cwd: s.cwd, name: s.name, env, cols: s.cols, rows: s.rows, placement: s.placement }).await.map_err(|e| e.rpc())?;
         let id = {
             let mut c = c.lock().unwrap();
             if !operation.valid() { return Err(provider::indeterminate("provider changed before spawn result was recorded")); }
-            c.record_spawn(&operation.handle.name, facts)?
+            c.record_spawn(&operation.handle.name, facts,launcher_principal)?
         };
         if let Some(reservation) = reservation { reservation.bind(&id)?; }
         Ok(id)

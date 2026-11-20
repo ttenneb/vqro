@@ -27,6 +27,8 @@ pub struct Resource {
     pub instance: String,
     pub available: bool,
     pub host: Option<String>,
+    /// Core-recorded launch assignment, never provider/child facts. Unknown across rehydration.
+    pub principal: Option<String>,
     life: watch::Sender<bool>,
     pub facts: Arc<ResourceFacts>,
 }
@@ -37,10 +39,10 @@ impl Resource {
 impl serde::Serialize for Resource {
     fn serialize<S:serde::Serializer>(&self,serializer:S)->Result<S::Ok,S::Error> {
         #[derive(serde::Serialize)] struct Wire<'a> {
-            id:&'a str,provider:&'a str,adapter:&'a str,instance:&'a str,available:bool,stale:bool,host:&'a Option<String>,
+            id:&'a str,provider:&'a str,adapter:&'a str,instance:&'a str,available:bool,stale:bool,host:&'a Option<String>,principal:&'a Option<String>,
             #[serde(flatten)] facts:&'a ResourceFacts,
         }
-        serde::Serialize::serialize(&Wire {id:&self.id,provider:&self.adapter,adapter:&self.adapter,instance:&self.instance,available:self.available,stale:!self.available,host:&self.host,facts:&self.facts},serializer)
+        serde::Serialize::serialize(&Wire {id:&self.id,provider:&self.adapter,adapter:&self.adapter,instance:&self.instance,available:self.available,stale:!self.available,host:&self.host,principal:&self.principal,facts:&self.facts},serializer)
     }
 }
 
@@ -564,13 +566,20 @@ impl Core {
 
     /// A spawn reply describes creation, not a new observation after every concurrent event.
     /// Reuse an already-published identity without rolling its newer facts back to that snapshot.
-    pub(crate) fn record_spawn(&mut self,name:&str,facts:ResourceFacts)->Result<String,RpcError>{
-        if let Some(info)=self.providers.get(name).filter(|p|facts.valid()&&p.health.borrow().connected).and_then(|p|p.info.as_ref()) {
-            if let Some(id)=self.identities.lookup(&provider::identity(name,&info.instance,&facts)) {
-                if self.resources.contains_key(id) {return Ok(id.to_string());}
+    pub(crate) fn record_spawn(&mut self,name:&str,facts:ResourceFacts,principal:Option<String>)->Result<String,RpcError>{
+        let terminal=facts.kind=="terminal";
+        let existing=self.providers.get(name).filter(|p|facts.valid()&&p.health.borrow().connected).and_then(|p|p.info.as_ref())
+            .and_then(|info|self.identities.lookup(&provider::identity(name,&info.instance,&facts)))
+            .filter(|id|self.resources.contains_key(*id)).map(String::from);
+        let id=match existing{Some(id)=>id,None=>self.upsert_resource(name,facts)?};
+        // A sync can arrive before its spawn receipt. Fill only the exact returned identity, never
+        // a nearby/new incarnation, and never rewrite an already known launcher assignment.
+        if terminal && principal.is_some(){
+            if let Some(resource)=self.resources.get_mut(&id).filter(|resource|resource.principal.is_none()){
+                resource.principal=principal;let event=resource.to_json();self.emit("resource",event);
             }
         }
-        self.upsert_resource(name,facts)
+        Ok(id)
     }
     pub fn upsert_resource(&mut self,name:&str,facts:ResourceFacts)->Result<String,RpcError>{
         self.upsert_resources(name,vec![facts],false).map(|mut ids|ids.remove(0))
@@ -631,7 +640,8 @@ impl Core {
             self.admission.resource(id,name,&facts.backend_ref,bytes);
             if self.resources.get(id).is_none_or(|r|r.facts.as_ref()!=&facts||!r.available){
                 let life=self.resources.get(id).map(|r|r.life.clone()).unwrap_or_else(||watch::channel(true).0);let available=*life.borrow();if !available{life.send_replace(true);}
-                let resource=Resource{id:id.clone(),adapter:name.into(),instance:instance.clone(),available:true,host,life,facts:Arc::new(facts)};self.emit("resource",resource.to_json());self.resources.insert(id.clone(),resource);
+                let principal=self.resources.get(id).and_then(|resource|resource.principal.clone());
+                let resource=Resource{id:id.clone(),adapter:name.into(),instance:instance.clone(),available:true,host,principal,life,facts:Arc::new(facts)};self.emit("resource",resource.to_json());self.resources.insert(id.clone(),resource);
             }
         }
         if newly_synced{self.provider_event(name);}
