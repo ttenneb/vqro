@@ -77,6 +77,8 @@ class Bridge:
         self._publish_lock = asyncio.Lock()
         self._publish_now = asyncio.Event()
         self._control_task = None
+        self._publishing = None
+        self.retirement_problem = None  # why resource.gone could not be delivered, if it could not
         self.fallback = fallback or Fallback()
         self.interval, self.pi_limits = interval, pi_limits
         self.transcript = Transcript(transcript_bytes)
@@ -387,7 +389,9 @@ class Bridge:
             if provider is self.provider and self.connected:
                 try:
                     current = self.facts()
-                    if not final and current != self._facts:
+                    # Once closing, facts are never upserted again: that could re-create the agent
+                    # after its resource.gone.
+                    if not final and not self.closing and current != self._facts:
                         await provider.upsert(current)
                         if provider is self.provider:
                             self._facts = current
@@ -426,6 +430,28 @@ class Bridge:
                     task.cancel()
                 await asyncio.gather(changed,immediate,return_exceptions=True)
 
+    async def _retire(self, why):
+        """Send resource.gone for the agent; retry once, then report rather than swallow a loss.
+
+        Retirement is idempotent (it names an identity, it is not runtime input), so one retry
+        after a timeout is safe. A loss leaves the agent cached as unavailable in vqro, so it is
+        made visible on the fallback screen and returned to the caller."""
+        if self.provider.generation is None:
+            return None
+        problem = None
+        for _ in range(2):
+            if not self.connected or self.provider.failure is not None:
+                problem = "provider disconnected: " + str(self.provider.failure or self.failure or "not connected")
+                break
+            try:
+                await asyncio.wait_for(self.provider.gone("agent", why=why), 1)
+                return None
+            except (TimeoutError, ProviderError) as error:
+                problem = str(error) or type(error).__name__
+        self.retirement_problem = tail(plain("agent retirement (resource.gone) not delivered: " + problem), 1024)
+        self.failure = self.retirement_problem if not self.failure else self.failure + "; " + self.retirement_problem
+        return self.retirement_problem
+
     async def run(self, stop=None):
         stop = stop or asyncio.Event()
         why = {"reason": "closed"}
@@ -442,7 +468,7 @@ class Bridge:
                     raise ProviderError("backend", "Pi did not accept startup metadata request")
                 self._task(self._read_config())  # registration never waits for model lists
                 self._control_task = self._task(self._control())
-                publishing = self._task(self._publish_loop())
+                publishing = self._publishing = self._task(self._publish_loop())
                 done, _ = await asyncio.wait({publishing, self._control_task, ended, stopping}, return_when=asyncio.FIRST_COMPLETED)
                 if publishing in done:
                     await publishing
@@ -462,20 +488,21 @@ class Bridge:
             raise
         finally:
             self.closing = True
-            finishing = [task for task in self._tasks if task is not self._control_task]
+            # The publisher may be mid-write; it keeps running until the agent is retired, so
+            # the retirement is never queued behind (or lost to) a cancelled publication.
+            finishing = [task for task in self._tasks if task not in (self._control_task, self._publishing)]
             for task in finishing:
                 task.cancel()
             await asyncio.gather(*finishing, return_exceptions=True)
             if self.pi is not None:
                 await self.pi.close(grace=.5)
-                if self.view is not None and self.connected:
-                    try:
-                        await asyncio.wait_for(self.publish(final=True), 1.5)
-                    except (TimeoutError, ProviderError):
-                        pass
-            if self.provider.generation is not None and self.connected:
+            await self._retire(why)
+            if self._publishing is not None:
+                self._publishing.cancel()
+                await asyncio.gather(self._publishing, return_exceptions=True)
+            if self.pi is not None and self.view is not None and self.connected:
                 try:
-                    await asyncio.wait_for(self.provider.gone("agent", why=why), 1)
+                    await asyncio.wait_for(self.publish(final=True), 1.5)
                 except (TimeoutError, ProviderError):
                     pass
             if self._control_task is not None:

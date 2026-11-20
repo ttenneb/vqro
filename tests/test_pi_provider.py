@@ -462,6 +462,54 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.core.notes("resource.gone")[0]["params"]["reason"]["exit_code"], 23)
         self.assertFalse(self.core.resources)
 
+    async def test_pi_exit_retires_the_agent_before_cancelling_an_in_flight_publication(self):
+        # The publisher is mid-publication (its view.publish is unanswered) when Pi exits. Cleanup
+        # must send resource.gone first and only then cancel the publisher, so a busy core can never
+        # turn the publisher's cancellation into a lost retirement (C2 gate e2e-agents-ui).
+        bridge = await self.start(interval=10)
+        seen = {}
+        original = self.core.notification
+        def notification(row):
+            if row["method"] == "resource.gone":
+                # The publisher's unanswered view.publish is still pending: it was not cancelled first.
+                seen["publisher_running"] = any(m == "view.publish" for m, _ in bridge.provider._pending.values())
+            original(row)
+        self.core.notification = notification
+        self.core.hold.add("view.publish")
+        held = len(self.core.notes("view.publish"))
+        await self.effect("prompt", {"message": "start"})
+        await self.core.wait(lambda: len(self.core.notes("view.publish")) > held)
+        bridge.pi.process.kill()
+        ended = await asyncio.wait_for(self.task, 3)
+        self.assertEqual(ended["reason"], "exited")
+        await self.core.wait(lambda: bool(self.core.notes("resource.gone")))
+        self.assertEqual(seen, {"publisher_running": True})
+        self.assertFalse(self.core.resources)
+        self.assertIsNone(bridge.retirement_problem)
+
+    async def test_undeliverable_retirement_is_retried_once_then_reported(self):
+        class Stub:
+            def __init__(self, failures):
+                self.generation, self.failure, self.calls, self.failures = 7, None, 0, failures
+            async def gone(self, ref, why=None):
+                self.calls += 1
+                if self.calls <= self.failures:
+                    raise ProviderError("timeout", "answer deadline; delivery unknown")
+        for failures, calls, reported in ((1, 2, False), (2, 2, True)):
+            bridge = mock.Mock(provider=Stub(failures), connected=True, failure=None, retirement_problem=None)
+            problem = await Bridge._retire(bridge, {"reason": "exited", "exit_code": 23})
+            self.assertEqual(bridge.provider.calls, calls)
+            self.assertEqual(problem is not None, reported)
+            if reported:
+                self.assertIn("not delivered", bridge.failure)
+                self.assertEqual(bridge.retirement_problem, problem)
+        # A disconnected provider is reported at once, without pretending to send.
+        bridge = mock.Mock(provider=Stub(0), connected=False, failure="provider connection closed", retirement_problem=None)
+        problem = await Bridge._retire(bridge, {"reason": "exited", "exit_code": 23})
+        self.assertEqual(bridge.provider.calls, 0)
+        self.assertIn("provider connection closed", problem)
+        self.assertIn("not delivered", bridge.failure)
+
     async def test_core_disconnect_preserves_pi_when_endpoint_is_unavailable(self):
         bridge = await self.start()
         self.core.writer.close()
