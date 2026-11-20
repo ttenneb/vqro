@@ -679,10 +679,19 @@ def case_request_routing():
     scope('resume')
     wait(lambda: projection() and projection()['human'])
     assert len(delivered) == 1, 'router restart recreated a notice'
+    peer, generation, _ = GEN['request-child']
+    peer.call('provider.sync', {'generation': generation, 'resources': [], 'final': True})
+    wait(lambda: not owner.call('resource.list', {'id': child})['resources'])
+    destination = ROOT / 'absent-notice-archive'; destination.mkdir(mode=0o700)
+    archive = cmd('inbox.archive', {'op': op('absent-freeze'), 'action': 'freeze', 'agents': [parent],
+                   'deliveries': [row['delivery']], 'destination': str(destination)})['archive']
+    cmd('inbox.archive', {'op': op('absent-export'), 'action': 'export', 'archive': archive})
+    freed = cmd('inbox.archive', {'op': op('absent-free'), 'action': 'free', 'archive': archive})
+    assert 'message/' + row['delivery'] in freed['freed'], freed
     return {'exact_coordinator': True, 'source_scope_correlated': True, 'held_is_recorded_not_refused': True,
             'revoked_right_human_fallback': True, 'both_human': True, 'coordinator_waiting_row': True,
             'native_notice_writes': 1, 'automatic_native_answers': 0, 'explicit_raw_recovery_attempts': 1,
-            'restart_recreated_notice': False}
+            'restart_recreated_notice': False, 'absent_source_archive_freed': True}
 
 
 def case_declarations():

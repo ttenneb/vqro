@@ -77,5 +77,10 @@ def notice_open(record, states):
         return False
     if not isinstance(notice, dict) or not isinstance(notice.get('key'), str):
         return True
-    keys = states.get(notice.get('agent'))
+    agent = notice.get('agent')
+    if not isinstance(agent, str):
+        return True
+    if agent not in states:
+        return False  # compact durable fence, not the full notice, protects a possible return
+    keys = states[agent]
     return keys is None or notice['key'] in keys

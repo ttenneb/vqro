@@ -64,6 +64,8 @@ class FakeExtension:
         self.providers = {}
         self.info = {"principal": "extension:fixture-coord", "actor": "extension:fixture-coord"}
         self.epoch = "core-boot"
+        self.snapshot_header = {'epoch': self.epoch, 'seq': 1,
+                                'identity_reservations': {'max_entries': 4096, 'max_entry_bytes': 2048}}
         self.cache_lock = threading.RLock()
         self.vqro = FakeRPC(self, available=available)
         self.handlers = {}

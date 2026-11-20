@@ -514,11 +514,23 @@ record `human`. No name, foreground pane, title or arbitrary answer holder confe
 Autonomous notices act as the actual `extension:coord` principal under only this configured pending-request route,
 not a forged owner or a general send grant. They use normal sender/target/domain quotas and receiver gates; a
 pre-effect refusal gives a visible human fallback. The source request's native epoch/id/revision/scope accompany the
-notice (as data, not an answer). An existing inbox record carries `request_notice:{agent,key}`; its source key is the
-hash of requester/incarnation/native epoch/id/revision/scope. The same source+recipient is not recreated after
-operation-window expiry or restart. While the source remains pending or unknown, this ordinary charged record is
-compacted but protected from final GC/archive-free; only positive obsolete native facts release that protection.
-No second pool, silent evidence eviction, expiry extension or native input replay is introduced. Derived
+notice (as data, not an answer). An inbox record carries `request_notice:{agent,key,source_key,revision}`: `key` is
+SHA256 of canonical JSON `[requester,incarnation,native_epoch,request,revision,scope]`; `source_key` omits revision
+and scope and identifies the native question (`[requester,incarnation,native_epoch,request]`). Admission atomically
+remembers only that identity digest/revision (plus FIFO bookkeeping) in ordinary charged domain rows, at most64
+compact entries per row/128B per entry. FIFO capacity is the core-reported identity-cache `N`; no second pool or
+extra reserve. Oldest entries drop when full, with a durable history-gap flag. Unknown/capacity-changed facts refuse
+automatic notices visibly rather than guessing a bound.
+
+A matching fenced revision is never automatically notified again. After FIFO loss, an unknown history is
+conservatively shown to the human: the router observes a baseline revision and routes only a subsequently observed
+newer revision. Those derived baselines are bounded by N and relearned after restart; losing one can delay a notice,
+never resend it. A new revision for a still-known source routes normally. Existing full notice records also
+suppress duplicates. While a present requester is pending or unavailable/unknown, its ordinary record is compacted
+but protected from final GC/archive-free. **Requester absence releases the full record** under normal GC or explicit
+archive; the compact fence, not indefinite payload pinning, protects a return. Positive answered/obsolete facts also
+release the full-record protection. Claimed/unknown native deliveries keep their existing ordinary evidence rules.
+No age release, inferred per-identity cache eviction, expiry extension or native input replay is introduced. Derived
 `coord-requests-<rN>` live content reports effective human/fallback/delivery state; disconnection clears it, and the
 agents UI conservatively shows human fallback when the projection is missing or does not match current requests.
 
@@ -742,7 +754,7 @@ no separate refusal-recovery margin is needed.
 | gate | 128 B | agents | 25,600 | 25,600 | 25,600 |
 | operation-window result or refusal (compact: state, outcome, receipt stage, error kind, ids) + fingerprint | 256 B | window `W` (1024) | 262,144 | 262,144 | 262,144 |
 | settled index entry (delivery → outcome) | 64 B | 1024 | 65,536 | 65,536 | 65,536 |
-| final record, compact (metadata, attempt and every step outcome, compact result; content dropped) | 1 KiB | 256 retained | 262,144 | 262,144 | 262,144 |
+| final record, compact (metadata, attempt and every step outcome, compact result; content dropped) | 1 KiB | 256 retained (pending-source notices additionally protected) | 262,144 | 262,144 | 262,144 |
 | handover plan | 4 KiB | 16 open | 65,536 | 65,536 | 65,536 |
 | archive manifest (pending archive) | 4 KiB | 4 | 16,384 | 16,384 | 16,384 |
 | future archive metadata funding (frozen/exporting plan; 8 KiB / 2 records after export) | 16 KiB / 4 records | 4 plans | 65,536 | 65,536 | 65,536 |
@@ -756,6 +768,10 @@ beyond which admission is refused `quota`; a 2 MiB domain holds about 6 or 60, a
 1,442 under its 4096-record ceiling. This conservative example includes four frozen plans' future funding and
 normal control headroom; the archive-only share is already inside the 10% reserve. A record count is a ceiling,
 not room for that many maximum payloads.
+Optional request-routing fences are charged at actual encoded bytes inside the same normal B, not added capacity:
+up to core N digest/revision entries (each≤128B plus JSON/slot overhead),64 entries per ordinary row. Subtract their
+actual retained size from the illustrative remaining-message space above; normal quota may refuse before N is full.
+
 Bounds are on the **encoded** size, not raw string limits (an identity of legal strings can encode to 1,989 B). Each
 open record reserves a **compact outcome** per attempt and per recipe step (steps × 1 KiB) at admission, and admission
 is refused `quota` if the reservation doesn't fit. A compact outcome is at most 1 KiB: state, receipt stage, outcome

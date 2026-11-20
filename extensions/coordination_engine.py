@@ -13,7 +13,8 @@ import uuid
 
 from coordination_store import StoreError, encoded
 from coordination_archive import export as export_archive
-from coordination_requests import inspect_route, notice_states, notice_open
+from coordination_requests import inspect_route, notice_states, notice_open, pending_requests, request_key
+from agent_request_routes import request_identity_key
 from coordination_policy import Policy, PolicyError, QuotaLimits, check_admission, bounded_page, FairQueue, record_charge
 
 OPEN = {"recorded", "held", "claimed", "unknown"}
@@ -513,11 +514,66 @@ class Coordinator:
         if not isinstance(source, str):
             return False
         route = self.request_route(source, policy)
-        states = notice_states({source: policy.resources.get(source, {})})
-        return (route["coordinator"] == target and route["fallback_reason"] is None
-                and states.get(source) is not None and notice.get("key") in states[source])
+        resource = policy.resources.get(source, {})
+        questions = pending_requests(resource)
+        return (route["coordinator"] == target and route["fallback_reason"] is None and questions is not None
+                and any(request_key(resource, question) == notice.get('key')
+                        and request_identity_key(resource, question) == notice.get('source_key')
+                        and question['revision'] == notice.get('revision') for question in questions))
 
-    def send(self, args, context, *, request_notice=None):
+    def notice_fences(self, rows=None):
+        rows = self.store.view() if rows is None else rows
+        entries = {}
+        for key, row in rows.items():
+            if not key.startswith('notice-fences/'):
+                continue
+            for slot, value in row['value'].items():
+                if (not slot.isdecimal() or not isinstance(value, list) or len(value) != 3
+                        or not isinstance(value[0], str) or type(value[1]) is not int or type(value[2]) is not int):
+                    raise CoordinationError('unavailable', 'request notice fence metadata is unreadable')
+                entries[int(slot)] = value
+        meta = (rows.get('meta') or {}).get('value', {})
+        header = meta.get('notice_fences') or {}
+        return {value[0]: value[1] for value in entries.values()}, bool(header.get('overflow')), entries
+
+    def _remember_notice(self, work, notice, *, after_gap=False):
+        capacity = getattr(self, 'notice_fence_capacity', None)
+        if type(capacity) is not int or capacity <= 0:
+            raise CoordinationError('unavailable', 'identity cache capacity is unknown; automatic notice refused')
+        identity, revision = notice.get('source_key'), notice.get('revision')
+        if not isinstance(identity, str) or type(revision) is not int:
+            raise CoordinationError('invalid', 'request notice needs its native identity digest and revision')
+        known, overflow, entries = self.notice_fences(work.rows)
+        previous = next(((slot, value) for slot, value in entries.items() if value[0] == identity), None)
+        if previous and previous[1][1] >= revision:
+            raise CoordinationError('conflict', 'request notice revision was already observed')
+        if not previous and overflow and not after_gap:
+            raise CoordinationError('conflict', 'request notice history is incomplete; human fallback')
+        meta = work.get('meta')
+        header = dict(meta.get('notice_fences') or {})
+        if header.get('capacity', capacity) != capacity:
+            raise CoordinationError('unavailable', 'request notice fence capacity changed; human review required')
+        if previous:
+            slot = previous[0]
+        elif len(entries) >= capacity:
+            slot = min(entries, key=lambda item: entries[item][2])
+            overflow = True
+        else:
+            slot = next(item for item in range(capacity) if item not in entries)
+        # Fixed slots, 64 compact entries per ordinary charged domain row. No
+        # second pool/reserve, source payload or individually growing keyspace.
+        order = header.get('next', 0)
+        bucket_key = 'notice-fences/' + str(slot // 64)
+        bucket = work.get(bucket_key, {})
+        value = [identity, revision, order]
+        if encoded(value) > 128:
+            raise CoordinationError('too_large', 'request notice fence exceeds its compact bound')
+        bucket[str(slot)] = value
+        work.put(bucket_key, bucket)
+        meta['notice_fences'] = {'capacity': capacity, 'next': order + 1, 'overflow': overflow}
+        work.put('meta', meta)
+
+    def send(self, args, context, *, request_notice=None, notice_after_gap=False):
         def admit(work, policy):
             principal = context["principal"]
             submission = args.get("submission")
@@ -611,6 +667,8 @@ class Coordinator:
             if previous:
                 previous.update(state="superseded", reason="replaced_before_claim")
                 work.put("message/" + previous["delivery"], previous)
+            if request_notice is not None:
+                self._remember_notice(work, request_notice, after_gap=notice_after_gap)
             work.put("message/" + delivery, record)
             epoch = work.get("meta")["window_epoch"]
             submissions = {key: value for key, value in submissions.items() if value["epoch"] == epoch}

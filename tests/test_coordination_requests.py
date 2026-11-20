@@ -7,6 +7,7 @@ import test_coordination_engine as fixtures
 import test_coordination_service as services
 from coordination_policy import PolicyError
 from coordination_requests import REQUEST_ROUTES, inspect_route, request_key
+from agent_request_routes import request_identity_key
 
 ROUTER = {'principal': 'extension:coord', 'actor': 'extension:coord', 'kind': 'tool'}
 
@@ -29,6 +30,7 @@ class RequestRoutingTests(unittest.TestCase):
         f = fixtures.EngineTests(); f.setUp()
         setup_routes(f.config, f.resources)
         f.engine.notice_principal = ROUTER['principal']
+        f.engine.notice_fence_capacity = 4096
         return f
 
     def notice(self, f):
@@ -36,7 +38,9 @@ class RequestRoutingTests(unittest.TestCase):
         op = f.op()
         return f.engine.send({'op': op, 'submission': op, 'to': 'r2', 'mode': 'admit', 'send_new': True,
                               'content': [{'type': 'text', 'text': 'native request notice'}]}, ROUTER,
-                             request_notice={'agent': 'r1', 'key': key})['delivery']
+                             request_notice={'agent': 'r1', 'key': key, 'source_key': request_identity_key(f.resources['r1'],
+                                             f.resources['r1']['data']['agent']['requests'][0]),
+                                             'revision': f.resources['r1']['data']['agent']['requests'][0]['revision']})['delivery']
 
     def test_defaults_configure_cas_and_invalid_visible_fallback(self):
         f = self.fixture(); policy = f.engine.policy()
@@ -117,10 +121,10 @@ class RequestRoutingTests(unittest.TestCase):
         f.engine.fence(); f.engine = f.make_engine(); f.engine.notice_principal = ROUTER['principal']
         f.engine.maintenance()
         self.assertIsNotNone(f.store.get('message/' + delivery))
-        f.resources['r1']['available'] = True
-        f.resources['r1']['data']['agent']['requests'] = []
+        del f.resources['r1']  # absent: full record can go; compact fence remains
         f.engine.maintenance()
         self.assertIsNone(f.store.get('message/' + delivery))
+        self.assertEqual(len(f.engine.notice_fences()[0]), 1)
         self.assertEqual(len(f.ledger), 258)
 
     def test_archive_free_refuses_pending_notice_then_allows_positive_obsolete_source(self):
@@ -135,6 +139,78 @@ class RequestRoutingTests(unittest.TestCase):
             freed = f.engine.archive({'op': f.op(), 'action': 'free', 'archive': archive}, fixtures.OWNER)
             self.assertIn('message/' + delivery, freed['freed'])
             self.assertEqual(f.ledger, [])
+
+    def test_absent_archive_and_fifo_fence_prevent_repeat_until_observed_new_revision(self):
+        ext = services.FakeExtension(); setup_routes(ext.entries, ext.resources)
+        publications = {}; ext.publish = lambda name, value: publications.__setitem__(name, copy.deepcopy(value))
+        ext.snapshot_header['identity_reservations']['max_entries'] = 1
+        service = services.CoordinationService(ext)
+        service.route_requests()
+        first = service.engine.records()[0]['delivery']
+        saved = copy.deepcopy(ext.resources.pop('r1'))
+        with tempfile.TemporaryDirectory() as path:
+            epoch = lambda suffix: service.engine.window()['epoch'] + ':' + suffix
+            archive = service.engine.archive({'op': epoch('freeze'), 'action': 'freeze', 'agents': ['r2'],
+                'deliveries': [first], 'destination': path}, fixtures.OWNER)['archive']
+            service.engine.archive({'op': epoch('export'), 'action': 'export', 'archive': archive}, fixtures.OWNER)
+            service.engine.archive({'op': epoch('free'), 'action': 'free', 'archive': archive}, fixtures.OWNER)
+        self.assertEqual(service.engine.records(), [])
+        ext.resources['r1'] = copy.deepcopy(saved)
+        service.route_requests()
+        self.assertEqual(service.engine.records(), [])
+        self.assertEqual(publications['coord-requests-r1']['fallback_reason'], 'notice_revision_fenced')
+        ext.resources['r1']['data']['agent']['requests'][0]['revision'] = 2
+        service.route_requests()
+        self.assertEqual(len(service.engine.records()), 1)
+        # Another request fills the one-entry FIFO, dropping q1's digest.
+        ext.resources['r1']['data']['agent']['requests'][0]['request'] = 'q2'
+        service.route_requests()
+        self.assertTrue(service.engine.notice_fences()[1])
+        self.assertEqual(len(service.engine.notice_fences()[0]), 1)
+        # Remove q1's full revision-2 record (source absent), as the owner may.
+        q1 = next(r for r in service.engine.records() if r['request_notice']['revision'] == 2)
+        saved2 = copy.deepcopy(ext.resources.pop('r1'))
+        with tempfile.TemporaryDirectory() as path:
+            archive = service.engine.archive({'op': epoch('freeze2'), 'action': 'freeze', 'agents': ['r2'],
+                'deliveries': [q1['delivery']], 'destination': path}, fixtures.OWNER)['archive']
+            service.engine.archive({'op': epoch('export2'), 'action': 'export', 'archive': archive}, fixtures.OWNER)
+            service.engine.archive({'op': epoch('free2'), 'action': 'free', 'archive': archive}, fixtures.OWNER)
+        saved2['data']['agent']['requests'][0].update(request='q1', revision=2)
+        ext.resources['r1'] = saved2
+        before = len(service.engine.records())
+        service.engine.fence(); service = services.CoordinationService(ext)
+        service.route_requests()
+        self.assertEqual(len(service.engine.records()), before)
+        self.assertEqual(publications['coord-requests-r1']['fallback_reason'], 'notice_history_incomplete')
+        ext.resources['r1']['data']['agent']['requests'][0]['revision'] = 3
+        service.route_requests()
+        self.assertEqual(len(service.engine.records()), before + 1)
+        self.assertFalse(any(method == 'resource.invoke' for method, _ in ext.vqro.calls))
+
+    def test_routing_error_does_not_starve_sweep_or_dispatch_and_advances_scan(self):
+        ext = services.FakeExtension(); ext.publish = lambda *_: None
+        service = services.CoordinationService(ext)
+        progressed = []
+        class OneLoop:
+            count = 0
+            def wait(self, *_):
+                self.count += 1
+                if self.count > 1:
+                    raise StopIteration()
+            def clear(self):
+                pass
+            def set(self):
+                pass
+        service.event = OneLoop(); service.inventory_dirty = False
+        service.items.pump = lambda: False
+        service.route_requests = lambda: (_ for _ in ()).throw(PolicyError('invalid', 'broken request configuration'))
+        service.engine.lifecycle_sweep = lambda **_: progressed.append('sweep')
+        service.schedule = lambda: progressed.append('dispatch')
+        with self.assertRaises(StopIteration):
+            service.work()
+        self.assertEqual(progressed, ['sweep', 'dispatch'])
+        self.assertGreater(service.next_request_scan, 0)
+        self.assertEqual(service.request_error['kind'], 'invalid')
 
     def test_service_notice_shape_projection_and_restart_dedup(self):
         ext = services.FakeExtension(); setup_routes(ext.entries, ext.resources)

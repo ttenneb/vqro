@@ -4,6 +4,7 @@ No terminal typing, native replay, runtime supervision, or workspace persistence
 fallback. Missing C1/C2 support is visible and fails closed; raw recovery survives.
 """
 import copy
+from collections import OrderedDict
 import json
 import threading
 import time
@@ -17,6 +18,7 @@ from coordination_engine import (Coordinator, digest, refusal_receipt, SCOPE_CAP
 from coordination_policy import PolicyError, bounded_page, QuotaLimits
 from coordination_streams import ItemReceiptStreams, ItemReceiptSink
 from coordination_requests import pending_requests, request_key, native_facts
+from agent_request_routes import request_identity_key
 from dataclasses import asdict
 
 COMMANDS = (
@@ -82,6 +84,8 @@ class CoordinationService:
         self.request_cursor = 0
         self.request_views = set()
         self.next_request_scan = 0.0
+        self.request_error = None
+        self.request_baselines = OrderedDict()
         self.pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="coord-native")
         self.jobs = set()
         self.job_lock = threading.Lock()
@@ -151,6 +155,7 @@ class CoordinationService:
             # Do not expose a partially recovered engine or any of its permits.
             # Every Coordinator boot write has confirmed before this publication.
             engine.notice_principal = self.ext.info.get("principal")
+            engine.notice_fence_capacity = self.identity_cache()['capacity']
             self.engine = engine
             self.bootstrap_state = "ready"
             self.inventory_dirty = self.dispatch_dirty = True
@@ -319,7 +324,8 @@ class CoordinationService:
                     "identity_cache": self.identity_cache(),
                     "control_latency_ms": CONTROL_LATENCY_MS,
                     "control_latency_conditions": copy.deepcopy(CONTROL_LATENCY_CONDITIONS),
-                    "receipts": self.items.status(), "maintenance": self.engine.maintenance_error if self.engine else None,
+                    "receipts": self.items.status(), "request_routing": {"error": self.request_error},
+                    "maintenance": self.engine.maintenance_error if self.engine else None,
                     "limits_confirmed": self.engine is not None, "configuration": self.engine.configuration_status() if self.engine else None,
                     "attention": self.engine.attention_summary() if self.engine else None}
         if self.engine is None and command in ("inbox.get", "inbox.list", "inbox.peek", "inbox.op") and self.read_only_rows is not None:
@@ -425,6 +431,8 @@ class CoordinationService:
         existing = {(r['request_notice']['key'], r['to']['agent']): r for r in records
                     if isinstance(r.get('request_notice'), dict) and isinstance(r['request_notice'].get('key'), str)}
         views, candidates, expected = {}, [], {}
+        fences, history_gap, _ = engine.notice_fences()
+        capacity = getattr(engine, 'notice_fence_capacity', None)
         for agent, resource in policy.resources.items():
             native = native_facts(resource)
             rows = native.get('requests')
@@ -450,8 +458,27 @@ class CoordinationService:
                     if previous['state'] in ('withdrawn', 'expired', 'superseded', 'rejected', 'resolved'):
                         view.update(human=True, fallback_reason='notice_no_longer_deliverable')
                 else:
+                    if type(capacity) is not int or capacity <= 0:
+                        view.update(human=True, fallback_reason='notice_fence_capacity_unknown')
+                        continue
+                    identity = request_identity_key(resource, question)
+                    revision = question['revision']
+                    fenced = fences.get(identity)
+                    if fenced is not None and revision <= fenced:
+                        view.update(human=True, fallback_reason='notice_revision_fenced')
+                        continue
+                    after_gap = False
+                    if fenced is None and history_gap:
+                        baseline = self.request_baselines.setdefault(identity, revision)
+                        if type(capacity) is int and capacity > 0:
+                            while len(self.request_baselines) > capacity:
+                                self.request_baselines.popitem(last=False)
+                        if revision <= baseline:
+                            view.update(human=True, fallback_reason='notice_history_incomplete')
+                            continue
+                        after_gap = True
                     view.update(human=True, fallback_reason='notification_pending')
-                    candidates.append((agent, resource, question, key, route['coordinator']))
+                    candidates.append((agent, resource, question, key, route['coordinator'], identity, after_gap))
         count = len(candidates)
         chosen = [candidates[(self.request_cursor + i) % count] for i in range(min(4, count))] if count else []
         self.request_cursor = (self.request_cursor + len(chosen)) % count if count else 0
@@ -459,7 +486,7 @@ class CoordinationService:
         context = {name: identity.get(name) for name in ('principal', 'actor', 'author', 'initiator')}
         context['kind'] = 'tool'
         context['author'] = identity.get('actual_author', context.get('author'))
-        for agent, resource, question, key, target in chosen:
+        for agent, resource, question, key, target, identity_key, after_gap in chosen:
             view = views[agent]
             epoch = engine.window()['epoch']
             operation = epoch + ':request:' + digest([key, target])
@@ -471,7 +498,8 @@ class CoordinationService:
                     'content': [{'type': 'text', 'text': 'Native request notice (not an answer):\n' +
                                  json.dumps(content, ensure_ascii=False, sort_keys=True)}]}
             try:
-                result = engine.send(args, context, request_notice={'agent': agent, 'key': key})
+                result = engine.send(args, context, request_notice={'agent': agent, 'key': key,
+                                     'source_key': identity_key, 'revision': question['revision']}, notice_after_gap=after_gap)
                 view['notices'].append({'source_key': key, 'request': question['request'], 'revision': question['revision'], **result})
                 self.dispatch_dirty = True
             except (PolicyError, StoreError, VqroError) as error:
@@ -483,6 +511,22 @@ class CoordinationService:
         for agent in self.request_views - set(views):
             self.ext.publish('coord-requests-' + agent, None)
         self.request_views = set(views)
+
+    def scan_requests(self):
+        try:
+            self.route_requests()
+            self.request_error = None
+        except Exception as error:
+            self.request_error = {'kind': getattr(error, 'kind', None) or 'routing_error', 'message': str(error)[:512]}
+            self.ext.log('request routing attention:', self.request_error)
+            for agent in self.request_views:
+                try:
+                    self.ext.publish('coord-requests-' + agent, None)
+                except Exception:
+                    pass  # clearing derived UI is best effort, never a gate for dispatch
+            self.request_views.clear()
+        finally:
+            self.next_request_scan = time.monotonic() + 1.0
 
     def work(self):
         next_sweep = 0.0
@@ -498,14 +542,7 @@ class CoordinationService:
                 if self.items.pump():
                     self.event.set()
                 if time.monotonic() >= self.next_request_scan:
-                    try:
-                        self.route_requests()
-                    except (PolicyError, StoreError, VqroError):
-                        for agent in self.request_views:
-                            self.ext.publish('coord-requests-' + agent, None)
-                        self.request_views.clear()
-                        raise
-                    self.next_request_scan = time.monotonic() + 1.0
+                    self.scan_requests()
                 if time.monotonic() >= next_sweep:
                     self.engine.lifecycle_sweep(forget=self.forget)
                     next_sweep = time.monotonic() + 5.0
