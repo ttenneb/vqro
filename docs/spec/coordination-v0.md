@@ -389,6 +389,29 @@ without ever losing it:
 A lookup of an archived delivery returns its locator. A missing or unreadable archive answers `unknown`, never "no
 effect". Archive is never triggered by memory pressure.
 
+### 6.2 Request routing
+
+Each agent has a request route: `human`, `coordinator` or `both`. This is ordinary attributed agent
+configuration, not native request state; the owner or a principal holding `configure` on that agent may change
+it through transactions. Launchers record the route: default `human` for agents the owner starts,
+`coordinator` for agents launched by a coordinator.
+
+- `human`: show the waiting notice and request popup in the requesting agent's pane.
+- `coordinator`: deliver an inbox message about the request to the requesting agent's **recorded coordinator**,
+  its membership `reports_to` exact agent endpoint, not every principal holding `answer`. That coordinator must
+  currently hold `answer` on the requester; team launchers seed this grant. The message identifies the requesting
+  agent and the native request's epoch, id and revision so a response targets that exact request.
+- If there is no `reports_to`, the coordinator is ended/unavailable, or it lacks `answer`, fall back to `human`
+  with a visible reason. There is no guessed coordinator or automatic successor routing.
+- `both`: coordinator delivery plus the human waiting notice/popup (or the visible human fallback above).
+
+Routing never answers or auto-approves. The coordinator answers through `coord.control {action: respond}` with
+`agent.respond`'s epoch/revision/scope/expiry fences (`agent-v0.md` §5), checked along with its current `answer`
+right. Any other principal holding `answer`, including the owner, may still respond through Control regardless
+of route. **First valid answer wins**; other viewers/controllers see it answered and cannot write a second native
+response. Unanswered requests stay pending under their native expiry rules; routing creates no new expiry,
+renewal or weaker response fence. Inbox delivery or a human notice is never evidence of an answer.
+
 ## 7. Pull at safe points (P5)
 
 A terminal (tier-1) agent receives messages only by pull, through an in-agent plugin or hook; a structured adapter may

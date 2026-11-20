@@ -532,6 +532,9 @@ replaced when the Pi bridge is ported.
   and supervised child processes do not inherit caller identity variables. A missing/invalid owner row gives the
   TUI `owner-unset` without coordination grants, with a visible bootstrap notice and raw/recovery still usable;
   no fallback guesses owner authority.
+- Request routing is ordinary attributed agent configuration: human, recorded-coordinator inbox, or both;
+  launchers record defaults. The exact `reports_to` coordinator must hold answer; absent/unavailable/ended or
+  ungranted routing falls back visibly to human. Route never auto-approves or weakens native response fences.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
@@ -577,6 +580,13 @@ replaced when the Pi bridge is ported.
 - Claude Code hook hand-offs are context (`supplied`, not `inserted`); `read` needs model-request and normal
   completion evidence, never hook success. Idle `asyncRewake` is interactive-only, with native `NOT USER INPUT`
   framing distinct from turn/settle context.
+
+- **AS10c', request routing:** "Yes, add it." Each agent routes requests to `human` (notice/popup), `coordinator`
+  (inbox mail to its recorded `reports_to` endpoint holding `answer`) or `both`. Default human for owner-started
+  agents, coordinator for coordinator-launched agents; the launcher records it. The owner or a configure holder
+  may change this ordinary attributed configuration. An absent/ended/unavailable/ungranted coordinator falls
+  back to human with a visible reason. Other answer holders may still answer; first valid answer wins with the
+  same epoch/revision/native expiry fences, never auto-approval or renewal.
 
 Nothing is stable until Pi and the two other real runtimes pass conformance.
 

@@ -213,6 +213,7 @@ Checked against fake adapters. Level **P** (pull): a terminal agent plus a plugi
 |---|---|---|
 | operation window, scope capacity, quotas, protected-domain budget, identity cache size | the extension | I10, I17–I19, I21, H14, H16, L7–L9 |
 | `pull {points, insert, evidence}`, `consumer`; advisory terminal status | plugin's endpoint, agents extension | T1–T14 |
+| request route `human` / `coordinator` / `both` | ordinary attributed agent configuration | Q1–Q4 |
 
 **I. Inbox.** P1's prototype (`proto/inbox-seam` b26cf0a, fake native ledger recording every invocation) passes I1–I6
 for one fake agent; the rest need the full extension.
@@ -384,6 +385,16 @@ durability at each step (after freeze, during export, after export before free) 
 an edit during export leaves that record in place; a failed destination write frees nothing; a repeated archive `op`
 inspects the original archive; an archived delivery's lookup returns its locator, and a missing archive answers
 `unknown`.
+
+**Q. Request routing.** Q1 launch defaults: owner-started agents record `human`, coordinator-launched agents
+record `coordinator`; changing the ordinary attributed configuration needs the owner or `configure` on that
+agent and follows transaction/undo rules. Q2 `coordinator` delivers request mail to the exact recorded
+`reports_to` agent currently holding `answer`, not every grant holder; the mail identifies the request's agent,
+epoch, id and revision. Missing coordinator, ended/unavailable endpoint or missing grant falls back to the human
+notice/popup with a visible reason. Q3 `both` provides coordinator mail plus the human notice; racing valid
+answers from the coordinator, owner and another answer holder produce one native response, with answered state
+visible to the others. Q4 invalid/stale epoch/revision/scope, expired request or revoked answer grant rejects
+before a native response; unanswered requests keep native expiry and are never auto-approved or renewed.
 
 **S. Scale gate.** Streams measured by P3, inbox persistence by P1; the combined end-to-end gate is still to run: 600
 terminals / 200 agents, 1 and 3 viewers per agent (3 needs the stream-capacity change when one provider serves all
