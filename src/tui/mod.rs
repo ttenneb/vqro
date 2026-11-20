@@ -1555,9 +1555,18 @@ impl App {
     }
 
     /// `doc/settings/tui.terminal_engine`: the built-in engine new and reattached terminal panes use.
-    fn terminal_engine(&self) -> emulator::EngineKind {
-        self.ws.entries.get("doc/settings/tui").and_then(|s| s["terminal_engine"].as_str()).and_then(emulator::EngineKind::parse)
-            .unwrap_or(emulator::EngineKind::DEFAULT)
+    /// An engine name this client doesn't know (a newer setting, a typo) uses the default, and says so once.
+    fn terminal_engine(&mut self) -> emulator::EngineKind {
+        let named = self.ws.entries.get("doc/settings/tui").and_then(|s| s["terminal_engine"].as_str()).map(String::from);
+        match named.as_deref().map(|n| (n, emulator::EngineKind::parse(n))) {
+            Some((_, Some(kind))) => kind,
+            Some((name, None)) => {
+                let note = format!("terminal engine {name:?} is not built into this client; using {}", emulator::EngineKind::DEFAULT.name());
+                if self.engine_notes.insert(note.clone()) { self.message = note; }
+                emulator::EngineKind::DEFAULT
+            }
+            None => emulator::EngineKind::DEFAULT,
+        }
     }
 
     /// `doc/settings/tui.scrollback_lines`, bounded (see `SCROLLBACK_RANGE`); new and reattached panes use it.
@@ -3890,6 +3899,12 @@ mod tests {
         draw(&mut app);
         assert!(app.message.is_empty(), "each fallback reason is reported once");
         emulator::FAIL_START.with(|f| f.set(None));
+        // A name this client doesn't know (a newer engine, a typo) uses the default and says so.
+        app.ws.entries.insert("doc/settings/tui".into(), json!({"terminal_engine": "alacritty"}));
+        app.terms.get_mut("t").unwrap().attaching = false;
+        draw(&mut app);
+        assert!(app.message.contains("\"alacritty\" is not built into this client"), "{}", app.message);
+        assert_eq!(app.terms["t"].emu.wanted(), emulator::EngineKind::DEFAULT);
     }
 
     #[tokio::test]
