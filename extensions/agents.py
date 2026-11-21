@@ -323,6 +323,7 @@ class Conversation:
         self.rejections, self.rejected_at, self.retry_at, self.incompatible = 0, None, 0.0, None
         self.compat = None  # the provider's declared items bounds when it stopped
         self.retry_scheduled = False  # one pending backoff timer at a time
+        self.counted_generation = None  # the stream whose rejection was counted: one attempt per stream, however chunked
         self.declared = {}  # the provider's declared bounds this view was built from (shown when clamped)
 
     @property
@@ -340,7 +341,8 @@ class Conversation:
             self.notices.extend((now, n) for at, n in received if at == self.view.epoch)
             broken = self.view.broken
             rejection = self.view.rejection if broken and self.view.rejection is not rejected_before else None
-            if rejection is not None:
+            if rejection is not None and self.counted_generation != self.generation:
+                self.counted_generation = self.generation  # this stream's attempt; more bytes of it add nothing
                 self.rejected(rejection)
             elif not broken and self.rejections and not self.incompatible and self.passed_rejection():
                 self.rejections, self.rejected_at = 0, None  # real progress: the warning no longer applies

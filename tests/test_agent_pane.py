@@ -837,6 +837,38 @@ class AgentPane(unittest.TestCase):
         self.assertIsNone(c.stream)
         self.assertEqual(len(self.timers), 1, "a new timer, never a stall")
 
+    def test_one_oversized_record_is_one_attempt_however_it_is_chunked(self):
+        """vqro-lead-secondary #104 finding: 1,539 bytes at a 512-byte record bound counted once in one callback but
+        three times (sticky stop, no reattach) in three 513-byte callbacks. One rejected stream is one attempt."""
+        from agents import Conversation
+        def row(value): return (json.dumps(value) + "\n").encode()
+        begin = row({"op": "snapshot", "phase": "begin", "epoch": "e1", "coverage": "all_retained"}) + row({"op": "snapshot", "phase": "end", "seq": 0})
+        chunk = b"x" * 513
+        def observe(parts):
+            c = Conversation("r2", lambda *a, **k: None, {"max_record_bytes": 512})
+            c.data(begin)
+            for part in parts:
+                c.data(part)
+            return (c.rejections, c.incompatible, c.view.after())
+        one, three = observe([chunk * 3]), observe([chunk] * 3)
+        self.assertEqual(one, three)
+        self.assertEqual(three[:2], (1, None), "one attempt, not a sticky stop without any reattach")
+        self.assertEqual(three[2], {"epoch": "e1", "seq": 0}, "the cursor never moves")
+
+    def test_the_reattach_budget_still_stops_on_the_third_stream(self):
+        """Counting once per stream keeps the genuine budget: three reattached streams each oversized, then stop."""
+        self.agents.conversations["r2"].view.max_record_bytes = 512
+        for attempt in range(3):
+            c = self.agents.conversations["r2"]
+            for _ in range(3):  # each stream delivers its oversized record in pieces
+                if c.stream is not None:
+                    self.core.sinks[c.stream].data(b"x" * 513)
+            self.agents.flush_conversations()
+            if attempt < 2:
+                self.elapse()
+        self.assertIsNotNone(self.agents.conversations["r2"].incompatible)
+        self.assertEqual(len(self.attaches()), 3, "the first attach plus two backed-off retries")
+
     def test_one_pending_backoff_timer_however_many_wakes(self):
         """spike-panel-1 P3: wakes during a backoff never pile up timers."""
         self.feed(snapshot(CONVERSATION, seq=4))

@@ -106,14 +106,16 @@ class ItemView:
                 if len(self._buf) > self.max_record_bytes:  # a partial line never grows past the bound
                     self._buf.clear()
                     self._error("oversize")
-                    self._reject("oversize", None)
+                    if not self.broken:  # the rest of the same oversized line is the same rejection, not a new one
+                        self._reject("oversize", None)
                     self.broken = True
                 break
             line = bytes(self._buf[:pos])
             del self._buf[:pos + 1]
             if pos >= self.max_record_bytes:
                 self._error("oversize")
-                self._reject("oversize", None)
+                if not self.broken:
+                    self._reject("oversize", None)
                 self.broken = True
                 continue
             if self.broken:
