@@ -4389,6 +4389,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_double_click_on_a_place_row_runs_its_command_and_neither_opens_nor_closes_it() {
+        // The human: double-clicking a workspace should switch to it and its tabs, and once seemed to make pages.
+        let (mut app, _) = app();
+        let ws = json!({"id":"ws:vqro","text":"vqro","command":"workspaces.open","args":{"path":"/p"},"expanded":false,
+            "on_toggle":{"command":"sidebar.place","args":{"id":"ws:vqro"}},"children":[{"text":"tab"}]});
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","items":[ws]}}}}));
+        app.leaves = vec!["p".into()];
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 6)).unwrap();
+        let mut line = String::new();
+        terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, 40, 6), true, &Palette::default(), &Icons::new(None, false));
+            let b = f.buffer_mut(); line = (0..40).map(|x| b[(x, 1)].symbol().to_string()).collect(); }).unwrap();
+        let x = line.find("vqro").map(|i| line[..i].chars().count() as u16).unwrap();
+        for _ in 0..2 {
+            app.panel_click("p", "p", Position { x: x + 1, y: 1 }, MouseButton::Left, json!({}));
+            assert_eq!(app.message, "running workspaces.open…", "the click switches");
+            app.message.clear();
+        }
+        let rows = panel::rows(&app.panel_value("p"), &app.pstate["p"]);
+        assert!(!rows[0].expanded, "still closed: the text runs the command; only the expander opens");
+    }
+
+    #[tokio::test]
     async fn title_actions_sit_in_the_frame_and_run_by_click_or_key() {
         let (mut app, _) = app();
         let menu = json!([{"label":"Stop","command":"agents.stop"},{"label":"Bridge terminal","command":"agents.bridge"}]);

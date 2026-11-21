@@ -301,13 +301,16 @@ class SidebarTree(unittest.TestCase):
         self.assertIn("children", find(self.build(), "ws:/w/extra3"))
         self.module["collapse_cmd"]({"id": "ws:" + WS})
         self.assertNotIn("children", find(self.build(), "ws:" + WS))
-        # Going there (it becomes the default again) opens it.
+        # Going there (it becomes the default again) only switches: closed by hand, it stays closed (the human's
+        # "double-click should switch to its tabs"; before, it also reopened it, and a large one brought pages).
         self.ext.entries["workspace/active"] = {"value": {"layout": "ws-x1"}, "version": 2}
         self.build()
         self.ext.entries["workspace/active"] = {"value": {"layout": "ws-a"}, "version": 3}
         rows = self.build()
-        self.assertIn("children", find(rows, "ws:" + WS))
+        self.assertNotIn("children", find(rows, "ws:" + WS))
         self.assertIn("children", find(rows, "ws:/w/extra1"), "recently shown places stay open (bounded)")
+        self.module["expand_cmd"]({"id": "ws:" + WS})
+        self.assertIn("children", find(self.build(), "ws:" + WS), "its ▸ (or Expand here) opens it")
         # A blocked terminal inside a collapsed place still counts in the status segment and its row's roll-up.
         self.ext.resources["x7"]["status"] = {"state": "blocked"}
         self.assertIn({"text": "1 blocked", "style": "warn"}, find(self.build(), "ws:/w/extra7")["badges"])
@@ -333,6 +336,20 @@ class SidebarTree(unittest.TestCase):
         self.assertTrue(closed["has_children"])
         self.module["toggle_cmd"]({"id": "ws:" + WS, "open": True})
         self.assertIn("children", find(self.sidebar()["items"], "ws:" + WS))
+
+    def test_a_place_with_only_ended_terminals_shows_its_ended_row_without_a_not_in_a_tab_group(self):
+        """The human's "▾ Not in a tab › 1 ended": a group header around one fold row."""
+        del self.ext.resources["r3"]  # proj's live terminal in no tab
+        self.ext.resources["e1"] = term("e1", cwd=WS, state="finished")
+        ws = find(self.build(), "ws:" + WS)
+        ids = [row["id"] for row in ws["children"]]
+        self.assertNotIn("loose:" + WS, ids)
+        self.assertIn("ended:" + WS, ids)
+        self.assertEqual(find(self.build(), "ended:" + WS)["text"], "1 ended")
+        # With a live one too, both sit in "Not in a tab" as before.
+        self.ext.resources["r3"] = term("r3", cwd=WS + "/src")
+        loose = find(self.build(), "loose:" + WS)
+        self.assertEqual([row["id"] for row in loose["children"]], ["term:r3", "ended:" + WS])
 
     def test_search_covers_every_row_with_its_place(self):
         g = self.module["build"].__globals__

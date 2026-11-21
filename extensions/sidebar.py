@@ -382,6 +382,10 @@ def loose_group(key, rows, lazy=True):
     if not rows:
         return []
     kids = fold_ended(key, rows, lazy)
+    if all(row.get("_ended") for row in rows):
+        # Only ended terminals: their "N ended" row sits in the place itself, without a "Not in a tab" group around
+        # one row (the human's "Not in a tab › 1 ended").
+        return kids
     return [{"id": f"loose:{key}", "text": "Not in a tab", "style": "dim", "icon": ICON["loose"], "icon_style": "dim",
              "_level": "tab", **badged(rollup(rows)), "expanded": True, "children": kids}]
 
@@ -571,7 +575,7 @@ def note_active(places):
                 recent_places.remove(row["id"])
             recent_places.insert(0, row["id"])
             del recent_places[OPEN_RECENT:]
-            collapsed_places.discard(row["id"])  # going there opens it again
+            # Going there only switches: a place closed by its ▸ stays closed (opening it is the ▸'s job).
             last_active[0] = active  # only once the place is known (workspace data may still be loading)
             return
 
