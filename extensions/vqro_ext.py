@@ -373,14 +373,20 @@ class Vqro:
             return True
         except Exception as e:  # report, don't crash
             if "id" in msg:
-                kind = getattr(e, "kind", None) or "extension"
-                metadata = getattr(e, "data", None)
-                data = dict(metadata) if isinstance(metadata, dict) else {}
-                data["kind"] = kind  # exception classification is authoritative
-                error = {"code": -32000, "message": str(e), "data": data}
+                fallback = "extension failed; error details unavailable"
+                try:
+                    kind = getattr(e, "kind", None) or "extension"
+                    metadata = getattr(e, "data", None)
+                    data = dict(metadata) if isinstance(metadata, dict) else {}
+                    data["kind"] = kind  # exception classification is authoritative
+                    message = str(e)  # render once, still before any transport I/O
+                except Exception:
+                    kind, message = "extension", fallback
+                    data = {"kind": kind, "incomplete": True}
+                error = {"code": -32000, "message": message, "data": data}
                 reply = {"jsonrpc": "2.0", "id": msg["id"], "error": error}
-                for message, details in ((str(e), data), (str(e), {"kind": kind}),
-                                         ("extension failed; error details unavailable", {"kind": "extension", "incomplete": True})):
+                for message, details in ((message, data), (message, {"kind": kind}),
+                                         (fallback, {"kind": "extension", "incomplete": True})):
                     error.update(message=message, data=details)
                     try:
                         # Validate BEFORE transport I/O. Never retry a partly

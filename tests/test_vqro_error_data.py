@@ -126,6 +126,50 @@ class OutboundErrorDataTests(unittest.TestCase):
         self.assertEqual(reply['data']['kind'], 'extension')
         self.assertTrue(reply['data']['incomplete'])
 
+    def test_exception_with_raising_string_gets_one_generic_incomplete_reply(self):
+        calls = []
+        class BadString(RuntimeError):
+            def __str__(self):
+                calls.append(True)
+                raise ValueError('cannot format exception')
+        reply = self.dispatch_error(BadString())
+        self.assertEqual(calls, [True])
+        self.assertEqual(reply['message'], 'extension failed; error details unavailable')
+        self.assertEqual(reply['data'], {'kind': 'extension', 'incomplete': True})
+
+    def test_exception_is_rendered_only_once(self):
+        calls = []
+        class CountedString(RuntimeError):
+            def __str__(self):
+                calls.append(True)
+                return 'original message'
+        reply = self.dispatch_error(CountedString())
+        self.assertEqual(reply['message'], 'original message')
+        self.assertEqual(calls, [True])
+
+    def test_bad_string_transport_failure_is_never_retried_and_context_restores(self):
+        class BadString(RuntimeError):
+            def __str__(self):
+                raise ValueError('cannot format exception')
+        client = object.__new__(sdk.Vqro)
+        client._command_context = threading.local()
+        client._command_context.invocation = 'old-proof'
+        client._command_context.layout = 'old-layout'
+        client._command_context.caller = {'principal': 'old-caller'}
+        sends = []
+        def send(message):
+            sends.append(message)
+            raise OSError('owned transport failed')
+        def handler(*_):
+            raise BadString()
+        client._send, client.handler = send, handler
+        with self.assertRaises(OSError):
+            client._dispatch({'id': 1, 'method': 'command.invoke', 'params': {'invocation': 'new-proof'}})
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(client._command_context.invocation, 'old-proof')
+        self.assertEqual(client._command_context.layout, 'old-layout')
+        self.assertEqual(client._command_context.caller, {'principal': 'old-caller'})
+
     def test_transport_failure_is_not_retried_as_a_fallback(self):
         client = object.__new__(sdk.Vqro)
         calls = []
