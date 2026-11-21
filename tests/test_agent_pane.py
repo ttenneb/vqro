@@ -166,6 +166,21 @@ class TranscriptRows(unittest.TestCase):
         many = agent_transcript.tool_row("r", {"title": "edit", "locations": [{"path": f"/w/{i}"} for i in range(9)]})
         self.assertEqual(len([m for m in many["menu"] if m["command"] == "links.open"]), agent_transcript.OPEN_ITEMS)
 
+    def test_notices_and_other_kinds_show_what_they_say(self):
+        """K3 bug (vqro-lead-secondary, part-a-94 O12): an entity of kind notice rendered nothing at all."""
+        say = {("message", "m"): {"position": 1, "role": "assistant", "final": True, "content": text("partial answer")},
+               ("notice", "n"): {"value_is": "state", "severity": "warn", "text": "assistant output omitted: too large"},
+               ("notice", "hidden"): {"native": {"reason": "output omitted"}, "id": "truncated"},
+               ("x.acme.step", "s"): {"position": 2, "content": text("indexing the repo")},
+               ("_ui", "u"): {"position": 3, "text": "an implementation's own bookkeeping"},
+               ("state", "current"): {"state": "idle", "text": "facts, shown elsewhere"}}
+        rows = self.rows(say)
+        texts = [r.get("text") for r in rows]
+        self.assertEqual(texts, ["Pi", "partial answer", "", "· x.acme.step: indexing the repo", "",
+                                 "· assistant output omitted: too large"],
+                         "in timeline order when positioned, after it when not; hidden metadata never shown")
+        self.assertEqual(rows[-1]["style"], "warn", "severity styles it")
+
     def test_an_empty_system_message_leaves_no_bare_label(self):
         """The human's 16:44 screenshot: a stray "System" label at the top (Pi's system message, an empty text block)."""
         empty = {("message", "s"): {"position": 1, "role": "system", "final": True, "content": text("")},
@@ -567,6 +582,15 @@ class AgentPane(unittest.TestCase):
         reply = self.core.handlers["agents.send"](dict(composer["args"], mode="auto", text="go"))
         self.assertEqual(reply["client"]["popup"]["view"], "agents-send-r2")
         self.assertEqual(len([1 for m, _ in self.core.calls if m == "resource.invoke"]), before)
+
+    def test_live_notices_are_shown_newest_last_and_bounded(self):
+        """agent-v0 section 4 notice records (live, no seq) were dropped by the pane."""
+        self.feed(snapshot(CONVERSATION))
+        for i in range(5):
+            self.feed(line({"op": "notice", "value": {"text": f"rate limited {i}", "severity": "warn"}}))
+        shown = [t for t in self.texts() if t and "rate limited" in t]
+        self.assertEqual(len(shown), 3, "the newest three")
+        self.assertTrue(shown[-1].startswith("· ") and shown[-1].endswith("rate limited 4"))
 
     def test_the_waiting_line_and_the_runtimes_queue_are_pinned(self):
         items = self.make_v0(requests=[{"request": "q1", "revision": 1, "method": "confirm", "title": "Run git push?", "params": {}}],

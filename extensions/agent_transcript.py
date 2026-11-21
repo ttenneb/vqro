@@ -499,6 +499,48 @@ def senders(entities, names):
     return seen
 
 
+# The standard entity kinds (agent-v0 section 4): each has its own view, or is facts shown elsewhere (state, request,
+# session, terminal, run, association). Other kinds are "shown generically" (entity_rows), except `_` kinds, which are
+# an implementation's own bookkeeping.
+KNOWN_KINDS = ("message", "tool", "plan", "compaction", "receipt", "state", "run", "terminal", "request", "session",
+               "association")
+
+
+def generic_kind(kind):
+    return isinstance(kind, str) and kind not in KNOWN_KINDS and not kind.startswith("_")
+SEVERITY_STYLE = {"warn": "warn", "warning": "warn", "error": "error"}
+ENTITY_LINES = 12  # an entity of another kind shows at most this many lines of what it says
+
+
+def entity_rows(kind, eid, value):
+    """An entity of a kind the pane has no special view for (a `notice`, a kind added later): its `text` and typed
+    `content`, styled by `severity`, with the kind named unless it is a notice. Hidden metadata (`native`, ids) is
+    never shown and never stands in for text: an entity with nothing to say shows nothing."""
+    style = SEVERITY_STYLE.get(value.get("severity"), "dim")
+    body = lines(value["text"], style, ENTITY_LINES) if isinstance(value.get("text"), str) and value["text"].strip() else []
+    if isinstance(value.get("content"), list):
+        body += content_rows(value["content"], style, ENTITY_LINES)
+    if not body:
+        return []
+    label = "· " + ("" if kind == "notice" else clip(plain(str(kind)), 40) + ": ")
+    return [dict(body[0], id=f"e:{clip(plain(str(kind)), 40)}:{eid}", text=label + str(body[0].get("text", "")))] + body[1:]
+
+
+def notice_rows(notices):
+    """Live `notice` records (agent-v0 section 4: not entities, no seq), newest last, as the pane received them."""
+    out = []
+    for at, value in notices:
+        text = value.get("text") if isinstance(value, dict) else value if isinstance(value, str) else None
+        if isinstance(text, str) and text.strip():
+            style = SEVERITY_STYLE.get(value.get("severity"), "dim") if isinstance(value, dict) else "dim"
+            out.append({"type": "text", "wrap": True, "style": style,
+                        "text": "· " + (when(at) + " " if when(at) else "") + clip(plain(text.strip()), NOTICE_BYTES)})
+    return out
+
+
+NOTICE_BYTES = 512
+
+
 def home_short(path):
     """A folder as people write it: the home folder as ~ (of this extension's host, where the agent's folder is)."""
     home = os.path.expanduser("~")
@@ -582,8 +624,12 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
     receipts = {eid: v.get("stage") for (kind, eid), (_, v) in entities.items()
                 if kind == "receipt" and isinstance(v, dict) and isinstance(v.get("stage"), str)}
     timeline = sorted(((v.get("position"), kind, eid, v) for (kind, eid), (_, v) in entities.items()
-                       if isinstance(v, dict) and type(v.get("position")) is int and kind in ("message", "tool", "plan", "compaction")),
+                       if isinstance(v, dict) and type(v.get("position")) is int
+                       and (kind in ("message", "tool", "plan", "compaction") or generic_kind(kind))),
                       key=lambda t: (t[0], t[1], t[2]))
+    # Entities of other kinds without a position (a notice, say) are state, not timeline: shown after it, in id order.
+    unplaced = sorted((kind, eid, v) for (kind, eid), (_, v) in entities.items()
+                      if isinstance(v, dict) and type(v.get("position")) is not int and generic_kind(kind))
     blocks, tools, hidden, last_sender = [], [], {}, None
     tail = {"agent": None, "work": None}  # the last block, if it is the agent's message / its unlabelled work
 
@@ -612,6 +658,14 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
             rows_ = [{"id": "s:" + eid, "text": summary_text(title, values, view["summary"], tool_count),
                       "style": "dim", "children": rows_, "expanded": False}]
         blocks.append(rows_)
+
+    def other_kind(kind, eid, value):
+        """A kind this pane has no view of its own for (a notice, a later kind): what it says (entity_rows)."""
+        rows_ = entity_rows(kind, eid, value)
+        if rows_:
+            end_tools()
+            flush_hidden()
+            blocks.append(rows_)
 
     def end_tools():
         """A run of tool calls: one Activity group. Summary collapses it under a summary line; the group row itself
@@ -685,10 +739,14 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
                     blocks.append(framed(eid, value, body) if other else body)
         elif kind == "compaction":
             add("system", [{"type": "text", "style": "dim", "text": "· System · context compacted"}], "System · context compacted", [value], eid)
-        else:  # plan: shown whole, generically
+        elif kind == "plan":  # shown whole, generically
             flush_hidden()
             blocks.append([{"type": "header", "text": "Plan"}] + lines(json.dumps(value.get("entries", value), ensure_ascii=False, indent=1), "muted", 40))
+        else:
+            other_kind(kind, eid, value)
     end_tools()
+    for kind, eid, value in unplaced:
+        other_kind(kind, eid, value)
     flush_hidden()
     out, size, dropped = [], 0, 0
     for block in reversed(blocks):

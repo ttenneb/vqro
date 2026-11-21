@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Runtime-neutral agent panels and native capability-driven controls. No launcher."""
+import collections
 import json
 from pathlib import Path
 import sys
@@ -299,6 +300,7 @@ def unknown_badge(ext, r):
 # this extension hold unbounded state.
 VIEW_MAX_ENTITIES = 4096
 VIEW_MAX_ENTITY_BYTES = 4 * 1024 * 1024
+LIVE_NOTICES = 3  # the newest live notice records (agent-v0 section 4) a pane shows
 
 
 class Conversation:
@@ -313,10 +315,12 @@ class Conversation:
         self.generation = 0  # bumped when a stream ends, so a late attach reply can't revive it
         self.clamped = False  # the provider declared more than this viewer keeps
         self.too_big = False  # a snapshot exceeded the bounds: stop reattaching (it would only overflow again)
+        self.notices = collections.deque(maxlen=LIVE_NOTICES)  # (at_ms, value): live notice records, newest last
 
     def data(self, data):
         with self.lock:
-            self.view.feed(data)
+            now = int(time.time() * 1000)
+            self.notices.extend((now, n) for n in self.view.feed(data))
             broken = self.view.broken
             if broken and self.view.errors["over_bound"]:
                 self.too_big = True
@@ -685,8 +689,9 @@ class Agents:
             if c.view.epoch is None:
                 return notes + [{"type": "text", "style": "dim", "text": "Loading the conversation…"}]
             session = agent_facts(r).get("session") if isinstance(agent_facts(r).get("session"), dict) else {}
+            live = agent_transcript.notice_rows(c.notices)
             out = notes + agent_transcript.rows(c.view.entities, names, c.view.coverage, self.view_of(r["id"]),
-                                                session.get("cwd") if isinstance(session.get("cwd"), str) else None)
+                                                session.get("cwd") if isinstance(session.get("cwd"), str) else None) + live
         if c.stream is None and r.get("available") is not False:
             out.append({"type": "text", "style": "dim", "text": "Reconnecting to the conversation…"})
         return out or [{"type": "text", "style": "dim", "text": "No messages yet."}]  # complete coverage only: rows() discloses others
