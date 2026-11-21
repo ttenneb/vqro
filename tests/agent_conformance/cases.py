@@ -994,7 +994,7 @@ def stalled_attachment_witness(first, second, stalled):
 
 
 @case("O7")
-async def stalled_viewer_isolation(ctx):
+async def stalled_viewer_isolation(ctx, *, before_recovery=None):
     first = await fresh_view(ctx)
     second = await fresh_view(ctx, peer=await ctx.viewer())
     stalled = await fresh_view(ctx, peer=await ctx.viewer())
@@ -1020,6 +1020,9 @@ async def stalled_viewer_isolation(ctx):
     except asyncio.TimeoutError as error:
         raise HarnessGap("O7 paced pressure did not produce a stalled-attachment retirement witness") from error
     stalled_attachment_witness(first, second, stalled)
+    # An optional observation runs at the established isolation boundary, not after replay.
+    if before_recovery is not None:
+        await before_recovery()
     # Retirement is stream.closed/slow_consumer, not socket EOF (coordinator ruling).
     snapshot = await stalled.peer.call("workspace.snapshot")
     check(isinstance(snapshot.get("epoch"), str), "ordinary RPC socket did not survive its stalled attachment")
