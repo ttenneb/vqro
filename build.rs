@@ -47,18 +47,30 @@ fn wanted_zig(vendored: &std::path::Path) -> String {
         .expect("minimum_zig_version in build.zig.zon")
 }
 
-/// `ZIG` if set; else `zig` on PATH if it is the wanted version; else the user-local `~/.local/zig-<version>/zig`
-/// (installed next to other versions, never on PATH); else `zig`, whose build then says what is missing.
+/// `ZIG` if set (and it must be the wanted version: a wrong one is refused, naming the right one found); else `zig`
+/// on PATH if it is the wanted version; else the user-local `~/.local/zig-<version>/zig` (installed next to other
+/// versions, never on PATH); else `zig`, whose build then says what is missing.
 fn find_zig(vendored: &std::path::Path) -> String {
-    if let Ok(zig) = env::var("ZIG") { return zig; }
     let wanted = wanted_zig(vendored);
     let version = |zig: &str| Command::new(zig).arg("version").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-    if version("zig").as_deref() == Some(wanted.as_str()) { return "zig".into(); }
-    if let Ok(home) = env::var("HOME") {
-        let local = format!("{home}/.local/zig-{wanted}/zig");
-        if version(&local).as_deref() == Some(wanted.as_str()) { return local; }
+    let local = env::var("HOME").ok().map(|home| format!("{home}/.local/zig-{wanted}/zig"))
+        .filter(|local| version(local).as_deref() == Some(wanted.as_str()));
+    if let Ok(zig) = env::var("ZIG") {
+        // An explicit choice is never replaced silently: a wrong version stops the build and says what would work.
+        match version(&zig) {
+            Some(v) if v == wanted => return zig,
+            found => panic!(
+                "ZIG={zig} is {}, but the vendored libghostty-vt needs Zig {wanted}. {}",
+                found.map(|v| format!("Zig {v}")).unwrap_or_else(|| "not a Zig that runs".into()),
+                match &local {
+                    Some(local) => format!("Unset ZIG to use {local}, or set ZIG={local}."),
+                    None => format!("Set ZIG to a Zig {wanted} (none found on PATH or at ~/.local/zig-{wanted}/zig)."),
+                }
+            ),
+        }
     }
-    "zig".into()
+    if version("zig").as_deref() == Some(wanted.as_str()) { return "zig".into(); }
+    local.unwrap_or_else(|| "zig".into())
 }
 
 /// Where Zig keeps fetched packages: `LIBGHOSTTY_VT_ZIG_PKG_DIR`, else the user's cache (`XDG_CACHE_HOME`, else
