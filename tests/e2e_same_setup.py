@@ -51,6 +51,12 @@ class Root:
                         ignore=shutil.ignore_patterns("node_modules", "opentui", "__pycache__"))
         os.symlink("/usr/bin/python3", os.path.join(self.r, "bin", "python3"))
         os.symlink(os.path.join(TARGET, "debug", "vqro-bridge-pi"), os.path.join(self.r, "bin", "vqro-bridge-pi"))
+        # The tmux-server extension's status helper, as an install provides it. Without it every status call failed
+        # (ENOENT) once the owned server existed, and the extension, which declared its view only after a successful
+        # call, never declared it when its first poll came after the tmux provider had started the server: the
+        # e2e-same-setup failures under full-gate load (e332e800, e1b0e858).
+        os.symlink(os.path.join(TARGET, "debug", "vqro-tmux"), os.path.join(self.r, "bin", "vqro-tmux"))
+        os.symlink("/usr/bin/tmux", os.path.join(self.r, "bin", "tmux"))  # which the helper runs, as on a real PATH
         self.env = {"HOME": f"{self.r}/home", "PATH": f"{self.r}/bin", "TERM": "xterm-256color", "SHELL": SHELL,
                     "VQRO_STATE_DIR": f"{self.r}/st", "VQRO_SOCKET": f"{self.r}/p.sock", "VQRO_EXTENSIONS_DIR": f"{self.r}/ext",
                     "XDG_STATE_HOME": f"{self.r}/xst", "XDG_RUNTIME_DIR": f"{self.r}/run", "XDG_CONFIG_HOME": f"{self.r}/cfg",
@@ -185,6 +191,17 @@ class Root:
         return found
 
 
+def tmux_server_view(root):
+    """The tmux-server extension's availability, apart from the parity diff (vqro-lead-secondary's judgement): its
+    view is declared (the extension declares it at start, whatever its helper does), and its panel shows the owned
+    server running: both roots run it, since both have the tmux provider connected."""
+    snap = lambda: root.call("workspace.snapshot")
+    texts = lambda: [i.get("text", "") for i in ((snap().get("live", {}).get("tmux-server") or {}).get("items") or [])]
+    declared = root.wait(lambda: "view/tmux-server" in snap()["entries"], 15)
+    running = declared and root.wait(lambda: any(t.startswith("Running") for t in texts()), 15)
+    return bool(declared), bool(running), texts() if declared else []
+
+
 def scenario(root):
     """The same workspace, built only through public commands. Returns a note of anything that could not be done."""
     c = root.call
@@ -263,8 +280,7 @@ def capture(root):
     keep = ("kind", "state", "available", "stale", "provider", "name", "title", "cwd", "argv", "status", "host")
     out = {
         "layout": snap["entries"].get("layout/main", {}).get("value"),
-        # view/tmux-server is left out: both roots run the vqro-owned tmux server, and its extension declares the
-        # view on a 5 s poll whose helper may take seconds under load, so its presence is timing, not parity.
+        # view/tmux-server is left out of the parity diff: its availability is its own check (tmux_server_view).
         "views": {k[5:]: {f: v["value"].get(f) for f in ("kind", "resource", "title", "fallback")}
                   for k, v in snap["entries"].items() if k.startswith("view/") and k != "view/tmux-server"},
         "resources": {label_: {f: r.get(f) for f in keep} for label_, r in ((r["id"], r) for r in snap["resources"])},
@@ -295,6 +311,9 @@ try:
         root = Root(backend)
         roots.append(root)
         check(f"{backend}: both providers connected, {backend} the default", root.start())
+        declared, reported, texts = tmux_server_view(root)
+        check(f"{backend}: the tmux-server extension declares its view", declared)
+        check(f"{backend}: the tmux-server panel shows the owned server running", reported, str(texts))
         problem = scenario(root)
         check(f"{backend}: the scripted workspace was built", problem is None, problem or "")
         captures[backend] = capture(root)

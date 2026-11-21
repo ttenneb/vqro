@@ -119,6 +119,44 @@ class TmuxServerTests(unittest.TestCase):
             self.assertNotIn("menu/tmux-server", self.ext.contributions[-1])
             self.assertEqual(set(self.ext.commands), {"tmux.server.status", "tmux.server.stop"})
 
+    def test_the_view_is_declared_before_any_helper_call_and_a_hung_helper_shows_in_it(self):
+        """e2e-same-setup under full-gate load: the view was declared only after a successful status call, so a
+        helper slower than its 4 s timeout left view/tmux-server missing for poll after poll (each try ~9 s)."""
+        with tempfile.TemporaryDirectory() as root:
+            self.ext.info["state_dir"] = root
+            (Path(root) / "tmux.sock").write_text("")  # an owned server's endpoint exists: polls ask the helper
+            child = Mock(returncode=None, pid=1234)
+            child.communicate.side_effect = subprocess.TimeoutExpired("vqro-tmux", 4)
+            seen = []
+            def sleep(_):
+                seen.append((len(self.ext.contributions), list(self.ext.published)))
+                if len(seen) == 2: raise StopIteration
+            with patch.object(m, "Extension", return_value=self.ext), \
+                    patch.object(m.subprocess, "Popen", return_value=child) as spawn, \
+                    patch.object(m.os, "killpg"), patch.object(m.time, "sleep", side_effect=sleep):
+                with self.assertRaises(StopIteration): m.main()
+            # Declared at start, before the first helper call, and the timeout is reported in the panel.
+            self.assertIn("view/tmux-server", self.ext.contributions[0])
+            self.assertNotIn("menu/tmux-server", self.ext.contributions[0])
+            self.assertEqual(self.ext.published[0][1]["items"][0]["text"], "Checking the vqro-owned tmux server…")
+            self.assertTrue(spawn.called)
+            texts = [c["items"][0]["text"] for _, c in self.ext.published]
+            self.assertTrue(any(t.startswith("Status unknown: tmux helper timed out") for t in texts), texts)
+            self.assertEqual(texts.count(texts[-1]), 1, "the same failure is published once, not every poll")
+
+    def test_a_missing_helper_never_hides_the_view(self):
+        """The e2e-same-setup root cause: no `vqro-tmux` on the extension's PATH, and the owned server's socket
+        already there at the first poll. Before, every poll raised ENOENT and the view was never declared."""
+        with tempfile.TemporaryDirectory() as root:
+            self.ext.info["state_dir"] = root
+            (Path(root) / "tmux.sock").write_text("")
+            with patch.object(m, "Extension", return_value=self.ext), \
+                    patch.object(m.subprocess, "Popen", side_effect=FileNotFoundError(2, "No such file or directory", "vqro-tmux")), \
+                    patch.object(m.time, "sleep", side_effect=[None, StopIteration]):
+                with self.assertRaises(StopIteration): m.main()
+            self.assertIn("view/tmux-server", self.ext.contributions[0])
+            self.assertTrue(self.ext.published[-1][1]["items"][0]["text"].startswith("Status unknown: [Errno 2]"))
+
     def test_poll_discovers_server_and_removes_menu_within_one_interval(self):
         with tempfile.TemporaryDirectory() as root:
             self.ext.info["state_dir"] = root

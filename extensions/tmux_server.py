@@ -90,6 +90,24 @@ class TmuxServer:
             self._negative_stamp = stamp
         return observed
 
+    VIEW = {"kind": "panel", "title": "vqro-owned tmux server", "items": []}
+
+    def declare(self):
+        """Declare the view before asking anything: it never waits on the helper (a slow or failing status call
+        under load used to leave the view undeclared for poll after poll). Its content says it is checking."""
+        self.ext.contribute({"view/tmux-server": self.VIEW})
+        self.menu = False
+        self.ext.publish("tmux-server", {"title": "vqro-owned tmux server", "items": [
+            {"type": "text", "text": "Checking the vqro-owned tmux server…"}]})
+
+    def unknown(self, message):
+        """A status call that failed or timed out: the panel says so (nothing is hidden or retried at once)."""
+        observed = {"unknown": message}
+        if observed != self.last:
+            self.last = observed
+            self.ext.publish("tmux-server", {"title": "vqro-owned tmux server", "items": [
+                {"type": "text", "text": f"Status unknown: {label(message)}", "style": "warn"}]})
+
     def refresh(self, observed=None):
         observed = self.call("status") if observed is None else observed
         exists = observed.get("running") is True
@@ -97,7 +115,7 @@ class TmuxServer:
             # Explicit commands always query; a positive observation invalidates cached absence.
             self._negative_stamp = self._absent_stamp = None
         if exists != self.menu:
-            entries = {"view/tmux-server": {"kind": "panel", "title": "vqro-owned tmux server", "items": []}}
+            entries = {"view/tmux-server": self.VIEW}
             if exists:
                 entries["menu/tmux-server"] = {"where": "status", "label": "tmux server",
                                                "command": "tmux.server.status", "order": 40}
@@ -168,6 +186,7 @@ def main():
     # Keep the SDK's command/event dispatcher; poll only the native server, never a provider RPC.
     import threading
     threading.Thread(target=ext.run, daemon=True).start()
+    server.declare()
     error = None
     while True:
         try:
@@ -178,6 +197,7 @@ def main():
             if message != error:
                 print("tmux-server: " + label(message), file=sys.stderr)
                 error = message
+            server.unknown(message)
         time.sleep(POLL_INTERVAL)
 
 
