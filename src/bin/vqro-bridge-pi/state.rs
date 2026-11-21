@@ -132,7 +132,8 @@ impl Agent {
         let mut caps=self.declarations();caps["agent"]["tool_principal"]=json!("env");
         // Registration covers either consume-time batch setting and either native model input class.
         for (mode,point) in [("boundary","after_tool_calls"),("settle","would_stop")] {
-            caps["agent.send"]["modes"][mode]=json!({"point":point,"batch":["one","all"],"batch_at":"consume","idle":"park"});
+            // idle: start, as the resource declares since #114 (an idle Pi starts a run for these modes).
+            caps["agent.send"]["modes"][mode]=json!({"point":point,"batch":["one","all"],"batch_at":"consume","idle":"start"});
         }
         caps["agent.send"]["content"]["types"]=json!(["text","image"]);
         bound(caps).as_object().unwrap().clone()

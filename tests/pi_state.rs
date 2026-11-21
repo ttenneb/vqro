@@ -229,6 +229,19 @@ fn an_ignored_tool_result_start_does_not_split_the_open_message() {
     assert_eq!((&rows[0]["value"]["content"][0]["text"],&rows[0]["value"]["final"]),(&json!("hello"),&json!(true)));
 }
 
+/// Part A C1: the provider registration bounds what the resource may declare; boundary/settle idle is start in both.
+#[test]
+fn provider_queue_mode_bounds_cover_the_resource_declaration() {
+    let a=make();
+    let provider=json!(a.provider_capabilities());
+    for mode in ["boundary","settle"] {
+        let declared=&a.caps()["agent.send"]["modes"][mode];
+        let bound=&provider["agent.send"]["modes"][mode];
+        assert_eq!(declared["idle"],"start","{mode}");
+        assert!(bound["idle"].as_array().is_some_and(|values|values.contains(&declared["idle"])),"{mode}: provider idle {} must allow {}",bound["idle"],declared["idle"]);
+    }
+}
+
 #[test]
 fn modules_are_versioned_descriptor_maps_for_resource_and_provider() {
     let a=make();
