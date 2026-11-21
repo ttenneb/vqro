@@ -508,7 +508,7 @@ KNOWN_KINDS = ("message", "tool", "plan", "compaction", "receipt", "state", "run
 
 def generic_kind(kind):
     return isinstance(kind, str) and kind not in KNOWN_KINDS and not kind.startswith("_")
-SEVERITY_STYLE = {"warn": "warn", "warning": "warn", "error": "error"}
+SEVERITY_STYLE = {"warn": "warn", "error": "error"}  # agent-v0: any other severity is as if absent
 ENTITY_LINES = 12  # an entity of another kind shows at most this many lines of what it says
 
 

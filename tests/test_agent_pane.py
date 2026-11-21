@@ -190,6 +190,8 @@ class TranscriptRows(unittest.TestCase):
             live = agent_transcript.notice_rows([(None, {"severity": odd, "text": "still shown"})], "Pi")[0]
             self.assertEqual((live["text"], live["style"]), ("· Pi notice: still shown", "dim"), odd)
         self.assertEqual(agent_transcript.entity_rows("notice", "n", {"severity": "warn", "text": "w"})[0]["style"], "warn")
+        self.assertEqual(agent_transcript.entity_rows("notice", "n", {"severity": "warning", "text": "w"})[0]["style"], "dim",
+                         "only the spec's values: an unknown severity is as if absent")
 
     def test_an_empty_system_message_leaves_no_bare_label(self):
         """The human's 16:44 screenshot: a stray "System" label at the top (Pi's system message, an empty text block)."""
@@ -638,6 +640,28 @@ class AgentPane(unittest.TestCase):
         self.assertEqual(observe([stream[:7], stream[7:40], stream[40:]]), split, "or cut anywhere")
         self.assertEqual(observe([old + epoch_snapshot("e2")]), ("e2", []), "an old notice never outlives the new cut")
         self.assertEqual(observe([old, new]), ("e1", ["old-session-only", "new-session-only"]), "same epoch: all kept")
+
+    def test_one_agents_render_failure_never_stalls_the_others(self):
+        """prim-opus-review: the publish loops had no per-agent guard, so one agent's render bug stopped every pane."""
+        import contextlib, io
+        self.core.resources["r5"] = dict(self.core.resources["r2"], id="r5", name="Other")
+        self.agents.event("resource", {"id": "r5"})
+        self.agents.flush_conversations()
+        real = self.agents.panel
+        self.agents.panel = lambda r: (_ for _ in ()).throw(KeyError("boom")) if r["id"] == "r2" else real(r)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.agents.publish_panels()
+            self.agents.wake("r2"), self.agents.wake("r5")
+            self.agents.flush_conversations()
+        broken = self.core.live["agents-r2"]["items"][0]
+        self.assertEqual(broken["style"], "error")
+        self.assertIn("couldn't be drawn (KeyError: 'boom')", broken["text"])
+        self.assertNotIn("couldn't be drawn", json.dumps(self.core.live["agents-r5"]), "the other agent's pane is drawn")
+        self.assertIn("pane failed for r2", err.getvalue())
+        self.agents.panel = real
+        self.agents.wake("r2")
+        self.agents.flush_conversations()
+        self.assertNotIn("couldn't be drawn", json.dumps(self.core.live["agents-r2"]), "it redraws on the next update")
 
     def test_the_waiting_line_and_the_runtimes_queue_are_pinned(self):
         items = self.make_v0(requests=[{"request": "q1", "revision": 1, "method": "confirm", "title": "Run git push?", "params": {}}],

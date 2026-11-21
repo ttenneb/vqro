@@ -404,6 +404,14 @@ def incompatible_note(c):
     return "Incompatible stream: " + cause + "." + tail
 
 
+def broken_panel(r, error):
+    """An agent pane whose drawing failed: says so, bounded, in that pane only (the other agents' panes keep updating).
+    Nothing is sent to the agent; showing it again or the next update redraws it."""
+    return {"title": label(r.get("name") or r.get("title") or "Agent") + " " + str(r.get("id")), "items": [
+        {"type": "text", "style": "error", "text": "This agent's pane couldn't be drawn ("
+         + label(f"{type(error).__name__}: {error}", 300) + "). Other agents are unaffected; it redraws on the next update."}]}
+
+
 class Agents:
     def __init__(self, ext):
         self.ext, self.lock = ext, threading.RLock()
@@ -576,11 +584,19 @@ class Agents:
             attach, dirty = self.conv_attach, self.conv_dirty
             self.conv_attach, self.conv_dirty = set(), set()
         for rid in attach:
-            self.attach(rid)
+            self.isolated(rid, "attach", self.attach, rid)
         for rid in dirty:
             r = self.ext.resources.get(rid)
             if r is not None:
-                self.publish_panel(r)
+                self.isolated(rid, "publish", self.publish_panel, r)
+
+    def isolated(self, rid, what, fn, *args):
+        """Run one agent's step so that its failure never stops the others' (review: one agent's render bug stalled
+        every pane). The failure is logged; publish_panel already shows it in that agent's own pane."""
+        try:
+            fn(*args)
+        except Exception as error:  # noqa: BLE001 - any bug in one agent's step
+            print(f"agents: {what} failed for {rid}: {type(error).__name__}: {str(error)[:300]}", file=sys.stderr, flush=True)
 
     def conversation_worker(self):
         while True:
@@ -1660,12 +1676,19 @@ class Agents:
         # facts: an older copy can never overwrite the embedded native view with the fallback.
         with self.lock:
             resource = self.ext.resources.get(rid) or resource
-            content = self.panel(resource)
+            try:
+                content = self.panel(resource)
+            except Exception as error:  # noqa: BLE001 - this agent's pane says so; the others keep updating
+                print(f"agents: pane failed for {rid}: {type(error).__name__}: {str(error)[:300]}", file=sys.stderr, flush=True)
+                content = broken_panel(resource, error)
             if self.published.get(rid) != content:
                 self.ext.publish(view(rid), content)
                 self.published[rid] = content
             if rid in self.open_pane:
-                gear = self.gear_panel(resource)
+                try:
+                    gear = self.gear_panel(resource)
+                except Exception as error:  # noqa: BLE001
+                    gear = broken_panel(resource, error)
                 if self.published_pane.get(rid) != gear:
                     self.ext.publish("agents-pane-" + rid, gear)
                     self.published_pane[rid] = gear
@@ -1683,7 +1706,7 @@ class Agents:
             self.published = {rid: content for rid, content in self.published.items() if rid in self.ext.resources}
         for r in list(self.ext.resources.values()) if resources is None else resources:
             if r.get("kind") == "agent":
-                self.publish_panel(r)
+                self.isolated(r.get("id"), "publish", self.publish_panel, r)
         if resources is None:
             for key, entry in list(self.ext.entries.items()):
                 if panel_key(key) and entry["value"].get("owner") == "agents" and key[12:] not in self.ext.resources:
