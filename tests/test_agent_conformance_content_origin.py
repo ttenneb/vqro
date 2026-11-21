@@ -194,6 +194,28 @@ class Context:
         return result("accepted", data={"receipt": {"delivery": args["delivery"], "origin": origin}})
 
 
+class PiModelContext(Context):
+    """Pi-native model DTO; input-received/public witnesses stay public-shaped."""
+    def __init__(self, shape="text_then_media", fault=None):
+        super().__init__(shape, fault)
+        self.manifest = {"wire": "pi"}
+
+    def evaluate(self, request, expected):
+        result = super().evaluate(request, expected)
+        if result.get("outcome") == "accepted" and self.native.messages:
+            for block in self.native.messages[-1]["content"]:
+                if block.get("type") == "image":
+                    block["mimeType"] = block.pop("mime")
+                    if self.fault == "pi_model_mime_value":
+                        block["mimeType"] = "image/jpeg"
+            if self.fault == "pi_public_mime_value":
+                public = self.entities[next(reversed(self.entities))]["value"]
+                for block in public["content"]:
+                    if block.get("type") == "image":
+                        block["mime"] = "image/jpeg"
+        return result
+
+
 class Route:
     def __init__(self, ctx):
         self.ctx, self.actor = ctx, "extension:coord"
@@ -274,6 +296,37 @@ class ContentChecks(unittest.TestCase):
         self.assertTrue(subject.public_content_matches(public, message))
         public["content"][0]["text"] = "changed"
         self.assertFalse(subject.public_content_matches(public, message))
+
+    def test_pi_model_projection_maps_only_the_native_mime_key(self):
+        image = deepcopy(examples()["image"])
+        native_image = {**image, "mimeType": image["mime"]}
+        native_image.pop("mime")
+        raw = {"role": "user", "timestamp": 7, "content": [examples()["text"], native_image]}
+        saved = deepcopy(raw)
+        projected = subject.model_message_projection(raw, "pi")
+        self.assertEqual(raw, saved)
+        self.assertEqual(projected, {**raw, "content": [examples()["text"], image]})
+        self.assertIsNot(projected["content"][1], raw["content"][1])
+        self.assertEqual(subject.model_message_projection(projected, "pi"), projected)
+        self.assertIs(subject.model_message_projection(raw, "codex"), raw)
+        conflict = deepcopy(raw)
+        conflict["content"][1]["mime"] = "image/jpeg"
+        with self.assertRaisesRegex(CheckFailed, "conflicting MIME"):
+            subject.model_message_projection(conflict, "pi")
+
+    def test_pi_normalization_does_not_mask_history_or_cross_wire_changes(self):
+        image = deepcopy(examples()["image"])
+        raw = {"role": "user", "content": [{"type": "image", "mimeType": image["mime"], "data": image["data"]}]}
+        with self.assertRaises(CheckFailed):
+            subject.new_model_message({"messages": []}, {"messages": [raw]}, [image], sender_header=False, wire="codex")
+        old_projected = subject.model_message_projection(raw, "pi")
+        with self.assertRaisesRegex(CheckFailed, "lost/rewrote"):
+            subject.new_model_message({"messages": [raw]}, {"messages": [old_projected, raw]}, [image], sender_header=False, wire="pi")
+        for change in ({"mimeType": "image/jpeg"}, {"data": "changed"}):
+            wrong = deepcopy(raw)
+            wrong["content"][0].update(change)
+            with self.subTest(change=change), self.assertRaises(CheckFailed):
+                subject.new_model_message({"messages": []}, {"messages": [wrong]}, [image], sender_header=False, wire="pi")
 
     def test_model_claim_values_are_case_sensitive_and_field_local(self):
         subject.model_claims("asserted kind: agent; asserted agent: A1", {"kind": "agent", "agent": "A1"})
@@ -391,6 +444,26 @@ class HandlerChecks(unittest.IsolatedAsyncioTestCase):
                 ctx = Context(shape)
                 await subject.content_shape(ctx)
                 self.assertTrue(any(row["kind"] == "D16_native_shape" and row["public_message"] for row in ctx.evidence))
+
+    async def test_d16_pi_native_mime_dto_matches_without_rewriting_evidence(self):
+        for shape in ("text_then_media", "ordered"):
+            ctx = PiModelContext(shape)
+            with self.subTest(shape=shape):
+                await subject.content_shape(ctx)
+            images = [row for row in ctx.evidence if row.get("kind") == "D16_native_shape" and "image" in row["types"]]
+            self.assertTrue(images)
+            for row in images:
+                raw = next(block for block in row["native_message"]["content"] if block["type"] == "image")
+                projected = next(block for block in row["model_projection"]["content"] if block["type"] == "image")
+                self.assertNotIn("mime", raw)
+                self.assertEqual(raw["mimeType"], projected["mime"])
+                self.assertEqual(raw["data"], projected["data"])
+
+    async def test_d16_pi_mime_values_remain_strict_in_model_and_public_witness(self):
+        for fault, error in (("pi_model_mime_value", "new native model input"),
+                             ("pi_public_mime_value", "final public content")):
+            with self.subTest(fault=fault), self.assertRaisesRegex(CheckFailed, error):
+                await subject.content_shape(PiModelContext(fault=fault))
 
     async def test_qualified_rpc_refusals_preserve_audit_identity(self):
         ctx = Context(fault="rpc_rejection")

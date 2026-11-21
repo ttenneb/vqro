@@ -25,7 +25,28 @@ def model_messages(row):
     return messages
 
 
-def new_model_message(before, after, content, *, sender_header):
+def model_message_projection(message, wire):
+    """Project Pi's native DTO for comparison, never mutate the native evidence.
+
+    Pi ImageContent uses mimeType (pi-ai/dist/types.d.ts:273–277); the bridge's
+    public->native mapping is src/bin/vqro-bridge-pi/contract.rs:141 and its
+    inverse public projection is src/bin/vqro-bridge-pi/state.rs:17.
+    """
+    if wire != "pi":
+        return message
+    projected = deepcopy(message)
+    content = projected.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "image" and "mimeType" in block:
+                mime = block.pop("mimeType")
+                check("mime" not in block or block["mime"] == mime,
+                      "Pi native image has conflicting MIME fields", component="fixture")
+                block["mime"] = mime
+    return projected
+
+
+def new_model_message(before, after, content, *, sender_header, wire=None):
     """Require a new native envelope, not an old matching message or an ACK."""
     old, new = model_messages(before), model_messages(after)
     check(len(new) > len(old) and new[:len(old)] == old,
@@ -33,7 +54,8 @@ def new_model_message(before, after, content, *, sender_header):
     matched = []
     for message in new[len(old):]:
         try:
-            compare_content(content, message.get("content"), sender_header=sender_header)
+            projected = model_message_projection(message, wire)
+            compare_content(content, projected.get("content"), sender_header=sender_header)
         except CheckFailed:
             continue
         matched.append(message)
@@ -153,7 +175,9 @@ async def content_shape(ctx):
         check(len(received) == 1 and len(inserted) == 1, "valid shape was duplicated or never inserted natively")
         compare_content(content, received[0].get("content"), sender_header=framed)
         after = await model_cut(ctx, f"D16-after-{index}")
-        message = new_model_message(before, after, content, sender_header=framed)
+        wire = getattr(ctx, "manifest", {}).get("wire")
+        native_message = new_model_message(before, after, content, sender_header=framed, wire=wire)
+        message = model_message_projection(native_message, wire)
         def final_public(reducer):
             return [(key, row["value"]) for key, row in reducer.entities.items()
                     if key not in previous and key[0] == "message" and public_content_matches(row["value"], message)]
@@ -163,7 +187,8 @@ async def content_shape(ctx):
         ctx.evidence.append({"kind": "D16_native_shape", "shape": declaration["content"]["shape"],
                              "types": [block["type"] for block in content], "delivery": receipt["delivery"],
                              "input_seq": received[0]["seq"], "inserted_seq": inserted[0]["seq"],
-                             "model_seq": after["seq"], "native_message": message,
+                             "model_seq": after["seq"], "native_message": native_message,
+                             "model_projection": message, "model_wire": wire,
                              "public_message": public[0]})
 
 
