@@ -497,7 +497,7 @@ impl Runtime {
             .map_err(|_| {
                 Fault::Reject(RpcError::new(
                     "overloaded",
-                    "momentary overlap with another native send, session change, or model readback; input not sent, retry",
+                    "overlap with another native send, session change, or model readback; input not sent, retry",
                 ))
             })?;
         let permit = self
