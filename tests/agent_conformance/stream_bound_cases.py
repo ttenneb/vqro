@@ -46,15 +46,28 @@ def cursor_never_advanced(afters, last_good_seq, epoch):
     return True
 
 
+def json_equal(a, b):
+    """serde_json Value equality: typed, so true != 1, 1 != 1.0 and "1" != 1 (Python's == would say true == 1)."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, list):
+        return len(a) == len(b) and all(json_equal(x, y) for x, y in zip(a, b))
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(json_equal(a[k], b[k]) for k in a)
+    return a == b
+
+
 def visible_text(content):
     """The text a published pane actually draws, projected per row kind exactly as the production renderer does
     (src/tui/panel.rs at main 31c157b2, draw_row :680-:833, kind() defaulting to "item" in src/ui_model/panel.rs:107):
     - the panel title and title_right; a paged panel shows its first page (title and rows);
     - composer: nothing; separator: only a line, nothing textual (:730);
     - chips: each chip's text, never the row's own text (:692-:710, chip_label :78);
-    - select: the row text and the chosen option's label, else the value (:711-:729);
+    - select: the row text and the label of the first option whose value equals the row value by typed JSON
+      equality (json_equal), else the value when it is a string (:711-:729);
     - header and text: the row text, only the first `fold` lines when folded (:731, :732-:754, body_lines :139);
-    - message: title (else text) on top, then body (else text) (block_lines :149-:161);
+    - message: title (else text) on top, then body (else text); "else" only when the field is absent or not a
+      string, so an empty title or body stays empty (Option::or, block_lines :149-:161, body_lines :141);
     - every other kind ("item", "toggle", ...): text, detail, badge texts, action texts that have a command, and
       description (:755-:833);
     - children only when the row is expanded.
@@ -62,9 +75,13 @@ def visible_text(content):
     out = []
     def text(node, key="text"):
         return node[key] if isinstance(node.get(key), str) else None
+    def either(node, key, fallback):
+        # Rust `a.as_str().or(b.as_str())`: falls back only when `key` is absent or not a string; "" stays "".
+        return node[key] if isinstance(node.get(key), str) else text(node, fallback)
     def folded(value, node):
         n = node.get("fold")
-        if isinstance(n, int) and not isinstance(n, bool) and value is not None:
+        # Rust `as_u64().map(|n| n.clamp(1, 10_000))`: only a non-negative integer folds (0 shows one line).
+        if isinstance(n, int) and not isinstance(n, bool) and n >= 0 and value is not None:
             return "\n".join(value.split("\n")[:max(1, min(n, 10000))])
         return value
     def row(node):
@@ -79,12 +96,12 @@ def visible_text(content):
         elif kind == "select":
             value = node.get("value")
             label = next((option.get("label") for option in node.get("options", []) or []
-                          if isinstance(option, dict) and option.get("value") == value), None)
+                          if isinstance(option, dict) and "value" in option and json_equal(option["value"], value)), None)
             shown += [text(node), label if isinstance(label, str) else value if isinstance(value, str) else None]
         elif kind in ("header", "text"):
             shown.append(folded(text(node), node))
         elif kind == "message":
-            shown += [text(node, "title") or text(node), folded(text(node, "body") or text(node), node)]
+            shown += [either(node, "title", "text"), folded(either(node, "body", "text"), node)]
         else:
             shown += [text(node), text(node, "detail"), text(node, "description")]
             shown += [badge.get("text") for badge in node.get("badges", []) or [] if isinstance(badge, dict)]

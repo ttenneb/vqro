@@ -255,8 +255,16 @@ class WholeHandlerControls(unittest.TestCase):
                                                "description": self.report(ref)["items"][0]["text"]}]}
         collapsed = lambda ref: {"items": [{"type": "header", "text": "Status", "expanded": False,
                                             "children": [self.report(ref)["items"][0]]}]}
+        empty_message = lambda ref: {"items": [{"type": "message", "title": "", "body": "",
+                                                "text": self.report(ref)["items"][0]["text"]}]}
+        typed_select = lambda ref: {"items": [{"type": "select", "text": "Status", "value": 1, "options": [
+            {"value": True, "label": self.report(ref)["items"][0]["text"]}, {"value": 1, "label": "Loading"}]}]}
+        message_fallback = lambda ref: {"items": [{"type": "message", "text": self.report(ref)["items"][0]["text"]}]}
         controls = {
             "valid back-off and visible cause/limit": (reset_once, self.report, True),
+            "message with empty title and body hides its text (Option::or)": (reset_once, empty_message, False),
+            "select picks the typed-equal option, not true == 1": (reset_once, typed_select, False),
+            "message without title or body shows its text": (reset_once, message_fallback, True),
             "cause/limit in a default item's description (drawn)": (reset_once, default_desc, True),
             "cause/limit only in a separator's text (never drawn)": (reset_once, separator, False),
             "cause/limit only in a chips row's own text (only chips drawn)": (reset_once, chips_row, False),
