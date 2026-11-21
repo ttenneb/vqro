@@ -23,6 +23,10 @@ MAX_ENTITY_BYTES = 512 * 1024
 ERRORS = ("duplicate", "missing", "stale_base", "unknown_entity", "bad_utf8", "bad_json", "bad_record",
           "out_of_snapshot", "oversize", "over_bound")
 LOSSY = ("missing", "stale_base", "over_bound", "unknown_entity", "bad_record")  # as the Rust ItemView (7a8d0fd)
+# Rejections that repeat unchanged on every reattach (agent-v0 section 4, "Incompatible stream"): a record this view
+# can't read (malformed or an unknown op), data beyond its bounds, a line beyond its record bound.
+INCOMPATIBLE = ("bad_record", "over_bound", "oversize")
+KNOWN_OPS = ("notice", "snapshot", "put", "remove", "append")
 
 
 def encoded_size(value):
@@ -74,6 +78,7 @@ class ItemView:
         self.records = 0  # live records applied
         self.snapshots = 0  # snapshots installed
         self.broken = False
+        self.rejection = None  # the latest incompatible rejection: {kind, op?, unknown_op?, seq?, limits}
         self._pending = None  # [epoch, coverage, entities, entity bytes] while a snapshot is being received
         self._overflow = False
         self._buf = bytearray()
@@ -101,12 +106,14 @@ class ItemView:
                 if len(self._buf) > self.max_record_bytes:  # a partial line never grows past the bound
                     self._buf.clear()
                     self._error("oversize")
+                    self._reject("oversize", None)
                     self.broken = True
                 break
             line = bytes(self._buf[:pos])
             del self._buf[:pos + 1]
             if pos >= self.max_record_bytes:
                 self._error("oversize")
+                self._reject("oversize", None)
                 self.broken = True
                 continue
             if self.broken:
@@ -121,13 +128,26 @@ class ItemView:
             except ValueError:
                 self._error("bad_json")
                 continue
+            before = {e: self.errors[e] for e in INCOMPATIBLE}
             lossy = sum(self.errors[e] for e in LOSSY)
             notice = self._apply(record) if isinstance(record, dict) else self._error("bad_record")
             if notice is not None:
                 notices.append((self.epoch, notice) if epochs else notice)
             if sum(self.errors[e] for e in LOSSY) != lossy:
                 self.broken = True
+            rejected = [e for e in INCOMPATIBLE if self.errors[e] != before[e]]
+            if rejected:
+                self._reject(rejected[0], record)
         return notices
+
+    def _reject(self, kind, record):
+        """Keep the rejection detail an incompatible-stream report needs (never used to skip or relax anything)."""
+        op = record.get("op") if isinstance(record, dict) else None
+        self.rejection = {"kind": kind, "op": op if isinstance(op, str) else None,
+                          "unknown_op": isinstance(op, str) and op not in KNOWN_OPS,
+                          "seq": record.get("seq") if isinstance(record, dict) and type(record.get("seq")) is int else None,
+                          "limits": {"record_bytes": self.max_record_bytes, "entities": self.max_entities,
+                                     "entity_bytes": self.max_entity_bytes}}
 
     def _error(self, kind):
         self.errors[kind] += 1

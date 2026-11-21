@@ -7,6 +7,7 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "extensions"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from agents import Agents
+import agents as agents_module
 import agent_transcript
 from agent_fixture import FakeCore
 
@@ -425,7 +426,18 @@ class AgentPane(unittest.TestCase):
         self.core.resources["r7"] = {"id": "r7", "kind": "agent", "provider": "other", "name": "vqro-lead", "state": "live", "principal": "p:lead",
                                      "available": True, "data": {}}
         self.agents = Agents(self.core)
+        self.timers = []  # delayed reattaches, fired by elapse() instead of real timers
+        self.agents.later = lambda delay, rid: self.timers.append((delay, rid))
         self.agents.flush_conversations()
+
+    def elapse(self):
+        """The backoff waits pass: fire every pending delayed reattach."""
+        timers, self.timers = self.timers, []
+        for _, rid in timers:
+            self.agents.conversations[rid].retry_at = 0.0
+            self.agents.wake(rid, reattach=True)
+        self.agents.flush_conversations()
+        return [delay for delay, _ in timers]
 
     def attaches(self):
         return [p for m, p in self.core.calls if m == "resource.attach"]
@@ -647,17 +659,100 @@ class AgentPane(unittest.TestCase):
         c = self.agents.conversations["r3"]
         self.assertEqual((c.view.max_entities, c.view.max_entity_bytes, c.clamped), (4096, 4 * 1024 * 1024, True))
         many = {("message", f"m{i}"): {"position": i, "role": "assistant", "content": text("x"), "final": True} for i in range(65)}
-        self.feed(snapshot(many))  # r2 keeps 64 entities: this snapshot overflows
+        for attempt in range(3):  # the same overflowing snapshot on every reattach: back off twice, then stop
+            self.feed(snapshot(many))  # r2 keeps 64 entities: this snapshot overflows
+            self.assertIn("Incompatible stream", " ".join(self.texts()))
+            self.assertIn("64 items", " ".join(self.texts()), "the limit this view ran into")
+            self.assertIsNone(self.agents.conversations["r2"].stream, "the rejected stream is closed, not read on")
+            if attempt < 2:
+                self.assertEqual([round(d, 1) for d in self.elapse()], [(2.0, 10.0)[attempt]], "one delayed reattach, never a tight loop")
         attaches = len(self.attaches())
         self.assertIn("stopped updating", " ".join(self.texts()))
         self.agents.flush_conversations()
-        self.assertEqual(len(self.attaches()), attaches, "no reattach loop")
+        self.assertEqual((len(self.attaches()), self.timers), (attaches, []), "no reattach loop")
         self.assertIsNone(self.agents.conversations["r2"].stream)
         self.assertIn("Show the agent again", " ".join(self.texts()))
         self.core.handlers["agents.show"]({"resource": "r2"})  # what the advice says: it retries
         self.agents.flush_conversations()
         self.assertFalse(self.agents.conversations["r2"].too_big)
         self.assertEqual(self.attaches()[-1], {"resource": "r2", "items": {}}, "a fresh attach")
+
+    def bad_record_storm(self, record, rounds=50):
+        """The producer repeats the rejected record on every attach (agent-v0 section 4). Returns the attach cursors."""
+        self.feed(snapshot(CONVERSATION, seq=4))
+        for _ in range(rounds):
+            if self.agents.conversations["r2"].stream is not None:
+                self.feed(line(record))
+            self.agents.flush_conversations()
+            self.elapse()
+        return [a["items"].get("after") for a in self.attaches()]
+
+    def test_a_repeated_bad_record_backs_off_then_stops_instead_of_a_reopen_storm(self):
+        """Part A O14 (regrade54: 64 Pi / 66 Codex reopens in 10 s): a record this view can't read, repeated on every
+        continue, gets two delayed retries from the last good cursor and then stops with a visible report."""
+        cursors = self.bad_record_storm({"op": "put", "seq": 5, "kind": "message"})  # no id: unreadable
+        self.assertEqual(len(cursors), 3, "the first attach plus two backed-off retries, not a storm")
+        self.assertEqual(cursors[1:], [{"epoch": "e1", "seq": 4}] * 2, "never skips the record or advances the cursor")
+        note = " ".join(self.texts())
+        self.assertIn("Incompatible stream", note)
+        self.assertIn("can't read (bad_record", note)
+        self.assertIn("at seq 5", note)
+        self.assertIn("stopped updating after 3 identical attempts", note)
+        self.assertIn("Fixing", note, "the last good conversation is kept, nothing partial installed")
+        self.assertNotIn("Reconnecting", note, "a stopped conversation does not claim to be reconnecting")
+        self.core.handlers["agents.show"]({"resource": "r2"})  # an explicit retry
+        self.agents.flush_conversations()
+        self.assertEqual(len(self.attaches()), 4)
+
+    def test_an_unknown_newer_op_is_reported_the_same_way(self):
+        cursors = self.bad_record_storm({"op": "x.future", "seq": 5, "kind": "message", "id": "m9", "rev": 1})
+        self.assertEqual(len(cursors), 3)
+        note = " ".join(self.texts())
+        self.assertIn('unknown operation "x.future" at seq 5, perhaps from a newer agent', note)
+        self.assertIn("stopped updating", note)
+
+    def test_backoff_is_visible_while_waiting(self):
+        self.feed(snapshot(CONVERSATION, seq=4))
+        self.feed(line({"op": "put", "seq": 5, "kind": "message"}))
+        self.assertIsNone(self.agents.conversations["r2"].stream)
+        self.assertEqual([(round(d, 1), rid) for d, rid in self.timers], [(2.0, "r2")])
+        self.assertIn("Retrying after a pause (attempt 1 of 3)", " ".join(self.texts()))
+        self.agents.flush_conversations()  # any number of wakes before the wait passes: no attach
+        self.agents.wake("r2", reattach=True)
+        self.agents.flush_conversations()
+        self.assertEqual(len(self.attaches()), 1)
+
+    def test_progress_starts_a_new_count_and_ordinary_loss_still_reattaches_at_once(self):
+        self.feed(snapshot(CONVERSATION, seq=4))
+        self.feed(line({"op": "put", "seq": 5, "kind": "message"}))
+        self.elapse()
+        self.feed(line({"op": "append", "seq": 5, "kind": "message", "id": "m5", "base": 1, "rev": 2,
+                        "field": "/content/0/text", "text": "!"}))  # the producer moved on: progress
+        self.feed(line({"op": "put", "seq": 6, "kind": "message"}))  # a new rejection at a new position
+        self.assertEqual(self.agents.conversations["r2"].rejections, 1, "unchanged rejection is not progress; this is new")
+        self.elapse()
+        attaches = len(self.attaches())
+        self.feed(line({"op": "append", "seq": 9, "kind": "message", "id": "m5", "base": 2, "rev": 3,
+                        "field": "/content/0/text", "text": "?"}))  # ordinary loss (seq 7-8 missing): not incompatible
+        self.assertEqual(len(self.attaches()), attaches + 1, "a data loss reattaches at once from a fresh snapshot")
+
+    def test_an_over_bound_report_names_the_limit_the_agent_declared(self):
+        self.core.providers["items"]["capabilities"]["items.stream"] = {"entities": 64, "entity_bytes": 3000}
+        self.core.resources["r4"] = dict(self.core.resources["r2"], id="r4")
+        self.agents.event("resource", {"id": "r4"})
+        self.agents.flush_conversations()
+        c = self.agents.conversations["r4"]
+        c.data(snapshot({("message", "huge"): {"position": 1, "role": "assistant", "content": text("x" * 9000), "final": True}}))
+        self.agents.flush_conversations()
+        self.assertIn("3000 bytes", agents_module.incompatible_note(c))
+
+    def test_a_change_in_the_declared_bounds_retries_a_stopped_conversation(self):
+        self.bad_record_storm({"op": "put", "seq": 5, "kind": "message"}, rounds=6)
+        attaches = len(self.attaches())
+        self.core.providers["items"]["capabilities"]["items.stream"] = {"entities": 128, "entity_bytes": 65536}
+        self.agents.event("resource", {"id": "r2"})
+        self.agents.flush_conversations()
+        self.assertEqual(len(self.attaches()), attaches + 1, "a compatibility change retries")
 
     def test_pane_keys_copy_fields_and_search(self):
         """S3/S4: keys without the prefix (scoped to agent panes), copy fields, search over collapsed rows."""

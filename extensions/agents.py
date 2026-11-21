@@ -301,6 +301,9 @@ def unknown_badge(ext, r):
 VIEW_MAX_ENTITIES = 4096
 VIEW_MAX_ENTITY_BYTES = 4 * 1024 * 1024
 LIVE_NOTICES = 3  # the newest live notice records (agent-v0 section 4) a pane shows
+# agent-v0 section 4 "Incompatible stream": a rejection that repeats on reattach backs off, then stops and is reported.
+INCOMPATIBLE_BACKOFF_S = (2.0, 10.0)  # waits after the 1st and 2nd identical rejection
+INCOMPATIBLE_STOP = len(INCOMPATIBLE_BACKOFF_S) + 1  # the 3rd identical rejection stops automatic reattaching
 
 
 class Conversation:
@@ -314,21 +317,47 @@ class Conversation:
         self.stream = None
         self.generation = 0  # bumped when a stream ends, so a late attach reply can't revive it
         self.clamped = False  # the provider declared more than this viewer keeps
-        self.too_big = False  # a snapshot exceeded the bounds: stop reattaching (it would only overflow again)
         self.notices = collections.deque(maxlen=LIVE_NOTICES)  # (at_ms, value): live notice records, newest last
+        # Incompatible stream (agent-v0 section 4): consecutive identical rejections, the wait before the next attach,
+        # and, once stopped, the rejection reported (no automatic reattach until shown again or bounds change).
+        self.rejections, self.rejected_at, self.retry_at, self.incompatible = 0, None, 0.0, None
+        self.compat = None  # the provider's declared items bounds when it stopped
+        self.retry_scheduled = False  # one pending backoff timer at a time
+        self.declared = {}  # the provider's declared bounds this view was built from (shown when clamped)
+
+    @property
+    def too_big(self):
+        return bool(self.incompatible) and self.incompatible.get("kind") == "over_bound"
 
     def data(self, data):
         with self.lock:
             now, epoch = int(time.time() * 1000), self.view.epoch
+            rejected_before = self.view.rejection
             received = self.view.feed(data, epochs=True)
             if self.view.epoch != epoch:  # a new epoch or session: earlier live notices are about something else
                 self.notices.clear()
             # Only notices of the epoch now installed, judged per record, so chunk boundaries never matter (#97).
             self.notices.extend((now, n) for at, n in received if at == self.view.epoch)
             broken = self.view.broken
-            if broken and self.view.errors["over_bound"]:
-                self.too_big = True
+            rejection = self.view.rejection if broken and self.view.rejection is not rejected_before else None
+            if rejection is not None:
+                self.rejected(rejection)
         self.wake(self.rid, reattach=broken)
+
+    def rejected(self, rejection):
+        """Count an incompatible rejection (under the lock). The same cause at the same position again is not
+        progress; anything else starts a new count. Never skips, relaxes bounds or moves the cursor."""
+        at = (rejection.get("kind"), rejection.get("op"), self.view.epoch, self.view.seq)
+        self.rejections = self.rejections + 1 if at == self.rejected_at else 1
+        self.rejected_at = at
+        if self.rejections >= INCOMPATIBLE_STOP:
+            self.incompatible = dict(rejection, attempts=self.rejections)
+        else:
+            self.retry_at = time.monotonic() + INCOMPATIBLE_BACKOFF_S[self.rejections - 1]
+
+    def compatible_again(self):
+        """Shown again, or the producer's bounds changed: allow attaching (the rejection count starts over)."""
+        self.rejections, self.rejected_at, self.retry_at, self.incompatible, self.compat = 0, None, 0.0, None, None
 
     def error(self, error):
         pass
@@ -339,6 +368,29 @@ class Conversation:
             self.stream = None
             self.generation += 1
         self.wake(self.rid, reattach=True)
+
+
+def incompatible_note(c):
+    """The visible incompatible-stream report (agent-v0 section 4): the cause and the limit it ran into, and whether
+    the view is backing off or has stopped. Called under the conversation lock."""
+    r = c.incompatible or (c.view.rejection or {})
+    limits, kind = r.get("limits") or {}, r.get("kind")
+    at = f" at seq {r['seq']}" if type(r.get("seq")) is int else ""
+    if kind == "over_bound":
+        cause = (f"its history is larger than this view's limit ({limits.get('entities')} items, "
+                 f"{limits.get('entity_bytes')} bytes)" + ("; this pane keeps less than the agent declares" if c.clamped else ""))
+    elif kind == "oversize":
+        cause = f"it sent a record larger than this view's limit of {limits.get('record_bytes')} bytes"
+    elif r.get("unknown_op"):
+        cause = f"it sent an unknown operation \"{label(str(r.get('op')), 64)}\"{at}, perhaps from a newer agent"
+    else:
+        cause = f"it sent a record this view can't read (bad_record{', op ' + label(str(r['op']), 64) if r.get('op') else ''}){at}"
+    if c.incompatible:
+        tail = (f" The conversation stopped updating after {c.incompatible.get('attempts')} identical attempts. "
+                "Show the agent again (Agents, or its pane menu) to retry.")
+    else:
+        tail = f" Retrying after a pause (attempt {c.rejections} of {INCOMPATIBLE_STOP})."
+    return "Incompatible stream: " + cause + "." + tail
 
 
 class Agents:
@@ -399,6 +451,17 @@ class Agents:
         return (r.get("kind") == "agent" and r.get("available") is not False and not ended(r)
                 and isinstance(self.provider_caps(r).get("items.stream"), dict))
 
+    def later(self, delay, rid):
+        """One delayed reattach of `rid` (a daemon timer; tests replace this)."""
+        timer = threading.Timer(delay, self.wake, (rid,), {"reattach": True})
+        timer.daemon = True
+        timer.start()
+
+    def items_bounds(self, rid):
+        r = self.ext.resources.get(rid)
+        caps = self.provider_caps(r).get("items.stream") if r is not None else None
+        return json.dumps(caps, sort_keys=True) if isinstance(caps, dict) else None
+
     def wake(self, rid, reattach=False):
         with self.conv_lock:
             self.conv_dirty.add(rid)
@@ -420,6 +483,10 @@ class Agents:
                     c.clamped = kept != declared
                     self.wake(r["id"], reattach=True)
                 elif self.conversations[r["id"]].stream is None:
+                    c = self.conversations[r["id"]]
+                    if c.incompatible and c.compat is not None and c.compat != self.items_bounds(r["id"]):
+                        with c.lock:  # a compatibility change (the producer's declared bounds) retries
+                            c.compatible_again()
                     self.wake(r["id"], reattach=True)
         for rid, c in list(self.conversations.items()):
             r = self.ext.resources.get(rid)
@@ -438,12 +505,17 @@ class Agents:
         if c is None or r is None or not self.streams_items(r):
             return
         with c.lock:
-            if c.too_big or c.stream is not None and not c.view.broken:
-                if c.too_big and c.stream is not None:
-                    old, c.stream = c.stream, None
+            waiting = c.retry_at - time.monotonic()
+            if c.incompatible or waiting > 0 or c.stream is not None and not c.view.broken:
+                if (c.incompatible or waiting > 0) and c.stream is not None and c.view.broken:
+                    old, c.stream = c.stream, None  # stop the rejected stream now; never read past the rejection
                     c.view.stream_ended()
                     c.generation += 1
                     self.ext.close_stream(old)
+                if c.incompatible:
+                    c.compat = c.compat or self.items_bounds(rid)
+                elif waiting > 0:  # back off: one delayed reattach, never a tight loop
+                    self.later(waiting, rid)
                 return
             old, c.stream = c.stream, None
             # After lost records, start over from a fresh snapshot: simple, bounded, and right whatever the loss was
@@ -458,9 +530,7 @@ class Agents:
         try:
             reply = self.ext.attach_items(rid, c, after)
         except VqroError:
-            timer = threading.Timer(1.0, self.wake, (rid,), {"reattach": True})
-            timer.daemon = True
-            timer.start()
+            self.later(1.0, rid)
             return
         with c.lock:
             if c.generation == generation and isinstance(reply.get("stream"), int):
@@ -683,10 +753,8 @@ class Agents:
         names = agent_transcript.Names(self.ext.resources, r["id"], self.ext.owner())
         with c.lock:
             notes = []
-            if c.too_big:
-                notes.append({"type": "text", "style": "warn", "text": "This agent's history is larger than this pane can hold "
-                              f"({VIEW_MAX_ENTITIES} items, {VIEW_MAX_ENTITY_BYTES // 1048576} MiB), so the conversation stopped updating. "
-                              "Show the agent again (Agents, or its pane menu) to retry."})
+            if c.incompatible or c.rejections:
+                notes.append({"type": "text", "style": "warn", "text": incompatible_note(c)})
             elif c.clamped:
                 notes.append({"type": "text", "style": "dim", "text": "This agent declares more history than this pane keeps; "
                               "if it sends that much, the conversation stops updating and says so."})
@@ -696,7 +764,7 @@ class Agents:
             live = agent_transcript.notice_rows(c.notices, names.agent_name(r["id"]))
             out = notes + agent_transcript.rows(c.view.entities, names, c.view.coverage, self.view_of(r["id"]),
                                                 session.get("cwd") if isinstance(session.get("cwd"), str) else None) + live
-        if c.stream is None and r.get("available") is not False:
+        if c.stream is None and r.get("available") is not False and not c.incompatible:  # stopped: the note says so
             out.append({"type": "text", "style": "dim", "text": "Reconnecting to the conversation…"})
         return out or [{"type": "text", "style": "dim", "text": "No messages yet."}]  # complete coverage only: rows() discloses others
 
@@ -785,9 +853,9 @@ class Agents:
         self.ext.fresh()
         r = self.agent(args, inspect=True)
         c = self.conversations.get(r["id"])
-        if c is not None and c.too_big:  # showing the agent again retries a conversation that overflowed
+        if c is not None and c.incompatible:  # showing the agent again retries an incompatible conversation
             with c.lock:
-                c.too_big = False
+                c.compatible_again()
                 c.view = ItemView(max_entities=c.view.max_entities, max_entity_bytes=c.view.max_entity_bytes)
             self.wake(r["id"], reattach=True)
         self.ext.contribute(self.declarations([r]))
