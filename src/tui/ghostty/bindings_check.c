@@ -88,6 +88,7 @@ static GhosttyResult (*const f_style)(const GhosttyGridRef*, GhosttyStyle*) = gh
 static GhosttyResult (*const f_uri)(const GhosttyGridRef*, uint8_t*, size_t, size_t*) = ghostty_grid_ref_hyperlink_uri;
 static GhosttyResult (*const f_cell_get)(GhosttyCell, GhosttyCellData, void*) = ghostty_cell_get;
 static GhosttyResult (*const f_row_get)(GhosttyRow, GhosttyRowData, void*) = ghostty_row_get;
-static GhosttyTerminalBellFn const f_bell = (GhosttyTerminalBellFn)0;
-static GhosttyTerminalClipboardWriteFn const f_clip = (GhosttyTerminalClipboardWriteFn)0;
+/* The callback typedefs, restated with their parameters (a typedef that changes fails to compile). */
+static void (*const f_bell)(GhosttyTerminal, void*) = (GhosttyTerminalBellFn)0;
+static void (*const f_clip)(GhosttyTerminal, void*, const GhosttyClipboardWrite*) = (GhosttyTerminalClipboardWriteFn)0;
 static void (*const f_reply_type)(const GhosttyClipboardWrite*, const GhosttyClipboardWriteReply*) = (GhosttyClipboardWriteReplyFn)0;

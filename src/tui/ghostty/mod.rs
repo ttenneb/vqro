@@ -4,7 +4,8 @@
 //! written by hand against the vendored headers and checked by the C compiler (`bindings_check.c`). Only the
 //! narrow API the engine needs is wrapped. Rules for every FFI call:
 //! - a handle is used only while its owner is alive, and is freed once (`Drop`);
-//! - out-pointers point at storage of the documented type, and sized structs carry their `size`;
+//! - out-pointers point at storage of the documented type, and the one sized struct (the clipboard reply) carries
+//!   its `size`;
 //! - callbacks never unwind into C (`catch_unwind`), never call back into the terminal, and bound what they keep;
 //! - input reaches the library only through `ghostty_terminal_vt_write`, which takes any bytes.
 //!
@@ -50,6 +51,11 @@ struct Collected {
 }
 
 const MAX_CLIPBOARD_BYTES: usize = 768 * 1024; // decoded; within the 1 MiB base64 bound the vt100 engine uses
+
+// The callbacks have exactly the types the library's options take (ghostty-audit P3-1): checked here by the Rust
+// compiler, and the C typedefs by bindings_check.c.
+const _: ffi::GhosttyTerminalBellFn = Some(bell_cb);
+const _: ffi::GhosttyTerminalClipboardWriteFn = Some(clipboard_cb);
 
 unsafe extern "C" fn bell_cb(_terminal: ffi::GhosttyTerminal, userdata: *mut c_void) {
     let _ = std::panic::catch_unwind(|| {
@@ -108,8 +114,9 @@ unsafe fn borrowed<'a>(value: ffi::GhosttyString) -> Option<&'a [u8]> {
     if value.len == 0 { Some(&[]) } else if value.ptr.is_null() { None } else { Some(unsafe { slice::from_raw_parts(value.ptr, value.len) }) }
 }
 
-/// OSC 9 and OSC 777 notifications in a program's byte stream (libghostty-vt has no callback for them). A small,
-/// bounded state machine that survives sequences split across writes.
+/// OSC 9 and OSC 777 notifications in a program's byte stream: the same rule as the vt100 engine, kept by vqro
+/// (the library's DESKTOP_NOTIFICATION callback stays unset). A small, bounded state machine that survives
+/// sequences split across writes.
 #[derive(Default)]
 struct Notifications {
     /// Bytes of an OSC being read (after `ESC ]`), or None outside one.
@@ -490,10 +497,11 @@ impl Engine for Ghostty {
     fn take_effects(&mut self) -> Vec<Effect> { mem::take(&mut self.effects) }
 
     fn resize(&mut self, cols: u16, rows: u16) {
-        // Never resize with the view pinned on history: at this pin the library can leave its viewport pin on a
-        // freed page, and the next read reaches `unreachable` (a segfault in ReleaseFast; ghostty-audit P0-1). So
-        // follow the live screen, resize, and go back to the same distance from the bottom (0: keep following;
-        // the library's reflow could otherwise leave a following view scrolled back, P1-3).
+        // Resize with the view following the live screen, then go back to the same distance from the bottom (0: keep
+        // following; reflow could otherwise leave a following view scrolled back, P1-3). This started as the
+        // workaround for ghostty-audit P0-1: at pin c5a21edf a resize with the view pinned on history could leave the
+        // library's viewport pin on a freed page. 9ad3c422 no longer needs it (the audit's re-review ran the P0-1
+        // logs without it); it is kept because it is cheap and keeps the view's distance explicit.
         let back = self.scroll_offset();
         if back > 0 { self.set_scroll_offset(0); }
         let before = self.issued();

@@ -40,6 +40,7 @@ wayland, z2d, ...) are not linked into lib-vt.
 | uucode 0.2.0 | Zig package (`build.zig.zon`) | MIT ("Copyright (c) 2026 Jacob Sandlund"), plus its `licenses/LICENSE_unicode` (Unicode-3.0) for the UCD data and `licenses/LICENSE_Bjoern_Hoehrmann` (MIT) | `LICENSE.md` and both files in its `licenses/` |
 | Zig compiler_rt | the Zig 0.17.1 toolchain (`lib/compiler_rt`) | MIT (Zig's `LICENSE`) | Zig's `LICENSE` |
 | musl, in compiler_rt | 18 files of Zig's `lib/compiler_rt` say they are ported from musl, which is MIT (0.15.2 had 16 such files; the old inventory missed them) | MIT ("Copyright © 2005-2020 Rich Felker, et al.") | musl's `COPYRIGHT` |
+| LLVM compiler-rt, in compiler_rt | some files say they are ported from LLVM's compiler-rt: post-2019 code is Apache-2.0 WITH LLVM-exception, which needs no notice in binaries; one older port says "release 8.0 (MIT)" (ghostty-audit findings 3, informational) | as stated | none beyond Zig's `LICENSE` |
 | FFI declarations | `src/tui/ghostty/bindings.rs`, written by hand for vqro against the headers above, checked by `bindings_check.c` | vqro's own | none |
 
 All of these are on vqro's licence allowlist (Apache-2.0, MIT, BSD-3-Clause, Unicode-3.0). `vendor/notices.json`

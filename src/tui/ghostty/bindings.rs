@@ -3,7 +3,8 @@
 //!
 //! bindgen isn't used: these declarations are checked against the headers instead. `bindings_check.c` asserts
 //! with the C compiler every size, alignment, field offset and enum value below; `build.rs` compiles it with
-//! the same Zig. The `layout` test asserts the same numbers on the Rust side. Change all three together.
+//! the same Zig. On the Rust side, the `layout` tests assert the same sizes and offsets, and that every constant here
+//! has its `SAME(..)` line there with the same value. Change both files together.
 //!
 //! C enums here are `int` (`GHOSTTY_ENUM_TYPED`), so they are `c_int` constants.
 use std::os::raw::{c_int, c_void};
@@ -315,5 +316,35 @@ mod layout {
         assert_eq!((offset_of!(GhosttyClipboardWrite, contents), offset_of!(GhosttyClipboardWrite, contents_len), offset_of!(GhosttyClipboardWrite, name),
                     offset_of!(GhosttyClipboardWrite, granted), offset_of!(GhosttyClipboardWrite, can_remember), offset_of!(GhosttyClipboardWrite, ctx),
                     offset_of!(GhosttyClipboardWrite, reply)), (8, 16, 24, 40, 41, 48, 56));
+    }
+
+    /// Every constant here has a `SAME(name, value)` line in bindings_check.c with the same value, and every such line
+    /// names a constant here (ghostty-audit P3-2): the C compiler checks those lines against the headers, so an edit
+    /// to only one side fails somewhere.
+    #[test]
+    fn constants_match_the_c_check() {
+        macro_rules! values { ($($n:ident),* $(,)?) => { vec![$((stringify!($n), $n as i64)),*] } }
+        let rust: std::collections::BTreeMap<&str, i64> = values![GHOSTTY_SUCCESS, GHOSTTY_INVALID_VALUE, GHOSTTY_OUT_OF_SPACE, GHOSTTY_POINT_TAG_ACTIVE, GHOSTTY_POINT_TAG_VIEWPORT, GHOSTTY_POINT_TAG_SCREEN, GHOSTTY_CELL_DATA_CODEPOINT, GHOSTTY_CELL_DATA_WIDE, GHOSTTY_CELL_WIDE_NARROW, GHOSTTY_CELL_WIDE_WIDE, GHOSTTY_CELL_WIDE_SPACER_TAIL, GHOSTTY_CELL_WIDE_SPACER_HEAD, GHOSTTY_ROW_DATA_WRAP, GHOSTTY_STYLE_COLOR_NONE, GHOSTTY_STYLE_COLOR_PALETTE, GHOSTTY_STYLE_COLOR_RGB, GHOSTTY_STYLE_FLAG_BOLD, GHOSTTY_STYLE_FLAG_ITALIC, GHOSTTY_STYLE_FLAG_FAINT, GHOSTTY_STYLE_FLAG_BLINK, GHOSTTY_STYLE_FLAG_INVERSE, GHOSTTY_STYLE_FLAG_INVISIBLE, GHOSTTY_STYLE_FLAG_STRIKETHROUGH, GHOSTTY_STYLE_UNDERLINE_SHIFT, GHOSTTY_STYLE_UNDERLINE_MASK, GHOSTTY_TERMINAL_OPT_USERDATA, GHOSTTY_TERMINAL_OPT_WRITE_PTY, GHOSTTY_TERMINAL_OPT_BELL, GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, GHOSTTY_TERMINAL_OPT_MODE_DEFAULT, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES, GHOSTTY_TERMINAL_DATA_COLS, GHOSTTY_TERMINAL_DATA_ROWS, GHOSTTY_TERMINAL_DATA_CURSOR_X, GHOSTTY_TERMINAL_DATA_CURSOR_Y, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE, GHOSTTY_TERMINAL_DATA_SCROLLBAR, GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS, GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_STORAGE_LIMIT, GHOSTTY_TERMINAL_DATA_MODE, GHOSTTY_TERMINAL_SCREEN_PRIMARY, GHOSTTY_TERMINAL_SCREEN_ALTERNATE, GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM, GHOSTTY_TERMINAL_SCROLL_VIEWPORT_ROW, GHOSTTY_CLIPBOARD_LOCATION_STANDARD, GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS, GHOSTTY_CLIPBOARD_WRITE_RESULT_DENIED, GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED, GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA].into_iter().collect();
+        let declared: std::collections::BTreeSet<&str> = include_str!("bindings.rs").lines()
+            .filter_map(|l| l.strip_prefix("pub const ")).filter_map(|l| l.split(':').next()).collect();
+        assert_eq!(declared, rust.keys().copied().collect(), "the list above names every constant declared in this file");
+        let eval = |v: &str| -> i64 {
+            let v = v.trim();
+            if let Some((a, b)) = v.split_once("<<") {
+                let base = a.trim().trim_start_matches("0x");
+                let base = if a.trim().starts_with("0x") { i64::from_str_radix(base, 16).unwrap() } else { base.parse().unwrap() };
+                return base << b.trim().parse::<i64>().unwrap();
+            }
+            if let Some(h) = v.strip_prefix("0x") { return i64::from_str_radix(h, 16).unwrap(); }
+            v.parse().unwrap_or_else(|_| panic!("bindings_check.c value {v}"))
+        };
+        let mut c = std::collections::BTreeMap::new();
+        for part in include_str!("bindings_check.c").split("SAME(").skip(1) {
+            // `SAME(GHOSTTY_X, value);` lines (the macro's own definition and size/offset lines are skipped).
+            let Some((name, rest)) = part.split_once(',') else { continue };
+            if !name.trim().starts_with("GHOSTTY_") { continue; }
+            c.insert(name.trim(), eval(&rest[..rest.find(");").unwrap()]));
+        }
+        assert_eq!(c.iter().map(|(k, v)| (*k, *v)).collect::<std::collections::BTreeMap<&str, i64>>(), rust);
     }
 }
