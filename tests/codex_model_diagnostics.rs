@@ -13,6 +13,10 @@ fn model_failure_keeps_exact_code_and_bounded_message_but_never_error_data() {
     };
     let public = failure(FailureStage::NativeRpc, &native);
     assert_eq!(public.kind(), "backend");
+    assert_eq!(
+        public.message,
+        "native model native_rpc failure (code -32602): native model rejection; do not replay"
+    );
     let data = public.data.unwrap();
     assert_eq!(data["stage"], "native_rpc");
     assert_eq!(
@@ -33,7 +37,7 @@ fn model_failure_keeps_exact_code_and_bounded_message_but_never_error_data() {
 #[test]
 fn model_failure_omits_oversize_or_control_messages_instead_of_truncating() {
     for message in [
-        "x".repeat(1025),
+        "x".repeat(257),
         "x\nforged".into(),
         "x\rforged".into(),
         "x\u{0085}forged".into(),
@@ -58,8 +62,8 @@ fn model_failure_omits_oversize_or_control_messages_instead_of_truncating() {
             "bounds_or_controls"
         );
     }
-    let boundary = "\u{1f642}".repeat(256);
-    assert_eq!(boundary.len(), 1024);
+    let boundary = "\u{1f642}".repeat(64);
+    assert_eq!(boundary.len(), 256);
     let data = failure(
         FailureStage::NativeRpc,
         &RpcError {

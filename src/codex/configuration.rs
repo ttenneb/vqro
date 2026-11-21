@@ -12,21 +12,13 @@ pub enum FailureStage {
     Readback,
 }
 pub fn failure(stage: FailureStage, error: &RpcError) -> RpcError {
-    let (stage, key, message) = match stage {
-        FailureStage::NativeRpc => (
-            "native_rpc",
-            "native_error",
-            "native model outcome unknown; do not replay",
-        ),
-        FailureStage::Readback => (
-            "readback",
-            "readback_error",
-            "native model readback missing or changed thread; do not replay",
-        ),
+    let (stage, key) = match stage {
+        FailureStage::NativeRpc => ("native_rpc", "native_error"),
+        FailureStage::Readback => ("readback", "readback_error"),
     };
     let mut detail = json!({"code":error.code});
     if !error.message.is_empty()
-        && error.message.len() <= 1024
+        && error.message.len() <= 256
         && !crate::limits::text_controls(&error.message)
         && !error.message.contains(['\u{2028}', '\u{2029}'])
     {
@@ -34,7 +26,18 @@ pub fn failure(stage: FailureStage, error: &RpcError) -> RpcError {
     } else {
         detail["message_omitted"] = json!("bounds_or_controls");
     }
-    let mut public = RpcError::new("backend", message);
+    // The core's public refusal preserves text but not arbitrary provider error data.
+    // Keep this qualified diagnostic within the existing 512-character adapter envelope.
+    let message = detail["message"]
+        .as_str()
+        .unwrap_or("[message omitted: bounds_or_controls]");
+    let mut public = RpcError::new(
+        "backend",
+        format!(
+            "native model {stage} failure (code {}): {message}; do not replay",
+            error.code
+        ),
+    );
     let data = public.data.as_mut().unwrap();
     data["stage"] = json!(stage);
     data[key] = detail;

@@ -643,7 +643,9 @@ async fn native_model_error_stage_code_and_message_survive_the_sdk_boundary() {
     let incarnation = core.facts.lock().unwrap()["endpoint-1"]["incarnation"].clone();
     let result=core.peer.call_with_timeout("effect.invoke",json!({"generation":1,"effect":"model-native-error","ref":"endpoint-1","incarnation":incarnation,
         "op":"agent.configure","args":{"v":0,"id":"model","value":"fake-alternate"},"deadline_ms":1000}),Duration::from_secs(2)).await;
-    let error = result.unwrap_err().data.unwrap();
+    let public = result.unwrap_err();
+    assert!(public.message.contains("native model native_rpc failure (code -32600): fixture native model rejected; do not replay"));
+    let error = public.data.unwrap();
     assert_eq!(error["stage"], "native_rpc");
     assert_eq!(error["native_error"]["code"], -32600);
     assert_eq!(
