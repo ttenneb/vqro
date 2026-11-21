@@ -95,11 +95,28 @@ def grade_replacement(obs):
     provider = late.get("provider_after") or {}
     add((provider.get("instance") or "").endswith(":" + str(b)) and provider.get("state") == "connected",
         "the provider is still the replacement's connected instance after the old incarnation's late return")
+    own_host = obs.get("own_host") or {}
+    add(own_host.get("exited") is True and "exit" in (own_host.get("ledger") or []),
+        "the replacement's own native host really ended (its captured process is gone and its ledger records exit)",
+        "fixture")
     own = obs.get("own_end") or {}
     add(new_ids and all(isinstance(own.get(rid), dict) and own[rid].get("lifecycle") == "ended"
                         and host_of(own[rid]).get("incarnation") == b for rid in new_ids),
         "the replacement's own host end (owns_lifecycle) ended its endpoints, attributed to incarnation B")
     return results
+
+
+def replacement_group(rows, provider, old_incarnation, old_ids):
+    """The replacement's endpoints, validated BEFORE any public mutation: available agents of the SAME provider whose
+    host incarnation is one single new value (not the old one), at least as many as the old host served. Agents of
+    any other provider, or a mixed incarnation set, never qualify, so no unrelated agent is ever sent work."""
+    fresh = [row for row in rows if row.get("kind") == "agent" and row.get("available") and row.get("provider") == provider
+             and row.get("id") not in old_ids
+             and host_of((row.get("data") or {}).get("agent")).get("incarnation") not in (None, old_incarnation)]
+    incarnations = {host_of(row["data"]["agent"]).get("incarnation") for row in fresh}
+    if len(incarnations) != 1 or len(fresh) < len(old_ids):
+        return None
+    return sorted(fresh, key=lambda row: row["id"])
 
 
 def replacement_argv(argv, old_paths, new_paths):
@@ -203,13 +220,11 @@ async def many_host_replacement(ctx):
             ctx.backend.tracked.append(bridge_b)
         image_b = executable(bridge_b)
         async def replaced():
-            rows = [row for row in await ctx.resources() if row.get("kind") == "agent" and row.get("available")
-                    and row["id"] not in old_ids]
-            fresh = [row for row in rows if host_of((row.get("data") or {}).get("agent")).get("incarnation") not in (None, a)]
-            return fresh if len(fresh) >= len(old_ids) else None
+            return replacement_group(await ctx.resources(), old_provider, a, old_ids)
         new_rows = await poll(replaced, SETUP_S)
         if not new_rows:
-            raise HarnessGap("replacement bridge did not register its endpoints within the bounded setup")
+            raise HarnessGap("replacement bridge did not register one same-provider new-incarnation endpoint group "
+                             "within the bounded setup")
         new_ids = sorted(row["id"] for row in new_rows)
         new_host = host_of(new_rows[0]["data"]["agent"])
         b = new_host.get("incarnation")
@@ -250,7 +265,14 @@ async def many_host_replacement(ctx):
             settled = await ctx.wait_facts(lambda f: f.get("state") == "idle", rid=work_rid, timeout=5)
         except CheckFailed:
             settled = await ctx.facts(work_rid)
+        if not native_b_process:
+            raise HarnessGap("the replacement native host's process identity was not captured; its own end is unwitnessable")
+        own_ledger_mark = native_b.mark()
         await native_b.call("host_exit", code=0)
+        async def own_host_gone():
+            return not live(native_b_process)
+        own_host_exited = bool(await poll(own_host_gone, SETUP_S))
+        own_host_exit_rows = [row.get("kind") for row in native_b.records(after=own_ledger_mark)][-4:]
         def own_end_seen():
             rows = {rid: (ctx.resource_cache.get(rid) or {}).get("data", {}).get("agent") for rid in new_ids}
             return rows if all((row or {}).get("lifecycle") == "ended" for row in rows.values()) else None
@@ -269,7 +291,8 @@ async def many_host_replacement(ctx):
                "same_image": bool(image_b and image_b.get("sha256") == image.get("sha256")),
                "work_before": work_before, "work_after": work_after, "after_end": after_end,
                "available_after": available_after, "old_after": old_after, "settled": settled,
-               "history": history, "order": order, "late_return": late_return, "own_end": own_end}
+               "history": history, "order": order, "late_return": late_return, "own_end": own_end,
+               "own_host": {"exited": own_host_exited, "ledger": own_host_exit_rows}}
         brief = lambda f: {k: (f or {}).get(k) for k in ("state", "run", "lifecycle")} | {
             "incarnation": host_of(f).get("incarnation")}
         ctx.evidence.append({"kind": "l3_replacement", "old_host": host, "new_host": new_host,
@@ -279,6 +302,8 @@ async def many_host_replacement(ctx):
                                                for rid, row in old_after.items()},
                              "settled": brief(settled), "own_end": {rid: brief(f) for rid, f in own_end.items()},
                              "late_return": late_return,
+                             "own_host": {"process": native_b_process, "exited": own_host_exited,
+                                          "ledger": own_host_exit_rows},
                              "executables": {"old_bridge": {"pid": image.get("pid"), "birth": image.get("birth"),
                                                             "sha256": image.get("sha256")},
                                              "replacement_bridge": image_b,
@@ -289,7 +314,7 @@ async def many_host_replacement(ctx):
         results = grade_replacement(obs)
         for ok, message, component in results:
             if component in ("harness", "fixture"):
-                check(ok, message, component=component)
+                check(ok, message, component=component)  # unwitnessed scenario steps fail before adapter grades
         for ok, message, component in results:
             check(ok, message, component=component)
     finally:

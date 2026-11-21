@@ -28,6 +28,7 @@ def valid_obs():
             "old_ids": ["r2", "r3", "r4"], "new_ids": ["r6", "r7", "r8"], "same_image": True,
             "work_before": work, "work_after": dict(work),
             "own_end": {rid: facts(B, lifecycle="ended") for rid in ("r6", "r7", "r8")},
+            "own_host": {"exited": True, "ledger": ["exit"]},
             "after_end": after, "available_after": {rid: True for rid in after},
             "old_after": {"r2": None, "r3": None, "r4": None},
             "settled": facts(B, "idle", None, completion={"reason": "completed"}),
@@ -56,6 +57,8 @@ class GradeReplacement(unittest.TestCase):
         def own_end_not_ended(o): o["own_end"]["r7"] = facts(B)
         def own_end_misattributed(o): o["own_end"]["r8"] = facts(A, lifecycle="ended")
         def other_image(o): o["same_image"] = False
+        def own_host_still_live(o): o["own_host"]["exited"] = False
+        def own_host_no_exit_row(o): o["own_host"]["ledger"] = []
         def never_completes(o): o["settled"] = facts(B, "running", "turn-1")
         def ended_attributed_to_new(o): o["history"].append(("r2", facts(B, lifecycle="ended")))
         def old_resurrected(o): o["old_after"]["r3"] = (True, facts(A))
@@ -69,6 +72,7 @@ class GradeReplacement(unittest.TestCase):
                   work_lost: "adapter", run_replaced: "adapter", never_completes: "adapter",
                   session_switched: "adapter", run_rebound_to_old_host: "adapter", own_end_not_ended: "adapter",
                   own_end_misattributed: "adapter", other_image: "fixture",
+                  own_host_still_live: "fixture", own_host_no_exit_row: "fixture",
                   ended_attributed_to_new: "adapter", old_resurrected: "adapter", old_took_provider: "adapter",
                   provider_lost: "adapter", not_a_replacement: "harness", old_ids_reused: "harness",
                   old_host_never_ended: "harness", wrong_order: "harness"}
@@ -93,6 +97,18 @@ class Helpers(unittest.TestCase):
         self.assertIsNone(m.replacement_argv(argv, ["/r/other.sock"], {}))
         self.assertIsNone(m.replacement_argv(argv + ["/r/c.sock"], ["/r/c.sock", "/r/n.jsonl"], {}), "path must occur once")
 
+    def test_replacement_group_is_validated_before_any_send(self):
+        def row(rid, provider, incarnation, available=True):
+            return {"id": rid, "kind": "agent", "provider": provider, "available": available, "data": {"agent": facts(incarnation)}}
+        old = ["r2", "r3", "r4"]
+        rows = [row("r5", "other-provider", "inc-c"), row("r6", "codex-x", B), row("r7", "codex-x", B), row("r8", "codex-x", B)]
+        self.assertEqual([r["id"] for r in m.replacement_group(rows, "codex-x", A, old)], ["r6", "r7", "r8"], "foreign r5 ignored")
+        self.assertIsNone(m.replacement_group(rows[:3], "codex-x", A, old), "too few same-provider endpoints")
+        mixed = rows + [row("r9", "codex-x", "inc-d")]
+        self.assertIsNone(m.replacement_group(mixed, "codex-x", A, old), "mixed new incarnations are not one replacement")
+        self.assertIsNone(m.replacement_group([row("r6", "other", B), row("r7", "other", B), row("r8", "other", B)],
+                                              "codex-x", A, old), "another provider is never a replacement")
+
     def test_branch_selection(self):
         self.assertTrue(m.is_many_server({"kind": "server", "endpoints": "many"}, m.host_of(facts(A))))
         process = {"host": {"kind": "process", "owns_lifecycle": True}}
@@ -116,8 +132,8 @@ class SimulatedCore:
     """A tiny public-surface simulation for whole-handler controls: two bridges under one provider name, the core's
     one-live-connection rule, and a scenario hook deciding what the old incarnation's late return does."""
 
-    def __init__(self, late_return, own_end=None):
-        self.late_return = late_return
+    def __init__(self, late_return, own_end=None, foreign=False, native_b_lives=False):
+        self.late_return, self.native_b_lives, self.sends = late_return, native_b_lives, []
         self.own_end = own_end or SimulatedCore.ends_replacement_endpoints
         self.resources = {"r1": {"id": "r1", "kind": "terminal", "provider": "herdr", "available": True}}
         for rid in ("r2", "r3", "r4"):
@@ -125,6 +141,10 @@ class SimulatedCore:
                                    "data": {"agent": facts(A)}}
         self.provider = {"instance": "x:" + A, "generation": 1, "state": "connected"}
         self.history = []
+        self.foreign = foreign
+        if foreign:  # an unrelated available agent of another provider, present from the start
+            self.resources["r5"] = {"id": "r5", "kind": "agent", "provider": "other-provider", "available": True,
+                                    "data": {"agent": facts("inc-c")}}
 
     @staticmethod
     def ends_replacement_endpoints(core):  # the correct owns_lifecycle end of the replacement host
@@ -157,8 +177,8 @@ class SimulatedCore:
         raise AssertionError(method)
 
 
-def run_control(late_return, own_end=None):
-    core = SimulatedCore(late_return, own_end)
+def run_control(late_return, own_end=None, foreign=False, native_b_lives=False):
+    core = SimulatedCore(late_return, own_end, foreign, native_b_lives)
     ledger = []
     class NativeA:
         endpoint, path = "/r/c.sock", "/r/native.jsonl"
@@ -169,11 +189,15 @@ def run_control(late_return, own_end=None):
                 ledger.append({"kind": "exit"})
                 core.late_return(core)
             return {}
+    ledger_b = []
     class NativeB:
         def __init__(self, endpoint, path): self.endpoint, self.path = endpoint, path
+        def mark(self): return len(ledger_b)
+        def records(self, kind=None, after=0): return ledger_b[after:]
         async def call(self, verb, **kw):
             if verb == "state": return {"pid": 99}
-            if verb == "host_exit": core.own_end(core)
+            if verb == "host_exit":
+                ledger_b.append({"kind": "exit"}); core.own_end(core)
             if verb == "turn" and core.resources.get("r6", {}).get("available"):
                 agent = core.resources["r6"]["data"]["agent"]
                 if agent["state"] == "running":
@@ -184,6 +208,7 @@ def run_control(late_return, own_end=None):
         if agent and predicate(agent): return deepcopy(agent)
         raise CheckFailed("timeout")
     async def send(text, rid=None, **kw):
+        core.sends.append(rid)
         core.resources[rid]["data"]["agent"].update(state="running", run="turn-1")
     async def lifecycle_wait(ctx, predicate, description):
         if not predicate(): raise CheckFailed(description)
@@ -210,20 +235,24 @@ def run_control(late_return, own_end=None):
     async def cache_then(ctx_, predicate, description):
         await listing(); return await lifecycle_wait(ctx_, predicate, description)
     with patch.object(m, "Native", NativeB), patch.object(m, "signal_owned", lambda process, sig: True), \
+         patch.object(m, "SETUP_S", 0.2), \
          patch.object(m, "executable", lambda process: {"sha256": "img"}), patch.object(m, "ledger_summary", lambda n: {}), \
          patch.object(cases, "lifecycle_wait", cache_then), patch.object(m.asyncio, "sleep", AsyncMock()), \
          patch("pi_provider_e2e.identity", lambda pid: {"pid": pid, "birth": "1"}), \
-         patch("pi_provider_e2e.live", lambda process: False):
-        asyncio.run(m.many_host_replacement(ctx))
+         patch("pi_provider_e2e.live", lambda process: core.native_b_lives and process.get("pid") == 99):
+        try:
+            asyncio.run(m.many_host_replacement(ctx))
+        finally:
+            ctx.sends = core.sends
     return ctx
 
 
 class WholeHandlerControls(unittest.TestCase):
     """The real L3 handler against the simulated core: only the correct late return is accepted."""
 
-    def accepts(self, late_return, own_end=None):
+    def accepts(self, late_return, own_end=None, **kw):
         try:
-            run_control(late_return, own_end); return True
+            run_control(late_return, own_end, **kw); return True
         except CheckFailed:
             return False
 
@@ -258,6 +287,15 @@ class WholeHandlerControls(unittest.TestCase):
         for own_end in (own_host_end_ignored, own_host_end_attributed_to_old):
             with self.subTest(own_end.__name__):
                 self.assertFalse(self.accepts(fenced, own_end))
+
+    def test_replacement_native_still_live_is_never_green(self):
+        with self.assertRaises(CheckFailed) as caught:
+            run_control(lambda core: None, native_b_lives=True)
+        self.assertEqual(getattr(caught.exception, "component", None), "fixture")
+
+    def test_foreign_agent_is_never_sent_work(self):
+        ctx = run_control(lambda core: None, foreign=True)
+        self.assertEqual(ctx.sends, ["r6"], "only the validated replacement endpoint receives work")
 
     def test_evidence_records_the_late_return(self):
         ctx = run_control(lambda core: None)
