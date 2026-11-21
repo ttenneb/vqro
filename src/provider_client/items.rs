@@ -1081,6 +1081,20 @@ mod tests {
             };
             assert_eq!(refusal.kind, "too_large", "{name}: refused for the record bound");
             assert!(accepted > 1000, "{name}: refused only near the bound ({accepted} small appends accepted)");
+            // Refused exactly at the bound: the entity's current snapshot put fits the record bound, and the same put
+            // after one more small append would not (the journal's own admission check, not a copied constant).
+            let (rev, value) = j.entity("message", "m").map(|(r, v)| (r, v.clone())).unwrap();
+            let mut grown = value.clone();
+            let slot = grown.pointer_mut(field).and_then(|v| v.as_str().map(str::to_owned)).unwrap();
+            let next = if name == "bytes" {
+                let mut buf = B64.decode(slot.as_bytes()).unwrap();
+                buf.extend_from_slice(&[0xAB; 16]);
+                B64.encode(&buf)
+            } else { slot + &"t".repeat(16) };
+            *grown.pointer_mut(field).unwrap() = json!(next);
+            let put = |value: &Value, rev| json!({"op": "put", "seq": 0, "kind": "message", "id": "m", "rev": rev, "value": value});
+            assert!(j.fits(&put(&value, rev)).is_ok(), "{name}: the current entity still fits one record");
+            assert!(j.fits(&put(&grown, rev + 1)).is_err(), "{name}: one more small append would not fit");
             let before = state(&j);
             // The same small append again: refused again, and nothing moved.
             assert_eq!(append(&mut j, "message", "m", field).unwrap_err().kind, "too_large", "{name}: retry refused");
