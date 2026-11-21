@@ -12,6 +12,8 @@ failure nor a permission for the adapter to refuse inside the generic bound). Bo
 C11 binds usage/context/session facts to supplied native reports. Coverage limits, stated rather than hidden: these
 fixtures supply no priced cost (currency/basis/plan), so only its absence is graded; neither adapter emits run or
 thought entities here, so that clause is only a no-apportionment negative on the entities that do exist.
+Codex model intent is future-turn-only: one dispatch followed by actual same-thread Thread.model readback witnesses
+current configured metadata after dispatch, NOT per-turn telemetry. Pi's immediate native setter route is unchanged.
 """
 import asyncio
 import json
@@ -389,6 +391,196 @@ async def observe_native_state(ctx):
     return option, before, mark
 
 
+def c11_option(facts, ident):
+    rows = [row for row in facts.get("config", []) if row.get("id") == ident and row.get("category") == "model"]
+    check(len(rows) == 1, "C11: the selected model option is missing or duplicated")
+    return rows[0]
+
+
+def c11_pending(facts, ident, selected, previous, session, epoch, *, before_turn, allow_unknown=False):
+    option = c11_option(facts, ident)
+    check(option.get("value") == selected and option.get("pending") is True
+          and option.get("applies_from") == "next_turn",
+          "C11: future model intent was claimed applied/cleared before matching native readback")
+    public_session = facts.get("session") or {}
+    check(public_session.get("id") == session and facts.get("epoch") == epoch,
+          "C11: pending model intent changed session/epoch")
+    actual = (public_session.get("model") or {}).get("id")
+    check(actual == previous if before_turn else actual in (None, previous),
+          "C11: session.model was inferred from the future request or turn ACK")
+    statuses = (None, "pending", "unknown") if allow_unknown else (None, "pending")
+    check(option.get("status") in statuses, "C11: model status claimed confirmation without readback")
+    return json.loads(json.dumps({"option": option, "session": public_session, "epoch": facts.get("epoch")}))
+
+
+def c11_model_readback_facts(facts, ident, selected, actual, session, epoch):
+    option, public_session = c11_option(facts, ident), facts.get("session") or {}
+    check(option.get("value") == selected and option.get("applies_from") == "next_turn"
+          and public_session.get("id") == session and facts.get("epoch") == epoch,
+          "C11: model readback changed intent/session/epoch")
+    matched = actual == selected
+    check(option.get("pending") is (not matched), "C11: model pending cleared without a matching readback")
+    status = "confirmed" if matched else "unknown" if actual is None else "mismatch"
+    check(option.get("status") == status, "C11: model readback certainty/mismatch was not reported")
+    model = public_session.get("model") or {}
+    check(("model" not in public_session) if actual is None else model.get("id") == actual,
+          "C11: session.model was inferred from request/ACK instead of native thread/read")
+    return matched
+
+
+def c11_dispatch_readback(turn, ack, read, response, thread, selected):
+    """Internal evidence envelopes contain ledger seq plus the ACTUAL native JSON-RPC value.
+    Thread.model witnesses configured metadata after dispatch, NEVER per-turn execution telemetry.
+    """
+    values = [row["value"] for row in (turn, ack, read, response)]
+    start, admitted, query, reply = values
+    check(all(type(row.get("seq")) is int for row in (turn, ack, read, response))
+          and turn["seq"] < ack["seq"] < read["seq"] < response["seq"],
+          "C11: native model readback was not ordered after this turn's ACK")
+    check(start.get("method") == "turn/start" and start.get("params", {}).get("threadId") == thread
+          and start.get("params", {}).get("model") == selected,
+          "C11: the single native turn did not carry the selected future model on the same thread")
+    check(start.get("id") is not None and same_json(admitted.get("id"), start.get("id"))
+          and "error" not in admitted and isinstance(admitted.get("result"), dict)
+          and isinstance((admitted["result"].get("turn") or {}).get("id"), str)
+          and bool(admitted["result"]["turn"]["id"]),
+          "C11: missing successful native ACK for the dispatched turn")
+    check(query.get("method") == "thread/read" and same_json(query.get("params"), {"threadId": thread, "includeTurns": False}),
+          "C11: configured-model observation was not one same-thread read-only thread/read")
+    check(query.get("id") is not None and same_json(reply.get("id"), query.get("id")),
+          "C11: native configured-model response does not belong to the read request")
+    if "error" in reply:
+        return None
+    result = reply.get("result")
+    actual = result.get("thread") if isinstance(result, dict) else None
+    if not isinstance(actual, dict) or actual.get("id") != thread:
+        return None
+    if (actual.get("status") or {}).get("type") == "notLoaded":
+        return None
+    model = actual.get("model")
+    return model if isinstance(model, str) and model else None
+
+
+def c11_native_exchange(ctx, mark, thread, selected, *, require_read_response):
+    commands = ctx.native.records("command", after=mark)
+    turns = [row for row in commands if row.get("command") == "turn/start"]
+    check(len(turns) == 1 and len(ctx.native.writes(mark)) == 1,
+          "C11: future model witness dispatched/replayed more than one native mutation")
+    reads = [row for row in commands if row.get("command") == "thread/read"]
+    check(len(reads) == 1 and reads[0].get("effectful") is False,
+          "C11: model witness needs exactly one read-only native thread/read")
+    turn, read = turns[0], reads[0]
+    replies = ctx.native.records("native_response", after=mark)
+    def response(command):
+        ident = command["value"].get("id")
+        return [row for row in replies if row.get("command") == command.get("command")
+                and same_json(row.get("request"), ident)]
+    acks, observations = response(turn), response(read)
+    if len(acks) != 1:
+        raise HarnessGap("C11 needs the fixture's actual emitted turn/start response witness")
+    if not require_read_response:
+        check(not observations, "C11 readback barrier emitted a response while held", component="fixture")
+        # Validate the request/ACK now; native configured metadata is deliberately not inferred here.
+        start, ack = turn["value"], acks[0]["value"]
+        check(start.get("params", {}).get("threadId") == thread and start.get("params", {}).get("model") == selected
+              and same_json(start.get("id"), ack.get("id")) and "error" not in ack
+              and isinstance(((ack.get("result") or {}).get("turn") or {}).get("id"), str)
+              and bool(ack["result"]["turn"]["id"]),
+              "C11: future model turn or its native ACK did not match")
+        check(turn["seq"] < acks[0]["seq"] < read["seq"], "C11: model read was not after native ACK")
+        check(same_json(read["value"].get("params"), {"threadId": thread, "includeTurns": False}),
+              "C11: model read was not same-thread/read-only")
+        return {"turn": turn, "ack": acks[0], "read": read}
+    if len(observations) != 1:
+        raise HarnessGap("C11 needs exactly one actual emitted thread/read response witness")
+    actual = c11_dispatch_readback(turn, acks[0], read, observations[0], thread, selected)
+    return {"turn": turn, "ack": acks[0], "read": read, "response": observations[0], "actual": actual}
+
+
+async def future_model_route_witness(ctx):
+    facts = await ctx.facts()
+    options = [row for row in facts.get("config", []) if row.get("category") == "model"
+               and row.get("type") == "select" and row.get("choices")]
+    if "agent.configure" not in facts.get("caps", {}) or not options:
+        ctx.evidence.append({"kind": "c11_model_route", "declared": False, "scope": "future_turn"})
+        return "no advertised model-category configuration option to change the model through", False
+    option = options[0]
+    selected = next((row.get("value") for row in option["choices"] if isinstance(row.get("value"), str)
+                     and row["value"] and row["value"] != option.get("value")), None)
+    if selected is None:
+        raise HarnessGap("C11 future model option has no alternate native value")
+    before = await ctx.native.call("state")
+    thread, previous = before.get("session"), before.get("model")
+    session, epoch = (facts.get("session") or {}).get("id"), facts.get("epoch")
+    if not all(isinstance(value, str) and value for value in (thread, previous, session, epoch)):
+        raise HarnessGap("C11 future model witness needs known native/public thread and previous model")
+    if selected == previous:
+        raise HarnessGap("C11 alternate intent would not change the known native configured model")
+    check(((facts.get("session") or {}).get("model") or {}).get("id") == previous,
+          "C11: previous public model was not the known native configured model")
+    mark = ctx.native.mark()
+    result = await ctx.invoke("agent.configure", {"id": option["id"], "value": selected, "rev": option["rev"]})
+    check(result.get("outcome") in ("accepted", "observed", "dispatched"), "C11 future model intent was not accepted")
+    pending = await ctx.wait_facts(lambda f: any(row.get("id") == option["id"] and row.get("value") == selected
+                                               for row in f.get("config", [])), timeout=5)
+    record = {"kind": "c11_model_route", "declared": True, "route": "future_turn", "selected": selected,
+              "scope": "current_configured_after_turn_dispatch", "not_per_turn_telemetry": True,
+              "native_before": before, "configure": result}
+    ctx.evidence.append(record)
+    record["before_turn_facts"] = pending
+    record["before_turn"] = c11_pending(pending, option["id"], selected, previous, session, epoch, before_turn=True)
+    record["configure_native_commands"] = ctx.native.records("command", after=mark)
+    check(not record["configure_native_commands"], "C11: accepting future intent issued native RPC before the turn")
+    await ctx.native.call("pause_before", phase="model_readback")
+    sending, released = None, False
+    try:
+        # This is the SAME ordinary C11 observation turn reused by the remaining entity checks.
+        sending = asyncio.create_task(ctx.send("C11 run observation", mode="start"))
+        await ctx.native.wait(lambda rows: any(row.get("seq", 0) > mark and row.get("kind") == "paused"
+                                               and row.get("phase") == "model_readback" and row.get("when") == "before"
+                                               for row in rows), timeout=2)
+        record["after_ack_native"] = c11_native_exchange(ctx, mark, thread, selected, require_read_response=False)
+        held = await ctx.facts()
+        record["after_ack_facts"] = held
+        record["after_ack"] = c11_pending(held, option["id"], selected, previous, session, epoch, before_turn=False)
+        await ctx.native.call("release", phase="model_readback")
+        released = True
+        sent = await asyncio.wait_for(asyncio.shield(sending), 5)
+        record["send"] = sent
+        check(sent.get("outcome") == "accepted", "C11 future-model observation turn was not accepted")
+        try:
+            await ctx.native.wait(lambda rows: any(row.get("seq", 0) > mark and row.get("kind") == "native_response"
+                                                   and row.get("command") == "thread/read" for row in rows), timeout=2)
+        except CheckFailed as error:
+            current = await ctx.facts()
+            record["missing_native_read_response"] = {"error": str(error), "facts": current}
+            record["matched"] = False
+            c11_pending(current, option["id"], selected, previous, session, epoch,
+                        before_turn=False, allow_unknown=True)
+            return "native thread/read response unavailable; no mandatory applied-choice witness", True
+        exchange = c11_native_exchange(ctx, mark, thread, selected, require_read_response=True)
+        record["native_exchange"] = exchange
+        actual = exchange["actual"]
+        status = "confirmed" if actual == selected else "unknown" if actual is None else "mismatch"
+        final = await ctx.wait_facts(lambda f: any(row.get("id") == option["id"] and row.get("status") == status
+                                                 for row in f.get("config", [])), timeout=5)
+        record["after_readback_facts"] = final
+        matched = c11_model_readback_facts(final, option["id"], selected, actual, session, epoch)
+        c11_native_exchange(ctx, mark, thread, selected, require_read_response=True)  # Detect a late duplicate, never retry.
+        record["after_readback"] = {"session": final.get("session"), "option": c11_option(final, option["id"])}
+        record["matched"] = matched
+        # A truthful native mismatch/unknown is NOT adapter blame, but cannot witness the required applied choice.
+        return (None if matched else "native configured-model readback did not witness the selected choice"), True
+    finally:
+        record["native_ledger"] = ctx.native.records(after=mark)
+        if not released:
+            await ctx.native.call("release", phase="model_readback")
+        if sending is not None:
+            if not sending.done():
+                sending.cancel()
+            await asyncio.gather(sending, return_exceptions=True)
+
+
 async def model_route_witness(ctx, observed=None):
     """Model changes go through the advertised model-category config option: one native mutation recorded by the
     fixture, then session.model follows the runtime's own report. Absent such an option the route is undeclared and
@@ -452,7 +644,10 @@ async def optional_view_facts(ctx):
         check(model.get("effort") == native["effort"], f"C11: effort {model.get('effort')!r} != native {native['effort']!r}")
     ctx.evidence.append({"kind": "c11_session", "native": {"cwd": reported_cwd, "model": native.get("model"), "effort": native.get("effort")},
                          "facts": {"cwd": facts["session"].get("cwd"), "model": model}})
-    model_route_gap = await model_route_witness(ctx, observed)
+    if wire == "codex":
+        model_route_gap, model_turn_started = await future_model_route_witness(ctx)
+    else:
+        model_route_gap, model_turn_started = await model_route_witness(ctx, observed), False
 
     # 1. A full native report: window, occupancy (where the runtime reports it), token and cache totals, bare cost.
     report, expected = native_report(wire, window=200000, used=4321, tokens=(1100, 220, 33, 4), cost=0.75)
@@ -482,9 +677,12 @@ async def optional_view_facts(ctx):
     # 4. Run and thought entities carry usage only when natively reported; this runtime reported none for them.
     # One ordinary turn (input, a native model call and output, settle) gives the adapter run/message entities to
     # publish; the fixture reports usage only at the session level, so none of them may carry usage.
-    await idle(ctx)
-    result = await ctx.send("C11 run observation")
-    check(result.get("outcome") == "accepted", f"C11: run observation send not accepted: {result}")
+    if not model_turn_started:
+        await idle(ctx)
+        result = await ctx.send("C11 run observation")
+        check(result.get("outcome") == "accepted", f"C11: run observation send not accepted: {result}")
+    # Codex's future-model witness already dispatched this one ordinary turn. Reuse it,
+    # rather than replaying input or introducing a second model-application turn.
     await ctx.native.call("turn", state="start")
     await ctx.native.call("model_call")
     await ctx.native.call("retain", count=1, text="C11 assistant output")
