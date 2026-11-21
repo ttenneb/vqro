@@ -86,7 +86,7 @@ class CodexMixin:
                 raise ValueError("unsupported native input block (not a capability skip)")
         return blocks
 
-    async def start_turn(self, thread):
+    async def start_turn(self, thread, started_at=None):
         if thread["run"] is not None:
             return thread["run"]
         self.turn_serial += 1
@@ -94,12 +94,15 @@ class CodexMixin:
         thread["run"] = run
         thread["meta"]["status"] = {"type": "active", "activeFlags": []}
         self.active = True
-        self.record("turn", state="start", session=thread["meta"]["id"], run=run)
-        await self.event("turn/started", {"threadId": thread["meta"]["id"], "turn": {"id": run, "status": "inProgress", "items": []}})
+        turn = {"id": run, "status": "inProgress", "items": []}
+        if started_at is not None:
+            turn["startedAt"] = started_at  # native Turn time: Unix seconds (src/codex.rs:500)
+        self.record("turn", state="start", session=thread["meta"]["id"], run=run, native_turn=turn)
+        await self.event("turn/started", {"threadId": thread["meta"]["id"], "turn": turn})
         await self.event("thread/status/changed", {"threadId": thread["meta"]["id"], "status": thread["meta"]["status"]})
         return run
 
-    async def end_turn(self, thread, aborted=False, failure=None):
+    async def end_turn(self, thread, aborted=False, failure=None, started_at=None, completed_at=None):
         run = thread["run"]
         if run is None:
             return
@@ -112,10 +115,13 @@ class CodexMixin:
         thread["run"] = None
         thread["meta"]["status"] = {"type": "idle"}
         self.active = any(t["run"] is not None for t in self.threads.values())
-        self.record("turn", state="settled", session=session, run=run, aborted=aborted, error=failure)
-        await self.event("turn/completed", {"threadId": session, "turn": {"id": run,
-            "status": "failed" if failure else "interrupted" if aborted else "completed",
-            "error": {"message": failure} if failure else None}})
+        turn = {"id": run, "status": "failed" if failure else "interrupted" if aborted else "completed",
+                "error": {"message": failure} if failure else None}
+        for key, value in (("startedAt", started_at), ("completedAt", completed_at)):
+            if value is not None:
+                turn[key] = value  # native Turn times: Unix seconds (src/codex.rs:500)
+        self.record("turn", state="settled", session=session, run=run, aborted=aborted, error=failure, native_turn=turn)
+        await self.event("turn/completed", {"threadId": session, "turn": turn})
         await self.event("thread/status/changed", {"threadId": session, "status": {"type": "idle"}})
 
     async def insert_native(self, thread, command, content, run):
@@ -282,14 +288,18 @@ class CodexMixin:
         try:
             if verb == "turn":
                 state = row["state"]
+                times = {key: row[key] for key in ("started_at", "completed_at") if key in row}
+                if any(type(value) is not int or value < 0 for value in times.values()):
+                    raise ValueError("fixture turn times are non-negative Unix seconds")
                 if state == "start":
-                    await self.start_turn(thread)
+                    await self.start_turn(thread, times.get("started_at"))
                 elif state == "end":
                     # Canonical timeline's inner model-turn boundary is not Codex's outer turn.
                     # App-server exposes no separate inner-end notification; never invent one.
                     self.record("turn", state="end", session=session, run=thread["run"], native_turn_complete=False)
                 elif state == "settled":
-                    await self.end_turn(thread, bool(row.get("aborted", False)))
+                    await self.end_turn(thread, bool(row.get("aborted", False)), started_at=times.get("started_at"),
+                                        completed_at=times.get("completed_at"))
                 else:
                     raise ValueError("unknown turn state")
             elif verb == "failure":

@@ -126,7 +126,8 @@ class Runtime:
                  "type": "message", "message": {"role": "user", "content": [{"type": "text", "text": text}] + (images or []),
                                                    "timestamp": int(time.time() * 1000)}}
         self.entries.append(entry)
-        self.record("inserted", text=text, source=source, session=f"fixture-{self.session}", entry=entry["id"])
+        self.record("inserted", text=text, source=source, session=f"fixture-{self.session}", entry=entry["id"],
+                    timestamp=entry["message"]["timestamp"])
         await self.emit({"type": "message_start", "message": entry["message"]})
         await self.emit({"type": "message_end", "message": entry["message"]})
         await self.barrier("insertion", "after")
@@ -463,6 +464,31 @@ class Runtime:
                 raise ValueError("fixture usage report must be a bounded native stats object or null")
             self.usage_report = report
             self.record("usage", report=report)
+        elif verb == "message":
+            # O13 (test-only): one native message_start/message_end pair. `timestamp` (Pi epoch ms) is included only when
+            # supplied; omitting it is the "no native time" scenario. Ledger `native_message` is the exact payload.
+            role, text = row.get("role", "assistant"), row.get("text", "")
+            if role not in ("assistant", "user") or not isinstance(text, str) or len(text.encode()) > 64 * 1024:
+                raise ValueError("fixture message needs role assistant|user and bounded text")
+            message = {"role": role, "content": [{"type": "text", "text": text}]}
+            if "timestamp" in row:
+                if not isinstance(row["timestamp"], int) or isinstance(row["timestamp"], bool) or row["timestamp"] < 0:
+                    raise ValueError("fixture message timestamp must be non-negative epoch ms")
+                message["timestamp"] = row["timestamp"]
+            self.record("native_message", message=message)
+            await self.emit({"type": "message_start", "message": message})
+            await self.emit({"type": "message_end", "message": message})
+        elif verb == "notice":
+            # O13 (test-only): one native runtime notice event, exactly the fields the Pi decoder consumes
+            # (state.rs runtime_notice: type, attempt, delayMs, success, errorMessage/finalError).
+            kind = row.get("type")
+            if kind not in ("auto_retry_start", "auto_retry_end", "auto_compaction_start", "auto_compaction_end"):
+                raise ValueError("fixture notice type is not a native Pi notice")
+            event = {"type": kind, **{key: row[key] for key in ("attempt", "delayMs", "success", "errorMessage", "finalError") if key in row}}
+            if len(json.dumps(event).encode()) > 4096:
+                raise ValueError("fixture notice bound")
+            self.record("native_notice", event=event)
+            await self.emit(event)
         elif verb == "native_cwd":
             cwd = row.get("cwd")
             if cwd is not None and (not isinstance(cwd, str) or not cwd or len(cwd.encode()) > 4096):
