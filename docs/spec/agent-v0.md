@@ -344,7 +344,8 @@ A per-viewer credited stream of JSON records (core addition §9.1). P3 confirmed
   to the field's byte buffer. String append never applies to a bytes field, and base64 text is never concatenated (the
   chunks `/w==` and `AA==` are the bytes `ff 00`, not the string `/w==AA==`); a `put` carries a bytes field as one
   base64 encoding of the whole buffer; `remove {seq, kind,
-  id, rev}`; `notice {value}` (live only, no `seq`); `snapshot {phase: begin, epoch, coverage, session?}` …
+  id, rev}`; `notice {value}` (live only, no `seq`; never retained or replayed: a viewer drops live notices from an
+  earlier epoch once it installs a new epoch, however the records were chunked); `snapshot {phase: begin, epoch, coverage, session?}` …
   `snapshot {phase: end, seq, session?}`. A native first chunk with no prior entity arrives as a `put` of a typed
   base, then `append`s. Every record names its kind in `"op"` and carries exactly these fields; there is no other
   record shape and no dual acceptance (the P3 prototype's `reset`/`snapshot_end`, `remove` without `rev` and string
@@ -416,7 +417,9 @@ reasoning the runtime exposes for display):
 - `plan` (whole), `compaction`, `request` (§5), `session` (id `current`), `association` (§6.5).
 - `notice`: `position?`, `text`, `severity?: info|warn|error`, `native?`: a human-facing runtime notice that viewers
   show (with `position`, on the timeline). `severity` only when the runtime reports one; absent is unspecified, never
-  inferred. Unlike the live `notice` record it is retained. Produced by the Pi bridge for native `notify`.
+  inferred. Unlike the live `notice` record it is retained, with the normal entity and epoch lifecycle: a new epoch's
+  snapshot replaces it like any other entity. Produced by the Pi bridge for native `notify`. For both the entity and
+  the live record, an unknown or non-string `severity` is treated as absent.
 - Kinds starting with `_` are implementation-private state (for example the Pi bridge's `_ui`): retained in the
   stream, which viewers need not show (a debug view may), and not part of this contract.
 
