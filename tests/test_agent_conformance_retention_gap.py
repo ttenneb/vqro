@@ -381,11 +381,34 @@ class SteadyReaderControls(unittest.IsolatedAsyncioTestCase):
         peer, events = self.peer(line); original = peer.reader
         gate = probe.SteadyReader(peer, cadence=0); gate.start()
         await gate.readline()
-        self.assertEqual(events, ['pause', 'resume', 'pause'])
+        self.assertEqual(events, ['pause', 'resume', 'pause', 'resume', 'pause'])
         self.assertEqual((gate.lines, gate.data_lines), (1, 1))
         gate.stop()
         self.assertIs(peer.reader, original)
         self.assertEqual(events[-1], 'resume')
+
+    async def test_start_releases_already_inflight_original_read(self):
+        entered = asyncio.Event(); first = asyncio.get_running_loop().create_future(); calls = 0
+        async def line():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set(); return await first
+            return b'{"method":"stream.data"}\n'
+        peer, events = self.peer(line)
+        async def actor():
+            await peer.reader.readline()  # Already in flight before replacing reader.
+            return await peer.reader.readline()
+        task = asyncio.create_task(actor()); await entered.wait()
+        resume = peer.writer.transport.resume_reading
+        def readable():
+            resume()
+            if not first.done(): first.set_result(b'{"method":"stream.data"}\n')
+        peer.writer.transport.resume_reading = readable
+        gate = probe.SteadyReader(peer, cadence=0); gate.start()
+        await asyncio.wait_for(task, .2)
+        self.assertEqual(gate.data_lines, 1)
+        gate.stop()
 
     async def test_error_still_pauses_then_stop_restores(self):
         async def line(): raise ConnectionError('broken reader')

@@ -28,7 +28,11 @@ class SteadyReader:
     def start(self):
         self.enabled = True
         self.peer.reader = self
+        # Peer may already await the ORIGINAL reader. Let that in-flight read
+        # complete; its next iteration enters this gate. Starting fully paused
+        # here would deadlock that old await and never exercise steady reading.
         self.transport.pause_reading()
+        self.transport.resume_reading()
 
     def stop(self):
         self.enabled = False
@@ -38,6 +42,7 @@ class SteadyReader:
     async def readline(self):
         if not self.enabled:
             return await self.original.readline()
+        self.transport.pause_reading()
         await asyncio.sleep(self.cadence)  # workload cadence ONLY
         self.transport.resume_reading()
         try:
