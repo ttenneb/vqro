@@ -47,29 +47,67 @@ def cursor_never_advanced(afters, last_good_seq, epoch):
 
 
 def visible_text(content):
-    """The text a published pane actually draws, per the production renderer (src/tui/panel.rs): the panel title and
-    title_right; text and header rows draw only their `text` (draw_row :686, markdown :732, plain :749); chips rows draw each chip's
-    `text`; other rows draw `text` and their `description` (:689). Nested `children` rows are drawn the same way.
-    Labels, copy payloads, ids, args and any other field are not visible and never count as a report."""
+    """The text a published pane actually draws, projected per row kind exactly as the production renderer does
+    (src/tui/panel.rs at main 31c157b2, draw_row :680-:833, kind() defaulting to "item" in src/ui_model/panel.rs:107):
+    - the panel title and title_right; a paged panel shows its first page (title and rows);
+    - composer: nothing; separator: only a line, nothing textual (:730);
+    - chips: each chip's text, never the row's own text (:692-:710, chip_label :78);
+    - select: the row text and the chosen option's label, else the value (:711-:729);
+    - header and text: the row text, only the first `fold` lines when folded (:731, :732-:754, body_lines :139);
+    - message: title (else text) on top, then body (else text) (block_lines :149-:161);
+    - every other kind ("item", "toggle", ...): text, detail, badge texts, action texts that have a command, and
+      description (:755-:833);
+    - children only when the row is expanded.
+    Labels, copy payloads, ids, args, hidden diagnostics and every other field are never visible."""
     out = []
+    def text(node, key="text"):
+        return node[key] if isinstance(node.get(key), str) else None
+    def folded(value, node):
+        n = node.get("fold")
+        if isinstance(n, int) and not isinstance(n, bool) and value is not None:
+            return "\n".join(value.split("\n")[:max(1, min(n, 10000))])
+        return value
     def row(node):
         if not isinstance(node, dict):
             return
-        kind = node.get("type", "text")
-        if isinstance(node.get("text"), str):
-            out.append(node["text"])
-        if kind == "chips":
-            out.extend(chip["text"] for chip in node.get("chips", []) if isinstance(chip, dict) and isinstance(chip.get("text"), str))
-        elif kind not in ("text", "header") and isinstance(node.get("description"), str):
-            out.append(node["description"])
-        for child in node.get("children", []) if isinstance(node.get("children"), list) else []:
-            row(child)
-    if isinstance(content, list):
-        for node in content: row(node)
-    elif isinstance(content, dict):
-        out.extend(content[key] for key in ("title", "title_right") if isinstance(content.get(key), str))
-        for node in content.get("items", []) if isinstance(content.get("items"), list) else []:
+        kind = node.get("type") if isinstance(node.get("type"), str) else "item"
+        shown = []
+        if kind in ("composer", "separator"):
+            pass
+        elif kind == "chips":
+            shown += [chip["text"] for chip in node.get("chips", []) if isinstance(chip, dict) and isinstance(chip.get("text"), str)]
+        elif kind == "select":
+            value = node.get("value")
+            label = next((option.get("label") for option in node.get("options", []) or []
+                          if isinstance(option, dict) and option.get("value") == value), None)
+            shown += [text(node), label if isinstance(label, str) else value if isinstance(value, str) else None]
+        elif kind in ("header", "text"):
+            shown.append(folded(text(node), node))
+        elif kind == "message":
+            shown += [text(node, "title") or text(node), folded(text(node, "body") or text(node), node)]
+        else:
+            shown += [text(node), text(node, "detail"), text(node, "description")]
+            shown += [badge.get("text") for badge in node.get("badges", []) or [] if isinstance(badge, dict)]
+            shown += [action.get("text") for action in node.get("actions", []) or []
+                      if isinstance(action, dict) and isinstance(action.get("command"), str)]
+        out.extend(value for value in shown if isinstance(value, str))
+        if node.get("expanded") is True and isinstance(node.get("children"), list):
+            for child in node["children"]:
+                row(child)
+    def panel(value):
+        out.extend(value[key] for key in ("title", "title_right") if isinstance(value.get(key), str))
+        for node in value.get("items", []) if isinstance(value.get("items"), list) else []:
             row(node)
+    if isinstance(content, list):
+        for node in content:
+            row(node)
+    elif isinstance(content, dict):
+        pages = content.get("pages")
+        if isinstance(pages, list) and pages and isinstance(pages[0], dict) and not isinstance(content.get("items"), list):
+            out.extend(content[key] for key in ("title", "title_right") if isinstance(content.get(key), str))
+            panel(pages[0])
+        else:
+            panel(content)
     return "\n".join(out)
 
 

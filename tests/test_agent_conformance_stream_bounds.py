@@ -248,8 +248,19 @@ class WholeHandlerControls(unittest.TestCase):
         label = lambda ref: {"items": [{"type": "text", "text": "Loading conversation",
                                         "label": self.report(ref)["items"][0]["text"]}]}
         loop = lambda ref: [{"kind": "open", "ref": ref, "after": None, "t": 0.15 * i} for i in range(60)]
+        separator = lambda ref: {"items": [{"type": "separator", "text": self.report(ref)["items"][0]["text"]}]}
+        chips_row = lambda ref: {"items": [{"type": "chips", "text": self.report(ref)["items"][0]["text"],
+                                            "chips": [{"text": "Loading"}]}]}
+        default_desc = lambda ref: {"items": [{"text": "Incompatible stream",
+                                               "description": self.report(ref)["items"][0]["text"]}]}
+        collapsed = lambda ref: {"items": [{"type": "header", "text": "Status", "expanded": False,
+                                            "children": [self.report(ref)["items"][0]]}]}
         controls = {
             "valid back-off and visible cause/limit": (reset_once, self.report, True),
+            "cause/limit in a default item's description (drawn)": (reset_once, default_desc, True),
+            "cause/limit only in a separator's text (never drawn)": (reset_once, separator, False),
+            "cause/limit only in a chips row's own text (only chips drawn)": (reset_once, chips_row, False),
+            "cause/limit only in a collapsed row's children": (reset_once, collapsed, False),
             "rejected reset continued after seq 1": (advanced, self.report, False),
             "rejected reset's sibling entity installed": (reset_once, sibling, False),
             "cause/limit only in hidden metadata": (reset_once, hidden, False),
