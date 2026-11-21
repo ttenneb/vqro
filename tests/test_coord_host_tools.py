@@ -13,7 +13,8 @@ def positive():
     return {'host': 'r3', 'registration': {'host': 'r3', 'actor': 'host:r3', 'generation': 1},
         'private_token_present': True, 'token_distinct': True, 'hello': {'actor': 'host:r3'},
         'sdk_env': {'VQRO_SOCKET': '/private/s', 'VQRO_SOCKET_SOURCE': '', 'VQRO_PRINCIPAL': 'undeclared'},
-        'resources': [{'id': rid, 'host': 'r3', 'backend_ref': ref, 'kind': 'agent', 'data': {}}
+        'resources': [{'id': rid, 'host': 'r3', 'backend_ref': ref, 'kind': 'agent', 'data': {},
+                       'available': True, 'stale': False, 'state': 'live', 'principal': None}
                       for rid, ref in (('r4', 'endpoint-a'), ('r5', 'endpoint-b'))],
         'cli': [{'key': 'doc/g11/' + ref, 'exit': 0, 'reply': {'txn': txn}} for ref, txn in (('endpoint-a', 10), ('endpoint-b', 11))],
         'history': {'txns': [{'id': txn, 'actor': 'host:r3', 'principal': 'host:r3', 'author': author,
@@ -41,16 +42,19 @@ class HostToolChecks(unittest.TestCase):
             (['sdk_env', 'VQRO_PRINCIPAL'], 'owner'), (['sdk_env', 'VQRO_SOCKET'], '/live/s'),
             (['sdk_env', 'VQRO_SOCKET_SOURCE'], 'terminal'), (['resources'], []),
             (['resources', 1, 'id'], 'r4'), (['resources', 1, 'host'], 'r8'),
-            (['resources', 1, 'backend_ref'], 'endpoint-a'),
+            (['resources', 1, 'backend_ref'], 'endpoint-a'), (['resources', 1, 'available'], False),
+            (['resources', 1, 'stale'], True), (['resources', 1, 'state'], 'gone'), (['resources', 1, 'principal'], 'endpoint:b'),
             (['resources', 1, 'data'], {'agent': {'caps': {'agent': {'tool_principal': 'env'}}}}),
             (['cli', 1, 'exit'], 1), (['cli', 1, 'exit'], False), (['cli', 1, 'reply'], {}),
-            (['cli', 1, 'key'], 'doc/g11/unrelated'), (['history', 'txns'], []),
+            (['cli', 1, 'key'], 'doc/g11/unrelated'), (['cli', 1, 'reply', 'txn'], 11.0),
+            (['history', 'txns', 1, 'id'], 11.0), (['history', 'txns'], []),
             (['history', 'txns', 1, 'principal'], 'endpoint-b'), (['history', 'txns', 1, 'actor'], 'owner'),
             (['history', 'txns', 1, 'author'], 'client:one'), (['history', 'txns', 1, 'changes'], [{'key': 'doc/unrelated'}]),
             (['ordinary', 'actor'], 'host:r3'), (['wrong_token'], None), (['raw_host'], None), (['no_grant'], None),
             (['human_spawn', 'context_present'], True), (['human_spawn', 'principal'], 'owner'),
             (['public_secrets_absent'], False), (['no_grant_entry'], {'value': 1}), (['stale', 'bound'], None), (['stale', 'hello'], None),
-            (['stale', 'cli_exit'], 0), (['stale', 'entries'], [{'value': 1}, None])]
+            (['stale', 'cli_exit'], 0), (['stale', 'entries'], [{'value': 1}, None]),
+            (['stale', 'entries'], [{'value': None}, None]), (['no_grant_entry'], {'value': None})]
         for path, replacement in cases:
             with self.subTest(path=path, value=replacement):
                 value = deepcopy(positive()); target = value

@@ -41,7 +41,9 @@ def grade_host_route(ctx, value):
     ctx.check(isinstance(rows, list) and len(rows) == 2 and {row.get('backend_ref') for row in rows} == {'endpoint-a', 'endpoint-b'} and
               len({row.get('id') for row in rows}) == 2, 'two distinct actual runtime endpoints are observed')
     for row in rows:
-        ctx.check(row.get('host') == host and row.get('kind') == 'agent', 'both endpoints share the actual registered host')
+        ctx.check(row.get('host') == host and row.get('kind') == 'agent' and row.get('available') is True and
+                  row.get('stale') is False and row.get('state') == 'live' and row.get('principal') is None,
+                  'both live available endpoints share actual host without an endpoint principal')
         caps = (row.get('data') or {}).get('agent', {}).get('caps', {}).get('agent', {})
         ctx.check(caps.get('tool_principal') != 'env', 'shared host never declares endpoint tool_principal=env')
         ctx.evidence.append({'subcase': 'endpoint-env-tool', 'status': 'not-applicable',
@@ -53,8 +55,8 @@ def grade_host_route(ctx, value):
     authors = []
     for item in writes:
         ctx.check(type(item.get('exit')) is int and item['exit'] == 0 and isinstance(item.get('reply'), dict) and
-                  item['reply'].get('txn') is not None, 'real tool CLI completed with an actual transaction receipt')
-        matches = [row for row in history if row.get('id') == item['reply']['txn']]
+                  type(item['reply'].get('txn')) is int and item['reply']['txn'] > 0, 'real tool CLI completed with an actual transaction receipt')
+        matches = [row for row in history if type(row.get('id')) is int and row['id'] == item['reply']['txn']]
         ctx.check(len(matches) == 1, 'CLI receipt identifies exactly one actual history transaction')
         txn = matches[0]
         ctx.check(txn.get('actor') == actor and txn.get('principal') == actor,
@@ -69,7 +71,7 @@ def grade_host_route(ctx, value):
         ctx.check(isinstance(value.get(field), str) and value[field] in {'invalid', 'forbidden', 'no_grant', 'stale_generation'},
                   'wrong token/raw assertion/delegation cannot acquire host or endpoint authority', refused=field)
     denied_entry = value.get('no_grant_entry')
-    ctx.check('no_grant_entry' in value and (denied_entry is None or isinstance(denied_entry, dict) and denied_entry.get('value') is None),
+    ctx.check('no_grant_entry' in value and denied_entry is None,
               'denied endpoint delegation created no workspace entry')
     ctx.check(value.get('human_spawn') == {'context_present': False, 'principal': 'undeclared'},
               'ordinary native shell spawn does not receive host credential or inherited owner')
@@ -79,7 +81,7 @@ def grade_host_route(ctx, value):
               type(stale.get('cli_exit')) is int and stale['cli_exit'] != 0,
               'retired provider fences bound tool, fresh hello and actual stale CLI without downgrade/replay')
     entries = stale.get('entries', [])
-    ctx.check(isinstance(entries, list) and len(entries) == 2 and all(row is None or isinstance(row, dict) and row.get('value') is None for row in entries),
+    ctx.check(isinstance(entries, list) and len(entries) == 2 and all(row is None for row in entries),
               'retired tool calls created no workspace entry')
 
 
