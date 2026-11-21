@@ -17,6 +17,7 @@ from agent_conformance.item_metadata_cases import (
     U64_MAX, check_format_rows, check_notice_role, check_times, expected_times,
     native_ms, unique_item, render_production_blocks, observe_native_metadata,
     observe_native_absence, optional_item_metadata, observe_public_rendering, PUBLIC_PROVIDER,
+    qualified_authority_refusal,
 )
 from agent_conformance.results import CheckFailed, HarnessGap, FixtureFailed
 from agent_conformance.wire import ItemReducer, RpcError
@@ -134,7 +135,8 @@ class ItemMetadataTests(unittest.TestCase):
 
 class MetadataContext:
     """Local control/ledger/public-state fake, never a qualification witness."""
-    def __init__(self, wire, *, lose_ledger=False, corrupt_public=False, ack_only=False, lose_written=False):
+    def __init__(self, wire, *, lose_ledger=False, corrupt_public=False, ack_only=False, lose_written=False,
+                 final_transition=None):
         self.manifest = {'wire': wire}; self.evidence = []
         reducer = ItemReducer()
         reducer.accept({'op': 'snapshot', 'phase': 'begin', 'epoch': 'e1', 'coverage': 'tail'})
@@ -144,13 +146,17 @@ class MetadataContext:
         self.rows, self.serial, self.turn_id = [], 0, 0
         self.lose_ledger, self.corrupt_public, self.ack_only = lose_ledger, corrupt_public, ack_only
         self.lose_written = lose_written
+        self.final_transition, self.pending_updates = final_transition, []
     def delivery(self): return 'unit-marker'
     def mark(self): return self.serial
     def records(self, kind, after=0):
         return [] if self.lose_ledger or self.lose_written and kind == 'native_event' else [r for r in self.rows if r['kind'] == kind and r['seq'] > after]
     async def attach(self, **unused): return self.view
     async def wait_view(self, view, predicate, **unused):
-        if not predicate(view.reducer): raise CheckFailed('public observation missing')
+        if not predicate(view.reducer):
+            for key, value in self.pending_updates: self.put(*key, value)
+            self.pending_updates.clear()
+            if not predicate(view.reducer): raise CheckFailed('public observation missing')
     def put(self, kind, ident, value):
         if not self.ack_only: self.view.reducer.entities[(kind, ident)] = {'value': value}
     async def call(self, verb, **params):
@@ -159,13 +165,20 @@ class MetadataContext:
             payload = {'role': params['role'], 'content': [{'type': 'text', 'text': params['text']}]}
             if 'timestamp' in params: payload['timestamp'] = params['timestamp']
             self.rows.append({'kind': 'native_message', 'seq': self.serial, 'message': deepcopy(payload)})
-            value = {'role': payload['role'], 'content': deepcopy(payload['content'])}
+            value = {'role': payload['role'], 'content': deepcopy(payload['content']), 'final': True}
             if 'timestamp' in payload: value['at_ms'] = payload['timestamp'] + int(self.corrupt_public)
-            self.put('message', 'm' + str(self.serial), value)
+            key = ('message', 'm' + str(self.serial))
+            if (self.final_transition == 'correct' or self.final_transition == 'supplied' and 'timestamp' in payload
+                    or self.final_transition == 'missing' and 'timestamp' not in payload):
+                final = deepcopy(value)
+                if self.final_transition != 'correct': final['at_ms'] = payload.get('timestamp', 0) + 111
+                value['final'] = False
+                self.pending_updates.append((key, final))
+            self.put(*key, value)
         elif verb == 'notice':
             event = {'type': params['type'], **{key: value for key, value in params.items() if key != 'type'}}
             self.rows.append({'kind': 'native_notice', 'seq': self.serial, 'event': event})
-            self.put('message', 'notice', {'role': 'system', 'content': [{'type': 'text', 'text': params['errorMessage']}]})
+            self.put('message', 'notice', {'role': 'system', 'content': [{'type': 'text', 'text': params['errorMessage']}], 'final': True})
         elif verb == 'turn':
             if params['state'] == 'start': self.turn_id += 1
             run = 'turn-' + str(self.turn_id)
@@ -206,7 +219,12 @@ class MetadataContext:
             item = {'id': 'retained-' + str(self.serial), 'type': 'agentMessage', 'text': '0:' + params['text']}
             self.rows.append({'kind': 'native_event', 'seq': self.serial, 'wire': 'codex',
                 'method': 'item/completed', 'payload': {'item': item}})
-            self.put('message', item['id'], {'role': 'assistant', 'content': [{'type': 'text', 'text': item['text']}]})
+            value = {'role': 'assistant', 'content': [{'type': 'text', 'text': item['text']}], 'final': True}
+            if self.final_transition == 'codex_missing':
+                final = {**deepcopy(value), 'at_ms': 1700000000999}
+                value['final'] = False
+                self.pending_updates.append((('message', item['id']), final))
+            self.put('message', item['id'], value)
         else:
             raise AssertionError('unagreed fixture verb: ' + verb)
         return {'seq': self.serial}  # ACK cannot be sufficient for a witness
@@ -229,6 +247,21 @@ class NativeMetadataPhaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(evidence[2]['public_value'])
         self.assertIsNone(evidence[3]['public_value'])
         self.assertNotEqual(evidence[0]['entity'], evidence[2]['entity'])
+
+    async def test_correct_partial_then_wrong_final_timestamp_never_passes(self):
+        with self.assertRaises(CheckFailed):
+            await observe_native_metadata(MetadataContext('pi', final_transition='supplied'))
+
+    async def test_untimed_partial_then_invented_final_clock_never_passes(self):
+        with self.assertRaises(CheckFailed):
+            await observe_native_metadata(MetadataContext('pi', final_transition='missing'))
+        ctx = MetadataContext('codex', final_transition='codex_missing')
+        with self.assertRaises(CheckFailed): await observe_native_absence(ctx, ctx.view)
+
+    async def test_correct_partial_is_not_graded_until_correct_final_is_installed(self):
+        ctx = MetadataContext('pi', final_transition='correct')
+        _, evidence = await observe_native_metadata(ctx)
+        self.assertTrue(all(row['public_value']['final'] is True for row in evidence))
 
     async def test_public_value_or_ack_without_actual_native_ledger_is_not_pass(self):
         with self.assertRaises(HarnessGap):
@@ -275,7 +308,8 @@ class NativeMetadataPhaseTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PublicRendererPhaseTests(unittest.IsolatedAsyncioTestCase):
-    async def exercise(self, *, wrong_content=False, wrong_role=False, missing_sent=False, upgrade=False):
+    async def exercise(self, *, wrong_content=False, wrong_role=False, missing_sent=False, upgrade=False,
+                       refusal_data=None, late_write=False):
         with tempfile.TemporaryDirectory(prefix='o13-unit-') as directory:
             ctx = MetadataContext('pi')
             ctx.root = Path(directory); (ctx.root / 'work').mkdir()
@@ -285,11 +319,23 @@ class PublicRendererPhaseTests(unittest.IsolatedAsyncioTestCase):
                                for path in source.rglob('*.py')})
             ctx.backend = SimpleNamespace(env={'VQRO_SOCKET': '/private/unit-only'}, tracked=[])
             ctx.peers = []
-            async def facts(): return {'caps': {'agent.send': {'modes': {'start': {}}}}}
-            async def send(*args, **kwargs): return {'rpc_error': True, 'error': {'data': {'kind': 'forbidden'}}}
-            ctx.facts, ctx.send, ctx.writes = facts, send, lambda **kw: []
+            async def facts(): return {'epoch': 'e1', 'caps': {'rev': 1, 'agent.send': {'modes': {'start': {}}}}}
+            async def send(*args, **kwargs): return {'outcome': 'observed', 'effect': 'valid-framed-recovery'}
+            ctx.facts, ctx.send = facts, send
+            ctx.agents = [{'id': 'r-native'}]
             ctx._notice = lambda *args: None
-            state = {}
+            state = {'entries': {'doc/principals/owner': {'version': 1, 'value': 'actual-owner'}}, 'txn': 0, 'fenced': False}
+            ctx.writes = lambda **kw: [{'command': 'late-send'}] if late_write and state['fenced'] else []
+            class Owner:
+                async def call(self, method, params):
+                    if method == 'workspace.get': return deepcopy(state['entries'].get(params['key']))
+                    if method == 'workspace.apply':
+                        for op in params['ops']:
+                            state['entries'][op['key']] = {'version': 1, 'value': op['value']}
+                        state['fenced'] = True; state['txn'] += 1
+                        return {'txn': state['txn']}
+                    raise AssertionError(method)
+            ctx.peer = Owner()
             class Process:
                 pid = 987654321
                 terminated = False
@@ -321,8 +367,18 @@ class PublicRendererPhaseTests(unittest.IsolatedAsyncioTestCase):
                 async def call(self, method, params):
                     if method == 'hello': return {'actor': 'undeclared'}
                     if method == 'workspace.apply':
-                        if upgrade: return {'txn': 1}
-                        raise RpcError({'data': {'kind': 'forbidden'}})
+                        # Ordinary writes are VALID. Only principal configuration
+                        # is protected; this intentionally rejects the old probe.
+                        if params['ops'][0]['key'] != 'doc/principals/owner' or upgrade:
+                            return {'txn': 1}
+                        raise RpcError({'data': refusal_data if refusal_data is not None else
+                                        {'kind': 'forbidden', 'outcome': 'rejected'}})
+                    if method == 'resource.invoke':
+                        # Ordinary framed recovery is VALID, representation is not.
+                        if params.get('on_behalf_of') != 'actual-owner' or upgrade:
+                            return {'outcome': 'observed', 'effect': 'raw-recovery'}
+                        raise RpcError({'data': refusal_data if refusal_data is not None else
+                                        {'kind': 'forbidden', 'outcome': 'rejected'}})
                     raise AssertionError(method)
                 def on(self, *args): pass
                 async def close(self): self.closed = True
@@ -343,8 +399,10 @@ class PublicRendererPhaseTests(unittest.IsolatedAsyncioTestCase):
         proof = next(row for row in evidence if row['kind'] == 'o13_public_renderer')
         self.assertIn('NOT native adapter', proof['source'])
         self.assertEqual(len(proof['rendered_rows']), 4)
-        self.assertEqual(proof['input_refusal_before'], 'forbidden')
-        self.assertEqual(proof['input_refusal_after'], 'forbidden')
+        self.assertEqual(proof['authority_before']['protected_owner'], 'actual-owner')
+        self.assertEqual(proof['authority_after']['protected_owner'], 'actual-owner')
+        self.assertTrue(all(row['error']['data']['outcome'] == 'rejected'
+                            for row in proof['authority_after']['refusals']))
         self.assertTrue(evidence[-1]['reaped'])
 
     async def test_spec_dict_without_matching_public_observation_is_not_pass(self):
@@ -356,6 +414,22 @@ class PublicRendererPhaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_role_observation_cannot_hide_standing_upgrade(self):
         with self.assertRaises(CheckFailed): await self.exercise(upgrade=True)
+
+    async def test_missing_indeterminate_or_effectful_forbidden_is_not_qualified_refusal(self):
+        for data in ({'kind': 'forbidden'},
+                     {'kind': 'forbidden', 'outcome': 'indeterminate', 'effect': 'fx-pending'},
+                     {'kind': 'forbidden', 'outcome': 'rejected', 'effect': 'fx-admitted'}):
+            with self.subTest(data=data):
+                with self.assertRaises(CheckFailed): await self.exercise(refusal_data=data)
+
+    async def test_late_native_write_after_public_ordering_fence_fails(self):
+        with self.assertRaises(CheckFailed): await self.exercise(late_write=True)
+
+    def test_qualified_core_rejection_rejects_unknown_or_admitted_outcomes(self):
+        qualified_authority_refusal(RpcError({'data': {'kind': 'forbidden', 'outcome': 'rejected'}}))
+        for data in ({'kind': 'forbidden'}, {'kind': 'forbidden', 'outcome': 'indeterminate'},
+                     {'kind': 'forbidden', 'outcome': 'rejected', 'effect': None}):
+            with self.assertRaises(CheckFailed): qualified_authority_refusal(RpcError({'data': data}))
 
     def test_embedded_producer_uses_real_sdk_and_compiles(self):
         compile(PUBLIC_PROVIDER, '<O13-public-provider>', 'exec')

@@ -212,7 +212,7 @@ async def observe_native_metadata(ctx):
                   type(payload.get('timestamp')) is int and payload['timestamp'] == timestamp,
                   'O13 supplied/omitted native timestamp scenario was actually emitted', component='fixture')
             await ctx.wait_view(view, lambda reducer: any(
-                kind == 'message' and row['value'].get('content') == payload['content']
+                kind == 'message' and row['value'].get('content') == payload['content'] and row['value'].get('final') is True
                 for (kind, _), row in reducer.entities.items()))
             ident, public = unique_item(view.reducer.entities, 'message', marker)
             expected = check_times('message', payload, public, wire)
@@ -224,7 +224,7 @@ async def observe_native_metadata(ctx):
         notice = emitted_payload(ctx, 'native_notice', 'event', mark, lambda event: event.get('errorMessage') == marker)
         check(notice.get('type') == 'auto_retry_start', 'O13 notice source is an actual decoded runtime event', component='fixture')
         await ctx.wait_view(view, lambda reducer: any(
-            kind == 'message' and marker in str(row['value'].get('content'))
+            kind == 'message' and marker in str(row['value'].get('content')) and row['value'].get('final') is True
             for (kind, _), row in reducer.entities.items()))
         ident, public = unique_item(view.reducer.entities, 'message', marker)
         check_notice_role(public)
@@ -351,7 +351,7 @@ async def observe_native_absence(ctx, view):
         check(native.get('type') == 'agentMessage' and text in native.get('text', ''),
               'O13 native untimed message was actually written', component='fixture')
         check_omitted_native_times(native)
-        await ctx.wait_view(view, lambda reducer: ('message', native['id']) in reducer.entities)
+        await ctx.wait_view(view, lambda reducer: reducer.entities.get(('message', native['id']), {}).get('value', {}).get('final') is True)
         public = view.reducer.entities[('message', native['id'])]['value']
         check_times('message', native, public, wire)
         ctx.evidence.append({'kind': 'o13_native_message_absence', 'wire': wire,
@@ -366,6 +366,57 @@ async def observe_native_absence(ctx, view):
     if public_run is not None: check_times('run', end_native, public_run['value'], wire)
     ctx.evidence.append({'kind': 'o13_native_run_end_absence', 'wire': wire,
                          'native_payload': end_native, 'public_run_id': run, 'public_entity': public_run})
+
+
+def qualified_authority_refusal(error):
+    """Known pre-effect core authorization refusal, never a provider admission."""
+    check(error.kind == 'forbidden' and error.data.get('outcome') == 'rejected',
+          'O13 authority probe requires an explicitly rejected core refusal', component='core')
+    check('effect' not in error.data and 'effect' not in error.error,
+          'O13 pre-effect authority refusal cannot carry an admitted effect', component='core')
+    return error.error
+
+
+async def authority_probe(ctx, observer, name, stage):
+    """Protected principal config + unauthorized represented input, not raw recovery.
+
+    Ordinary writes and framed undeclared sends may be valid. This observer may
+    not mint standing authority or represent the actual workspace owner.
+    """
+    owner_key = 'doc/principals/owner'
+    owner_entry = await ctx.peer.call('workspace.get', {'key': owner_key})
+    owner = owner_entry.get('value') if isinstance(owner_entry, dict) else None
+    check(isinstance(owner, str) and bool(owner), 'O13 reads the actual protected workspace owner', component='core')
+    facts = await ctx.facts()
+    send = {'resource': ctx.agents[0]['id'], 'op': 'agent.send', 'on_behalf_of': owner,
+        'deadline_ms': 1000, 'args': {'v': 0, 'epoch': facts.get('epoch'),
+            'caps_rev': facts.get('caps', {}).get('rev'), 'mode': 'start',
+            'delivery': name + '-' + stage, 'content': [{'type': 'text', 'text': name}],
+            'origin': {'kind': 'human'}, 'render': ['attributed_user']}}
+    mark = ctx.native.mark()
+    refused = []
+    for method, params in (
+        ('workspace.apply', {'ops': [{'op': 'set', 'key': owner_key, 'value': owner}]}),
+        ('resource.invoke', send),
+    ):
+        try:
+            reply = await observer.call(method, params)
+        except RpcError as error:
+            refused.append({'method': method, 'error': qualified_authority_refusal(error)})
+        else:
+            check(False, 'O13 observation must not authorize protected or represented work: ' + str(reply), component='core')
+    # This real owner commit fences the serialized core mutation queue after the
+    # qualified result. No admitted provider effects are accepted by this probe.
+    fence = 'doc/o13/fence/' + name + '-' + stage
+    adopted = await ctx.peer.call('workspace.apply', {'ops': [{'op': 'set', 'key': fence, 'value': stage}]})
+    check(type(adopted.get('txn')) is int and adopted['txn'] > 0, 'O13 public authority fence has a transaction receipt', component='core')
+    fence_entry = await ctx.peer.call('workspace.get', {'key': fence})
+    check(isinstance(fence_entry, dict) and fence_entry.get('value') == stage,
+          'O13 public authority fence was actually adopted', component='core')
+    current = await ctx.peer.call('workspace.get', {'key': owner_key})
+    check(current == owner_entry, 'O13 protected principal entry remains unchanged after the ordering fence', component='core')
+    check(not ctx.native.writes(after=mark), 'O13 qualified authority refusals have no native writes after the public fence', component='core')
+    return {'protected_owner': owner, 'refusals': refused, 'fence': adopted, 'owner_entry': current}
 
 
 async def observe_public_rendering(ctx):
@@ -425,29 +476,7 @@ async def observe_public_rendering(ctx):
         check(hello.get('actor') == 'undeclared', 'O13 observer starts without inherited input authority', component='core')
         for method in ('stream.data', 'stream.closed', 'stream.gap'):
             observer.on(method, lambda params, method=method: ctx._notice(observer, method, params))
-        async def denied_write():
-            try:
-                await observer.call('workspace.apply', {'ops': [{'op': 'set', 'key': 'doc/o13/no-authority', 'value': name}]})
-            except RpcError as error:
-                check(error.kind == 'forbidden', 'O13 observation has no workspace write standing', component='core')
-                return error.kind
-            check(False, 'O13 observation role must never grant workspace input authority', component='core')
-        async def denied_send():
-            facts = await ctx.facts()
-            modes = facts.get('caps', {}).get('agent.send', {}).get('modes', {})
-            if not any(mode in modes for mode in ('start', 'admit')):
-                ctx.evidence.append({'subcase': 'O13-input-authority', 'status': 'not-applicable',
-                    'declaration': {'path': 'caps.agent.send.modes', 'actual': modes}})
-                return 'excluded by actual send-mode declaration'
-            mark = ctx.native.mark()
-            result = await ctx.send(name + '-no-authority', peer=observer)
-            error = result.get('error', {})
-            kind = (error.get('data') or {}).get('kind', error.get('kind'))
-            check(kind == 'forbidden', 'O13 observation does not grant native input authority', component='core')
-            check(not ctx.native.writes(after=mark), 'O13 denied input causes no native write', component='core')
-            return kind
-        before = await denied_write()
-        input_before = await denied_send()
+        before = await authority_probe(ctx, observer, name, 'before')
         view = await ctx.attach(rid=resource['id'], peer=observer)
         await ctx.wait_view(view, lambda reducer: reducer.snapshots > 0 and all(
             ('message', ident) in reducer.entities for ident in ('formats', 'system', 'coordination')))
@@ -459,8 +488,7 @@ async def observe_public_rendering(ctx):
         check_notice_role(system)
         check(coordination.get('role') == 'coordination' and coordination.get('role') != system['role'],
               'O13 observed system and coordination roles remain distinct')
-        after = await denied_write()
-        input_after = await denied_send()
+        after = await authority_probe(ctx, observer, name, 'after')
         emitted = [json.loads(line) for line in log.read_text().splitlines()]
         check(any(row.get('kind') == 'snapshot_sent' and row.get('records') == records for row in emitted),
               'O13 actual SDK producer sent exactly the observed metadata records', component='fixture')
@@ -469,8 +497,7 @@ async def observe_public_rendering(ctx):
             'producer_sha256': hashlib.sha256(PUBLIC_PROVIDER.encode()).hexdigest(),
             'public_resource': resource, 'actual_public_content': actual, 'rendered_rows': rows,
             'system': system, 'coordination': coordination, 'observer_hello': hello,
-            'write_refusal_before': before, 'write_refusal_after': after,
-            'input_refusal_before': input_before, 'input_refusal_after': input_after, 'producer_log': str(log)})
+            'authority_before': before, 'authority_after': after, 'producer_log': str(log)})
     finally:
         if observer is not None: await observer.close()
         if process is not None:
