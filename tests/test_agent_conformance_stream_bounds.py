@@ -240,12 +240,15 @@ class WholeHandlerControls(unittest.TestCase):
             return pane
         hidden = lambda ref: {"items": [{"type": "text", "text": "Loading conversation",
                                          "hidden_diagnostic": self.report(ref)["items"][0]["text"]}]}
+        label = lambda ref: {"items": [{"type": "text", "text": "Loading conversation",
+                                        "label": self.report(ref)["items"][0]["text"]}]}
         loop = lambda ref: [{"kind": "open", "ref": ref, "after": None, "t": 0.15 * i} for i in range(60)]
         controls = {
             "valid back-off and visible cause/limit": (reset_once, self.report, True),
             "rejected reset continued after seq 1": (advanced, self.report, False),
             "rejected reset's sibling entity installed": (reset_once, sibling, False),
             "cause/limit only in hidden metadata": (reset_once, hidden, False),
+            "cause/limit only in a text row's label (never drawn)": (reset_once, label, False),
             "immediate reattach loop": (loop, self.report, False),
         }
         for name, (rows, pane, want) in controls.items():
@@ -280,6 +283,12 @@ class WholeHandlerControls(unittest.TestCase):
             return {"rev": rev, "value": {"role": "assistant", "position": position,
                                           "content": [{"type": "text", "text": t} for t in texts]}}
         old_marker = {("message", "old"): message(1, 1, "[an earlier message was truncated: too large]")}
+        def old_output(t):  # an earlier O12-prefixed body and marker, already present before this emission
+            return {("message", "prev"): message(1, 1, t[:60000], "[message truncated: too large]")}
+        def hidden_only(t):
+            entity = message(1, 2)
+            entity["value"]["native"] = {"diagnostic": "assistant output omitted: too large"}
+            return {("message", "m"): entity}
         controls = {
             "whole text in one entity": (lambda t: {("message", "m"): message(1, 2, t)}, None, True),
             "truncated body plus separate marker block": (lambda t: {("message", "m"): message(1, 2, t[:60000], "[message truncated: too large]")}, None, True),
@@ -289,8 +298,12 @@ class WholeHandlerControls(unittest.TestCase):
                                                                                        ("message", "a"): message(1, 3, t[40000:])}, None, True),
             "silent truncation": (lambda t: {("message", "m"): message(1, 2, t[:60000])}, None, False),
             "silent truncation beside an older marker": (lambda t: {("message", "m"): message(1, 2, t[:60000])}, old_marker, False),
+            "empty visible message, marker only in native metadata": (hidden_only, None, False),
+            "no new output; unchanged old O12 body and marker": (lambda t: {}, "old_output", False),
         }
         for name, (new, old, want) in controls.items():
+            if old == "old_output":
+                old = old_output("0:" + "".join("O12-" + "x" * 1020 for _ in range(70)))
             with self.subTest(name):
                 self.assertEqual(self.accepts(lambda: self.o12(new, old)), want)
 

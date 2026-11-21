@@ -370,21 +370,24 @@ def shown_texts(value):
 
 
 def message_texts(reducer, needle, baseline=None):
-    """Correlate the emitted message once: (texts, other_texts). `texts` are ALL text blocks (body and any marker
-    block) of every message entity carrying `needle` in some block, in timeline (position) order; `other_texts` are the strings of
-    every other entity new or changed since `baseline` (a {key: rev} map), e.g. an omission-only notice; only their
-    shown text (shown_texts), never hidden metadata."""
+    """Correlate the emitted message once, from CURRENT output only: entities unchanged since `baseline` (a {key: rev}
+    map taken before the native emission) are history and never count. Returns (texts, other_texts): `texts` are ALL
+    shown text blocks (body and any marker block) of every new or changed message entity carrying `needle`, in
+    timeline (position) order; `other_texts` are the shown text (shown_texts) of every other new or changed entity,
+    e.g. an omission-only notice. Hidden metadata never counts."""
     texts, others = [], []
     def timeline(item):  # the message's own position, never the opaque entity id; unpositioned entities last
         position = (item[1].get("value") or {}).get("position")
         return (0, position, str(item[0])) if isinstance(position, int) and not isinstance(position, bool) else (1, 0, str(item[0]))
     for key, entity in sorted(reducer.entities.items(), key=timeline):
+        if baseline is not None and key in baseline and baseline[key] == entity.get("rev"):
+            continue  # unchanged history, not output of this emission
         kind, value = key[0], entity.get("value") or {}
         blocks = [block["text"] for block in value.get("content", []) if isinstance(block, dict)
                   and isinstance(block.get("text"), str)] if kind == "message" and isinstance(value.get("content"), list) else []
         if any(needle in text for text in blocks):
             texts += blocks
-        elif (baseline or {}).get(key) != entity.get("rev"):
+        else:
             others += shown_texts(value)
     return texts, others
 
