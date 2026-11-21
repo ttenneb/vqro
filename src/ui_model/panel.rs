@@ -89,7 +89,7 @@ pub struct Flat {
 
 
 /// Panel features this client renders. A panel may list what it needs in `requires`.
-pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow", "markdown", "pin", "composer", "multiline", "search", "facets", "sort", "columns", "message", "fold", "actions", "title_actions", "composer_buttons"];
+pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow", "markdown", "pin", "composer", "multiline", "search", "facets", "sort", "columns", "message", "fold", "actions", "title_actions", "composer_buttons", "card"];
 
 /// Features a panel needs that this client lacks.
 pub fn missing(v: &Value) -> Vec<String> { missing_for(v, SUPPORTED) }
@@ -106,6 +106,15 @@ pub const BASE_FEATURES: &[&str] = &["items", "pages", "tree", "toolbar", "badge
 
 pub fn kind(item: &Value) -> &str {
     item["type"].as_str().unwrap_or("item")
+}
+
+/// A `message` row's look for a client rendering `features`: (on the card background, frame drawn). `look: "card"`
+/// (feature `card`) sets the block on the palette's `card` role with a padding line above and below, and drops the
+/// frame unless `frame: true`. Without the feature, or any other `look`, it is today's framed block.
+pub fn message_look(item: &Value, features: &[&str]) -> (bool, bool) {
+    if kind(item) != "message" { return (false, false); }
+    let card = item["look"] == "card" && features.contains(&"card");
+    (card, !card || item["frame"] == true)
 }
 
 pub fn selectable(item: &Value) -> bool {

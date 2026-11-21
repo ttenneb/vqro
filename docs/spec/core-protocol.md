@@ -1156,6 +1156,15 @@ New row types, components and view kinds are progressive enhancements: every cli
   messages from other senders; ordinary messages stay plain text rows. A message row is selectable; Enter folds or
   unfolds it, and `copy` is what `client.copy` takes. Clients without the feature show the row's `fallback` (give
   one: today's plain rows), else a plain item with `text`.
+- **`look: "card"`** (feature `card`) on a `message` row: the block sits on the palette's `card` colour across the
+  row's whole width, with a padding line above and below and one clear column at each side. Its frame is not drawn
+  (the title line shows bold, in the row's `style`) unless the row also says `frame: true`, which keeps the frame on
+  the card. Use it to set apart entries by who wrote them (the agent pane: your messages on cards, the agent's
+  replies plain, other agents' messages framed on cards). Clients without the feature, and unknown `look` values,
+  draw the framed block; where a frame would mislead (your own messages never get one), give the row
+  `requires: ["card"]` and a `fallback` (plain rows). The text client claims it and prints a card as its sender line
+  and body (no background); the TUI and the OpenTUI client draw the background. Shared model:
+  `message_look(item, features)`; conformance: `panels.json` (`looks`).
 - **`fold: N`** (feature `fold`) on a text row (wrapped or markdown) or a message: the client shows the first N
   lines and then "▸ M more lines". Enter, Space, → or a click on that line unfolds; "▾ less", ← or Enter folds
   again. Unfolded is client state per row id, initially the row's `expanded`. A folding text row is selectable.
@@ -1362,6 +1371,7 @@ Colours: a name (the 16 ANSI names such as `cyan`, `darkgray`, `lightblue`), `#R
 | `selection`, `selection_text` | the selected row; unset `selection` means reverse video | unset |
 | `badge`, `badge_text` | neutral badge and unchecked chip fill; text on any filled background | `darkgray`, `black` |
 | `surface` | fill of plain chips and inactive tab chips | `#282830` |
+| `card` | background of card blocks (`message` rows with `look: "card"`): a little lighter than the pane, below `surface`. A theme without `card` but with `surface` uses its `surface` | `#202026` |
 | `tab_active`, `tab_active_text` | the active tab (bold) | `blue`, `white` |
 | `tab_bar` | background of the whole tab bar row and the gaps between tab chips | `235` |
 

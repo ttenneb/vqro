@@ -21,7 +21,7 @@ export function parseColor(v: any): RGBA | null {
 const DEFAULTS: Record<string, any> = {
   text: "default", muted: "gray", dim: "darkgray", accent: "cyan", ok: "green", warn: "yellow", error: "red",
   prompt: "magenta", border: "darkgray", border_focus: "cyan", selection: null, selection_text: null,
-  badge: "darkgray", badge_text: "black", surface: "#282830", tab_active: "blue", tab_active_text: "white", tab_bar: 235,
+  badge: "darkgray", badge_text: "black", surface: "#282830", card: "#202026", tab_active: "blue", tab_active_text: "white", tab_bar: 235,
 };
 
 export class Palette {
@@ -35,6 +35,8 @@ export class Palette {
       const mine = token in palette ? parseColor(palette[token]) : null;
       this.colors[token] = mine ?? (value === null ? null : parseColor(value));
     }
+    // A theme from before `card` (or one without it) gets its own raised surface for cards.
+    if (!("card" in palette) && parseColor(palette.surface)) this.colors.card = this.colors.surface;
   }
 
   color(token: string): RGBA { return this.colors[token] ?? this.fg; }

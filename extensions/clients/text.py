@@ -22,7 +22,7 @@ import vqro_client_model as model  # noqa: E402
 from vqro_ext import Vqro, VqroError  # noqa: E402
 
 FEATURES = model.BASE_FEATURES + ["icon_names", "current_when", "markdown", "pin", "composer", "multiline", "facets", "sort", "columns",
-                                  "message", "fold"]
+                                  "message", "fold", "card"]
 WIDTH = 100  # formatted text is laid out at this width
 HELP = """commands (numbers refer to the last listing):
   show                    this client's layout (workspace): tabs and numbered panes (* = focused)
@@ -345,8 +345,10 @@ class TextClient:
         item, pad = r["item"], "  " * r["depth"]
         k0 = model.kind(item)
         if k0 == "message" or (k0 == "text" and model.fold(item) is not None):
-            # A message block (framed) or a folding text row: its lines, the first `fold` until `expand <row>`.
+            # A message block (framed) or a folding text row: its lines, the first `fold` until `expand <row>`. A card
+            # (feature `card`) has no background here: its sender line and body, framed only with `frame: true`.
             message = k0 == "message"
+            framed = model.message_look(item, FEATURES)[1]
             body = text_of(item.get("body") if message and item.get("body") is not None else item.get("text"))
             width = WIDTH - 7 - len(pad)
             if item.get("format") == "markdown":
@@ -355,12 +357,13 @@ class TextClient:
                 shown = [l[i:i + width] or "" for l in body.split("\n") for i in range(0, max(len(l), 1), width)]
             label = model.fold_label(item, len(shown), open_)
             n_shown = len(shown) if open_ or model.fold(item) is None else model.fold(item)
-            out = [f"{pad}{n:>3}. " + (f"┏━ {text_of(item.get('title') or item.get('text'))}" if message else shown[0] if shown else "")]
+            title = text_of(item.get('title') or item.get('text'))
+            out = [f"{pad}{n:>3}. " + ((f"┏━ {title}" if framed else title) if message else shown[0] if shown else "")]
             rest = shown[:n_shown] if message else shown[1:n_shown]
-            out += [pad + "     " + ("┃ " if message else "") + l for l in rest]
+            out += [pad + "     " + ("┃ " if framed else "") + l for l in rest]
             if label:
-                out.append(pad + "     " + ("┃ " if message else "") + label + f"  ({'collapse' if open_ else 'expand'} {n})")
-            if message:
+                out.append(pad + "     " + ("┃ " if framed else "") + label + f"  ({'collapse' if open_ else 'expand'} {n})")
+            if framed:
                 out.append(pad + "     ┗━")
             return "\n".join(out)
         if getattr(self, "widths", None) and isinstance(item.get("columns"), list):

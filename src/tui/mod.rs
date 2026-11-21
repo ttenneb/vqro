@@ -4152,6 +4152,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn card_messages_fill_the_width_with_padding_and_keep_a_frame_only_when_asked() {
+        let (mut app, _) = app();
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","items":[
+            {"type":"message","id":"u","text":"User · 16:42","body":"hello","look":"card"},
+            {"type":"text","text":"Pi · 16:42"},
+            {"type":"message","id":"o","text":"coord · 16:43","body":"from another agent","look":"card","frame":true},
+            {"type":"message","id":"f","text":"framed","body":"today's block"}]}}}}));
+        app.leaves = vec!["p".into()];
+        let pal = Palette { card: ratatui::style::Color::Rgb(1, 2, 3), ..Palette::default() };
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 20)).unwrap();
+        let (mut text, mut bg) = (Vec::new(), Vec::new());
+        terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, 40, 20), false, &pal, &Icons::new(None, false));
+            let b = f.buffer_mut();
+            text = (0..20).map(|y| (0..40).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>();
+            bg = (0..20).map(|y| (1..39).all(|x| b[(x, y)].bg == pal.card)).collect::<Vec<_>>(); }).unwrap();
+        let at = |t: &str| text.iter().position(|l| l.contains(t)).unwrap_or_else(|| panic!("{t} not drawn: {text:#?}"));
+        // Your message: a padding line, the bold sender line and body one column in, a padding line; no frame.
+        let u = at("User · 16:42");
+        assert!(bg[u - 1] && bg[u] && bg[u + 1] && bg[u + 2], "the card spans the pane's width with padding: {text:#?}");
+        assert!(text[u].starts_with("│ User · 16:42") && text[u + 1].starts_with("│ hello"), "one clear column: {text:#?}");
+        assert!(!text[u - 1..=u + 2].iter().any(|l| l.contains('┏') || l.contains('┃')), "no frame: {text:#?}");
+        // The agent's reply stays plain.
+        assert!(!bg[at("Pi · 16:42")]);
+        // Another agent's message keeps its frame on the card.
+        let o = at("coord · 16:43");
+        assert!(text[o].contains("┏━ coord · 16:43") && bg[o] && bg[o - 1] && text[o + 1].contains("┃ from another agent") && text[o + 2].contains("┗━") && bg[o + 3], "{text:#?}");
+        // Without `look`, today's framed block on the plain background.
+        let f = at("┏━ framed");
+        assert!(!bg[f] && !bg[f + 1], "{text:#?}");
+    }
+
+    #[tokio::test]
     async fn toolbar_parts_frame_status_latest_hint_and_short_labels() {
         let (mut app, _) = app();
         let chips = json!([{"text":"Stop…","short":"■","command":"x"},{"text":"⚙ Settings","short":"⚙","command":"x"},

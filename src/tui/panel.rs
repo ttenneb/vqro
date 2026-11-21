@@ -145,19 +145,24 @@ fn body_lines(item: &Value, width: u16) -> Vec<crate::ui_model::markdown::Line> 
 }
 
 /// Every line a text row (with `fold`) or message block draws, as (text, style tag, kind): the frame of a message
-/// ("top", "side", "bottom"), its body, and the fold line ("fold"). Tags: markdown's, or "" plain.
+/// ("top", "side", "bottom"), or its unframed "title" on a card, its body, the fold line ("fold"), and a card's
+/// padding lines ("pad"). Tags: markdown's, or "" plain.
 fn block_lines(item: &Value, width: u16, depth: usize, open: bool) -> Vec<(crate::ui_model::markdown::Line, &'static str)> {
     let message = kind(item) == "message";
-    let inner = width.saturating_sub((depth * 2) as u16 + if message { 2 } else { 0 }).max(1);
+    let (card, frame) = message_look(item, SUPPORTED);
+    let framed = message && frame;
+    let inner = width.saturating_sub((depth * 2) as u16 + if framed { 2 } else { 0 } + if card { 2 } else { 0 }).max(1);
     let body = body_lines(item, inner);
     let total = body.len();
     let label = fold_label(item, total, open);
     let shown = match (fold(item), open) { (Some(n), false) => n.min(total), _ => total };
     let mut out: Vec<(crate::ui_model::markdown::Line, &'static str)> = Vec::new();
-    if message { out.push((vec![(item["title"].as_str().or(item["text"].as_str()).unwrap_or("").to_string(), "")], "top")); }
-    out.extend(body.into_iter().take(shown).map(|l| (l, if message { "side" } else { "" })));
+    if card { out.push((Vec::new(), "pad")); }
+    if message { out.push((vec![(item["title"].as_str().or(item["text"].as_str()).unwrap_or("").to_string(), "")], if framed { "top" } else { "title" })); }
+    out.extend(body.into_iter().take(shown).map(|l| (l, if framed { "side" } else { "" })));
     if let Some(l) = label { out.push((vec![(l, "")], "fold")); }
-    if message { out.push((Vec::new(), "bottom")); }
+    if framed { out.push((Vec::new(), "bottom")); }
+    if card { out.push((Vec::new(), "pad")); }
     out
 }
 
@@ -634,17 +639,32 @@ fn draw_composer(buf: &mut Buffer, row: Rect, item: &Value, selected: bool, chip
 fn draw_block(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, i: usize, skip: u16, hits: &mut Hits, pal: &Palette, open: bool) {
     let item = &r.item;
     let indent = (r.depth * 2) as u16;
-    let x0 = row.x + indent;
-    let w = row.width.saturating_sub(indent);
     let message = kind(item) == "message";
+    // A card (feature `card`) fills the row's whole width with the palette's `card` and keeps one column clear
+    // on each side; its frame, if kept, is drawn inside.
+    let (card, framed) = message_look(item, SUPPORTED);
+    let pad = if card { 1 } else { 0 };
+    let x0 = row.x + indent + pad;
+    let w = row.width.saturating_sub(indent + 2 * pad);
+    let right = x0 + w;
     let frame = if item["style"].is_string() { text_style(item, pal) } else { pal.style(Some("accent")) };
     let base = if message || item["format"] == "markdown" { Style::new().fg(pal.text) } else if item["style"].is_string() { text_style(item, pal) } else { pal.style(Some("muted")) };
     if selectable(item) { hits.rows.push((row, i)); }
     for (dy, (line, part)) in block_lines(item, row.width, r.depth, open).into_iter().skip(skip as usize).take(row.height as usize).enumerate() {
         let y = row.y + dy as u16;
         let mut x = x0;
+        if card { buf.set_style(Rect { x: row.x, y, width: row.width, height: 1 }, Style::new().bg(pal.card)); }
         let pre = |s: &str, x: &mut u16, buf: &mut Buffer| { buf.set_string(*x, y, s, frame); *x += icons::width(s); };
         match part {
+            "pad" => continue,
+            "title" => {
+                // An unframed card's sender line: bold, in the row's style (plain text when it has none).
+                let title = line.first().map(|s| s.0.as_str()).unwrap_or("");
+                let own = if item["style"].is_string() { text_style(item, pal) } else { Style::new().fg(pal.text) };
+                let style = if selected { pal.selected() } else { own.add_modifier(Modifier::BOLD) };
+                buf.set_string(x, y, truncate(title, w as usize), style);
+                continue;
+            }
             "top" => {
                 let title = line.first().map(|s| s.0.as_str()).unwrap_or("");
                 let t = truncate(&format!("┏━ {title} "), w as usize);
@@ -657,10 +677,10 @@ fn draw_block(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, i: usize, s
             "bottom" => { buf.set_string(x, y, format!("┗{}", "━".repeat(w.saturating_sub(1) as usize)), frame); continue; }
             "side" => pre("┃ ", &mut x, buf),
             "fold" => {
-                if message { pre("┃ ", &mut x, buf); }
+                if message && framed { pre("┃ ", &mut x, buf); }
                 let label = line.first().map(|s| s.0.as_str()).unwrap_or("");
-                buf.set_string(x, y, truncate(label, row.right().saturating_sub(x) as usize), pal.style(Some("accent")));
-                hits.expanders.push((Rect { x, y, width: icons::width(label).min(row.right().saturating_sub(x)), height: 1 }, i));
+                buf.set_string(x, y, truncate(label, right.saturating_sub(x) as usize), pal.style(Some("accent")));
+                hits.expanders.push((Rect { x, y, width: icons::width(label).min(right.saturating_sub(x)), height: 1 }, i));
                 continue;
             }
             _ => {}
@@ -668,7 +688,7 @@ fn draw_block(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, i: usize, s
         for (t, st) in line {
             let style = match st { "h" => base.patch(pal.style(Some("accent"))).add_modifier(Modifier::BOLD), "b" => base.add_modifier(Modifier::BOLD), "c" | "pre" => base.patch(pal.style(Some("muted"))), _ => base };
             let style = if selected && !message { style.patch(pal.selected()) } else { style };
-            let room = row.right().saturating_sub(x) as usize;
+            let room = right.saturating_sub(x) as usize;
             if room == 0 { break; }
             buf.set_string(x, y, truncate(&t, room), style);
             x = x.saturating_add(icons::width(&t));

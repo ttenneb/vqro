@@ -57,6 +57,14 @@ export function normalize(name: string): string | null {
 // ---- panels and element fallbacks --------------------------------------------------------------------------------
 
 export const kind = (item: Json): string => (isStr(item?.type) ? item.type : "item");
+/** A `message` row's look for a client rendering `features`: [on the card background, frame drawn]. `look: "card"`
+ *  (feature `card`) sets the block on the palette's `card` with a padding line above and below and drops the frame
+ *  unless `frame: true`; otherwise it is the framed block. */
+export function messageLook(item: Json, features: string[]): [boolean, boolean] {
+  if (kind(item) !== "message") return [false, false];
+  const card = item.look === "card" && features.includes("card");
+  return [card, !card || item.frame === true];
+}
 export const selectable = (item: Json): boolean =>
   (!["header", "separator", "text"].includes(kind(item)) || (kind(item) === "text" && (item.focusable === true || fold(item) !== null))) && item.disabled !== true;
 

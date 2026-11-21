@@ -4149,6 +4149,13 @@
     {
       "expect": {
         "list_detail": null,
+        "looks": [
+          {
+            "card": false,
+            "frame": true,
+            "id": "2"
+          }
+        ],
         "missing": [],
         "rows": [
           {
@@ -4669,6 +4676,331 @@
               }
             ],
             "type": "chips"
+          }
+        ]
+      },
+      "state": {}
+    },
+    {
+      "expect": {
+        "list_detail": null,
+        "looks": [
+          {
+            "card": true,
+            "frame": false,
+            "id": "u"
+          },
+          {
+            "card": true,
+            "frame": true,
+            "id": "o"
+          },
+          {
+            "card": false,
+            "frame": true,
+            "id": "f"
+          },
+          {
+            "card": false,
+            "frame": true,
+            "id": "g"
+          }
+        ],
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "u",
+            "pinned": false,
+            "selectable": true,
+            "text": "User · 16:42",
+            "type": "message"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "1",
+            "pinned": false,
+            "selectable": false,
+            "text": "Pi · 16:42",
+            "type": "text"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "o",
+            "pinned": false,
+            "selectable": true,
+            "text": "coord · 16:43",
+            "type": "message"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "f",
+            "pinned": false,
+            "selectable": true,
+            "text": "framed",
+            "type": "message"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "g",
+            "pinned": false,
+            "selectable": true,
+            "text": "future look",
+            "type": "message"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "t",
+            "pinned": false,
+            "selectable": false,
+            "text": "a text row asking for a card",
+            "type": "text"
+          }
+        ]
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap",
+        "message",
+        "card"
+      ],
+      "name": "message look card: card without frame, card with frame:true, framed by default; unknown looks are framed",
+      "panel": {
+        "items": [
+          {
+            "body": "hello",
+            "id": "u",
+            "look": "card",
+            "text": "User · 16:42",
+            "type": "message"
+          },
+          {
+            "text": "Pi · 16:42",
+            "type": "text"
+          },
+          {
+            "body": "hi",
+            "frame": true,
+            "id": "o",
+            "look": "card",
+            "text": "coord · 16:43",
+            "type": "message"
+          },
+          {
+            "body": "today",
+            "id": "f",
+            "text": "framed",
+            "type": "message"
+          },
+          {
+            "body": "x",
+            "id": "g",
+            "look": "glass",
+            "text": "future look",
+            "type": "message"
+          },
+          {
+            "id": "t",
+            "look": "card",
+            "text": "a text row asking for a card",
+            "type": "text"
+          }
+        ]
+      },
+      "state": {}
+    },
+    {
+      "expect": {
+        "list_detail": null,
+        "looks": [
+          {
+            "card": false,
+            "frame": true,
+            "id": "u"
+          },
+          {
+            "card": false,
+            "frame": true,
+            "id": "o"
+          },
+          {
+            "card": false,
+            "frame": true,
+            "id": "f"
+          },
+          {
+            "card": false,
+            "frame": true,
+            "id": "g"
+          }
+        ],
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "u",
+            "pinned": false,
+            "selectable": true,
+            "text": "User · 16:42",
+            "type": "message"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "1",
+            "pinned": false,
+            "selectable": false,
+            "text": "Pi · 16:42",
+            "type": "text"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "o",
+            "pinned": false,
+            "selectable": true,
+            "text": "coord · 16:43",
+            "type": "message"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "f",
+            "pinned": false,
+            "selectable": true,
+            "text": "framed",
+            "type": "message"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "g",
+            "pinned": false,
+            "selectable": true,
+            "text": "future look",
+            "type": "message"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "t",
+            "pinned": false,
+            "selectable": false,
+            "text": "a text row asking for a card",
+            "type": "text"
+          }
+        ]
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap",
+        "message"
+      ],
+      "name": "message look card without the card feature: every message keeps today's frame",
+      "panel": {
+        "items": [
+          {
+            "body": "hello",
+            "id": "u",
+            "look": "card",
+            "text": "User · 16:42",
+            "type": "message"
+          },
+          {
+            "text": "Pi · 16:42",
+            "type": "text"
+          },
+          {
+            "body": "hi",
+            "frame": true,
+            "id": "o",
+            "look": "card",
+            "text": "coord · 16:43",
+            "type": "message"
+          },
+          {
+            "body": "today",
+            "id": "f",
+            "text": "framed",
+            "type": "message"
+          },
+          {
+            "body": "x",
+            "id": "g",
+            "look": "glass",
+            "text": "future look",
+            "type": "message"
+          },
+          {
+            "id": "t",
+            "look": "card",
+            "text": "a text row asking for a card",
+            "type": "text"
           }
         ]
       },

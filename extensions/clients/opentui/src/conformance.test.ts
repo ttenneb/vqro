@@ -20,6 +20,9 @@ test("panels", async () => {
     }));
     const enhancement = p.list_detail && typeof p.list_detail === "object" ? m.missingFor(p.list_detail, m.BASE_FEATURES).length === 0 : null;
     const want: any = { rows: got, missing: m.missingFor(p, m.BASE_FEATURES), list_detail: enhancement };
+    const looks = m.rows(p, s.page ?? 0, s.filter ?? "", s.open ?? {}, features, s.facets ?? {}, s.sort ?? null)
+      .filter((r) => m.kind(r.item) === "message").map((r) => { const [card, frame] = m.messageLook(r.item, features); return { id: r.id, card, frame }; });
+    if (looks.length) want.looks = looks;
     if (s.search !== undefined) want.search = m.search(p, s.search, s.page ?? 0, s.filter ?? "", c.features ?? m.BASE_FEATURES).map(([id, open]) => ({ id, open }));
     const counts = m.facetCounts(p, s.page ?? 0, s.filter ?? "", s.facets ?? {}, features);
     if (counts.length) want.facets = counts;

@@ -44,6 +44,9 @@ pub struct Palette {
     pub badge_text: Color,
     /// Fill of plain (non-toggle) chips: a raised surface.
     pub surface: Color,
+    /// Background of card blocks (`message` rows with `look: "card"`): a little lighter than the pane, below
+    /// `surface`. A theme without it uses its `surface`.
+    pub card: Color,
     /// The active tab in a tab bar.
     pub tab_active: Color,
     pub tab_active_text: Color,
@@ -70,6 +73,7 @@ impl Default for Palette {
             badge: Color::DarkGray,
             badge_text: Color::Black,
             surface: Color::Rgb(40, 40, 48),
+            card: Color::Rgb(32, 32, 38),
             tab_active: Color::Blue,
             tab_active_text: Color::White,
             tab_bar: Color::Indexed(235),
@@ -94,6 +98,10 @@ impl Palette {
                 }
             }
         }
+        // A theme from before `card` (or one without it) gets its own raised surface for cards.
+        if !tokens.contains_key("card") && tokens.get("surface").and_then(parse_color).is_some() {
+            p.card = p.surface;
+        }
         p
     }
 
@@ -112,6 +120,7 @@ impl Palette {
             "badge" => &mut self.badge,
             "badge_text" => &mut self.badge_text,
             "surface" => &mut self.surface,
+            "card" => &mut self.card,
             "tab_active" => &mut self.tab_active,
             "tab_active_text" => &mut self.tab_active_text,
             "tab_bar" => &mut self.tab_bar,
@@ -192,6 +201,13 @@ mod tests {
         assert_eq!(parse_color(&json!("#12345")), None);
         assert_eq!(parse_color(&json!("chartreuse")), None);
         assert_eq!(parse_color(&json!({"r": 1})), None);
+    }
+
+    #[test]
+    fn card_is_a_token_and_falls_back_to_the_themes_surface() {
+        assert_eq!(Palette::from_theme(Some(&json!({"palette": {"card": "#101010", "surface": "#202020"}}))).card, Color::Rgb(16, 16, 16));
+        assert_eq!(Palette::from_theme(Some(&json!({"palette": {"surface": "#202020"}}))).card, Color::Rgb(32, 32, 32));
+        assert_eq!(Palette::from_theme(Some(&json!({"palette": {"accent": "red"}}))).card, Palette::default().card);
     }
 
     #[test]

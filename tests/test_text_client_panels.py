@@ -44,6 +44,21 @@ class TextPanels(unittest.TestCase):
         self.assertEqual(c.handle("facet nope x"), ["facets here: kind"])
 
 
+class Cards(unittest.TestCase):
+    def test_a_card_is_its_sender_line_and_body_and_keeps_a_frame_only_when_asked(self):
+        c = client({"title": "Pi", "items": [
+            {"type": "message", "id": "u", "text": "User · 16:42", "body": "hello", "look": "card"},
+            {"type": "message", "id": "o", "text": "coord · 16:43", "body": "hi", "look": "card", "frame": True},
+            {"type": "message", "id": "f", "text": "framed", "body": "today"}]})
+        lines = "\n".join(c.handle("view p")).split("\n")
+        self.assertIn("  1. User · 16:42", lines)
+        self.assertIn("     hello", lines)
+        self.assertIn("  2. ┏━ coord · 16:43", lines)
+        self.assertIn("     ┃ hi", lines)
+        self.assertIn("  3. ┏━ framed", lines)
+        self.assertEqual(sum(l.strip() == "┗━" for l in lines), 2, lines)
+
+
 class PopupAfterReply(unittest.TestCase):
     def test_a_popup_shows_what_its_command_published_even_before_the_event_arrives(self):
         """settings.open publishes fresh content, then replies with a popup; the view.content event can arrive

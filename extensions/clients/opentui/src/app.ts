@@ -6,7 +6,7 @@ import { Peer, RpcError, type Json } from "./rpc";
 import { Palette } from "./theme";
 import { Terminals } from "./terminal";
 
-export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail", "embedded_views", "markdown", "pin", "composer", "multiline", "search", "facets", "sort", "columns", "message"];
+export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail", "embedded_views", "markdown", "pin", "composer", "multiline", "search", "facets", "sort", "columns", "message", "card"];
 export const PROFILES = ["base", "keys", "terminal"];
 const KINDS = ["panel", "terminal"];
 
@@ -1309,9 +1309,20 @@ const messageBody = (it: Json, w: number): string[] => {
   return it.format === "markdown" ? m.markdownLines(body, Math.max(1, w)).map((l) => l.map(([t]) => t).join("")) : wrapText(body, Math.max(1, w));
 };
 
+/** A message block's lines at width `w` (after indent): a card's padding lines (feature card), then the frame's top
+ *  rule with the title (or, on an unframed card, the plain title), the body (inside "┃ " when framed), the closing rule. */
+const messageLines = (it: Json, w: number): string[] => {
+  const [card, framed] = m.messageLook(it, FEATURES);
+  const inner = w - (card ? 2 : 0);
+  const title = clean(it.title ?? it.text ?? "");
+  const body = messageBody(it, inner - (framed ? 2 : 0));
+  const lines = framed ? [`┏━ ${title} `, ...body.map((l) => `┃ ${l}`), "┗"] : [title, ...body];
+  return card ? ["", ...lines, ""] : lines;
+};
+
 const rowHeight = (r: m.Row, w: number) =>
   m.kind(r.item) === "composer" ? composerHeight(r.item)
-    : m.kind(r.item) === "message" ? messageBody(r.item, w - r.depth * 2 - 2).length + 2
+    : m.kind(r.item) === "message" ? messageLines(r.item, w - r.depth * 2).length
     : m.kind(r.item) === "text" && r.item.format === "markdown" ? Math.max(1, m.markdownLines(clean2(r.item.text), Math.max(1, w - r.depth * 2)).length)
     : m.kind(r.item) === "text" && r.item.wrap === true ? wrapText(clean2(r.item.text), Math.max(1, w - r.depth * 2)).length
     : m.kind(r.item) === "separator" ? 1 : 1 + (typeof r.item.description === "string" && r.item.description ? 1 : 0);
@@ -1398,15 +1409,25 @@ function drawRow(a: App, buf: OptimizedBuffer, r: Rect, row: m.Row, selected: bo
   if (k === "composer") return drawComposer(a, buf, r, it, selected, chipSel, comp, hit);
   if (k === "separator") { text(buf, r.x, r.y, "─".repeat(r.w), p.color("border")); return 1; }
   if (k === "message") {
-    // A message from someone else (feature message): a heavy frame with its title, then the body.
+    // A message from someone else (feature message): a heavy frame with its title, then the body. On a card
+    // (feature card) the whole width takes the palette's `card`, one column stays clear each side, and the frame
+    // is drawn only with `frame: true`.
+    const [card, framed] = m.messageLook(it, FEATURES);
     const frame = p.color(it.style ?? "accent");
-    const body = messageBody(it, r.w - indent - 2);
-    const lines = [`┏━ ${clean(it.title ?? it.text ?? "")} `, ...body.map((l) => `┃ ${l}`), "┗"];
+    const lines = messageLines(it, r.w - indent);
+    const [first, last] = card ? [1, lines.length - 2] : [0, lines.length - 1];
+    const bg = card ? p.color("card") : undefined;
+    const w = r.w - indent - (card ? 2 : 0);
+    const x0 = x + (card ? 1 : 0);
     lines.slice(0, r.h).forEach((l, j) => {
-      const fill = j === 0 || j === lines.length - 1 ? "━".repeat(Math.max(0, r.w - indent - width(l))) : "";
-      const attr = j === 0 ? TextAttributes.BOLD | (selected ? TextAttributes.INVERSE : 0) : 0;
-      text(buf, x, r.y + j, fit(j === 0 || j === lines.length - 1 ? l + fill : l, r.w - indent), j === 0 || j === lines.length - 1 ? frame : p.color("text"), undefined, attr);
-      if (j > 0 && j < lines.length - 1) text(buf, x, r.y + j, "┃", frame);
+      if (bg) buf.fillRect(r.x, r.y + j, r.w, 1, bg);
+      if (j < first || j > last) return;  // a card's padding line
+      const rule = framed && (j === first || j === last);
+      const fill = rule ? "━".repeat(Math.max(0, w - width(l))) : "";
+      const attr = j === first ? TextAttributes.BOLD | (selected ? TextAttributes.INVERSE : 0) : 0;
+      const fg = rule ? frame : j === first ? (it.style ? p.color(it.style) : p.color("text")) : p.color("text");
+      text(buf, x0, r.y + j, fit(l + fill, w), fg, bg, attr);
+      if (framed && j > first && j < last) text(buf, x0, r.y + j, "┃", frame, bg);
     });
     hit(r.x, r.w);
     return Math.min(lines.length, Math.max(1, r.h));

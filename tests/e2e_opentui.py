@@ -143,11 +143,16 @@ try:
     call("workspace.apply", {"note": "e2e markdown", "ops": [{"op": "set", "key": "view/e2e-md", "value": {"kind": "panel", "title": "Formatted", "items": [
         {"type": "text", "format": "markdown", "text": "## Plan heading\nRun `cargo test` then **ship**\n- first point\n- second point"},
         {"type": "message", "text": "Message from coord", "title": "Message from coord · 21:11", "body": "first line\nsecond line", "fold": 4},
+        {"type": "message", "id": "card", "text": "User · 16:42", "body": "card body line", "look": "card"},
         *[{"text": f"filler {n}"} for n in range(40)],
         {"text": "Messages: 2 waiting", "pin": "bottom"}]}}]})
     call("command.invoke", {"name": "tabs.show", "args": {"view": "e2e-md", "title": "Formatted"}})
     check("markdown: heading, inline code and list markers render without markup", bool(wait(lambda: "Plan heading" in screen() and "Run cargo test then ship" in screen() and "• second point" in screen() and "**" not in screen())), screen())
     check("a message block is framed with its title and body", bool(wait(lambda: "┏━ Message from coord · 21:11" in screen() and "┃ second line" in screen() and "┗━" in screen())), screen())
+    # feature card: no frame, the palette's built-in card (#202026) behind the whole width.
+    drawn = bool(wait(lambda: "User · 16:42" in screen() and "card body line" in screen() and "┏━ User" not in screen()))
+    card_screen = subprocess.run([*HARNESS, "capture-pane", "-p", "-e"], capture_output=True, text=True).stdout
+    check("a card message: sender and body on the card background, unframed", drawn and "48;2;32;32;38" in card_screen, card_screen)
     check("pin bottom: the pinned row stays visible below a long list", bool(wait(lambda: "Messages: 2 waiting" in screen() and "filler 39" not in screen())), screen())
     # Composer (feature composer): autofocus, multi-line typing, a control, Send through Enter.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

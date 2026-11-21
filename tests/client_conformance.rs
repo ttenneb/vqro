@@ -51,6 +51,10 @@ fn panels_flatten_like_the_model() {
             "selectable": panel::selectable(&r.item), "bottom": r.bottom, "chips": r.item.get("chips").map(|c| json!(c.as_array().into_iter().flatten().map(|c| c["text"].clone()).collect::<Vec<_>>()))})).collect();
         let enhancement = p["list_detail"].is_object().then(|| panel::missing_for(&p["list_detail"], panel::BASE_FEATURES).is_empty());
         let mut out = json!({"rows": rows, "missing": panel::missing_for(p, panel::BASE_FEATURES), "list_detail": enhancement});
+        // A message row's look (features `message`, `card`): on the card, frame drawn.
+        let looks: Vec<Value> = panel::rows_for(p, &state, features).iter().filter(|r| panel::kind(&r.item) == "message")
+            .map(|r| { let (card, frame) = panel::message_look(&r.item, features); json!({"id": r.id, "card": card, "frame": frame}) }).collect();
+        if !looks.is_empty() { out["looks"] = json!(looks); }
         if let Some(q) = s["search"].as_str() {
             out["search"] = json!(panel::search(p, &state, q, features).into_iter().map(|(id, open)| json!({"id": id, "open": open})).collect::<Vec<_>>());
         }

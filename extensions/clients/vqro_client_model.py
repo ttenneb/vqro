@@ -61,6 +61,16 @@ def kind(item):
     return item.get("type") or "item"
 
 
+def message_look(item, features):
+    """A `message` row's look for a client rendering `features`: (on the card background, frame drawn). `look: "card"`
+    (feature `card`) sets the block on the palette's `card` with a padding line above and below and drops the frame
+    unless `frame: true`; otherwise it is the framed block."""
+    if kind(item) != "message":
+        return (False, False)
+    card = item.get("look") == "card" and "card" in features
+    return (card, not card or item.get("frame") is True)
+
+
 def selectable(item):
     k = kind(item)
     return (k not in ("header", "separator", "text") or (k == "text" and (item.get("focusable") is True or fold(item) is not None))) \

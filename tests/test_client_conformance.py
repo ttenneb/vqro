@@ -39,6 +39,10 @@ class Conformance(unittest.TestCase):
                 if isinstance(p.get("list_detail"), dict):
                     enhancement = not model.missing_for(p["list_detail"], model.BASE_FEATURES)
                 want = {"rows": got, "missing": model.missing_for(p, model.BASE_FEATURES), "list_detail": enhancement}
+                looks = [{"id": r["id"], "card": c, "frame": f} for r in model.rows(p, s.get("page", 0), s.get("filter", ""), s.get("open"), features, s.get("facets"), s.get("sort"))
+                         if model.kind(r["item"]) == "message" for c, f in [model.message_look(r["item"], features)]]
+                if looks:
+                    want["looks"] = looks
                 if "search" in s:
                     want["search"] = [{"id": i, "open": o} for i, o in model.search(p, s["search"], s.get("page", 0), s.get("filter", ""), case.get("features") or model.BASE_FEATURES)]
                 counts = model.facet_counts(p, s.get("page", 0), s.get("filter", ""), s.get("facets"), features)
