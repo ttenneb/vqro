@@ -1216,17 +1216,18 @@ impl App {
         Some(self.watched_rows(key, view).into_iter().filter(|r| r.item["on_toggle"].is_object() && r.has_children).map(|r| (r.id, r.expanded)).collect())
     }
 
-    /// A panel's rows and, when a list row with a detail panel is selected, that detail's rows (ids prefixed with
-    /// `detail:`), for `toggle_watch`/`fire_toggles`: a lazy row may sit in either.
+    /// A panel's rows and, when a list row with a detail panel is selected, that detail's rows, for
+    /// `toggle_watch`/`fire_toggles`: a lazy row may sit in either. Ids are scoped so they never collide: `\0r\0<id>`
+    /// for the list, `\0d\0<selected list row>\0<id>` for its detail (selecting another row is not a toggle).
     fn watched_rows(&self, key: &str, view: &str) -> Vec<panel::Flat> {
         let value = self.panel_value(view);
         let st = self.pstate.get(key).cloned().unwrap_or_default();
-        let mut rows = panel::rows(&value, &st);
-        if let Some((id, detail)) = panel::selected_detail(&value, &st) {
+        let mut rows: Vec<panel::Flat> = panel::rows(&value, &st).into_iter().map(|mut r| { r.id = format!("\0r\0{}", r.id); r }).collect();
+        if let Some((owner, detail)) = panel::selected_detail(&value, &st) {
             let mut root = st.clone();
-            panel::sync_detail(&mut root, &id);
+            panel::sync_detail(&mut root, &owner);
             let dst = root.detail.as_deref().cloned().unwrap_or_default();
-            rows.extend(panel::rows(&Arc::new(detail), &dst).into_iter().map(|mut r| { r.id = format!("detail:{}", r.id); r }));
+            rows.extend(panel::rows(&Arc::new(detail), &dst).into_iter().map(|mut r| { r.id = format!("\0d\0{owner}\0{}", r.id); r }));
         }
         rows
     }
@@ -4397,6 +4398,30 @@ mod tests {
         // A row without on_toggle runs nothing.
         assert_eq!(panel::toggle_command(&json!({"text":"x"}), true), None);
         assert_eq!(panel::toggle_command(&lazy, false), Some(("x.toggle".into(), json!({"id":"ws:big","open":false}))));
+    }
+
+    #[tokio::test]
+    async fn selecting_another_list_row_is_not_a_toggle_of_its_detail_rows() {
+        // vqro-lead-secondary (255): rows of two details shared ids, so selecting B "changed" A's row.
+        let (mut app, _) = app();
+        let detail = |command: &str, expanded| json!({"items":[{"id":"deep","text":"deep","has_children":true,"expanded":expanded,"on_toggle":{"command":command}}]});
+        app.ws.entries.insert("view/test".into(), json!({"kind":"panel","list_detail":{"requires":["list_detail"]},
+            "items":[{"id":"a","text":"A","detail_panel":detail("x.a",false)},
+                     {"id":"b","text":"B","detail_panel":detail("x.b",true)}]}));
+        assert!(app.panel_key("test", "test", KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), json!({})));
+        assert!(app.message.is_empty(), "selection without toggle invoked a callback: {}", app.message);
+    }
+
+    #[tokio::test]
+    async fn list_and_detail_row_ids_cannot_alias() {
+        // vqro-lead-secondary (255): a list row with id "detail:deep" and a detail row "deep" shared one key.
+        let (mut app, _) = app();
+        app.ws.entries.insert("view/test".into(), json!({"kind":"panel","list_detail":{"requires":["list_detail"]},
+            "items":[{"id":"detail:deep","text":"root","expanded":true,"on_toggle":{"command":"x.root"},
+                "children":[{"text":"child"}],
+                "detail_panel":{"items":[{"id":"deep","text":"deep","has_children":true,"expanded":false,"on_toggle":{"command":"x.detail"}}]}}]}));
+        assert!(!app.panel_key("test", "test", KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE), json!({})));
+        assert!(app.message.is_empty(), "unchanged unhandled key invoked a callback: {}", app.message);
     }
 
     #[tokio::test]
