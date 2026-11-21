@@ -283,7 +283,7 @@ impl Agent {
         let id=if let Some(id)=&self.current_message {id.clone()}else{
             self.position+=1;let id=self.next("m");self.current_message=Some(id.clone());
             // Only the entity a correlated user message_start creates gets that origin; any other new entity gets none.
-            self.current_origin=self.start_origin.take().filter(|_|message["role"]=="user").map(|entry|(id.clone(),entry,message["timestamp"].clone()));id
+            self.current_origin=self.start_origin.take().filter(|_|message["role"]=="user" && count(&message["timestamp"]).is_some()).map(|entry|(id.clone(),entry,message["timestamp"].clone()));id
         };
         self.start_origin=None;
         let position=self.journal.entity("message",&id).and_then(|(_,value)|value["position"].as_u64()).unwrap_or(self.position);
@@ -291,7 +291,9 @@ impl Agent {
         // the bridge wrote: other content merged into the open message (a stray native end) loses it for good.
         // Same message too: Pi's user message keeps its creation timestamp from start to end (a stray identical text has its own).
         let bound=self.current_origin.as_ref().is_some_and(|(bound,_,_)|*bound==id);
-        if bound && !(message["role"]=="user" && self.current_origin.as_ref().is_some_and(|(_,entry,timestamp)|entry.matches(message) && message["timestamp"]==*timestamp)) {self.current_origin=None;}
+        // Fail closed: no valid native timestamp is no identity evidence (start binding requires one too).
+        let dropped=bound && !(message["role"]=="user" && count(&message["timestamp"]).is_some() && self.current_origin.as_ref().is_some_and(|(_,entry,timestamp)|entry.matches(message) && message["timestamp"]==*timestamp));
+        if dropped {self.current_origin=None;}
         let extra=self.current_origin.as_ref().filter(|(bound,_,_)|*bound==id).map(|(_,entry,_)|super::origins::fields(entry));
         let value=self.message_value(message,final_value,position,extra.as_ref());
         let event=&record["assistantMessageEvent"];
@@ -299,7 +301,8 @@ impl Agent {
         let appended=if let (Some(field),Some(delta))=(field,event["delta"].as_str()) {
             let same=self.journal.entity("message",&id).and_then(|(_,old)|old.pointer(&field)).and_then(Value::as_str)
                 .zip(value.pointer(&field).and_then(Value::as_str)).is_some_and(|(old,new)|new.len()==old.len()+delta.len() && new.starts_with(old) && new.ends_with(delta));
-            same && !final_value && self.journal.append_text("message",&id,&field,delta).is_ok()
+            // A dropped binding must re-put the whole entity: an append keeps the old origin/delivery/role.
+            same && !final_value && !dropped && self.journal.append_text("message",&id,&field,delta).is_ok()
         }else{false};
         if !appended {self.store("message",&id,value,true);}
         if final_value {

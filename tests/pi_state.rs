@@ -30,7 +30,7 @@ fn correlated_origin_never_leaks_to_a_later_uncorrelated_user_message() {
         let origin=json!({"principal":"p:owner","kind":"human"});
         a.origins.arm(origins::Entry::new("d-origin", &origin, &json!({"message":"owned A"})));
         event(&mut a,json!({"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}));
-        let owned=json!({"role":"user","content":"owned A"});
+        let owned=json!({"role":"user","content":"owned A","timestamp":1000});
         event(&mut a,json!({"type":"message_start","message":owned}));
         event(&mut a,json!({"type":"message_end","message":owned}));
         let unrelated=json!({"role":"user","content":"native B, not sent by bridge"});
@@ -54,13 +54,13 @@ fn content_merged_into_an_open_correlated_message_drops_its_origin() {
     let origin=json!({"principal":"p:owner","kind":"human"});
     a.origins.arm(origins::Entry::new("d-origin",&origin,&json!({"message":"owned A"})));
     event(&mut a,json!({"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}));
-    event(&mut a,json!({"type":"message_start","message":{"role":"user","content":"owned A"}}));
+    event(&mut a,json!({"type":"message_start","message":{"role":"user","content":"owned A","timestamp":1000}}));
     assert_eq!(entities(&a,"message")[0]["value"]["origin"],origin,"A is correlated while open");
     event(&mut a,json!({"type":"message_end","message":{"role":"user","content":"native B, not sent by bridge"}}));
     let rows=entities(&a,"message");assert_eq!(rows.len(),1,"B merged into the open entity");
     let value=&rows[0]["value"];assert_eq!(value["content"][0]["text"],"native B, not sent by bridge");
     assert!(value.get("origin").is_none() && value.get("delivery").is_none(),"{value}");
-    event(&mut a,json!({"type":"message_start","message":{"role":"user","content":"owned A"}}));
+    event(&mut a,json!({"type":"message_start","message":{"role":"user","content":"owned A","timestamp":1000}}));
     assert!(entities(&a,"message").iter().all(|row|row["value"].get("origin").is_none()),"the binding is gone");
     // Byte-identical text from another message (its own timestamp) merged into the open A: also no origin.
     let mut a=make();
@@ -89,7 +89,7 @@ fn a_correlated_origin_never_pushes_a_message_over_the_entity_bound() {
         let text="x".repeat(state::ENTITY_BYTES-slack);
         a.origins.arm(origins::Entry::new("d-origin",&origin,&json!({"message":text})));
         event(&mut a,json!({"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}));
-        let message=json!({"role":"user","content":text});
+        let message=json!({"role":"user","content":text,"timestamp":1000});
         event(&mut a,json!({"type":"message_start","message":message}));event(&mut a,json!({"type":"message_end","message":message}));
         let rows=entities(&a,"message");assert_eq!(rows.len(),1,"slack {slack}: the message entity exists");
         let value=&rows[0]["value"];
@@ -98,6 +98,43 @@ fn a_correlated_origin_never_pushes_a_message_over_the_entity_bound() {
         if value.get("incomplete").is_some(){over+=1;}
     }
     assert!(over>0 && over<60,"some sizes need the content-omitted fallback, some fit whole: {over}");
+}
+
+// spike-rev-b review controls on 06c8004f (R1 append path, R2 unknown timestamp).
+#[test]
+fn uncertain_update_cannot_keep_origin_via_text_append() {
+    let mut a = make();
+    let origin = json!({"principal":"p:owner","kind":"human"});
+    a.origins.arm(origins::Entry::new("d-origin", &origin, &json!({"message":"hello"})));
+    event(&mut a, json!({"type":"response","command":"prompt","success":true,
+                        "data":{"disposition":"started"}}));
+    event(&mut a, json!({"type":"message_start","message":{"role":"user",
+                        "content":[{"type":"text","text":"hello"}],"timestamp":1000}}));
+    assert_eq!(entities(&a,"message")[0]["value"]["origin"], origin);
+    // A legal assistant-delta shape, but uncertain merge into the still-open user entity.
+    event(&mut a, json!({"type":"message_update","message":{"role":"assistant",
+                        "content":[{"type":"text","text":"hello world"}],"timestamp":2000},
+                        "assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" world"}}));
+    let rows = entities(&a,"message");
+    assert_eq!(rows.len(),1);
+    let value = &rows[0]["value"];
+    assert_eq!(value["content"][0]["text"],"hello world");
+    assert!(value.get("origin").is_none() && value.get("delivery").is_none(),
+            "dropped binding must re-put, not append while retaining old top-level provenance: {value}");
+}
+#[test]
+fn missing_timestamp_is_not_same_message_identity() {
+    let mut a = make();
+    let origin = json!({"principal":"p:owner","kind":"human"});
+    a.origins.arm(origins::Entry::new("d-origin", &origin, &json!({"message":"same text"})));
+    event(&mut a, json!({"type":"response","command":"prompt","success":true,
+                        "data":{"disposition":"started"}}));
+    event(&mut a, json!({"type":"message_start","message":{"role":"user","content":"same text"}}));
+    // An unqualified standalone end: no timestamp distinguishes it from an unrelated identical message.
+    event(&mut a, json!({"type":"message_end","message":{"role":"user","content":"same text"}}));
+    let rows = entities(&a,"message");
+    assert!(rows[0]["value"].get("origin").is_none() && rows[0]["value"].get("delivery").is_none(),
+            "missing==missing must not qualify continuation identity: {}", rows[0]["value"]);
 }
 
 #[test]
