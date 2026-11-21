@@ -131,6 +131,11 @@ class Ctx:
         if self.fault == "rewrite_provenance" and "cause" in audit:
             audit["cause"] = dict(audit["cause"], provenance="asserted" if audit["cause"]["provenance"] != "asserted" else "adapter")
         dispatched = json.loads(json.dumps(args))
+        if self.fault == "bool_dispatched_args" and isinstance((dispatched.get("cause") or {}).get("extra"), dict):
+            dispatched["cause"]["extra"]["bounded"][0] = True
+        if self.fault == "bool_audit" and isinstance((audit.get("cause") or {}).get("extra"), dict):
+            audit["cause"] = json.loads(json.dumps(audit["cause"]))
+            audit["cause"]["extra"]["bounded"][0] = True
         if self.fault == "drop_dispatched_cause":
             dispatched.pop("cause", None)  # audit stays right, the adapter-bound args lose the link
         if self.fault == "inject_root_link" and "cause" in root and "cause" not in dispatched:
@@ -145,6 +150,9 @@ class Ctx:
                     metadata["cause"] = dict(metadata["cause"], provenance="wrong-provider-provenance")
                 if "correlation" in metadata:
                     metadata["correlation"] = "wrong-provider-correlation"
+            if self.fault == "bool_dispatch_metadata" and isinstance(metadata.get("cause", {}).get("extra"), dict) \
+                    and isinstance(metadata["cause"]["extra"].get("bounded"), list):
+                metadata["cause"]["extra"]["bounded"][0] = True  # JSON number 1 -> true; Python == still says equal
             if self.fault == "invent_dispatch_metadata" and "correlation" not in metadata:
                 metadata["correlation"] = "invented"
             self.witness.received.append({"op": op, "args": dispatched, **metadata})
@@ -164,7 +172,7 @@ class C12Negatives(unittest.TestCase):
     def test_each_broken_rule_fails(self):
         for fault in ("accept_invalid", "accept_conflict", "write_on_refusal", "drop_cause", "rewrite_provenance",
                       "drop_dispatched_cause", "inject_root_link", "drop_dispatch_metadata", "rewrite_dispatch_metadata",
-                      "invent_dispatch_metadata"):
+                      "invent_dispatch_metadata", "bool_dispatch_metadata", "bool_dispatched_args", "bool_audit"):
             with self.subTest(fault=fault), self.assertRaises(CheckFailed):
                 run(fault)
 

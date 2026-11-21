@@ -19,6 +19,11 @@ import json
 from .cases import audit_fence, case, caps
 from .results import CheckFailed, HarnessGap, check
 
+
+def same_json(left, right):
+    """Type-preserving JSON equality: Python `==` treats true == 1 and 1 == 1.0, which JSON does not."""
+    return json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
+
 KNOWN = ("kind", "id", "provenance", "endpoint", "epoch", "boot")
 
 
@@ -144,18 +149,18 @@ async def witnessed_form(ctx, witness, label, *, root=None, args=None):
     received = witness.received[before:]
     check(len(received) == 1 and received[0].get("op") == "agent.send",
           f"C12 {label}: the core did not dispatch exactly one agent.send effect", component="core")
-    check(received[0].get("args") == sent,
+    check(same_json(received[0].get("args"), sent),
           f"C12 {label}: dispatched args differ from the caller's args: sent {sent!r}, adapter received {received[0].get('args')!r}",
           component="core")
     audit = (await audit_fence(ctx, result))["data"]
     for field in ("cause", "correlation"):
         expected = (root or {}).get(field, (args or {}).get(field))
-        check(audit.get(field) == expected,
+        check((field in audit) == (expected is not None) and same_json(audit.get(field), expected),
               f"C12 {label}: effect audit {field} changed or invented: sent {expected!r}, audit {audit.get(field)!r}", component="core")
         # The provider-bound effect metadata is part of the wire contract too (agent-v0 §2.5: the core lifts the
         # links into effect metadata): field for field equal, and absent stays absent (never invented).
         dispatched = received[0].get(field)
-        check((field in received[0]) == (expected is not None) and dispatched == expected,
+        check((field in received[0]) == (expected is not None) and same_json(dispatched, expected),
               f"C12 {label}: dispatched effect {field} changed, dropped or invented: sent {expected!r}, provider received "
               f"{dispatched!r}", component="core")
     ctx.evidence.append({"kind": "c12_witnessed", "form": label, "effect": result.get("effect"),
@@ -198,7 +203,7 @@ async def accepted_form(ctx, mode, label, *, root=None, args=None, adapter_may_d
         if value is not None:
             expected[field] = value
     for field in ("cause", "correlation"):
-        check(audit.get(field) == expected.get(field),
+        check((field in audit) == (field in expected) and same_json(audit.get(field), expected.get(field)),
               f"C12 {label}: effect audit {field} changed or invented: sent {expected.get(field)!r}, audit {audit.get(field)!r}",
               component="core")
     ctx.evidence.append({"kind": "c12_accepted", "form": label, "effect": effect_id, "outcome": result.get("outcome"),
