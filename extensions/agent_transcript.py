@@ -512,11 +512,18 @@ SEVERITY_STYLE = {"warn": "warn", "warning": "warn", "error": "error"}
 ENTITY_LINES = 12  # an entity of another kind shows at most this many lines of what it says
 
 
+def severity_style(value):
+    """The style for a reported `severity`: only a known string chooses one; anything else (absent, unknown, a list or
+    an object) is no severity, never an error (vqro-lead-secondary, #97)."""
+    severity = value.get("severity") if isinstance(value, dict) else None
+    return SEVERITY_STYLE.get(severity, "dim") if isinstance(severity, str) else "dim"
+
+
 def entity_rows(kind, eid, value, who="Agent"):
     """An entity of a kind the pane has no special view for (a `notice`, a kind added later): its `text` and typed
     `content`, styled by `severity`, with the kind named unless it is a notice. Hidden metadata (`native`, ids) is
     never shown and never stands in for text: an entity with nothing to say shows nothing."""
-    style = SEVERITY_STYLE.get(value.get("severity"), "dim")
+    style = severity_style(value)
     body = lines(value["text"], style, ENTITY_LINES) if isinstance(value.get("text"), str) and value["text"].strip() else []
     if isinstance(value.get("content"), list):
         body += content_rows(value["content"], style, ENTITY_LINES)
@@ -533,7 +540,7 @@ def notice_rows(notices, who="Agent"):
     for at, value in notices:
         text = value.get("text") if isinstance(value, dict) else value if isinstance(value, str) else None
         if isinstance(text, str) and text.strip():
-            style = SEVERITY_STYLE.get(value.get("severity"), "dim") if isinstance(value, dict) else "dim"
+            style = severity_style(value)
             out.append({"type": "text", "wrap": True, "style": style,
                         "text": "· " + clip(plain(str(who)), 60) + " notice" + (" · " + when(at) if when(at) else "") + ": "
                                 + clip(plain(text.strip()), NOTICE_BYTES)})

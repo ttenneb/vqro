@@ -181,6 +181,15 @@ class TranscriptRows(unittest.TestCase):
                          "in timeline order when positioned, after it when not; hidden metadata never shown")
         self.assertEqual(rows[-1]["style"], "warn", "severity styles it")
 
+    def test_a_severity_of_any_shape_never_breaks_a_notice(self):
+        """vqro-lead-secondary (shadow-notices-97-review.md): a list or object severity raised TypeError in both renderers."""
+        for odd in (["warn"], {"level": "warn"}):
+            row = agent_transcript.entity_rows("notice", "n", {"severity": odd, "text": "still shown"}, "Pi")[0]
+            self.assertEqual((row["text"], row["style"]), ("· Pi notice: still shown", "dim"), odd)
+            live = agent_transcript.notice_rows([(None, {"severity": odd, "text": "still shown"})], "Pi")[0]
+            self.assertEqual((live["text"], live["style"]), ("· Pi notice: still shown", "dim"), odd)
+        self.assertEqual(agent_transcript.entity_rows("notice", "n", {"severity": "warn", "text": "w"})[0]["style"], "warn")
+
     def test_an_empty_system_message_leaves_no_bare_label(self):
         """The human's 16:44 screenshot: a stray "System" label at the top (Pi's system message, an empty text block)."""
         empty = {("message", "s"): {"position": 1, "role": "system", "final": True, "content": text("")},
