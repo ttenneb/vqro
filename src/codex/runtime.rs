@@ -1,6 +1,6 @@
 //! Provider-facing orchestration. Native event draining and controls never wait on an admission.
 //! The shared SDK item producer is supplied as a callback; no second item reducer lives here.
-use super::{Change, Endpoint, SendContext, provider_capabilities};
+use super::{Change, Endpoint, SendContext, configuration, provider_capabilities};
 use crate::provider_client::{Outcome, ProviderError};
 use crate::rpc::{Incoming, Peer, RpcError};
 use serde_json::{Map, Value, json};
@@ -359,13 +359,25 @@ impl Runtime {
                 kind: error.kind().into(),
                 message: error.message,
             }),
-            Err(Fault::Unknown(error)) => Err(ProviderError::new(
-                "backend",
-                format!(
-                    "native outcome unknown: {}",
-                    error.message.chars().take(512).collect::<String>()
-                ),
-            )),
+            Err(Fault::Unknown(error)) => {
+                let mut public = ProviderError::new(
+                    "backend",
+                    format!(
+                        "native outcome unknown: {}",
+                        error.message.chars().take(512).collect::<String>()
+                    ),
+                );
+                // Only the adapter-built model diagnostic crosses this boundary. Other native
+                // error data may contain payloads/credentials and remains deliberately discarded.
+                if op == "agent.configure"
+                    && error.data.as_ref().is_some_and(|data| {
+                        matches!(data["stage"].as_str(), Some("native_rpc" | "readback"))
+                    })
+                {
+                    public = public.with_data(error.data.unwrap());
+                }
+                Err(public)
+            }
         }
     }
 
@@ -660,21 +672,21 @@ impl Runtime {
                                 Outcome::Accepted(Some(value))
                             })
                         }
-                        Err(_) => {
+                        Err(error) => {
                             let changes = endpoint.model_unknown();
                             this.emit(index, &endpoint, changes, false);
-                            Err(Fault::Unknown(RpcError::new(
-                                "backend",
-                                "native model readback missing or changed thread; do not replay",
+                            Err(Fault::Unknown(configuration::failure(
+                                configuration::FailureStage::Readback,
+                                &error,
                             )))
                         }
                     },
-                    Err(_) => {
+                    Err(error) => {
                         let changes = endpoint.model_unknown();
                         this.emit(index, &endpoint, changes, false);
-                        Err(Fault::Unknown(RpcError::new(
-                            "backend",
-                            "native model outcome unknown; do not replay",
+                        Err(Fault::Unknown(configuration::failure(
+                            configuration::FailureStage::NativeRpc,
+                            &error,
                         )))
                     }
                 }

@@ -626,6 +626,53 @@ async fn session_observed_reply_waits_for_confirmed_core_facts() {
 }
 
 #[tokio::test]
+async fn native_model_error_stage_code_and_message_survive_the_sdk_boundary() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = UnixListener::bind(root.path().join("core.sock")).unwrap();
+    let child = bridge(&root, 1, 0, &["--reject-config"]);
+    let mut core = Core::accept(&listener, 1, "bootstrap").await;
+    core.wait(|facts| facts.len() == 1).await;
+    core.effect(
+        "new",
+        "endpoint-1",
+        "agent.session",
+        json!({"v":0,"action":"new"}),
+        1000,
+    )
+    .await;
+    let incarnation = core.facts.lock().unwrap()["endpoint-1"]["incarnation"].clone();
+    let result=core.peer.call_with_timeout("effect.invoke",json!({"generation":1,"effect":"model-native-error","ref":"endpoint-1","incarnation":incarnation,
+        "op":"agent.configure","args":{"v":0,"id":"model","value":"fake-alternate"},"deadline_ms":1000}),Duration::from_secs(2)).await;
+    let error = result.unwrap_err().data.unwrap();
+    assert_eq!(error["stage"], "native_rpc");
+    assert_eq!(error["native_error"]["code"], -32600);
+    assert_eq!(
+        error["native_error"]["message"],
+        "fixture native model rejected"
+    );
+    core.wait(|facts| {
+        facts
+            .get("endpoint-1")
+            .is_some_and(|row| row["data"]["agent"]["config"][0]["value"].is_null())
+    })
+    .await;
+    finish(child).await;
+    core.close().await;
+    let rows: Vec<Value> = std::fs::read_to_string(root.path().join("native.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row["method"] == "thread/resume")
+            .count(),
+        1
+    );
+    assert!(rows.iter().all(|row| row["method"] != "turn/start"));
+}
+
+#[tokio::test]
 async fn model_publication_refusal_keeps_native_readback_without_replaying_configure() {
     let root = tempfile::tempdir().unwrap();
     let listener = UnixListener::bind(root.path().join("core.sock")).unwrap();

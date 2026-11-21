@@ -24,6 +24,7 @@ parser.add_argument("--ledger", default=os.environ.get("AGENT_CONFORMANCE_LEDGER
 parser.add_argument("--reply-delay-ms", type=int, default=int(os.environ.get("CODEX_FAKE_REPLY_DELAY_MS", "0")))
 parser.add_argument("--hold", action="store_true", default=os.environ.get("CODEX_FAKE_HOLD") == "1")
 parser.add_argument("--config-delay-ms", type=int, default=int(os.environ.get("CODEX_FAKE_CONFIG_DELAY_MS", "0")))
+parser.add_argument("--reject-config", action="store_true", help="fixture-only native model error witness")
 parser.add_argument("--exit-after-init", action="store_true")
 parser.add_argument("--control", type=Path, help="K1 private control socket; enables controlled mode")
 parser.add_argument("--script", type=Path)
@@ -113,6 +114,8 @@ def handle(request):
             if model not in MODELS:
                 error(request, "unknown native model"); return
             if "model" in params:
+                if args.reject_config:
+                    error(request, "fixture native model rejected"); return
                 time.sleep(args.config_delay_ms / 1000)
                 thread_models[thread_id] = model
                 if args.hold:

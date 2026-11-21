@@ -6,6 +6,41 @@ pub const MODELS: usize = 128;
 pub const CATALOG_BYTES: usize = 24 * 1024;
 pub const PAGES: usize = 4;
 
+/// Only code/message cross the public diagnostic boundary, never native error data or requests.
+pub enum FailureStage {
+    NativeRpc,
+    Readback,
+}
+pub fn failure(stage: FailureStage, error: &RpcError) -> RpcError {
+    let (stage, key, message) = match stage {
+        FailureStage::NativeRpc => (
+            "native_rpc",
+            "native_error",
+            "native model outcome unknown; do not replay",
+        ),
+        FailureStage::Readback => (
+            "readback",
+            "readback_error",
+            "native model readback missing or changed thread; do not replay",
+        ),
+    };
+    let mut detail = json!({"code":error.code});
+    if !error.message.is_empty()
+        && error.message.len() <= 1024
+        && !crate::limits::text_controls(&error.message)
+        && !error.message.contains(['\u{2028}', '\u{2029}'])
+    {
+        detail["message"] = json!(&error.message);
+    } else {
+        detail["message_omitted"] = json!("bounds_or_controls");
+    }
+    let mut public = RpcError::new("backend", message);
+    let data = public.data.as_mut().unwrap();
+    data["stage"] = json!(stage);
+    data[key] = detail;
+    public
+}
+
 fn text(value: &Value, limit: usize) -> Result<&str, RpcError> {
     value
         .as_str()
