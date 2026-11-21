@@ -722,7 +722,7 @@ def o12_flag_put(reducer, baseline, key):
     return None
 
 
-def o12_affected_entities(reducer, baseline, emitted, needle="O12-"):
+def o12_affected_entities(reducer, baseline, emitted, needle="O12-", *, snapshot_publication=False):
     """Bind flags to the controlled message body, never an unrelated/global flag.
 
     An empty omitted entity needs a separate correlation witness; freshness alone
@@ -750,8 +750,9 @@ def o12_affected_entities(reducer, baseline, emitted, needle="O12-"):
             type(entity.get("rev")) is int and type(before.get("rev")) is int and entity["rev"] > before["rev"])
         flagged = value.get("incomplete") is True
         flag_put = o12_flag_put(reducer, baseline, key) if flagged else None
+        snapshot_flag = snapshot_publication and type(entity.get("rev")) is int and fresh_record
         fresh_flag = flagged and fresh_record and (before is None or new_epoch or before.get("incomplete") is not True
-                                                   or flag_put is not None)
+                                                   or flag_put is not None or snapshot_flag)
         body_changed = before is None or before["body"] != fingerprint
         if body_changed and not fresh_record:
             raise HarnessGap("O12 correlation gap: body changed without a new public revision")
@@ -760,7 +761,8 @@ def o12_affected_entities(reducer, baseline, emitted, needle="O12-"):
                          "fresh_incomplete": fresh_flag, "baseline_incomplete": before.get("incomplete") if before else None,
                          "baseline_rev": before.get("rev") if before else None,
                          "baseline_epoch": before.get("epoch") if before else None,
-                         "flag_put": flag_put, "value": deepcopy(value)})
+                         "flag_put": flag_put, "snapshot_publication": bool(flagged and snapshot_flag),
+                         "value": deepcopy(value)})
     return rows
 
 
@@ -831,9 +833,103 @@ async def o12_adapter_result(ctx, view, recorder):
     witness = emitted[-1]
     check(witness["text_bytes"] == len(expected.encode()) and witness["text_sha256"] == hashlib.sha256(expected.encode()).hexdigest(),
           "O12 native emission did not match the controlled body challenge", component="fixture")
+    deadline = time.monotonic() + 15  # Original observation budget, shared with the one possible snapshot read.
+    first = await o12_capture(ctx, view, recorder, baseline, expected, needle, witness, deadline=deadline)
+    retention = o12_retention_gap(first["observation"])
+    needs_frontier = (o12_healthy(first["observation"]) and not first["notice_evidence_lost"]
+                      and not first["disclosure_observed"]
+                      and first["affected_entities"]
+                      and all(row["value"].get("final") is True for row in first["affected_entities"]))
+    if retention or needs_frontier:
+        recorder.restore()
+        await o12_snapshot_once(ctx, view, baseline, expected, needle, witness, first, deadline,
+                                trigger="retention" if retention else "negative_frontier")
+    else:
+        o12_grade(first)
+
+
+def o12_healthy(health):
+    return (health["wait_error"] is None and health.get("evidence_error") is None
+            and health["applied_flags_known"] and health["view_known"] and health["peer_known"] and health["reducer_known"]
+            and health["peer_closed"] is False and health["peer_failure"] is None and health["peer_read_done"] is False
+            and health["reducer_failure"] is None and not health["staged"] and health["view_closed"] is None
+            and health["terminal"] is None and not health["applied_flag_evidence_lost"])
+
+
+def o12_retention_gap(health):
+    terminal = health.get("terminal") or {}
+    reason = terminal.get("reason")
+    retention = (isinstance(reason, dict) and
+                 (reason.get("reason") == "retention" or
+                  reason.get("reason") == "gap" and reason.get("gap") == "retention"))
+    return (terminal.get("method") == "stream.gap" and retention
+            and health.get("view_closed") == "retention"
+            and health.get("reducer_failure") == {"type": "str", "message": "retention"}
+            and health.get("view_known") and health.get("reducer_known") and not health.get("staged")
+            and health.get("peer_known") and health.get("peer_closed") is False
+            and health.get("peer_failure") is None and health.get("peer_read_done") is False
+            and health.get("applied_flags_known") and not health.get("applied_flag_evidence_lost")
+            and health.get("evidence_error") is None)
+
+
+async def o12_snapshot_once(ctx, old, baseline, expected, needle, witness, first, deadline, *, trigger):
+    recovery = {"kind": "o12_snapshot_observation", "trigger_kind": trigger, "attempt": 1,
+                "trigger": deepcopy(first["observation"]), "attach": {"after": None, "seed": None},
+                "old_stream": old.stream, "new_stream": None}
+    ctx.evidence.append(recovery)
+    view = recorder = None
+    try:
+        try:
+            # A fresh same-peer attach, not a native retry or continuation seeded with the broken prefix.
+            view = await asyncio.wait_for(ctx.attach(peer=old.peer), timeout=max(0, min(2, deadline - time.monotonic())))
+            recovery["new_stream"] = view.stream
+            if view is old or view.reducer is old.reducer or view.initial != "reset":
+                raise HarnessGap("retention reattach did not supply a fresh snapshot reducer")
+            recorder = AppliedFlagPuts(view.reducer)
+            await ctx.wait_view(view, lambda reducer: reducer.snapshots > 0,
+                                timeout=max(0, min(2, deadline - time.monotonic())))
+            if view.reducer.snapshots < 1 or view.reducer.staged is not None:
+                raise HarnessGap("reattach has not installed a complete snapshot")
+            if view.reducer.epoch != old.reducer.epoch:
+                raise HarnessGap("snapshot observation changed the controlled emission's epoch")
+        except Exception as error:
+            recovery["error"] = {"type": type(error).__name__, "message": str(error)}
+            recovery["observation"] = o12_observation(view, error) if view is not None else None
+            recovery["held_messages"] = ([{"kind": key[0], "id": key[1], **deepcopy(entity)}
+                                           for key, entity in view.reducer.entities.items() if key[0] == "message"]
+                                          if view is not None else [])
+            raise HarnessGap("O12 snapshot observation gap: reattach failed or changed epoch; no healthy installed snapshot") from error
+        # Keep ORIGINAL pre-emission entity/body/revision baselines. All notices on this new,
+        # unseeded stream arrived after the emission; their receipt numbering starts at zero.
+        recovered_baseline = dict(baseline)
+        notices = list(view.reducer.notices)
+        limit = getattr(view.reducer.notices, "maxlen", None) or 64  # ItemReducer's declared bounded notice cache.
+        view.reducer.notices = ReceivedNotices(notices, maxlen=limit)
+        view.reducer.notices.since = notices
+        view.reducer.notices.lost = len(notices) >= limit and view.reducer.trace_dropped > 0
+        recovered_baseline[NOTICES] = {"shown": [], "body": "", "received": 0}
+        recovered_baseline[OBSERVATION] = {**baseline[OBSERVATION], "applied_flags": recorder, "applied_received": 0}
+        recovery["snapshot_installed"] = True
+        recovery["frontier"] = {"epoch": view.reducer.epoch, "cursor": deepcopy(view.reducer.cursor),
+                                "snapshots": view.reducer.snapshots,
+                                "snapshot_records": [deepcopy(row) for row in view.reducer.trace if row.get("op") == "snapshot"]}
+        record = await o12_capture(ctx, view, recorder, recovered_baseline, expected, needle, witness,
+                                   recovered=True, phase=trigger + "_snapshot")
+        record["notice_evidence_lost"] = record["notice_evidence_lost"] or first["notice_evidence_lost"]
+        terminal = record["observation"].get("terminal") or {}
+        if terminal.get("method") == "stream.gap":
+            raise HarnessGap("O12 snapshot observation gap: second/reattached stream gap")
+        o12_grade(record)  # No second reattach, output wait, native call or deadline extension.
+    finally:
+        if recorder is not None:
+            recorder.restore()
+
+
+async def o12_capture(ctx, view, recorder, baseline, expected, needle, witness, *, recovered=False,
+                      phase="initial", deadline=None):
     def observed(reducer):
         texts, others = message_texts(reducer, needle, baseline, expected)
-        affected = o12_affected_entities(reducer, baseline, expected, needle)
+        affected = o12_affected_entities(reducer, baseline, expected, needle, snapshot_publication=recovered)
         positive = (adapter_preserves_or_marks(texts, witness["text_bytes"], witness["text_sha256"], other_texts=others)
                     or any(row["fresh_incomplete"] for row in affected))
         return texts, others, affected, positive
@@ -843,10 +939,11 @@ async def o12_adapter_result(ctx, view, recorder):
         # a positive verdict and misclassifying the resulting timeout as loss.
         return positive or bool(affected) and all(row["value"].get("final") is True for row in affected)
     wait_error = None
-    try:
-        await ctx.wait_view(view, settled, timeout=15)
-    except Exception as error:
-        wait_error = error  # Never erase an interrupted observation or upgrade it to adapter evidence.
+    if not recovered:
+        try:
+            await ctx.wait_view(view, settled, timeout=max(0, deadline - time.monotonic()))
+        except Exception as error:
+            wait_error = error  # Only a typed retention gap below permits one public snapshot recovery.
     health = o12_observation(view, wait_error)
     health["applied_flags_known"] = recorder.known
     health["applied_flags_baseline"] = baseline[OBSERVATION]["applied_received"]
@@ -857,25 +954,31 @@ async def o12_adapter_result(ctx, view, recorder):
     except Exception as error:
         health["evidence_error"] = {"type": type(error).__name__, "message": str(error)}
         texts, others, affected, verdict = [], [], [], False
-    ctx.evidence.append({"kind": "o12_adapter", "emitted": witness, "stream_text_bytes": [len(t.encode()) for t in texts],
+    record = {"kind": "o12_adapter", "phase": phase, "public_frontier": recovered,
+                         "emitted": witness, "stream_text_bytes": [len(t.encode()) for t in texts],
                          "other_new_entity_strings": [t[:200] for t in others][:16],
                          "affected_entities": affected,
                          "applied_flag_puts": deepcopy(recorder.records),
                          "incomplete_witnesses": [row for row in affected if row["fresh_incomplete"]],
-                         "observation": health})
-    if (wait_error is not None or health.get("evidence_error") is not None
-            or not recorder.known or not health["view_known"] or not health["peer_known"] or not health["reducer_known"]
-            or health["peer_closed"] is not False or health["peer_failure"] is not None
-            or health["peer_read_done"] is True or health["reducer_failure"] is not None or health["staged"]
-            or health["view_closed"] is not None):
-        raise HarnessGap("O12 observation gap: wait/view/peer/reducer health does not establish an uninterrupted public witness")
-    if recorder.lost:
+                         "disclosure_observed": verdict, "notice_evidence_lost": getattr(view.reducer.notices, "lost", False),
+                         "observation": health}
+    ctx.evidence.append(record)
+    return record
+
+
+def o12_grade(record):
+    health, verdict, affected = record["observation"], record["disclosure_observed"], record["affected_entities"]
+    if health["applied_flag_evidence_lost"]:
         raise HarnessGap("O12 flag observation gap: applied flag evidence exceeded the bounded recorder")
-    if not verdict and getattr(view.reducer.notices, "lost", False):
+    if not o12_healthy(health):
+        raise HarnessGap("O12 observation gap: wait/view/peer/reducer health does not establish an uninterrupted public witness")
+    if not verdict and record["notice_evidence_lost"]:
         raise HarnessGap("O12 notice observation gap: more live notices arrived since the baseline than the recorder "
                          "keeps, so a refusal marker may have been received and cannot be excluded")
     if not verdict and (not affected or any(row["value"].get("final") is not True for row in affected)):
         raise HarnessGap("O12 observation gap: only a held prefix/no completed affected entity was observed")
+    if not verdict and not record["public_frontier"]:
+        raise HarnessGap("O12 observation gap: no public frontier establishes completion of disclosure observation")
     check(verdict,
           "after the producer refusal the adapter keeps the whole emitted text or publicly marks the affected "
           "output incomplete (no silent loss)")

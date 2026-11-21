@@ -311,7 +311,7 @@ class WholeHandlerControls(unittest.TestCase):
 
     def o12(self, new_entities, old_entities=None, old_notices=(), new_notices=(), *, wait_error=None,
             health_fault=None, evidence_out=None, new_epoch=None, wait_returns_early=False, republish_flag=False,
-            fresh_challenge=False, native_mismatch=False):
+            fresh_challenge=False, native_mismatch=False, no_frontier=False):
         import asyncio, hashlib
         from types import SimpleNamespace
         from unittest.mock import AsyncMock, patch
@@ -374,8 +374,18 @@ class WholeHandlerControls(unittest.TestCase):
             observed = predicate(view.reducer)
             if wait_error is not None and getattr(ctx.native, 'emitted', False): raise wait_error
             if not observed and not wait_returns_early: raise CheckFailed("not reached")
+        from copy import deepcopy
+        async def attach(*, peer=None, after=None, seed=None):
+            self.assertIsNone(after); self.assertIsNone(seed)
+            if not getattr(ctx.native, 'emitted', False): return view
+            if no_frontier: raise RuntimeError('no witnessed public frontier')
+            self.assertIs(peer, view.peer)
+            fresh = SimpleNamespace(**vars(reducer))
+            fresh.entities, fresh.notices = deepcopy(reducer.entities), deque(maxlen=64)
+            fresh.accept = lambda row: None
+            return SimpleNamespace(initial='reset', reducer=fresh, peer=peer, stream=2, closed=None, close_notice=None)
         ctx = SimpleNamespace(evidence=evidence_out if evidence_out is not None else [], native=Native(), wait_view=wait_view,
-                              attach=AsyncMock(return_value=view))
+                              attach=attach)
         # Inherited producer evidence is stubbed ONLY to isolate the adapter half; it proves nothing here.
         with patch.dict(evidence.REGRESSIONS, {"O12": {}}), patch.object(evidence, "component", lambda *a: ({}, None, None, None)), \
              patch.object(evidence, "regressions", lambda *a: None), patch.object(evidence, "inherited", lambda *a: None), \
@@ -409,9 +419,12 @@ class WholeHandlerControls(unittest.TestCase):
                 ('unrelated flag', lambda t: {('message', 'm'): row(t[:6000]),
                                              ('message', 'other'): row('unrelated', flag=True)}, None)):
             with self.subTest(name=name), self.assertRaises(CheckFailed) as raised:
-                self.o12(new, before)
-            self.assertNotIsInstance(raised.exception, HarnessGap)
-            self.assertEqual(raised.exception.component, 'adapter')
+                self.o12(new, before, no_frontier=name == 'stale flag')
+            if name == 'stale flag':
+                self.assertIsInstance(raised.exception, HarnessGap)  # Held true without a new public cut is never PASS.
+            else:
+                self.assertNotIsInstance(raised.exception, HarnessGap)
+                self.assertEqual(raised.exception.component, 'adapter')
         # The same opaque ID in a genuinely new epoch is a new entity, not a stale flag.
         self.o12(lambda t: {('message', 'm'): row(t[:6000], flag=True)}, old, new_epoch='o12-new-epoch')
 
@@ -700,6 +713,140 @@ class WholeHandlerControls(unittest.TestCase):
                 old = old_output("0:" + "".join("O12-" + "x" * 1020 for _ in range(70)))
             with self.subTest(name):
                 self.assertEqual(self.accepts(lambda: self.o12(new, old)), want)
+
+
+class O12SnapshotFrontier(unittest.TestCase):
+    """Real NDJSON reducers, unpatched random challenge, mocked native/public transport only."""
+    def run_case(self, mode, *, retained=None):
+        import asyncio, hashlib, json
+        from types import SimpleNamespace
+        from agent_conformance.wire import ItemReducer
+        from agent_conformance.results import CheckFailed
+        def feed(reducer, *rows):
+            reducer.feed(reducer.offset, ''.join(json.dumps(row) + '\n' for row in rows).encode())
+            self.assertIsNone(reducer.failure)
+        def value(text, *, flag=None, final=True, position=1):
+            data = {'role': 'assistant', 'position': position, 'final': final,
+                    'content': [{'type': 'text', 'text': text}]}
+            if flag is not None: data['incomplete'] = flag
+            return data
+        def cut(reducer, rows=(), *, epoch='e', seq=0):
+            feed(reducer, {'op': 'snapshot', 'phase': 'begin', 'epoch': epoch, 'coverage': 'tail'},
+                 *rows, {'op': 'snapshot', 'phase': 'end', 'seq': seq})
+        def put(rev, data, *, id='m', seq=None):
+            row = {'op': 'put', 'kind': 'message', 'id': id, 'rev': rev, 'value': data}
+            if seq is not None: row['seq'] = seq
+            return row
+        peer = SimpleNamespace(failure=None, closed=False, task=SimpleNamespace(done=lambda: False))
+        old = ItemReducer()
+        historical = mode in ('same_rev', 'oldbody', 'newer_true')
+        cut(old, [put(5, value('historic body', flag=True))] if historical else [])
+        views = [SimpleNamespace(initial='reset', reducer=old, peer=peer, stream=1, closed=None, close_notice=None)]
+        originals = [old.accept]
+        calls, attaches, waits = [], [], []
+        revision = 6 if historical else 1
+        def gap(view, reason='retention'):
+            view.closed = reason; view.reducer.failure = reason
+            view.close_notice = {'method': 'stream.gap', 'reason': {'reason': 'gap', 'gap': reason},
+                                 'last_good_cursor': dict(view.reducer.cursor)}
+        class Native:
+            def mark(self): return 0
+            async def call(self, method, **params):
+                calls.append((method, params))
+                self.text = '0:' + ''.join(params['chunks'])
+                if mode == 'uncertain_native': raise RuntimeError('native outcome unknown')
+                feed(old, put(revision, value(self.text[:6000], flag=True if mode == 'newer_true' else None,
+                                              final=mode.startswith('late') or mode == 'negative'), seq=1))
+                if mode == 'late_batched': feed(old, put(2, value(self.text[:6000], flag=True), seq=2))
+                if mode not in ('late_batched', 'late_split', 'negative'):
+                    gap(views[0], 'slow_consumer' if mode == 'nonretention' else 'retention')
+            def records(self, *args, **params):
+                return [{'type': 'message_end', 'role': 'assistant', 'text_bytes': len(self.text.encode()),
+                         'text_sha256': hashlib.sha256(self.text.encode()).hexdigest()}]
+        async def attach(**params):
+            attaches.append(params)
+            self.assertEqual(params, {'peer': peer})  # No after/seed or native control.
+            if mode == 'attach_error': raise RuntimeError('attach rejected')
+            new = ItemReducer(); originals.append(new.accept)
+            view = SimpleNamespace(initial='continue' if mode == 'continue' else 'reset', reducer=new,
+                                   peer=peer, stream=2, closed=None, close_notice=None)
+            views.append(view)
+            return view
+        async def wait(view, predicate, **params):
+            waits.append(params['timeout'])
+            if view is views[0]:
+                if view.reducer.failure: raise CheckFailed('item reconstruction gap/error:' + view.reducer.failure)
+                self.assertTrue(predicate(view.reducer)); return
+            text = ctx.native.text
+            if mode == 'late_split': feed(old, put(2, value(text[:6000], flag=True), seq=2))
+            data = value(text[:6000], flag=True)
+            rows = [put(6 if historical else 2, data)]
+            if mode in ('negative', 'partial'): rows = [put(2, value(text[:6000], final=mode == 'negative'))]
+            if mode == 'same_rev': rows = [put(5, data)]
+            if mode == 'oldbody': rows = [put(6, value('historic body', flag=True))]
+            if mode == 'full': rows = [put(2, value(text[:35000])), put(1, value(text[35000:], position=2), id='m2')]
+            if mode == 'marker':
+                rows = [put(2, value(text[:6000])), {'op': 'put', 'kind': 'notice', 'id': 'n', 'rev': 1,
+                        'value': {'content': [{'type': 'text', 'text': 'assistant output omitted: too large'}]}}]
+            if mode == 'staged':
+                feed(view.reducer, {'op': 'snapshot', 'phase': 'begin', 'epoch': 'e', 'coverage': 'tail'}, *rows)
+            else: cut(view.reducer, rows, epoch='other' if mode == 'epoch' else 'e', seq=2)
+            if mode == 'second_gap': gap(view); raise CheckFailed('second retention')
+            if not predicate(view.reducer): raise CheckFailed('snapshot not installed')
+        ctx = SimpleNamespace(evidence=retained if retained is not None else [], native=Native(), attach=attach, wait_view=wait)
+        recorder = m.AppliedFlagPuts(old)
+        try:
+            asyncio.run(m.o12_adapter_result(ctx, views[0], recorder))
+        finally:
+            recorder.restore()
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], 'retain')
+            self.assertEqual(calls[0][1]['count'], 1)
+            self.assertEqual(len(calls[0][1]['chunks']), 70)
+            self.assertTrue(all(len(chunk.encode()) == 1024 for chunk in calls[0][1]['chunks']))
+            self.assertLessEqual(len(attaches), 1)
+            self.assertTrue(all(0 <= timeout <= 15 for timeout in waits))
+            if len(waits) > 1: self.assertLessEqual(waits[-1], 2)
+            for view, original in zip(views, originals): self.assertEqual(view.reducer.accept, original)
+        return ctx.evidence, attaches
+
+    def test_one_retention_snapshot_disclosure_paths(self):
+        for mode in ('flag', 'full', 'marker', 'newer_true'):
+            with self.subTest(mode=mode):
+                evidence, attaches = self.run_case(mode)
+                self.assertEqual(len(attaches), 1)
+                self.assertEqual(evidence[0]['observation']['view_closed'], 'retention')
+                self.assertTrue(evidence[-1]['public_frontier'])
+                self.assertTrue(evidence[-1]['disclosure_observed'])
+                if mode in ('flag', 'newer_true'):
+                    self.assertTrue(evidence[-1]['incomplete_witnesses'][0]['snapshot_publication'])
+
+    def test_failed_second_gap_epoch_stale_or_unfinished_snapshot_are_named_gaps(self):
+        from agent_conformance.results import HarnessGap
+        for mode in ('attach_error', 'continue', 'second_gap', 'epoch', 'staged', 'partial', 'oldbody', 'same_rev', 'nonretention'):
+            retained = []
+            with self.subTest(mode=mode), self.assertRaises(HarnessGap):
+                self.run_case(mode, retained=retained)
+            self.assertTrue(retained)
+            self.assertEqual(retained[0]['phase'], 'initial')
+            if mode == 'nonretention': self.assertEqual(len(retained), 1)
+
+    def test_late_separate_flag_is_batch_invariant_and_unmarked_frontier_still_fails(self):
+        from agent_conformance.results import CheckFailed, HarnessGap
+        for mode, attach_count in (('late_batched', 0), ('late_split', 1)):
+            evidence, attaches = self.run_case(mode)
+            self.assertEqual(len(attaches), attach_count)
+            self.assertTrue(evidence[-1]['disclosure_observed'])
+        retained = []
+        with self.assertRaises(CheckFailed) as raised: self.run_case('negative', retained=retained)
+        self.assertNotIsInstance(raised.exception, HarnessGap)
+        self.assertEqual(raised.exception.component, 'adapter')
+        self.assertTrue(retained[-1]['public_frontier'])
+        self.assertIsNone(retained[-1]['observation']['wait_error'])
+
+    def test_uncertain_native_call_is_never_replayed_or_recovered(self):
+        with self.assertRaisesRegex(RuntimeError, 'native outcome unknown'):
+            self.run_case('uncertain_native')
 
 
 if __name__ == "__main__":
