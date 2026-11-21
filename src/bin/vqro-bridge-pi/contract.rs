@@ -103,7 +103,10 @@ pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
     if !context.literal {return Err(reject("unsupported","literal input requires a controlled launch"));}
     let delivery=id(&args["delivery"])?.to_string();
     let mode=id(&args["mode"])?.to_string();
-    let command=match mode.as_str() {"start"|"admit"=>"prompt","boundary"=>"steer","settle"=>"follow_up",_=>return Err(reject("unsupported","undeclared delivery mode"))};
+    // Every mode is Pi's `prompt`: Pi itself decides atomically whether it starts a run (idle) or queues the input
+    // (`streamingBehavior` while streaming). Pi's `steer`/`follow_up` commands only queue, so on an idle agent they park
+    // input until some later run (pi-coding-agent agent-session.js followUp/_queueFollowUp; prompt/_preparePrompt).
+    let command=match mode.as_str() {"start"|"admit"|"boundary"|"settle"=>"prompt",_=>return Err(reject("unsupported","undeclared delivery mode"))};
     let origin=&args["origin"];
     if !origin.is_object() {return Err(invalid("effective origin is required"));}
     for field in ["principal","actor"] {let text=causal_string(&origin[field])?;if text.is_empty(){return Err(invalid("origin identity must be nonempty"));}frame_text(text)?;}
@@ -178,7 +181,7 @@ pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
     }}
     let mut native=json!({"message":message});
     if !images.is_empty() {native["images"]=json!(images);}
-    if mode=="admit" {native["streamingBehavior"]=json!("followUp");}
+    match mode.as_str() {"admit"|"settle"=>{native["streamingBehavior"]=json!("followUp");},"boundary"=>{native["streamingBehavior"]=json!("steer");},_=>{}}
     Ok(Send {delivery,mode,command,args:native,origin:origin.clone(),quoted,rendering,
         cause:args.get("cause").cloned(),correlation:args.get("correlation").and_then(Value::as_str).map(str::to_string)})
 }

@@ -104,7 +104,8 @@ steers accepted under one-at-a-time and then switched to all land in one request
 interrupt per `pending`/`scope`/`waits`; idle interrupt is a no-op; Pi declares `pending: unknown` (a steer can enter
 the session during a tool abort with no model request; follow-ups stay parked). **D11** guards: stale session/run rejects
 before native write; `runtime` vs `adapter` strength distinguished under two concurrent controllers. **D12** idle `park`:
-a Pi steer or follow-up sent while idle is parked, not started. **D13** start preflight: two overlapping starts are
+input sent while idle with a declared `park` is parked, not started (Pi's queue-only steer/follow-up commands park;
+the Pi bridge declares `idle: start` and does not use them). **D13** start preflight: two overlapping starts are
 serialized (one preflight in flight); a native settled event while a preflight is gated is no completion; interrupt
 does not cancel a gated preflight. **D14** `handled: none`: a hook-consumed Pi input is `admitted`, never `handled` or
 `inserted`. **D15** origin, asserted against the model-request envelope (not a UI badge): content with `origin.kind:

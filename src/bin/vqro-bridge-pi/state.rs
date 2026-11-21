@@ -103,7 +103,7 @@ impl Agent {
         for (mode,field,point) in [("boundary","steeringMode","after_tool_calls"),("settle","followUpMode","would_stop")] {
             if self.configuration.pending{continue;}
             if let Some(batch)=match current.metadata[field].as_str() {Some("one-at-a-time")=>Some("one"),Some("all")=>Some("all"),_=>None} {
-                modes[mode]=json!({"point":point,"batch":batch,"batch_at":"consume","idle":"park"});
+                modes[mode]=json!({"point":point,"batch":batch,"batch_at":"consume","idle":"start"});
             }
         }
         let mut caps=json!({"agent":{"v":0,"modules":{"queue":{"v":0},"stop":{"v":0},"config":{"v":0},"sessions":{"v":0}}},"host":{"kind":"process","endpoints":"one"},

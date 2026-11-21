@@ -103,12 +103,13 @@ fn unknown_versions_guards_and_capability_revisions_refuse_without_weakening() {
 
 #[test]
 fn modes_causality_and_metadata_keep_their_declared_meaning() {
-    for (mode,command) in [("start","prompt"),("admit","prompt"),("boundary","steer"),("settle","follow_up")] {
+    // Every mode is Pi's prompt; queue-only steer/follow_up would park input on an idle Pi (relay-13).
+    for (mode,command,behavior) in [("start","prompt",None),("admit","prompt",Some("followUp")),("boundary","prompt",Some("steer")),("settle","prompt",Some("followUp"))] {
         let mut args=input();args["mode"]=json!(mode);args["cause"]=json!({"kind":"delivery","id":"parent","provenance":"asserted"});args["correlation"]=json!("thread");
         let sent=send(&args,&context()).unwrap();
         assert_eq!(sent.mode,mode);assert_eq!(sent.command,command);assert_eq!(sent.delivery,"d1");
         assert_eq!(sent.cause,Some(args["cause"].clone()));assert_eq!(sent.correlation.as_deref(),Some("thread"));
-        assert_eq!(sent.args.get("streamingBehavior").is_some(),mode=="admit");
+        assert_eq!(sent.args.get("streamingBehavior").and_then(Value::as_str),behavior,"{mode}");
     }
     assert_eq!(contract::rows(&json!({"commands":[1]}),"commands").unwrap().len(),1);
     assert_eq!(contract::rows(&json!([1,2]),"models").unwrap().len(),2);

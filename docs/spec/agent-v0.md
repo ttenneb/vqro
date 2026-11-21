@@ -232,10 +232,12 @@ A mode says when the runtime takes input relative to current work. Every declare
 - `preempt` is declared only if native. It never implies rollback.
 
 ```jsonc
-// Pi, as measured (P4, proto/pi-semantics de2a7db tests/prototypes/pi_semantics/capabilities.json)
+// Pi (Rust bridge): every mode is Pi's `prompt`; boundary/settle add `streamingBehavior` steer/followUp, so an idle Pi
+// starts a run and a busy one queues, decided by Pi in one write. Pi's queue-only `steer`/`follow_up` park idle input
+// (as measured in P4, proto/pi-semantics de2a7db), which a user cannot tell from loss, so the bridge does not use them.
 "agent.send": {"modes": {"start": {"busy": "reject", "preflight": "serialized"}, "admit": {},
-                         "boundary": {"point": "after_tool_calls", "batch": "one", "batch_at": "consume", "idle": "park"},
-                         "settle": {"point": "would_stop", "batch": "one", "batch_at": "consume", "idle": "park"}},
+                         "boundary": {"point": "after_tool_calls", "batch": "one", "batch_at": "consume", "idle": "start"},
+                         "settle": {"point": "would_stop", "batch": "one", "batch_at": "consume", "idle": "start"}},
                "content": {"types": ["text", "image"], "shape": "text_then_media"}, "correlation": "none", "handled": "none", "literal": "controlled_launch",
                "origin": [{"as": "user", "role": "user"},
                           {"as": "attributed_user", "role": "user", "frame": "sender_header"}],

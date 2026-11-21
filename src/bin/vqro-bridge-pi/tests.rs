@@ -26,9 +26,6 @@ impl Core {
     async fn reply(&mut self,row:&Value,result:Value){self.w.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":row["id"],"result":result})).as_bytes()).await.unwrap();self.w.flush().await.unwrap();}
 }
 async fn fixture(root:&std::path::Path,apply:bool)->(Arc<Shared>,Provider,Core){
-    let signals=admission::Signals::new();let shared=Arc::new(Shared {agent:Mutex::new(Agent::new("instance".into(),signals)),fallback:Default::default(),connected:std::sync::atomic::AtomicBool::new(false),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),metadata_refresh:Notify::new(),cwd:root.to_string_lossy().into_owned(),provider_name:"pi-test".into(),instance:"instance".into(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
-    let initial=json!({"sessionId":"fixture","isStreaming":false,"isCompacting":false,"steeringMode":"one-at-a-time","followUpMode":"all"});
-    {let event=native::Event::Record(json!({"type":"response","command":"get_state","success":true,"data":initial}));let mut agent=shared.agent.lock().unwrap();agent.signals.observe(&event);agent.observe(&event);}
     let script=format!(r#"import sys,json,time,pathlib
 root=pathlib.Path({root})
 state={{"sessionId":"fixture","isStreaming":False,"isCompacting":False,"steeringMode":"one-at-a-time","followUpMode":"all"}}
@@ -46,8 +43,15 @@ for line in sys.stdin:
  else:data={{}}
  print(json.dumps({{'type':'response','id':row['id'],'command':row['type'],'success':True,'data':data}}),flush=True)
 "#,root=json!(root.to_string_lossy()),apply=if apply{"True"}else{"False"});
+    fixture_native(root,&["/usr/bin/python3".into(),"-c".into(),script]).await
+}
+/// The bridge over any native argv (an inline script, or tests/fixtures/fake_pi.py), connected to a duplex core.
+async fn fixture_native(root:&std::path::Path,argv:&[String])->(Arc<Shared>,Provider,Core){
+    let signals=admission::Signals::new();let shared=Arc::new(Shared {agent:Mutex::new(Agent::new("instance".into(),signals)),fallback:Default::default(),connected:std::sync::atomic::AtomicBool::new(false),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),metadata_refresh:Notify::new(),cwd:root.to_string_lossy().into_owned(),provider_name:"pi-test".into(),instance:"instance".into(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
+    let initial=json!({"sessionId":"fixture","isStreaming":false,"isCompacting":false,"steeringMode":"one-at-a-time","followUpMode":"all"});
+    {let event=native::Event::Record(json!({"type":"response","command":"get_state","success":true,"data":initial}));let mut agent=shared.agent.lock().unwrap();agent.signals.observe(&event);agent.observe(&event);}
     let weak=Arc::downgrade(&shared);
-    let native=Native::spawn(&["/usr/bin/python3".into(),"-c".into(),script],root,&HashMap::new(),Arc::new(move|event|{if let Some(shared)=weak.upgrade(){let mut agent=shared.agent.lock().unwrap();agent.signals.observe(&event);agent.observe(&event);drop(agent);shared.wake();}})).await.unwrap();shared.starts.set(Starts::new(native.clone(),shared.agent.lock().unwrap().signals.clone())).ok().unwrap();shared.native.set(native).ok().unwrap();
+    let native=Native::spawn(argv,root,&HashMap::new(),Arc::new(move|event|{if let Some(shared)=weak.upgrade(){let mut agent=shared.agent.lock().unwrap();agent.signals.observe(&event);agent.observe(&event);drop(agent);shared.wake();}})).await.unwrap();shared.starts.set(Starts::new(native.clone(),shared.agent.lock().unwrap().signals.clone())).ok().unwrap();shared.native.set(native).ok().unwrap();
     let (a,b)=tokio::io::duplex(65536);let (r,w)=tokio::io::split(b);let mut core=Core {r:BufReader::new(r),w,requests:None};
     let config=Config::new("pi-test","instance",shared.agent.lock().unwrap().provider_capabilities());let connect=tokio::spawn(Provider::connect(a,config));
     let hello=core.recv().await;core.reply(&hello,json!({"server":"fixture"})).await;let register=core.recv().await;core.reply(&register,json!({"generation":1})).await;
@@ -198,4 +202,58 @@ async fn setter_ack_without_matching_readback_is_only_accepted_and_waits_for_cor
     assert_eq!(core.recv().await["method"],"resource.upsert");let fence=core.recv().await;assert_eq!(fence["method"],"resource.list");assert!(!task.is_finished());core.reply(&fence,json!({"resources":[]})).await;
     assert!(matches!(task.await.unwrap().unwrap(),Outcome::Accepted(Some(data)) if data["value_evidence"]=="not_matched"));
     assert_eq!(shared.agent.lock().unwrap().configuration.options().iter().find(|row|row["id"]=="steering_mode").unwrap()["value"],"one-at-a-time");dispose(&shared,&provider).await;
+}
+
+/// Relay-13: a follow-up (settle) or steer (boundary) sent while Pi is idle was parked in Pi's queue and never ran.
+/// Every mode is now Pi's `prompt` with `streamingBehavior`: idle starts a run, busy queues. One native write each.
+#[tokio::test]
+async fn settle_and_boundary_start_an_idle_pi_and_queue_on_a_busy_one_exactly_once(){
+    async fn send(shared:&Arc<Shared>,provider:&Provider,core:&mut Core,id:u64,mode:&str,text:&str)->Outcome{
+        let wire=json!({"jsonrpc":"2.0","id":id,"method":"effect.invoke","params":{"generation":1,"effect":format!("e{id}"),"op":"agent.send","ref":"agent","incarnation":"","deadline_ms":2000,
+            "principal":"p:sender","actor":"extension:agents","initiator":"p:sender",
+            "args":{"v":0,"mode":mode,"delivery":format!("d{id}"),"origin":{"kind":"agent"},"content":[{"type":"text","text":text}]}}});
+        core.w.write_all(format!("{wire}\n").as_bytes()).await.unwrap();
+        let Request::Effect(effect)=core.requests.as_mut().unwrap().recv().await.unwrap() else{panic!("not effect")};
+        let owner=async{let get=core.recv().await;assert_eq!(get["method"],"workspace.get");core.reply(&get,json!({"value":"other-owner"})).await;};
+        let (outcome,())=tokio::join!(invoke(shared,provider,&effect),owner);let outcome=outcome.unwrap();
+        effect.respond(Ok(outcome.clone()));let reply=core.recv().await;assert_eq!(reply["id"],id);
+        outcome
+    }
+    async fn until(shared:&Arc<Shared>,what:&str,check:impl Fn(&Arc<Shared>)->bool){
+        let deadline=Instant::now()+Duration::from_secs(3);
+        while !check(shared){assert!(Instant::now()<deadline,"timed out waiting for {what}");tokio::time::sleep(Duration::from_millis(5)).await;}
+    }
+    fn prompts(trace:&std::path::Path)->Vec<Value>{
+        std::fs::read_to_string(trace).unwrap_or_default().lines().map(|row|serde_json::from_str::<Value>(row).unwrap())
+            .filter(|row|row.get("type").is_some()).filter(|row|row["type"]!="get_state" && row["type"]!="get_session_stats" && row["type"]!="get_messages" && row["type"]!="get_commands").collect()
+    }
+    let fake=format!("{}/tests/fixtures/fake_pi.py",env!("CARGO_MANIFEST_DIR"));
+    for (mode,behavior) in [("settle","followUp"),("boundary","steer")]{
+        let root=tempfile::tempdir().unwrap();let trace=root.path().join("trace");
+        let (shared,provider,mut core)=fixture_native(root.path(),&["/usr/bin/python3".into(),fake.clone(),"--trace-file".into(),trace.to_string_lossy().into_owned()]).await;
+        assert_eq!(shared.agent.lock().unwrap().caps()["agent.send"]["modes"][mode]["idle"],"start","{mode}: an idle Pi starts this mode natively");
+        assert_eq!(shared.agent.lock().unwrap().state(),"idle");
+        // Idle: one native prompt that starts a run; nothing is parked.
+        let outcome=send(&shared,&provider,&mut core,1,mode,&format!("{mode} while idle")).await;
+        let Outcome::Accepted(Some(value))=&outcome else{panic!("{mode}: not accepted: {outcome:?}")};assert_eq!(value["receipt"]["stage"],"admitted");
+        until(&shared,"the run to start",|shared|shared.agent.lock().unwrap().state()!="idle").await;
+        let sent=prompts(&trace);
+        assert_eq!(sent.len(),1,"{mode}: exactly one native write: {sent:?}");
+        assert_eq!((sent[0]["type"].as_str(),sent[0]["streamingBehavior"].as_str()),(Some("prompt"),Some(behavior)));
+        assert!(sent[0]["message"].as_str().unwrap().ends_with(&format!("{mode} while idle")));
+        // Busy: the same native op queues (Pi decides atomically); still exactly one write, and it is in Pi's queue.
+        until(&shared,"the start preflight to settle",|shared|shared.starts.get().unwrap().session_guard().is_ok()).await;
+        let outcome=send(&shared,&provider,&mut core,2,mode,&format!("{mode} while busy")).await;
+        assert!(matches!(outcome,Outcome::Accepted(_)),"{mode}: {outcome:?}");
+        until(&shared,"Pi's queue update",|shared|shared.agent.lock().unwrap().queue.as_ref().is_some_and(|queue|!queue.as_array().unwrap().is_empty())).await;
+        let queued=shared.agent.lock().unwrap().queue.clone().unwrap();
+        assert_eq!(queued.as_array().unwrap().len(),1,"{mode}: one queued entry: {queued}");
+        assert_eq!(queued[0]["mode"],mode,"{mode}: queued in Pi's own queue for this mode: {queued}");
+        assert!(queued[0]["preview"].as_str().unwrap().contains(&format!("{mode} while busy")),"{queued}");
+        let sent=prompts(&trace);
+        assert_eq!(sent.len(),2,"{mode}: one more native write: {sent:?}");
+        assert_eq!((sent[1]["type"].as_str(),sent[1]["streamingBehavior"].as_str()),(Some("prompt"),Some(behavior)));
+        assert!(sent.iter().all(|row|row["type"]!="follow_up" && row["type"]!="steer"),"queue-only commands park input on an idle Pi");
+        dispose(&shared,&provider).await;
+    }
 }

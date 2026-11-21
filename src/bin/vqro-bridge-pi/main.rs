@@ -299,7 +299,7 @@ async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant,owner_proven:bool
     });
     let result=match mode.as_str() {
         "start"=>shared.starts.get().unwrap().start(native_args,deadline,receipt).await,
-        "admit"=>shared.starts.get().unwrap().admit(native_args,deadline,receipt).await,
+        "admit"|"boundary"|"settle"=>shared.starts.get().unwrap().admit(native_args,deadline,receipt).await,
         _=>direct(shared.native.get().unwrap(),command,native_args,deadline,receipt).await,
     };
     match result {
