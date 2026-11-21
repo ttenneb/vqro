@@ -649,6 +649,9 @@ replaced when the Pi bridge is ported.
   once as unrepresentable instead of guessing; untimed dialogs remain answerable.
 - Item adapters declare snapshot coverage (`all_retained`, `tail`, `state_only`). Appends must also fit their
   resulting whole snapshot entity; the shared producer refuses `too_large` without changing state.
+  An optional entity `incomplete: true` explicitly marks content cut/refused for publication bounds; a fresh public
+  flag on the affected message satisfies O12 without a textual marker. Viewers should show the partial status;
+  finality does not imply completeness. Stale/unrelated flags and unobserved source bookkeeping are not witnesses.
 - An observed exit from the bound owning host terminal makes the endpoint `ended` and allows retention cleanup;
   `retired` remains an explicit administrative judgement, never inferred from exit or silence.
 - Claude Code hook hand-offs are context (`supplied`, not `inserted`); `read` needs model-request and normal

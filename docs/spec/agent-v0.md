@@ -401,6 +401,15 @@ A per-viewer credited stream of JSON records (core addition §9.1). P3 confirmed
   sequence if either exceeds the record bound. Adapters must handle that refusal explicitly, never silently lose
   content or emit a snapshot that cannot fit the declared bound.
 
+**Partial publication.** An entity, including a message, may carry optional `incomplete: true` when the adapter
+cut or refused part of its content to honor publication bounds. This is an explicit public indication that the
+entity's published content is partial, not a claim about what the native runtime generated. Viewers should show
+an incomplete/omitted indication; `final: true` does not make partial content complete. A fresh such flag on the
+affected entity satisfies explicit refusal handling without an additional textual marker. A stale flag or a flag
+on another entity does not witness this refusal. Publishing the flag is a separate successful record; it never
+changes the failed append's atomic refusal. Facts' `incomplete` field list (§2) and requests' approval restrictions
+(§5) retain their existing meanings.
+
 **Entity kinds** (unknown kinds preserved and shown generically; `native` holds lossless extras; `thought` is only
 reasoning the runtime exposes for display):
 - `state` (id `current`): `state`, `run?`, `completion?`, `background?`.

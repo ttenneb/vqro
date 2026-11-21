@@ -151,7 +151,9 @@ require a `retention` gap. Exercise these distinct conditions separately and ret
 A stalled viewer holding all 200 streams loses them together and harms nobody; an unknown gap reason ends the
 stream. **O12** producer append bounds: a small append whose resulting whole snapshot `put` exceeds
 the record bound returns `too_large`, leaving entity, revision and `seq` unchanged; both text and decoded-byte
-appends are covered. Adapters record how they handle this refusal without silently losing content. **O13** optional
+appends are covered. Adapters record how they handle this refusal without silently losing content: whole output,
+a fresh public disclosure, or fresh public `incomplete: true` on the affected entity (§4). A stale/unrelated flag
+is not this refusal's witness; missing observation evidence is a harness gap, not silent-loss proof. **O13** optional
 view metadata: plain/default, markdown and unknown text formats render independently per block (unknown falls back
 to plain). Runtime/vqro notices use role `system`, distinct from `coordination`, without upgrading a send's authority.
 Tool/run `started_ms`/`ended_ms` and message `at_ms` match supplied evidence; missing times remain unknown, not
