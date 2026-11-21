@@ -144,8 +144,11 @@ entities and adapter/transport overhead separately. A mid-snapshot cursor may re
 versions; include that per cursor and verify release on close/gap or the next cursor step after epoch change.
 Optional `items.snapshot_buffer_bytes` exposes the configured buffer; absence means not declared, not zero.
 P3's journal plateau of 26.2 MB is not an all-in slow-viewer cap (agent-v0 §8). **O11** (C3 covers attached retention
-gaps and a 200-stream stall) a viewer draining steadily but slower than generation gets gap reason `retention`;
-a stalled viewer holding all 200 streams loses them together and harms nobody; an unknown gap reason ends the
+gaps and a 200-stream stall) an attached producer cursor falling outside its retained journal ends the stream with
+gap reason `retention`. A viewer draining slower than generation, whether steadily or stalled, closes
+`slow_consumer` when its bounded stream-output budget is exhausted (agent-v0 §4); viewer slowness alone does not
+require a `retention` gap. Exercise these distinct conditions separately and retain the actual terminal reason.
+A stalled viewer holding all 200 streams loses them together and harms nobody; an unknown gap reason ends the
 stream. **O12** producer append bounds: a small append whose resulting whole snapshot `put` exceeds
 the record bound returns `too_large`, leaving entity, revision and `seq` unchanged; both text and decoded-byte
 appends are covered. Adapters record how they handle this refusal without silently losing content. **O13** optional
