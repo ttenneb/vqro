@@ -375,10 +375,26 @@ impl Endpoint {
                 "model readback cannot rebind or revive a thread",
             ));
         }
-        if response["thread"]["status"]["type"] == "notLoaded" {
+        // Codex0.170 ThreadStatus is a tagged object: notLoaded, idle, systemError,
+        // or active with activeFlags (waitingOnApproval/waitingOnUserInput). Unknown
+        // or malformed status cannot distinguish current configuration from persisted metadata.
+        let status = &response["thread"]["status"];
+        let loaded = match status["type"].as_str() {
+            Some("idle" | "systemError") => true,
+            Some("active") => status["activeFlags"].as_array().is_some_and(|flags| {
+                flags.iter().all(|flag| {
+                    matches!(
+                        flag.as_str(),
+                        Some("waitingOnApproval" | "waitingOnUserInput")
+                    )
+                })
+            }),
+            _ => false,
+        };
+        if !loaded {
             return Err(rejected(
                 "backend",
-                "native thread is not loaded; persisted model is not current configured readback",
+                "native thread loaded status is unconfirmed; model may be persisted, not current configured readback",
             ));
         }
         let id = configuration::text(&response["thread"]["model"], 256)?;

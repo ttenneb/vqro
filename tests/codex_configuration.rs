@@ -113,7 +113,7 @@ fn intent_is_pending_until_actual_native_thread_readback_not_request_or_ack() {
     assert_eq!(e.session_info()["model"]["id"], "native-one");
     assert_eq!(e.model_option()["pending"], true);
     e.finish_model_readback(
-        &json!({"thread":{"id":"s1","model":"native-two"}}),
+        &json!({"thread":{"id":"s1","model":"native-two","status":{"type":"idle"}}}),
         "s1",
         "e2",
         "native-two",
@@ -133,7 +133,7 @@ fn mismatch_reports_actual_native_model_without_clearing_intent_or_pending() {
     e.select_model("native-two".into());
     e.begin_model_turn();
     e.finish_model_readback(
-        &json!({"thread":{"id":"s1","model":"native-one"}}),
+        &json!({"thread":{"id":"s1","model":"native-one","status":{"type":"idle"}}}),
         "s1",
         "e2",
         "native-two",
@@ -148,8 +148,8 @@ fn mismatch_reports_actual_native_model_without_clearing_intent_or_pending() {
 #[test]
 fn unknown_and_stale_readback_never_rebind_revive_or_fabricate_applied_model() {
     for response in [
-        json!({"thread":{"id":"s1"}}),
-        json!({"thread":{"id":"other","model":"native-two"}}),
+        json!({"thread":{"id":"s1","status":{"type":"idle"}}}),
+        json!({"thread":{"id":"other","model":"native-two","status":{"type":"idle"}}}),
         json!({"thread":{"id":"s1","model":"native-two","status":{"type":"notLoaded"}}}),
     ] {
         let mut e = endpoint();
@@ -177,7 +177,7 @@ fn unknown_and_stale_readback_never_rebind_revive_or_fabricate_applied_model() {
     let before = e.facts();
     assert!(
         e.finish_model_readback(
-            &json!({"thread":{"id":"s1","model":"native-two"}}),
+            &json!({"thread":{"id":"s1","model":"native-two","status":{"type":"idle"}}}),
             "s1",
             "e2",
             "native-two"
@@ -185,6 +185,72 @@ fn unknown_and_stale_readback_never_rebind_revive_or_fabricate_applied_model() {
         .is_err()
     );
     assert_eq!(e.facts(), before);
+}
+#[test]
+fn only_schema_known_loaded_status_can_confirm_model_readback() {
+    // Codex0.170 ThreadStatus: notLoaded, idle, systemError, active { activeFlags }.
+    for status in [
+        json!({"type":"idle"}),
+        json!({"type":"systemError"}),
+        json!({"type":"active","activeFlags":[]}),
+        json!({"type":"active","activeFlags":["waitingOnApproval","waitingOnUserInput"]}),
+    ] {
+        let mut e = endpoint();
+        e.select_model("native-two".into());
+        e.begin_model_turn();
+        e.finish_model_readback(
+            &json!({"thread":{"id":"s1","model":"native-two","status":status}}),
+            "s1",
+            "e2",
+            "native-two",
+        )
+        .unwrap();
+        assert_eq!(e.session_info()["model"]["id"], "native-two");
+        assert_eq!(e.model_option()["pending"], false);
+        assert_eq!(e.model_option()["status"], "confirmed");
+    }
+    // The secondary's known-notLoaded + five unknown-shape controls, plus malformed active.
+    for status in [
+        Some(json!({"type":"notLoaded"})),
+        None,
+        Some(Value::Null),
+        Some(json!({})),
+        Some(json!({"type":"futureStatus"})),
+        Some(json!("idle")),
+        Some(json!({"type":"active"})),
+        Some(json!({"type":"active","activeFlags":null})),
+        Some(json!({"type":"active","activeFlags":["futureFlag"]})),
+        Some(json!({"type":"active","activeFlags":[null]})),
+    ] {
+        let mut response = json!({"thread":{"id":"s1","model":"native-two"}});
+        if let Some(status) = status {
+            response["thread"]["status"] = status;
+        }
+        let mut e = endpoint();
+        e.select_model("native-two".into());
+        e.begin_model_turn();
+        let before = e.facts();
+        let error = e
+            .finish_model_readback(&response, "s1", "e2", "native-two")
+            .unwrap_err();
+        assert_eq!(error.kind(), "backend", "{response}");
+        assert_eq!(
+            e.facts(),
+            before,
+            "rejected metadata must not mutate facts: {response}"
+        );
+        // The unchanged runtime readback-error path publishes unknown, never fails/replays input.
+        e.model_unknown(
+            configuration::failure(configuration::FailureStage::Readback, &error)
+                .data
+                .unwrap(),
+        );
+        assert!(e.session_info().get("model").is_none(), "{response}");
+        assert_eq!(e.model_option()["pending"], true, "{response}");
+        assert_eq!(e.model_option()["status"], "unknown", "{response}");
+        assert_eq!(e.model_option()["diagnostic"]["stage"], "readback");
+        assert_eq!(e.model_option()["value"], "native-two");
+    }
 }
 #[test]
 fn new_session_keeps_future_intent_but_reports_its_actual_default_model() {
