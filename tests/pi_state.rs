@@ -21,6 +21,31 @@ fn make()->Agent {let mut agent=Agent::new("private".into(),Signals::new());meta
 fn entities(agent:&Agent,kind:&str)->Vec<Value> {String::from_utf8(agent.journal.snapshot()).unwrap().lines().map(|line|serde_json::from_str::<Value>(line).unwrap()).filter(|row|row["op"]=="put" && row["kind"]==kind).collect()}
 fn message(agent:&mut Agent,text:&str,reason:&str) {event(agent,json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":text}],"stopReason":reason}}));}
 
+/// #119 P2 (vqro-lead-secondary's control): a correlated origin belongs to the one entity its user message_start
+/// created. A later uncorrelated user message, even a standalone native message_end, never inherits it; A keeps it.
+#[test]
+fn correlated_origin_never_leaks_to_a_later_uncorrelated_user_message() {
+    for with_start in [true, false] {
+        let mut a=make();
+        let origin=json!({"principal":"p:owner","kind":"human"});
+        a.origins.arm(origins::Entry::new("d-origin", &origin, &json!({"message":"owned A"})));
+        event(&mut a,json!({"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}));
+        let owned=json!({"role":"user","content":"owned A"});
+        event(&mut a,json!({"type":"message_start","message":owned}));
+        event(&mut a,json!({"type":"message_end","message":owned}));
+        let unrelated=json!({"role":"user","content":"native B, not sent by bridge"});
+        if with_start {event(&mut a,json!({"type":"message_start","message":unrelated}));}
+        event(&mut a,json!({"type":"message_end","message":unrelated}));
+        let rows=entities(&a,"message");
+        let text=|row:&&Value,t:&str|row["value"]["content"][0]["text"]==t;
+        let owned_row=rows.iter().find(|row|text(row,"owned A")).unwrap();
+        assert_eq!((&owned_row["value"]["origin"],&owned_row["value"]["delivery"]),(&origin,&json!("d-origin")),"A keeps its origin");
+        let row=rows.iter().find(|row|text(row,"native B, not sent by bridge")).unwrap();
+        assert!(row["value"].get("origin").is_none() && row["value"].get("delivery").is_none(),"uncorrelated native B with_start={with_start}: {row}");
+        assert!(a.receipts.is_empty(),"correlation never writes receipts");
+    }
+}
+
 #[test]
 fn modules_are_versioned_descriptor_maps_for_resource_and_provider() {
     let a=make();

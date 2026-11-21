@@ -52,7 +52,9 @@ pub struct Agent {
     pub queue:Option<Value>,pub queue_version:u64,
     pub tool_principal_env:bool,pub view:Option<String>,pub view_error:Option<String>,
     pub configuration:super::configuration::Configuration,pub commands:super::commands::Commands,
-    pub origins:super::origins::Origins,current_origin:Option<Value>,
+    // A correlated origin is bound to the one message entity its user message_start created (origins.rs): a later
+    // entity, even one created by a standalone native message_end, never inherits it.
+    pub origins:super::origins::Origins,start_origin:Option<Value>,current_origin:Option<(String,Value)>,
     pub requests:super::requests::Requests,ui_cancels:Vec<(String,Value)>,ui_unconfirmed:BTreeSet<String>,pub ui_overflow:bool,
     receipt_order:VecDeque<String>,
     history:VecDeque<(String,String)>,
@@ -69,7 +71,7 @@ impl Agent {
         let boot=bytes.iter().map(|byte|format!("{byte:02x}")).collect::<String>();
         let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entities:ENTITY_COUNT,max_entity_bytes:ENTITY_TOTAL,snapshot_buffer_bytes:1024*1024,..Default::default()});
         journal.set_coverage(Coverage::Tail);
-        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,tool_principal_env:false,view:None,view_error:None,configuration:Default::default(),commands:Default::default(),origins:Default::default(),current_origin:None,requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
+        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,tool_principal_env:false,view:None,view_error:None,configuration:Default::default(),commands:Default::default(),origins:Default::default(),start_origin:None,current_origin:None,requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
             position:0,serial:0,epoch_number:1,instance,boot,session:None,session_pending:false,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null,launch_cwd:None,usage:None,usage_revision:0};
         agent.refresh();agent
     }
@@ -149,7 +151,7 @@ impl Agent {
     }
     pub fn new_session_epoch(&mut self){
         self.invalidate_usage();
-        self.cancel_requests("epoch_changed");self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.current_message=None;self.origins.reset();self.current_origin=None;self.run=None;self.completion=None;
+        self.cancel_requests("epoch_changed");self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.current_message=None;self.origins.reset();self.start_origin=None;self.current_origin=None;self.run=None;self.completion=None;
     }
     pub fn ensure_session_epoch(&mut self,prior:&str){if self.epoch()==prior{self.new_session_epoch();if let Some(session)=self.session.clone(){self.store("session","current",session,false);}self.refresh();}}
     pub fn configuration_pending(&mut self,pending:bool){if pending{self.invalidate_usage();}self.configuration.pending=pending;if !pending{self.session_pending=false;}self.configuration.rebuild(&self.signals.current().metadata);self.refresh();}
@@ -268,16 +270,23 @@ impl Agent {
             value=json!({"position":position,"role":message["role"],"content":[{"type":"text","text":"[Native message exceeds the declared entity bound; content omitted]"}],"final":final_value,"incomplete":["content"]});
             if let Some(at_ms)=at_ms{value["at_ms"]=json!(at_ms);}
         }
-        // A correlated bridge send (origins.rs): its core-bound origin and delivery, kept even when content is omitted.
-        if message["role"]=="user" {if let Some(fields)=self.current_origin.as_ref().and_then(Value::as_object){for (key,field) in fields {value[key]=field.clone();}}}
         value
     }
     fn message(&mut self,record:&Value,final_value:bool) {
         let message=&record["message"];
         if message["role"]=="toolResult" {return;}
-        let id=if let Some(id)=&self.current_message {id.clone()}else{self.position+=1;let id=self.next("m");self.current_message=Some(id.clone());id};
+        let id=if let Some(id)=&self.current_message {id.clone()}else{
+            self.position+=1;let id=self.next("m");self.current_message=Some(id.clone());
+            // Only the entity a correlated user message_start creates gets that origin; any other new entity gets none.
+            self.current_origin=self.start_origin.take().filter(|_|message["role"]=="user").map(|fields|(id.clone(),fields));id
+        };
+        self.start_origin=None;
         let position=self.journal.entity("message",&id).and_then(|(_,value)|value["position"].as_u64()).unwrap_or(self.position);
-        let value=self.message_value(message,final_value,position);
+        let mut value=self.message_value(message,final_value,position);
+        // A correlated bridge send: its core-bound origin and delivery, kept even when content is omitted.
+        if message["role"]=="user" {if let Some((_,fields))=self.current_origin.as_ref().filter(|(bound,_)|*bound==id){
+            if let Some(fields)=fields.as_object(){for (key,field) in fields {value[key]=field.clone();}}
+        }}
         let event=&record["assistantMessageEvent"];
         let field=event["contentIndex"].as_u64().map(|index|format!("/content/{index}/text"));
         let appended=if let (Some(field),Some(delta))=(field,event["delta"].as_str()) {
@@ -292,6 +301,7 @@ impl Agent {
                 self.error=message["errorMessage"].as_str().map(|s|s.chars().take(1024).collect());
             }
             self.current_message=None;
+            if self.current_origin.as_ref().is_some_and(|(bound,_)|*bound==id){self.current_origin=None;}
         }
     }
     fn tool(&mut self,record:&Value,status:&str) {
@@ -361,7 +371,7 @@ impl Agent {
                 Some("message_start")=>{
                     self.current_message=None;
                     // Only a user message the bridge sent, under the evidence rules in origins.rs; never inferred.
-                    self.current_origin=if record["message"]["role"]=="user"{self.origins.user_message(&record["message"]).map(|entry|super::origins::fields(&entry))}else{None};
+                    self.start_origin=if record["message"]["role"]=="user"{self.origins.user_message(&record["message"]).map(|entry|super::origins::fields(&entry))}else{None};
                     self.message(record,false);
                 },
                 Some("message_update")=>self.message(record,false),Some("message_end")=>self.message(record,true),
