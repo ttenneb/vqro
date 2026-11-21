@@ -414,6 +414,11 @@ reasoning the runtime exposes for display):
 - `receipt` (id = its `delivery`): `delivery`, `stage`, `native?`, `run?`, `cause?`; one entity per delivery, whose
   later stages are revisions of it.
 - `plan` (whole), `compaction`, `request` (§5), `session` (id `current`), `association` (§6.5).
+- `notice`: `position?`, `text`, `severity?: info|warn|error`, `native?`: a human-facing runtime notice that viewers
+  show (with `position`, on the timeline). `severity` only when the runtime reports one; absent is unspecified, never
+  inferred. Unlike the live `notice` record it is retained. Produced by the Pi bridge for native `notify`.
+- Kinds starting with `_` are implementation-private state (for example the Pi bridge's `_ui`): retained in the
+  stream, never shown by viewers, and not part of this contract.
 
 ## 5. Requests
 
