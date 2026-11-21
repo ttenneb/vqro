@@ -296,9 +296,11 @@ async def producer_append_bounds(ctx):
     view = await fresh_view(ctx)
     mark = ctx.native.mark()
     chunks = ["O12-" + "x" * 1020 for _ in range(70)]  # about 70 KiB of text_delta appends in one message
-    await ctx.native.call("turn", state="start")
-    await ctx.native.call("retain", count=1, chunks=chunks)
-    emitted = [row for row in ctx.native.records("native_emit", after=mark) if row.get("type") == "message_end"]
+    # Fixture seam 5d9b0590 (prim-final-review): retain with chunks emits one assistant message as len(chunks)
+    # native deltas, text "0:" + "".join(chunks), and one native_emit ledger row (Pi message_end, Codex item/completed).
+    await ctx.native.call("retain", count=1, chunks=chunks, timeout=10)
+    emitted = [row for row in ctx.native.records("native_emit", after=mark)
+               if row.get("type") in ("message_end", "item/completed") and row.get("role") == "assistant"]
     if not emitted or not isinstance(emitted[-1].get("text_bytes"), int) or not isinstance(emitted[-1].get("text_sha256"), str):
         raise HarnessGap("O12 adapter half needs the native fixture's ledger witness of the emitted message "
                          "(native_emit message_end with text_bytes and text_sha256)")
