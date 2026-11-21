@@ -433,7 +433,9 @@ impl Endpoint {
         if let Some(native) = native {
             receipt["native"] = native;
         }
-        for field in ["cause", "correlation"] {
+        // The bridge has already bound this origin to the typed core effect.
+        // Retain the same origin for immediate, late and lookup receipts, not native identity.
+        for field in ["origin", "cause", "correlation"] {
             if let Some(value) = args.get(field) {
                 receipt[field] = value.clone();
             }

@@ -88,3 +88,35 @@ fn actor_and_cause_qualification_are_not_invented() {
     let receipt = e.record_receipt("d", "admitted", None, &args);
     assert_eq!(receipt.value["cause"], args["cause"]);
 }
+
+#[test]
+fn d17_bound_origin_survives_every_receipt_stage_and_lookup_without_invention() {
+    let attribution = serde_json::from_value(
+        json!({"principal":"human:D17-principal","actor":"extension:coord","initiator":"p:worker"}),
+    )
+    .unwrap();
+    let mut args = send();
+    args["origin"] = json!({"kind":"agent","agent":"D17-asserted-agent",
+        "sender":{"principal":"p:inbox-original","provenance":"inbox-record"},
+        "claimed":["principal","actor","initiator"]});
+    let mut bound = vqro::codex::bind_origin(&args, &attribution).unwrap();
+    let origin = bound["origin"].clone();
+    assert_eq!(origin["principal"], "human:D17-principal");
+    assert_eq!(origin["actor"], "extension:coord");
+    assert_eq!(origin["initiator"], "p:worker");
+    assert_eq!(origin["claimed"], json!(["kind", "agent", "sender"]));
+    let mut endpoint = endpoint();
+    for stage in ["dispatched", "admitted", "rejected", "unknown"] {
+        let delivery = format!("d17-{stage}");
+        let change = endpoint.record_receipt(&delivery, stage, None, &bound);
+        assert_eq!(change.value["origin"], origin);
+        assert_eq!(endpoint.receipt(&delivery)["origin"], origin);
+    }
+    assert!(endpoint.receipt("never-submitted").get("origin").is_none());
+    bound["origin"]["actor"] = json!("different");
+    assert_eq!(
+        endpoint.receipt("d17-admitted")["origin"],
+        origin,
+        "receipt owns its immutable bound-origin snapshot"
+    );
+}

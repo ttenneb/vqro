@@ -1,7 +1,7 @@
 //! Production bridge binary over the provider wire against a private socket core stub and native
 //! fake app-server. No installed runtime, model, live core, backend or credential store is opened.
 use base64::Engine;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -255,15 +255,22 @@ async fn provider_wire_binds_omitted_identity_and_rejects_spoofing_before_native
         before, native_before,
         "spoof refusals perform zero native calls"
     );
-    assert!(!before
-        .lines()
-        .any(|line| serde_json::from_str::<Value>(line).unwrap()["method"] == "turn/start"));
+    assert!(
+        !before
+            .lines()
+            .any(|line| serde_json::from_str::<Value>(line).unwrap()["method"] == "turn/start")
+    );
     let mut args = send("ui-kind-only");
     args["origin"] = json!({"kind":"human"});
     let result = core
         .effect("ui-kind-only", "endpoint-1", "agent.send", args, 1000)
         .await;
     assert_eq!(result["outcome"], "accepted");
+    assert_eq!(
+        result["data"]["receipt"]["origin"],
+        json!({"principal":"p:test","actor":"actor:test",
+        "initiator":"caller:original","kind":"human","claimed":["kind"]})
+    );
     let ledger = std::fs::read_to_string(root.path().join("native.jsonl")).unwrap();
     let calls: Vec<Value> = ledger
         .lines()
@@ -374,6 +381,9 @@ async fn core_reconnect_keeps_native_process_session_and_late_receipt_without_re
         .effect("send", "endpoint-1", "agent.send", send("delayed"), 50)
         .await;
     assert_eq!(receipt["outcome"], "dispatched");
+    let bound_origin = json!({"principal":"p:test","actor":"actor:test","initiator":"caller:original",
+        "kind":"agent","agent":"r7","claimed":["kind","agent"]});
+    assert_eq!(receipt["data"]["receipt"]["origin"], bound_origin);
     first.close().await;
     let mut second = Core::accept(&listener, 2, "resume-native").await;
     second.wait(|facts| facts.len() == 1).await;
@@ -394,6 +404,10 @@ async fn core_reconnect_keeps_native_process_session_and_late_receipt_without_re
         )
         .await;
     assert_eq!(receipt["data"]["stage"], "admitted");
+    assert_eq!(
+        receipt["data"]["origin"], bound_origin,
+        "late receipt retains the first core-bound caller across reconnect"
+    );
     let ledger = std::fs::read_to_string(root.path().join("native.jsonl")).unwrap();
     let calls: Vec<Value> = ledger
         .lines()
