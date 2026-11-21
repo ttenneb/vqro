@@ -798,6 +798,20 @@ class AgentPane(unittest.TestCase):
         self.feed(line({"op": "put", "seq": 5, "kind": "message"}))
         self.assertEqual(self.agents.conversations["r2"].rejections, 2)
 
+    def test_a_timer_firing_slightly_early_still_leads_to_a_retry(self):
+        """spike-panel-1 P3 (probe_rv_timer): the timer callback clears the pending flag, so a timer that fires a hair
+        before retry_at reschedules instead of stalling with neither a stream nor a timer."""
+        self.feed(snapshot(CONVERSATION, seq=4))
+        self.feed(line({"op": "put", "seq": 5, "kind": "message"}))
+        self.assertEqual(len(self.timers), 1)
+        self.timers.clear()
+        c = self.agents.conversations["r2"]
+        c.retry_at = agents_module.time.monotonic() + 0.5  # the wait has not quite passed when the timer fires
+        self.agents.retry_due("r2")
+        self.agents.flush_conversations()
+        self.assertIsNone(c.stream)
+        self.assertEqual(len(self.timers), 1, "a new timer, never a stall")
+
     def test_one_pending_backoff_timer_however_many_wakes(self):
         """spike-panel-1 P3: wakes during a backoff never pile up timers."""
         self.feed(snapshot(CONVERSATION, seq=4))

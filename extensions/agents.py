@@ -464,7 +464,7 @@ class Agents:
 
     def later(self, delay, rid):
         """One delayed reattach of `rid` (a daemon timer; tests replace this)."""
-        timer = threading.Timer(delay, self.wake, (rid,), {"reattach": True})
+        timer = threading.Timer(delay, self.retry_due, (rid,))
         timer.daemon = True
         timer.start()
 
@@ -482,6 +482,15 @@ class Agents:
         """Allow attaching again with a view built from the current declaration (under c.lock)."""
         c.compatible_again()
         c.view, c.clamped, c.declared = self.fresh_view(rid)
+
+    def retry_due(self, rid):
+        """A backoff timer fired: it is no longer pending (even if it fired a hair early, so the next attach can
+        schedule another instead of leaving the pane with neither a stream nor a timer)."""
+        c = self.conversations.get(rid)
+        if c is not None:
+            with c.lock:
+                c.retry_scheduled = False
+        self.wake(rid, reattach=True)
 
     def items_bounds(self, rid):
         r = self.ext.resources.get(rid)
