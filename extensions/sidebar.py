@@ -29,9 +29,9 @@ terminals no tab shows fold into one "N ended" row per place, opened by hand. A 
 (`lazy_children`) report the ▸ (`sidebar.place`), and a closed place's contents are sent only once it opens
 again. A larger tree first shows the places that are
 not open as single rows (open: the default workspace, the ones recently shown as default, or expanded by
-hand; "Expand here"/"Collapse" in row menus); only if that still does not fit are there pages (by bytes,
-keeping folder ancestors and each agent/bridge group together), the pager being the last resort at extreme
-scale. The toolbar's "/" searches every row of the whole tree (collapsed, hidden or on another page too)
+hand; "Expand here"/"Collapse" in row menus). If that still does not fit, the default is one scrolling list cut
+to a page's budget, ending with a row naming the places left (`fit`); pages (by bytes, keeping folder ancestors
+and each agent/bridge group together) are a setting, "Split into pages" (`pages`). The toolbar's "/" searches every row of the whole tree (collapsed, hidden or on another page too)
 and lists matches with their place in a popup; the panel's own filter still narrows the visible rows.
 """
 import copy
@@ -656,6 +656,35 @@ def paginate(items, page, budget=None, whole=None):
     return window(items), page, pages, total
 
 
+def fit(items, budget=None):
+    """One scrolling list (the default; pages are a setting): the whole tree when it fits one publication
+    (`WHOLE_BYTES`), else rows in order while they fit a page's budget, then one row saying how many places are left
+    (search still reaches them).
+    A place that alone is too large is shown closed (its ▸ or "Expand here" opens it)."""
+    total = sum(1 for row in items if row.get("type") != "header")
+    if encoded(items) <= (WHOLE_BYTES if budget is None else budget):
+        return items, total
+    # Cut to a page's budget: the same headroom under the publication bound as a page has.
+    room = (PAGE_BYTES if budget is None else budget) - 256  # for the closing row
+    kept, used, left = [], encoded([]), 0
+    for row in items:
+        size = encoded(row) + 1
+        if left == 0 and used + size > room and row.get("id", "").startswith(("ws:", "layout:")):
+            closed = collapse([row], {row["id"]})[0]
+            closed.pop("_level", None)
+            if used + encoded(closed) + 1 <= room:
+                row, size = closed, encoded(closed) + 1
+        if left or used + size > room:
+            left += row.get("type") != "header" and row.get("id", "").startswith(("ws:", "layout:", "term:"))
+            continue
+        kept.append(row)
+        used += size
+    if left:
+        kept.append({"id": "more-places", "type": "text", "style": "dim",
+                     "text": f"{left} more place{'s' if left != 1 else ''}: search (/) or open one; pages are a Sidebar setting"})
+    return kept, total
+
+
 def toolbar():
     """One line: what is shown (opens the view popup) and the filter."""
     short = SHORT.get(current_preset(), "custom")
@@ -691,6 +720,10 @@ def option_rows():
               "command": "sidebar.worktrees", "args": {"key": "changed_only", "value": not wt["changed_only"]}},
              {"type": "toggle", "text": "Hide detached", "checked": bool(wt["hide_detached"]), "detail": "no branch checked out",
               "command": "sidebar.worktrees", "args": {"key": "hide_detached", "value": not wt["hide_detached"]}},
+             {"type": "header", "text": "Size"},
+             {"type": "toggle", "text": "Split into pages", "checked": bool((ext.value(PREFS) or {}).get("pages")),
+              "detail": "off: one scrolling list (a very large tree ends with a row naming what is left)",
+              "command": "sidebar.pages", "args": {"value": not (ext.value(PREFS) or {}).get("pages")}},
              {"type": "separator"}, {"type": "header", "text": "Presets"}]
     current = current_preset()
     rows += [{"text": ("● " if name == current else "○ ") + name, "style": "accent" if name == current else None,
@@ -743,7 +776,11 @@ def publish_snapshot():
     # The worker reads a coherent cache, but never holds its lock across RPC/publication.
     with ext.cache_lock:
         all_items = build()
-        items, page_state[0], page_state[1], total = paginate(all_items, page_state[0])
+        if (ext.value(PREFS) or {}).get("pages"):
+            items, page_state[0], page_state[1], total = paginate(all_items, page_state[0])
+        else:
+            items, total = fit(all_items)
+            page_state[0], page_state[1] = 0, 1
         content = {"requires": ["tree", "badges", "menu", "toolbar", "chips", "icon", "icon_names"], "toolbar": toolbar(), "items": items,
                    "page": {"number": page_state[0]+1, "count": page_state[1], "rows": total}}
         view = view_panel()
@@ -898,6 +935,20 @@ def set_ended_visibility(hidden):
         value = dict(ext.value(PREFS) or {}, hide_ended=hidden)
         ext.apply([{"op": "set", "key": PREFS, "value": value, "expect": ext.version(PREFS)}], "sidebar: ended visibility")
     ext.retrying(attempt)
+
+
+@ext.command("sidebar.pages", "Split a very large sidebar into pages, or not (the default: one scrolling list) (args: value)")
+def pages_cmd(args):
+    value = args.get("value")
+    if not isinstance(value, bool):
+        raise VqroError("value must be true or false", "invalid")
+    def attempt():
+        prefs = dict(ext.value(PREFS) or {}, pages=value)
+        ext.apply([{"op": "set", "key": PREFS, "value": prefs, "expect": ext.version(PREFS)}], "sidebar: pages")
+    ext.retrying(attempt)
+    with ext.cache_lock:
+        page_state[0] = 0
+    refresh_now()
 
 
 @ext.command("sidebar.kill", "Kill a terminal's program (args: resource)")

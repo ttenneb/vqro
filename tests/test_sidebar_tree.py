@@ -272,6 +272,7 @@ class SidebarTree(unittest.TestCase):
         self.assertTrue(found, "a terminal in a cut worktree's tab is found")
         # "+N more" opens the rest (a tree this large pages again until collapse reaches the extension); a page
         # click publishes in its own call, not after the worker's coalescing wait.
+        self.ext.entries[self.module["PREFS"]] = {"value": {"pages": True}, "version": 1}  # paging is a setting
         self.module["worktrees_more"]({"path": WS})
         content = self.sidebar()
         self.assertGreater(content["page"]["count"], 1)
@@ -333,6 +334,7 @@ class SidebarTree(unittest.TestCase):
         self.ext.entries["workspace/active"] = {"value": {"layout": "ws-a"}, "version": 1}
         w = self.ext.live["workspaces"]["data"][0]
         w["worktrees"] = [{"path": f"/w/wt{i}", "branch": f"b{i}", "dirty": 0, "layout": f"wt-{i}"} for i in range(185)]
+        self.ext.entries[self.module["PREFS"]] = {"value": {"pages": True}, "version": 1}  # paging is a setting
         self.module["worktrees_more"]({"path": WS})  # every worktree listed: 112 KB, pages
         self.assertGreater(self.sidebar()["page"]["count"], 1)
         open_row = find(self.build(), "ws:" + WS)
@@ -345,6 +347,28 @@ class SidebarTree(unittest.TestCase):
         self.assertTrue(closed["has_children"])
         self.module["toggle_cmd"]({"id": "ws:" + WS, "open": True})
         self.assertIn("children", find(self.sidebar()["items"], "ws:" + WS))
+
+    def test_by_default_a_too_large_tree_scrolls_and_ends_with_what_is_left_and_pages_are_a_setting(self):
+        """Human feedback (batch 3): no pages by default, a setting for them. A tree too large for one publication
+        is cut to a page's budget, closing a place that alone is too large, and ends with a row naming what is
+        left; search still finds it."""
+        g = self.module["build"].__globals__
+        self.add_workspaces(300)
+        self.ext.entries["workspace/active"] = {"value": {"layout": "ws-a"}, "version": 1}
+        self.module["refresh"]()
+        content = self.sidebar()
+        self.assertEqual((content["page"]["count"], len(content["toolbar"])), (1, 1), "no pager")
+        self.assertLess(self.module["encoded"](content), 64 * 1024)
+        more = find(content["items"], "more-places")
+        self.assertRegex(more["text"], r"^\d+ more places: search")
+        found, _ = self.module["search_rows"]("extra shell 299")
+        self.assertTrue(found, "search still reaches what is left")
+        # The setting brings the pager back.
+        self.module["pages_cmd"]({"value": True})
+        self.assertGreater(self.sidebar()["page"]["count"], 1)
+        self.assertIn("Split into pages", [row.get("text") for row in self.module["option_rows"]()])
+        self.module["pages_cmd"]({"value": False})
+        self.assertEqual(self.sidebar()["page"]["count"], 1)
 
     def test_every_place_reports_its_triangle_in_a_small_tree_too(self):
         """vqro-lead-secondary (238): only a tree that was large or had a closed place got on_toggle on its rows, so

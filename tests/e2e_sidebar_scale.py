@@ -193,7 +193,7 @@ def run(args, root):
         receipt['initial_sidebar_bytes'] = len(json.dumps(initial).encode())
         receipt['pages'] = initial.get('page')
         if not args.baseline_sidebar:
-            # Too large for one page expanded: the 350 folders are single rows (their 800 resources inside them),
+            # Too large for one publication expanded: the 350 folders are single rows (their 800 resources inside them),
             # plus the add row; everything stays reachable by search (below) and by opening a folder.
             assert initial.get('page', {}).get('rows') == 351, 'startup fence must include all 350 folders, collapsed'
             assert all('children' not in row for row in initial['items'] if row.get('id', '').startswith('ws:'))
@@ -231,7 +231,12 @@ def run(args, root):
             assert receipt['initial_sidebar_bytes'] < 65536, receipt
             assert receipt['off_page']['sidebar_publications'] == 0, receipt
             assert receipt['on_page']['sidebar_publications'] <= 2*args.seconds+2, receipt
-            assert initial['page']['count'] > 1
+            # By default one scrolling list: no pager, and a last row names the places beyond the cut.
+            assert initial['page']['count'] == 1, initial['page']
+            assert any(row.get('id') == 'more-places' for row in initial['items'])
+            # Pages are a setting: on, the pager is back.
+            control.call('command.invoke', {'name': 'sidebar.pages', 'args': {'value': True}})
+            wait(lambda: control.call('workspace.snapshot')['live']['sidebar'].get('page', {}).get('count', 1) > 1)
             control.call('command.invoke', {'name': 'sidebar.page', 'args': {'text': '2'}})
             wait(lambda: control.call('workspace.snapshot')['live']['sidebar'].get('page', {}).get('number') == 2)
             # Search covers rows of collapsed folders and other pages.
