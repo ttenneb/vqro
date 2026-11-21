@@ -602,14 +602,15 @@ mod fuzz {
     #[test]
     fn a_resize_never_renames_a_row_on_any_engine() {
         for kind in EngineKind::ALL {
-            for lines in [0, 1, 100] {
+            for (lines, alternate) in [(0, false), (1, false), (100, false), (100, true)] {
                 let mut e = Emulator::with_engine(kind, 40, 4, lines);
+                if alternate { e.process(b"\x1b[?1049h"); } // the secondary's refinement: a valid history, alternate screen
                 e.process(b"A\r\nB\r\nC\r\nD");
                 let before: Vec<_> = (0..e.scrolled() + 4).map(|r| e.row_text(r).map(|t| t.0)).collect();
                 e.resize(40, 2);
                 for (row, was) in before.iter().enumerate() {
                     if let (Some(was), Some(now)) = (was, e.row_text(row).map(|t| t.0)) {
-                        assert_eq!(was, &now, "{} with {lines} lines: row {row} renamed by a resize", kind.name());
+                        assert_eq!(was, &now, "{} with {lines} lines (alternate {alternate}): row {row} renamed by a resize", kind.name());
                     }
                 }
             }
