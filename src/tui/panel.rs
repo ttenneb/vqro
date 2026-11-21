@@ -554,16 +554,30 @@ fn child_tables(rows: &[Flat], width: u16, icons: &Icons) -> Vec<Flat> {
 }
 
 fn join_cells(cells: Vec<String>, widths: &[usize], aligns: &[bool]) -> String {
+    join_cell_spans(cells, widths, aligns).0
+}
+
+/// The padded cells as one line, and where each column's text landed (display offset and width; `None` when
+/// the column was dropped for width), so a cell's own style can be drawn over it (`column_styles`).
+fn join_cell_spans(cells: Vec<String>, widths: &[usize], aligns: &[bool]) -> (String, Vec<Option<(usize, usize)>>) {
     let mut out = String::new();
+    let mut at = 0usize;
+    let mut spans = Vec::with_capacity(widths.len());
     for (i, w) in widths.iter().enumerate() {
-        if *w == 0 { continue; }  // dropped for width (`min_width`/`priority`)
+        if *w == 0 { spans.push(None); continue; }  // dropped for width (`min_width`/`priority`)
         let cell = cells.get(i).map(String::as_str).unwrap_or("");
         let cut = truncate(cell, *w);
-        let pad = w.saturating_sub(icons::width(&cut) as usize);
-        if !out.is_empty() { out.push(' '); }
-        if aligns.get(i) == Some(&true) { out.push_str(&" ".repeat(pad)); out.push_str(&cut); } else { out.push_str(&cut); out.push_str(&" ".repeat(pad)); }
+        let cw = icons::width(&cut) as usize;
+        let pad = w.saturating_sub(cw);
+        if !out.is_empty() { out.push(' '); at += 1; }
+        if aligns.get(i) == Some(&true) {
+            out.push_str(&" ".repeat(pad)); out.push_str(&cut); spans.push(Some((at + pad, cw)));
+        } else {
+            out.push_str(&cut); out.push_str(&" ".repeat(pad)); spans.push(Some((at, cw)));
+        }
+        at += pad + cw;
     }
-    out.trim_end().to_string()
+    (out.trim_end().to_string(), spans)
 }
 
 impl ColumnLayout {
@@ -571,9 +585,16 @@ impl ColumnLayout {
     fn apply(&self, r: &Flat, icons: &Icons) -> Flat {
         let Some(cells) = r.item["columns"].as_array() else { return r.clone() };
         let cells: Vec<String> = cells.iter().map(|c| c.as_str().unwrap_or("").to_string()).collect();
-        let lead = " ".repeat(self.start.saturating_sub(prefix_width(r, icons)) as usize);
+        let lead = self.start.saturating_sub(prefix_width(r, icons)) as usize;
+        let (line, spans) = join_cell_spans(cells, &self.widths, &self.aligns);
         let mut out = r.clone();
-        out.item["text"] = Value::String(format!("{lead}{}", join_cells(cells, &self.widths, &self.aligns)));
+        out.item["text"] = Value::String(format!("{}{line}", " ".repeat(lead)));
+        // `column_styles` (parallel to `columns`): a semantic style per cell, drawn over the row's text; clients
+        // without it draw the cells in the row's style.
+        let styled: Vec<Value> = r.item["column_styles"].as_array().into_iter().flatten().zip(&spans)
+            .filter_map(|(s, span)| Some(serde_json::json!([lead + span.as_ref()?.0, span.as_ref()?.1, s.as_str()?])))
+            .collect();
+        if !styled.is_empty() { out.item["_cell_styles"] = Value::Array(styled); }
         out
     }
 }
@@ -875,6 +896,14 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
                 bx = bx.saturating_sub(1);
             }
             buf.set_string(x, y, truncate(text, room_for_text(bx)), ink(text_style(item, pal)));
+            // Cells with their own style (`column_styles`, laid out by `ColumnLayout::apply`), within the text's room.
+            for c in item["_cell_styles"].as_array().into_iter().flatten() {
+                let (Some(off), Some(cw), Some(name)) = (c[0].as_u64(), c[1].as_u64(), c[2].as_str()) else { continue };
+                let room = room_for_text(bx) as u64;
+                let cw = cw.min(room.saturating_sub(off));
+                if cw == 0 { continue; }
+                buf.set_style(Rect { x: x + off as u16, y, width: cw as u16, height: 1 }, ink(pal.style(Some(name))));
+            }
             for (bx, t, s) in placed {
                 buf.set_string(bx, y, t, s);
             }
@@ -942,6 +971,29 @@ mod tests {
         let hits = render(&mut buf, area, &Arc::new(v), &mut state, true, &Palette::default(), &icons, None);
         assert_eq!(hits.actions.len(), 2);
         assert!(hits.actions.iter().all(|(rect, _, _)| rect.right() <= 60));
+    }
+
+    #[test]
+    fn column_styles_colour_their_own_cells_only() {
+        // pane-batch2 / agent-standard-coord: a tool row shows ✓ in ok and its target as a link, the rest plain.
+        let v = Arc::new(json!({"requires":["child_table"], "items":[
+            {"id":"g", "text":"Group", "expanded":true, "child_table":{"columns":[{"width":2},{"width":6},{"width":"fill"},{"width":5}]},
+             "children":[{"id":"a","text":"fallback","columns":["✓","read","src/a.rs","20 B"],"column_styles":["ok",null,"link"]},
+                         {"id":"b","text":"fallback","columns":["✗","bash","pwd","3 B"],"column_styles":["error"]}]}]}));
+        let area = Rect::new(0, 0, 60, 4);
+        let mut buf = Buffer::empty(area);
+        let pal = Palette::default();
+        render(&mut buf, area, &v, &mut State::default(), false, &pal, &Icons::new(None, false), None);
+        let find = |y: u16, t: &str| (0..60u16).find(|&x| (0..t.chars().count() as u16).map(|i| buf[(x + i, y)].symbol().to_string()).collect::<String>() == t).unwrap();
+        let (tick, read, path, size) = (find(1, "✓"), find(1, "read"), find(1, "src/a.rs"), find(1, "20 B"));
+        assert_eq!(buf[(tick, 1)].fg, pal.ok);
+        assert_eq!(buf[(read, 1)].fg, pal.text, "no style: the row's own");
+        assert_eq!(buf[(path, 1)].fg, pal.link);
+        assert!(buf[(path + 7, 1)].modifier.contains(Modifier::UNDERLINED));
+        assert!(!buf[(path + 8, 1)].modifier.contains(Modifier::UNDERLINED), "only the cell's text");
+        assert_eq!(buf[(size, 1)].fg, pal.text, "past the styles given");
+        assert_eq!(buf[(find(2, "✗"), 2)].fg, pal.error);
+        assert_eq!(buf[(find(2, "pwd"), 2)].fg, pal.text);
     }
 
     #[test]

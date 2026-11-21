@@ -1334,7 +1334,10 @@ given rows in clients without the feature. Fixtures: `tests/fixtures/client/pane
   shown column with the lowest `priority` (a number) is dropped, the rightmost first among equals; that may be the
   short column itself. Columns without `priority` are never dropped, so a short column with nothing left to drop
   stays short. A narrow pane thus keeps a readable title rather than squeezing every column. A header line shows when any column has a label. `text` stays required and is what clients
-  without the feature show, so write it as a readable join (`"command · agents.abort"`).
+  without the feature show, so write it as a readable join (`"command · agents.abort"`). A row may add
+  `column_styles: [style|null…]`, parallel to `columns`: a semantic style per cell (e.g. `["ok", null, "link"]` for
+  ✓, a plain name and a path), drawn over that cell's text only; missing or `null` entries keep the row's style. It
+  needs no feature: clients without it (today OpenTUI and the text client) draw every cell in the row's style.
 
 - **Group-local tables** (feature `child_table`): a tree item may declare
   `child_table: {columns: [column-spec…], max_width?: positive-cell-count}`. Its immediate children carrying
