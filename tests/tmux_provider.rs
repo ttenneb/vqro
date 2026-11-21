@@ -322,6 +322,24 @@ async fn panes_created_and_closed_outside_vqro_are_reconciled() {
     assert_eq!(gone["params"]["reason"]["reason"], "exited");
 }
 
+#[tokio::test]
+#[ignore]
+async fn the_title_hook_is_appended_once_and_keeps_other_hooks() {
+    // An external server with its own pane-title-changed hook (review of 8af0738e: it was replaced).
+    let tmux = Tmux::start();
+    assert!(tmux.cli(&["set-hook", "-g", "pane-title-changed", "set-option -g @independent_sentinel 1"]).status.success());
+    for _ in 0..2 {  // a provider that attaches again must not add its entry twice
+        let (mut core, provider) = start(&tmux).await;
+        let reg = core.read().await;
+        core.reply(&reg, json!({"provider": "tmux@test", "generation": 1, "limits": {"stream_window_bytes": 65536, "max_record_bytes": 1048576}})).await;
+        drop(provider);
+        let _ = std::fs::remove_file(tmux.root.path().join("core.sock"));  // the next attach binds it again
+    }
+    let hooks = String::from_utf8_lossy(&tmux.cli(&["show-hooks", "-g", "pane-title-changed"]).stdout).into_owned();
+    assert!(hooks.contains("set-option -g @independent_sentinel 1"), "the server's own hook is kept: {hooks}");
+    assert_eq!(hooks.matches("set-option -p @vqro_titled 1").count(), 1, "vqro's hook is there once: {hooks}");
+}
+
 /// Read stream data for `stream` (returning credit) until `needle` shows up. Returns the bytes seen.
 async fn read_until(core: &mut Core, stream: u64, needle: &[u8]) -> Vec<u8> {
     let mut tail: Vec<u8> = Vec::new();

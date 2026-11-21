@@ -34,7 +34,7 @@ const SEP: &str = "|@vqro@|";
 /// `@vqro_argv` at spawn; `@vqro_titled` by the `pane-title-changed` hook), never from tmux's own defaults: its
 /// automatic window name and its default pane title (the host name) are not what the spawn asked or the program set.
 const PANE_FORMAT: &str = "#{pane_id}|@vqro@|#{session_name}|@vqro@|#{window_id}|@vqro@|#{window_name}|@vqro@|#{pane_title}|@vqro@|#{pane_current_path}|@vqro@|#{pane_current_command}|@vqro@|#{pane_pid}|@vqro@|#{@vqro_bootstrap}|@vqro@|#{@vqro_name}|@vqro@|#{@vqro_titled}|@vqro@|#{@vqro_argv}";
-/// Marks a pane whose program set its title (OSC 0/2); installed server-wide when the provider attaches.
+/// Marks a pane whose program set its title (OSC 0/2); appended server-wide (once) when the provider attaches.
 const TITLED_HOOK: &str = "set-option -p @vqro_titled 1";
 const RECONCILE_EVERY: Duration = Duration::from_secs(3);
 /// Clears and homes the viewer's screen before a repaint (a screen snapshot, not replay).
@@ -826,7 +826,12 @@ async fn registration(a: &Args, endpoint: &str, socket: &PathBuf) -> Result<(), 
     let first = Client::connect(config).await.map_err(|e| format!("attach {spawn_session}: {e}"))?;
     let instance = first.instance().to_string();
     // Program titles: only a title the program set counts (tmux's default pane title is the host name).
-    first.command(&["set-hook", "-g", "pane-title-changed", TITLED_HOOK]).await.map_err(|e| format!("title hook: {e}"))?;
+    // Appended once, never replacing: a server may carry other pane-title-changed hooks (an external --tmux-socket
+    // server is the user's own), and a reattaching provider must not add the entry again.
+    let hooks = first.command(&["show-hooks", "-g", "pane-title-changed"]).await.map_err(|e| format!("title hook: {e}"))?;
+    if !hooks.iter().any(|line| String::from_utf8_lossy(line).trim_end().ends_with(&format!("] {TITLED_HOOK}"))) {
+        first.command(&["set-hook", "-ga", "pane-title-changed", TITLED_HOOK]).await.map_err(|e| format!("title hook: {e}"))?;
+    }
     // The host's default shell for an empty argv (provider-v0: $SHELL on Unix); without $SHELL, tmux's own.
     let default_shell = match std::env::var("SHELL") {
         Ok(shell) if shell.starts_with('/') => shell,
