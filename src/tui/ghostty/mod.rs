@@ -129,7 +129,8 @@ impl Notifications {
                     self.esc = b == 0x1b;
                 }
                 Some(body) => {
-                    let end = b == 0x07 || (self.esc && b == b'\\');
+                    // BEL or ESC \ ends it; ESC then BEL cancels it, as the terminal's parser does.
+                    let end = (b == 0x07 && !self.esc) || (self.esc && b == b'\\');
                     if end {
                         let body = self.osc.take().unwrap_or_default();
                         if let Some(e) = notification(&body) { if out.len() < MAX_EFFECTS { out.push(e); } }
@@ -156,8 +157,8 @@ impl Notifications {
 /// OSC 9 is a notification unless it is ConEmu's progress (`9;4;...`) or names a directory (`9;9;...`); OSC 777
 /// only for `notify`. Same rule as the vt100 engine.
 fn notification(body: &[u8]) -> Option<Effect> {
-    // The body goes to the outer terminal as it is: never with control bytes in it.
-    if body.iter().any(|b| *b < 0x20 || *b == 0x7f) { return None; }
+    // The body goes to the outer terminal as it is: well-formed UTF-8 without control characters (C0, DEL, C1).
+    if !super::emulator::outer_safe(body) { return None; }
     let mut parts = body.split(|b| *b == b';');
     match (parts.next(), parts.next()) {
         (Some(b"9"), Some(rest)) if !rest.is_empty() && rest != b"4" && rest != b"9" => Some(Effect::Notify(body.to_vec())),
@@ -688,5 +689,76 @@ mod tests {
     fn kitty_images_are_not_stored() {
         let g = Ghostty::new(40, 4, 100).unwrap();
         assert_eq!(g.get::<u64>(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_STORAGE_LIMIT), Some(0));
+    }
+}
+
+#[cfg(test)]
+/// vqro-lead-secondary's security controls (lead-secondary/native-fixes/security), kept as regression tests.
+mod independent_security_scanner_controls {
+    use super::*;
+
+    fn collected(bytes: &[u8], split: usize) -> Vec<Effect> {
+        let mut scanner = Notifications::default();
+        let mut out = Vec::new();
+        scanner.feed(&bytes[..split], &mut out);
+        scanner.feed(&bytes[split..], &mut out);
+        out
+    }
+    fn every_split(bytes: &[u8], expected: Vec<Effect>) {
+        for split in 0..=bytes.len() {
+            assert_eq!(collected(bytes, split), expected, "split={split}");
+        }
+        let mut scanner = Notifications::default();
+        let mut out = Vec::new();
+        for byte in bytes { scanner.feed(std::slice::from_ref(byte), &mut out); }
+        assert_eq!(out, expected, "one-byte writes");
+    }
+
+    #[test]
+    fn independent_scanner_preserves_valid_notifications_across_every_split() {
+        every_split(b"\x1b]9;done\x07", vec![Effect::Notify(b"9;done".to_vec())]);
+        every_split(b"\x1b]777;notify;T;B\x1b\\", vec![Effect::Notify(b"777;notify;T;B".to_vec())]);
+        let unicode_body = "9;通知 \u{1f980}".as_bytes();
+        let wire = [b"\x1b]".as_slice(), unicode_body, b"\x07"].concat();
+        every_split(&wire, vec![Effect::Notify(unicode_body.to_vec())]);
+        every_split(b"\x1b]9;4;1;50\x07\x1b]9;9;/w\x07\x1b]777;other\x07", vec![]);
+    }
+
+    #[test]
+    fn independent_scanner_cancellation_overflow_and_ascii_escape_attack() {
+        every_split(b"\x1b]9;hi\x1b[2J\x1b]52;c;?\x07", vec![]);
+        every_split(b"\x1b]9;x\x18\x07\x1b]9;x\x1a\x07", vec![]);
+        every_split(b"\x1b]9;x\rY\x07\x1b]777;notify;T;tab\there\x07\x1b]9;del\x7f\x07", vec![]);
+        every_split(b"\x1b]9;one\x1b\x1b]9;two\x07", vec![Effect::Notify(b"9;two".to_vec())]);
+        let mut scanner = Notifications::default();
+        let mut out = Vec::new();
+        scanner.feed(b"\x1b]9;unfinished\x1b", &mut out);
+        assert!(out.is_empty());
+        scanner.feed(b"[2J\x1b]9;recovered\x07", &mut out);
+        assert_eq!(out, vec![Effect::Notify(b"9;recovered".to_vec())]);
+        let exact_body = [b"9;".as_slice(), vec![b'x'; MAX_OSC - 2].as_slice()].concat();
+        let exact = [b"\x1b]".as_slice(), &exact_body, b"\x1b\\"].concat();
+        assert_eq!(collected(&exact, exact.len()-1), vec![Effect::Notify(exact_body)]);
+        let over = [b"\x1b]9;".as_slice(), vec![b'x'; MAX_OSC].as_slice(), b"\x07\x1b]9;ok\x07"].concat();
+        assert_eq!(collected(&over, MAX_OSC), vec![Effect::Notify(b"9;ok".to_vec())]);
+        let mut scanner = Notifications::default(); let mut out = Vec::new();
+        for _ in 0..MAX_EFFECTS+3 { scanner.feed(b"\x1b]9;x\x07", &mut out); }
+        assert_eq!(out.len(), MAX_EFFECTS);
+    }
+
+    #[test]
+    fn independent_scanner_rejects_c1_notification_body() {
+        every_split(b"\x1b]9;safe\x9c\x9d52;c;?\x9c\x07", vec![]);
+    }
+    #[test]
+    fn independent_scanner_rejects_unicode_c1_and_invalid_utf8() {
+        assert!(notification("9;bad\u{009c}after".as_bytes()).is_none());
+        assert!(notification(b"9;bad\xff").is_none());
+    }
+
+    // ESC then BEL cancels the string, as the terminal's parser does.
+    #[test]
+    fn independent_scanner_escape_then_bel_is_not_a_valid_terminator() {
+        every_split(b"\x1b]9;cancelled\x1b\x07", vec![]);
     }
 }

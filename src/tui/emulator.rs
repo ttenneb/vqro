@@ -26,6 +26,19 @@ pub enum Effect {
 
 /// Bounds what one parse may queue: a program can't flood the outer terminal or the client's memory.
 pub const MAX_EFFECTS: usize = 64;
+
+/// Whether program text may go to the user's terminal inside an OSC: well-formed UTF-8 with no control character,
+/// C0, DEL or C1 (raw C1 bytes are not well-formed UTF-8; U+0080-U+009F are refused decoded). Any of them could end
+/// the sequence and start another in some terminal (ghostty-audit P1-1 and its P3 follow-up).
+pub fn outer_safe(text: &[u8]) -> bool {
+    std::str::from_utf8(text).is_ok_and(|s| !s.chars().any(char::is_control))
+}
+
+/// An OSC 52 write that is safe to pass on: selection names `[a-z0-9]*`, data base64 (never the `?` read).
+pub fn clipboard_safe(selection: &[u8], data: &[u8]) -> bool {
+    selection.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && !data.is_empty() && data.iter().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+}
 const MAX_CLIPBOARD_B64: usize = 1 << 20;
 
 /// The cursor shape a program asked for (DECSCUSR).
@@ -91,7 +104,8 @@ impl vt100::Callbacks for Effects {
             [b"777", b"notify", ..] => true,
             _ => false,
         };
-        if notify && params.iter().map(|p| p.len() + 1).sum::<usize>() <= 4096 { self.push(Effect::Notify(params.join(&b';'))); }
+        let body = params.join(&b';');
+        if notify && body.len() < 4096 && outer_safe(&body) { self.push(Effect::Notify(body)); }
     }
 }
 
@@ -595,6 +609,19 @@ mod fuzz {
             }
             let area = Rect::new(0, 0, e.cols(), rows);
             e.draw(&mut Buffer::empty(area), area);
+        }
+    }
+
+    /// ghostty-audit P3 (findings 2): neither engine passes on a notification with C1 (raw or UTF-8) or invalid UTF-8,
+    /// and both keep valid Unicode ones.
+    #[test]
+    fn no_engine_passes_on_c1_or_invalid_utf8() {
+        for kind in EngineKind::ALL {
+            let mut e = Emulator::with_engine(kind, 40, 4, 10);
+            e.process(b"\x1b]9;safe\x9c\x9d52;c;?\x9c\x07\x1b]9;x\xc2\x9cy\x07\x1b]9;x\xff\x07");
+            assert!(e.take_effects().iter().all(|x| !matches!(x, Effect::Notify(_))), "{}", kind.name());
+            e.process("\x1b]9;通知 \u{1f980}\x07".as_bytes());
+            assert_eq!(e.take_effects(), vec![Effect::Notify("9;通知 \u{1f980}".as_bytes().to_vec())], "{}", kind.name());
         }
     }
 

@@ -3846,12 +3846,12 @@ fn cursor_shape(s: CursorShape) -> crossterm::cursor::SetCursorStyle {
 
 /// The bytes that pass a program's effect on to the outer terminal.
 fn effect_bytes(e: &Effect) -> Vec<u8> {
-    // Whatever the engine, nothing with a control byte in it reaches the outer terminal: such a byte could end the
-    // sequence and start another (ghostty-audit P1-1, defence in depth).
-    let control = |b: &[u8]| b.iter().any(|c| *c < 0x20 || *c == 0x7f);
+    // Whatever the engine, nothing that could end the sequence and start another reaches the outer terminal: a
+    // notification is well-formed UTF-8 without C0, DEL or C1, a clipboard write is a selection name and base64
+    // (ghostty-audit P1-1 and its P3 follow-up, defence in depth).
     match e {
-        Effect::Clipboard(ty, data) if control(ty) || control(data) => Vec::new(),
-        Effect::Notify(body) if control(body) => Vec::new(),
+        Effect::Clipboard(ty, data) if !emulator::clipboard_safe(ty, data) => Vec::new(),
+        Effect::Notify(body) if !emulator::outer_safe(body) => Vec::new(),
         Effect::Clipboard(ty, data) => [b"\x1b]52;".as_slice(), ty, b";", data, b"\x07"].concat(),
         Effect::Bell => b"\x07".to_vec(),
         Effect::Notify(body) => [b"\x1b]".as_slice(), body, b"\x07"].concat(),
@@ -5428,5 +5428,53 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.restore_under();
         assert!(matches!(&app.overlay, Some(Overlay::Popup { view, .. }) if view == "pop"));
+    }
+}
+
+#[cfg(test)]
+/// vqro-lead-secondary's security controls (lead-secondary/native-fixes/security), kept as regression tests.
+mod independent_security_sink_controls {
+    use super::*;
+
+    #[test]
+    fn independent_sink_valid_unicode_notification_clipboard_and_bell() {
+        assert_eq!(effect_bytes(&Effect::Notify(b"9;done".to_vec())), b"\x1b]9;done\x07");
+        let body = "777;notify;通知;\u{1f980}".as_bytes().to_vec();
+        let expected = [b"\x1b]".as_slice(), body.as_slice(), b"\x07"].concat();
+        assert_eq!(effect_bytes(&Effect::Notify(body)), expected);
+        assert_eq!(effect_bytes(&Effect::Clipboard(b"c".to_vec(), b"aGk=".to_vec())), b"\x1b]52;c;aGk=\x07");
+        // Decoded clipboard content can contain NUL; the *wire* data remains safe base64.
+        assert_eq!(effect_bytes(&Effect::Clipboard(b"c".to_vec(), b"AA==".to_vec())), b"\x1b]52;c;AA==\x07");
+        assert_eq!(effect_bytes(&Effect::Bell), b"\x07");
+    }
+
+    #[test]
+    fn independent_sink_rejects_all_c0_and_del_in_every_untrusted_field() {
+        for byte in (0u8..=0x1f).chain(std::iter::once(0x7f)) {
+            let mut body = b"9;x".to_vec(); body.push(byte);
+            assert!(effect_bytes(&Effect::Notify(body)).is_empty(), "notify byte={byte:02x}");
+            let mut selector = b"c".to_vec(); selector.push(byte);
+            assert!(effect_bytes(&Effect::Clipboard(selector, b"eA==".to_vec())).is_empty(), "selector byte={byte:02x}");
+            let mut data = b"eA==".to_vec(); data.push(byte);
+            assert!(effect_bytes(&Effect::Clipboard(b"c".to_vec(), data)).is_empty(), "clipboard data byte={byte:02x}");
+        }
+    }
+
+    #[test]
+    fn independent_sink_rejects_raw_c1_notification_breakout_bytes() {
+        assert!(effect_bytes(&Effect::Notify(b"9;safe\x9c\x9d52;c;?\x9c".to_vec())).is_empty());
+    }
+    #[test]
+    fn independent_sink_rejects_unicode_c1_and_invalid_utf8() {
+        assert!(effect_bytes(&Effect::Notify("9;x\u{009c}y".as_bytes().to_vec())).is_empty());
+        assert!(effect_bytes(&Effect::Notify(b"9;x\xff".to_vec())).is_empty());
+    }
+
+    // Defence in depth for the clipboard fields: a selection name and base64 only.
+    #[test]
+    fn independent_sink_clipboard_fields_do_not_accept_c1_or_read_payloads() {
+        assert!(effect_bytes(&Effect::Clipboard(b"c\x9c\x9d9;x".to_vec(), b"eA==".to_vec())).is_empty());
+        assert!(effect_bytes(&Effect::Clipboard(b"c".to_vec(), b"eA==\x9c".to_vec())).is_empty());
+        assert!(effect_bytes(&Effect::Clipboard(b"c".to_vec(), b"?".to_vec())).is_empty());
     }
 }
