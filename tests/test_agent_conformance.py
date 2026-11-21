@@ -672,21 +672,30 @@ class CommandWitnessTests(unittest.TestCase):
 class MemoryWitnessTests(unittest.IsolatedAsyncioTestCase):
     async def test_rss_samples_and_small_entities_cannot_replace_public_gap_witness(self):
         from agent_conformance.cases import public_retention_bounds
-        reducer = SimpleNamespace(cursor={"epoch": "e", "seq": 1}, offset=0, max_record=65536, entities={})
-        view = SimpleNamespace(reducer=reducer, closed=None, peer=SimpleNamespace(wait=AsyncMock()))
-        replay = SimpleNamespace(initial="reset", reducer=SimpleNamespace(entities={}, snapshots=1))
+        reducer = SimpleNamespace(cursor={"epoch": "e", "seq": 1}, epoch="e", offset=0,
+                                  max_record=65536, entities={}, snapshots=1, failure=None)
+        transport = SimpleNamespace(pause_reading=lambda: None, resume_reading=lambda: None,
+                                    is_reading=lambda: False)
+        peer = SimpleNamespace(wait=AsyncMock(), writer=SimpleNamespace(transport=transport))
+        view = SimpleNamespace(initial="reset", epoch="e", reducer=reducer, closed=None, close_notice=None, peer=peer)
         async def burst(*args, **kwargs): reducer.offset = 1 << 20
-        ctx = SimpleNamespace(evidence=[], metadata={"adapter_image": {"pid": 12345}}, viewer=AsyncMock(), attach=AsyncMock(return_value=replay),
-            facts=AsyncMock(return_value={"items": {"entities": 1, "entity_bytes": 1, "retain_bytes": 1},
-                                          "caps": {"items.stream": {"retain_bytes": 1}}}),
+        ctx = SimpleNamespace(evidence=[], manifest={"wire": "pi"}, metadata={"adapter_image": {"pid": 12345}},
+            viewer=AsyncMock(return_value=peer), attach=AsyncMock(return_value=view),
+            facts=AsyncMock(return_value={"items": {"entities": 1, "entity_bytes": 1, "retain_bytes": 1}}),
             native=SimpleNamespace(call=AsyncMock(side_effect=burst)), wait_view=AsyncMock())
-        with patch("agent_conformance.cases.fresh_view", AsyncMock(side_effect=[view, replay])), patch(
-                "agent_conformance.cases.flood_retained", AsyncMock(return_value="needle")), patch(
-                "agent_conformance.cases.has_message", return_value=True), patch(
-                "agent_conformance.cases.process_rss", side_effect=[1 << 20, 100 << 20, 200 << 20, 300 << 20]):
-            with self.assertRaisesRegex(HarnessGap, "retention-gap witness not observed"):
+        module = "agent_conformance.retention_gap_cases."
+        with patch(module + "begin_native", AsyncMock(return_value=("run", "e"))), patch(
+                module + "settle_native", AsyncMock()), patch(
+                module + "sample_snapshot", AsyncMock(side_effect=[{"entities": 0, "entity_bytes": 0} for _ in range(4)])), patch(
+                module + "flood_retained", AsyncMock(return_value="needle")), patch(
+                module + "process_rss", side_effect=[1 << 20, 100 << 20, 200 << 20, 300 << 20]), patch(
+                module + "one_replay", new_callable=AsyncMock) as replay:
+            with self.assertRaisesRegex(HarnessGap, "did not yield a public retention gap"):
                 await public_retention_bounds(ctx)
-        self.assertIsNone(ctx.evidence[-1]["live_gap"])
+            replay.assert_not_awaited()
+        self.assertEqual(len(ctx.evidence[0]["samples"]), 4)
+        self.assertIsNone(ctx.evidence[-1]["closed"])
+        self.assertEqual(ctx.attach.await_count, 1)
 
     async def test_o10_needs_both_public_and_internal_accounting_witnesses(self):
         from agent_conformance.cases import declared_retention_bounds

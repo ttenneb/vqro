@@ -1082,55 +1082,8 @@ def process_rss(pid):
 
 
 async def public_retention_bounds(ctx):
-    # agent-v0 declares retained bounds in data.agent.items, not an op-specific
-    # capability descriptor (adapters may advertise a narrower subset there).
-    declaration = (await ctx.facts()).get("items", {})
-    for field in ("entities", "entity_bytes", "retain_bytes"):
-        check(type(declaration.get(field)) is int and declaration[field] > 0, "missing numeric item bound: " + field)
-    view, samples = await fresh_view(ctx), []
-    evidence_start = len(ctx.evidence)
-    initial_cursor, initial_bytes = deepcopy(view.reducer.cursor), view.reducer.offset
-    pid = ctx.metadata.get("adapter_image", {}).get("pid")
-    if not pid:
-        raise FixtureFailed("owned adapter PID missing from execution provenance")
-    for phase in range(4):
-        needle = await flood_retained(ctx, "O10-window-" + str(phase))
-        view = await wait_with_retention_replay(ctx, view, lambda reducer: has_message(reducer, needle))
-        check(len(view.reducer.entities) <= declaration["entities"], "retained entity count exceeded its declaration")
-        entity_bytes = sum(len(json.dumps(row["value"], ensure_ascii=False, separators=(",", ":")).encode()) for row in view.reducer.entities.values())
-        check(entity_bytes <= declaration["entity_bytes"], "retained entity bytes exceeded their declaration")
-        samples.append({"records": (phase + 1) * 96, "entities": len(view.reducer.entities),
-                        "entity_bytes": entity_bytes, "adapter_rss_bytes": process_rss(pid)})
-    ctx.evidence.append({"kind": "retention_pressure", "declared": declaration, "samples": samples,
-                         "native_payload_bytes": 4 * 96 * 8192, "rss_is_measurement_not_cross_runtime_slo": True})
-    # One native burst can make the public cursor fall behind while native draining
-    # continues. A reset alone is not a witnessed live retention-gap notification.
-    await ctx.native.call("retain", count=512, text="O10-gap-burst:" + "y" * 8192, timeout=5)
-    await view.peer.wait(lambda: view.closed is not None or has_message(view.reducer, "511:O10-gap-burst:"), timeout=5)
-    last_good = deepcopy(view.reducer.cursor)
-    delivered_bytes = view.reducer.offset - initial_bytes
-    gap_seen = view.closed == "retention" or any(row.get("kind") == "public_retention_recovery" for row in ctx.evidence[evidence_start:])
-    if not gap_seen and delivered_bytes <= declaration["retain_bytes"] + view.reducer.max_record:
-        raise HarnessGap("O10 public workload did not cross the declared retained-record envelope")
-    replay = await ctx.attach(peer=await ctx.viewer(), after=initial_cursor)
-    check(replay.initial == "reset", "public replay continued from outside declared retention")
-    try:
-        await ctx.wait_view(replay, lambda reducer: reducer.snapshots > 0 and has_message(reducer, "511:O10-gap-burst:"))
-    except CheckFailed as error:
-        if replay.closed == "retention" and replay.reducer.failure == "retention":
-            ctx.evidence.append({"kind": "bounded_replay_invalidated", "notice": replay.close_notice,
-                                 "last_good_cursor": replay.reducer.cursor})
-            raise HarnessGap("O10 pressure fixture invalidated its bounded replay before quiescence") from error
-        raise
-    replay_bytes = sum(len(json.dumps(row["value"], ensure_ascii=False, separators=(",", ":")).encode()) for row in replay.reducer.entities.values())
-    check(len(replay.reducer.entities) <= declaration["entities"] and replay_bytes <= declaration["entity_bytes"],
-          "reset replay exceeded declared current-entity bounds")
-    ctx.evidence.append({"kind": "public_retention_replay", "expired_cursor": initial_cursor,
-                         "last_good_cursor": last_good, "live_gap": "retention" if gap_seen else view.closed,
-                         "observed_wire_bytes": delivered_bytes, "replay": replay.initial,
-                         "replay_entities": len(replay.reducer.entities), "replay_entity_bytes": replay_bytes})
-    if not gap_seen:
-        raise HarnessGap("O10 public retention-gap witness not observed; bounded reset alone is insufficient")
+    from .retention_gap_cases import public_retention_bounds as run_public_retention_bounds
+    await run_public_retention_bounds(ctx)
 
 
 @case("O10")
@@ -1713,6 +1666,11 @@ async def stop_evidence(ctx):
 async def host_lifecycle(ctx):
     facts = await ctx.facts()
     host, declaration = facts["host"], facts["caps"].get("host", {})
+    from .codex_l3_cases import is_many_server, many_host_replacement
+    if is_many_server(declaration, host):
+        await many_host_replacement(ctx)
+        host_generation_fence(ctx)
+        return
     if not (host.get("kind") == "process" and host.get("owns_lifecycle") is True and declaration.get("endpoints") == "one"):
         raise HarnessGap("L3 many/cross-incarnation host needs a dedicated real late-old-host injection fixture")
     rid, pid = ctx.agents[0]["id"], ctx.native.state["pid"]
