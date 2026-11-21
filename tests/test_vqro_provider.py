@@ -577,3 +577,47 @@ class CancelledWriteTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SyncStartedTests(unittest.IsolatedAsyncioTestCase):
+    """When the SDK counts the first sync as started (its upsert gate): once the sync is written, not after its reply
+    (an effect can arrive first: 5cdaeb61), and not when it was refused before any byte was written (vqro-lead-
+    secondary's finding 250)."""
+
+    async def asyncSetUp(self):
+        self.core = Core()
+        self.sock = await self.core.start()
+        self.value = {"ref": "r", "incarnation": "", "kind": "terminal", "state": "live", "name": "r"}
+
+    async def asyncTearDown(self):
+        await self.provider.close()
+        await self.core.close()
+
+    async def test_a_written_sync_opens_the_upsert_gate_before_its_reply(self):
+        self.provider = Provider("fake", "instance", fixture.CAPABILITIES)
+        await self.provider.connect(sock=self.sock)
+        self.core.hold.add("provider.sync")
+        sync = asyncio.create_task(self.provider.sync([]))
+        await self.core.wait(lambda: bool(self.core.notes("provider.sync")) or any(r.get("method") == "provider.sync" for r in self.core.rows))
+        self.assertTrue(self.provider._sync_started, "written, its reply still pending")
+        await self.provider.upsert(self.value)
+        await self.core.wait(lambda: len(self.core.notes("resource.upsert")) == 1)
+        sync.cancel()
+        await asyncio.gather(sync, return_exceptions=True)
+
+    async def test_a_sync_refused_before_it_was_written_has_not_started(self):
+        self.provider = Provider("fake", "instance", fixture.CAPABILITIES, limits=Limits(pending=1))
+        await self.provider.connect(sock=self.sock)
+        self.core.hold.add("probe")
+        held = asyncio.create_task(self.provider.call("probe", {"hold": True}))
+        await self.core.wait(lambda: any(r.get("method") == "probe" for r in self.core.rows))
+        with self.assertRaises(ProviderError) as refused:
+            await self.provider.sync([])
+        self.assertEqual(refused.exception.kind, "overloaded")
+        self.assertFalse(any(r.get("method") == "provider.sync" for r in self.core.rows), "nothing was written")
+        self.assertFalse(self.provider._sync_started)
+        with self.assertRaises(ProviderError) as gate:
+            await self.provider.upsert(self.value)
+        self.assertEqual(gate.exception.kind, "conflict")
+        held.cancel()
+        await asyncio.gather(held, return_exceptions=True)

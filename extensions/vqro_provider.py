@@ -389,7 +389,7 @@ class Provider:
         if not done.cancelled() and done.exception() is not None:
             self._disconnect("writer failed; delivery unknown")
 
-    async def call(self, method, params, timeout=None):
+    async def call(self, method, params, timeout=None, on_written=None):
         params = dict(params)
         if method == "hello" and self.principal and self.principal != "undeclared":
             params.setdefault("identity", {"kind": "principal", "principal": self.principal})
@@ -407,6 +407,8 @@ class Provider:
         self._pending[ident] = (method, future)
         try:
             await self._write({"jsonrpc": "2.0", "id": ident, "method": method, "params": params}, deadline)
+            if on_written is not None:
+                on_written()
             return await asyncio.wait_for(asyncio.shield(future), max(0, deadline - asyncio.get_running_loop().time()))
         except TimeoutError:
             raise ProviderError("timeout", "answer deadline; delivery unknown, never resent") from None
@@ -426,10 +428,13 @@ class Provider:
         rows = [facts(row) for row in resources]
         if not isinstance(final, bool):
             raise ProviderError("invalid", "final must be a boolean")
-        # Started once sent: the core may mark the provider synced, and a client may send it an effect (whose
-        # handler upserts), before this coroutine resumes after the reply. Messages keep their order on the wire.
-        self._sync_started = True
-        return await self.call("provider.sync", {"generation": self.generation, "resources": rows, "final": final})
+        # Started once written: the core may mark the provider synced, and a client may send it an effect (whose
+        # handler upserts), before this coroutine resumes after the reply. Messages keep their order on the wire. A
+        # sync refused before any byte was written (the pending bound, a full outgoing queue) has not started.
+        def started():
+            self._sync_started = True
+        return await self.call("provider.sync", {"generation": self.generation, "resources": rows, "final": final},
+                               on_written=started)
 
     async def full_sync(self, resources):
         chunk, size = [], 0
