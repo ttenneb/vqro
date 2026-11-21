@@ -1,5 +1,5 @@
 {
-  "version": 8,
+  "version": 9,
   "extensions": [
     {
       "name": "tabs",
@@ -64,6 +64,11 @@
         "python3",
         "pi.py"
       ]
+    },
+    {
+      "name": "codex",
+      "since": 9,
+      "argv": ["python3", "codex.py"]
     },
     {
       "name": "agents",

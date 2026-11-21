@@ -109,6 +109,14 @@ current state; they carry no per-token stream position.
 preserved, never mapped to success. Coarse mapping: `running` → `working`, `requires_action` → `blocked`, idle after
 `error` → `error`, else `idle`.
 
+**Optional launcher identity.** `data.agent.principal?` is an adapter-reported, explicitly launcher-tagged
+single-endpoint identity, not a principal inferred from a host, placement or process. Codex publishes it only
+for an explicit single-endpoint launcher opt-in matching the bridge's configured caller principal. A
+multi-endpoint/shared host does not turn its host identity into endpoint claims. This fact alone grants no
+rights, proves no tool-process attribution and does not declare `agent.tool_principal: "env"`; those require
+their own standing/evidence (§2.4). Coordination already reads this endpoint fact separately from the core's
+terminal-launch `resource.principal` marker; neither should be guessed when absent.
+
 **Optional view facts.** All fields below are optional; absent means unknown, never zero, empty or inferred.
 Adapters publish only what the runtime reports, including estimates labelled as such by the runtime:
 - `session.cwd?`: string, as reported by the runtime, not the viewer's or bridge process's working directory.

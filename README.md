@@ -38,6 +38,20 @@ Upgrading a pre-rename installation is a one-time offline operation: use the cop
 backup, refuses an existing destination and never changes live backends or creates compatibility links. The
 operator installs the new binaries/extensions and chooses any temporary endpoint handoff for existing clients.
 
+### New Codex agent
+
+Choose **New Codex agent** from commands (or the Codex tab-bar button). The bundled `codex` extension starts
+`vqro-bridge-codex` and `codex app-server --stdio` on the terminal host, creates one empty session, opens a new
+agent tab and records human request routing. Each launch gets its own `p:<uuid>` identity. No prompt is sent;
+Codex's native `admit` delivery remains an explicit choice, not a fabricated strict start mode.
+
+`codex.settings` / `doc/settings/codex` configure a list of literal `{name, argv, bridge_argv?, bridge_env?,
+codex_home?, home?}` runtimes. Optional profile paths resolve on the terminal host and become `CODEX_HOME` / `HOME`;
+absent settings use Codex's own normal login/profile, as if started by hand. vqro and its adapter never read,
+copy or write credentials or native profile files; Codex owns its own authentication/state. Do not put credentials
+in workspace settings. Disabling the launcher does not stop existing agents. Failed UI/routing/session setup
+leaves the already-observed host visible for recovery and never replays a launch or native session creation.
+
 Development: `cargo test`; `.run/harness.py` (ignored) drives `vqro tui` in a pty for UI checks against a scratch
 core (`VQRO_STATE_DIR`, `VQRO_SOCKET`, `VQRO_EXTENSIONS_DIR`, `vqro serve --fake`).
 

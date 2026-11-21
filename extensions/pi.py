@@ -9,6 +9,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
+from agent_launch import launch, launch_cwd, runtimes, valid_argv
 
 SETTINGS = "doc/settings/pi"
 LEGACY = "doc/settings/agents"
@@ -20,33 +21,6 @@ def default_bridge():
     # Resolved by the terminal host, never selected from the core host's OS.
     # Windows/other hosts configure their launcher explicitly (e.g. py -3).
     return ["python3", "-I", str(Path(EXTENSIONS) / "pi_bridge" / "launch.py")]
-
-
-def valid_argv(argv):
-    return isinstance(argv, list) and 1 <= len(argv) <= 64 and all(
-        isinstance(arg, str) and arg and "\0" not in arg and len(arg.encode()) <= 32768 for arg in argv)
-
-
-def runtimes(value):
-    rows = value.get("runtimes") if isinstance(value, dict) else None
-    if not isinstance(rows, list) or not 1 <= len(rows) <= 32:
-        raise VqroError("Pi runtimes must be a nonempty list (at most 32)", "invalid")
-    seen = set()
-    for row in rows:
-        if not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"].strip() \
-                or len(row["name"]) > 64 or row["name"] in seen:
-            raise VqroError("runtime names must be unique, nonempty strings (at most 64 characters)", "invalid")
-        argv = row.get("argv")
-        if not valid_argv(argv):
-            raise VqroError("runtime argv must be a nonempty list of literal argument strings", "invalid")
-        if "bridge_argv" in row and not valid_argv(row["bridge_argv"]):
-            raise VqroError("bridge_argv must be literal argv for the terminal host", "invalid")
-        env = row.get("bridge_env", {})
-        if not isinstance(env, dict) or any(not isinstance(k, str) or not k or "=" in k or "\0" in k
-                or not isinstance(v, str) or "\0" in v for k, v in env.items()):
-            raise VqroError("bridge_env must map host environment names to strings", "invalid")
-        seen.add(row["name"])
-    return rows
 
 
 class Pi:
@@ -83,18 +57,7 @@ class Pi:
         entry=self.ext.vqro.call("workspace.get",{"key":SETTINGS})
         options = runtimes(entry["value"] if entry else DEFAULTS)
         selected = args.get("runtime") or args.get("value")
-        context = args.get("context") or {}
-        source_id = context.get("resource")
-        for prefix in ("agents-", "agent-"):
-            if not source_id and str(context.get("view", "")).startswith(prefix):
-                source_id = context["view"][len(prefix):]
-        cwd = args.get("cwd")
-        if not cwd and source_id:
-            scoped=self.ext.vqro.call("resource.list",{"id":source_id})
-            source=next((r for r in scoped.get("resources",[]) if r.get("id")==source_id),{})
-            cwd=source.get("cwd")
-        if not cwd:
-            cwd = self.ext.layout_folder(args)  # the layout's starting folder, if it names one
+        cwd = launch_cwd(self.ext, args)
         if selected is None and len(options) > 1:
             self.ext.publish("pi-runtimes", {"title": "New Pi agent: runtime", "requires": ["menu"], "items": [
                 {"text": label(r["name"]), "description": label(" ".join(r["argv"])), "command": "pi.new",
@@ -112,43 +75,8 @@ class Pi:
         params = {"bridge": True, "name": "pi-bridge-"+uuid.uuid4().hex[:12], "argv": [*launcher, "--", *runtime["argv"]], "env": env}
         if cwd:
             params["cwd"] = cwd
-        result = self.ext.vqro.call("resource.spawn", params)  # exactly once, never retried
-        host = result["resource"]["id"]
-        end = time.monotonic() + 12
-        lookup_problem=None
-        while True:
-            try:
-                scoped=self.ext.vqro.call("resource.list",{"host":host})
-                rows=scoped.get("resources",[])
-                lookup_problem=None
-            except VqroError as error:
-                lookup_problem=label(f"{error} ({error.kind})",256)
-                rows=[]
-                if error.kind not in ("timeout","overloaded","unavailable","disconnected"):
-                    break
-            found = [r for r in rows if r.get("kind") == "agent" and r.get("host") == host and r.get("available")]
-            if found:
-                resource = found[0]
-                self.initialize_request_route(resource['id'])
-                # Agents is optional: its disable must never kill or hide the
-                # backend terminal. Fall back to that public terminal view.
-                try:
-                    shown = self.ext.invoke("agents.show", {"resource": resource["id"]})
-                except VqroError as error:
-                    # Showing a view is not part of the already-observed spawn. Never turn
-                    # a UI/read failure into an apparent failed launch that invites a retry.
-                    if error.kind not in ("unavailable", "not_found"):
-                        self.ext.notify("Pi agent "+resource["id"]+" exists; view unavailable ("+error.kind+").", "warn")
-                    shown = self.terminal(host)
-                self.ext.notify("Pi agent "+resource["id"]+" created (observed); no prompt sent.", "ok")
-                return {"outcome": result["outcome"], "host": host, "agent": resource["id"], "client": dict((shown or {}).get("client") or {}, close=True)}
-            if time.monotonic() >= end:
-                break
-            time.sleep(.1)
-        detail=" Status unavailable: "+lookup_problem+"." if lookup_problem else ""
-        self.ext.notify("Terminal "+host+" spawned; Pi agent not ready."+detail+" Do not blindly retry.", "warn")
-        shown = self.terminal(host)
-        return {"outcome": result["outcome"], "host": host, "ready": False, "client": (shown or {}).get("client", {})}
+        return launch(self.ext, params, brand="Pi", initialize_route=self.initialize_request_route,
+                      show_terminal=self.terminal)
 
     def initialize_request_route(self, agent):
         # The coord callback sees the original SDK caller/proof, never a launch
