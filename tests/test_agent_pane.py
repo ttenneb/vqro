@@ -901,6 +901,29 @@ class AgentPane(unittest.TestCase):
         self.assertIsNotNone(self.agents.conversations["r2"].incompatible)
         self.assertEqual(len(self.attaches()), 3, "the first attach plus two backed-off retries")
 
+    def test_bytes_and_ends_of_a_closed_stream_never_reach_the_current_one(self):
+        """spike-panel-1 #104 review P3: the SDK may still deliver a note of a stream the viewer already closed. Each
+        stream's sink forwards only while that stream is current."""
+        self.feed(snapshot(CONVERSATION, seq=4))
+        old_sink = self.core.sinks[self.agents.conversations["r2"].stream]
+        self.feed(line({"op": "put", "seq": 5, "kind": "message"}))  # rejected: closed, then reattached after the wait
+        self.elapse()
+        c = self.agents.conversations["r2"]
+        current = c.stream
+        self.assertIsNotNone(current)
+        rejections, seq = c.rejections, c.view.seq
+        old_sink.data(line({"op": "put", "seq": 5, "kind": "message"}))  # the same rejected record, late
+        old_sink.data(b"x" * 70000)  # and late oversized bytes
+        self.agents.flush_conversations()
+        self.assertEqual((c.rejections, c.view.seq, c.view.broken), (rejections, seq, False), "nothing counted or applied")
+        old_sink.ended("closed", {"reason": "late"})
+        self.agents.flush_conversations()
+        self.assertEqual(c.stream, current, "an old stream's end never ends the current one")
+        self.core.sinks[current].data(line({"op": "append", "seq": 5, "kind": "message", "id": "m5", "base": 1, "rev": 2,
+                                            "field": "/content/0/text", "text": " on"}))
+        self.agents.flush_conversations()
+        self.assertEqual(c.view.seq, 5, "the current stream still applies")
+
     def test_one_pending_backoff_timer_however_many_wakes(self):
         """spike-panel-1 P3: wakes during a backoff never pile up timers."""
         self.feed(snapshot(CONVERSATION, seq=4))

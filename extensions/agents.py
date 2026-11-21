@@ -331,8 +331,10 @@ class Conversation:
     def too_big(self):
         return bool(self.incompatible) and self.incompatible.get("kind") == "over_bound"
 
-    def data(self, data):
+    def data(self, data, generation=None):
         with self.lock:
+            if generation is not None and generation != self.generation:
+                return  # late bytes of a stream already closed: never applied or counted against the current one
             now, epoch = int(time.time() * 1000), self.view.epoch
             rejected_before = self.view.rejection
             received = self.view.feed(data, epochs=True)
@@ -373,12 +375,31 @@ class Conversation:
     def error(self, error):
         pass
 
-    def ended(self, kind, reason):
+    def ended(self, kind, reason, generation=None):
         with self.lock:
+            if generation is not None and generation != self.generation:
+                return  # an old stream's end never ends the current one
             self.view.stream_ended()
             self.stream = None
             self.generation += 1
         self.wake(self.rid, reattach=True)
+
+
+class StreamSink:
+    """The sink of ONE attached stream: it forwards to its conversation only while that stream is current (the
+    generation it was attached in), so bytes or an end the SDK still delivers after a close are dropped."""
+
+    def __init__(self, conversation, generation):
+        self.conversation, self.generation = conversation, generation
+
+    def data(self, data):
+        self.conversation.data(data, self.generation)
+
+    def error(self, error):
+        self.conversation.error(error)
+
+    def ended(self, kind, reason):
+        self.conversation.ended(kind, reason, self.generation)
 
 
 def incompatible_note(c):
@@ -576,7 +597,7 @@ class Agents:
         if old is not None:
             self.ext.close_stream(old)  # data was lost: reattach from the last installed cursor
         try:
-            reply = self.ext.attach_items(rid, c, after)
+            reply = self.ext.attach_items(rid, StreamSink(c, generation), after)
         except VqroError:
             self.later(1.0, rid)
             return
