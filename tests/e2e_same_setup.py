@@ -119,9 +119,23 @@ class Root:
                 self.core.wait(15)
             except subprocess.TimeoutExpired:
                 self.core.kill()
-        subprocess.run([HC, "server", "stop"], env={**self.env, "PATH": ""}, capture_output=True)
-        subprocess.run(["/usr/bin/tmux", "-N", "-S", f"{self.r}/st/tmux.sock", "kill-server"],
-                       env={"HOME": f"{self.r}/home", "PATH": "/usr/bin:/bin"}, capture_output=True)
+        # The providers exit after the core; until vqro-tmux is gone it may start its owned server again, so stop
+        # the backends only after it, and repeat until nothing of this root runs (bounded).
+        backend = lambda pid: open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")[0].endswith((b"tmux", b"herdr-core"))
+        def only_backends():
+            try:
+                return all(backend(pid) for pid in self.leftovers())
+            except OSError:
+                return False
+        self.wait(only_backends, 15)
+        end = time.time() + 15
+        while True:
+            subprocess.run([HC, "server", "stop"], env={**self.env, "PATH": ""}, capture_output=True)
+            subprocess.run(["/usr/bin/tmux", "-N", "-S", f"{self.r}/st/tmux.sock", "kill-server"],
+                           env={"HOME": f"{self.r}/home", "PATH": "/usr/bin:/bin"}, capture_output=True)
+            if not self.leftovers() or time.time() > end:
+                break
+            time.sleep(0.5)
 
     def leftovers(self):
         found = []
