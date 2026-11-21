@@ -66,7 +66,7 @@ impl Owner {
     pub fn is_live(&self)->bool { self.live.load(Ordering::Acquire) }
 }
 pub fn authenticate(core:&crate::core::Core, name:&str, token:&str)->Option<Owner> {
-    core.exts.get(name).filter(|r|r.running && !r.token.is_empty() && r.token==token).map(|r|Owner{name:name.into(),generation:r.generation,live:r.live.clone()})
+    core.exts.get(name).filter(|r|r.running && crate::bridge_tokens::token_matches(&r.token,token)).map(|r|Owner{name:name.into(),generation:r.generation,live:r.live.clone()})
 }
 pub fn owner_valid(core:&crate::core::Core, owner:&Owner)->bool { owner.is_live() && core.exts.get(&owner.name).is_some_and(|r|r.running && r.generation==owner.generation) }
 pub(crate) fn check_owner(core:&crate::core::Core, owner:Option<&Owner>)->Result<(),crate::rpc::RpcError> {

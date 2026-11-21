@@ -54,6 +54,14 @@ private RPC replies remain unchanged. A synthetic-secret baseline leaks via str 
 nonmutation and wire-separation tests3 plus existing provider28 and host-helper3 tests pass. No new logger,
 implicit payload normalization or universal secret-discovery guarantee is added.
 
+Per coordinator direction, host-context and extension credential equality share a stdlib-only public-length
+check plus full-byte XOR/OR fold, with black_box on the accumulator (no content-dependent early exit). This is a
+best-effort optimizer barrier, NOT a formal compiler/hardware timing guarantee or a new security boundary. No
+new dependency, Cargo.lock or licence-inventory change. Exact equality, every one of64 mismatches, empty/length
+refusals and Unicode cases plus library279/child-supervision1/host-context1/native-CLI1 tests pass (1libraryignored);
+these are behavioural preservation tests, not a timing proof. Setup-only taskset/Zig PATH failures are retained
+separately from the real Python functional red and the successful focused run.
+
 All scratch evidence under prim-slice1-host-context. Whole final-candidate gate, independent review and K1 PartB
 reprobe remain pending; no harness gap closure or live install is claimed by focused tests alone. Names/semantics
 sent to spec owner for batch7 consistency review. No install/network/model calls or live sessions touched.

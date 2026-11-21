@@ -120,7 +120,7 @@ impl HostContext {
 pub(crate) fn authenticate_host_context(core:&crate::core::Core,token:&str)->Option<HostContext>{
     if token.is_empty(){return None}
     core.providers.iter().find_map(|(name,provider)|{
-        if provider.host_context_token.as_deref()!=Some(token){return None}
+        if provider.host_context_token.as_deref().is_none_or(|expected|!crate::bridge_tokens::token_matches(expected,token)){return None}
         let host=provider.metadata["host"].as_str()?;
         let context=HostContext{provider:name.clone(),generation:provider.generation,host:host.into(),health:provider.health.subscribe(),resource:core.resources.get(host)?.lifetime(),owner:provider.owner.clone()};
         context.valid(core).then_some(context)

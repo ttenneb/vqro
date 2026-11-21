@@ -11,6 +11,25 @@ use crate::core::{Core, Shared};
 use crate::rpc::{Peer, RpcError};
 use crate::provider;
 
+/// Compare all equal-length credential bytes without content-dependent early exit. Length is public.
+/// black_box is a best-effort optimizer barrier, not a formal hardware/compiler timing guarantee;
+/// the cooperative same-user protocol is still not a security boundary.
+pub(crate) fn token_matches(expected:&str,presented:&str)->bool {
+    if expected.is_empty() || expected.len()!=presented.len(){return false}
+    let difference=expected.bytes().zip(presented.bytes()).fold(0u8,|difference,(a,b)|std::hint::black_box(difference|(a^b)));
+    difference==0
+}
+
+#[cfg(test)]
+#[test]
+fn credential_comparison_preserves_exact_opaque_equality() {
+    let expected="a".repeat(64);
+    assert!(token_matches(&expected,&expected));
+    for index in 0..64 {let mut different=expected.as_bytes().to_vec();different[index]^=1;assert!(!token_matches(&expected,std::str::from_utf8(&different).unwrap()));}
+    assert!(!token_matches("",""));assert!(!token_matches(&expected,&expected[..63]));assert!(!token_matches(&expected,&format!("{expected}x")));
+    assert!(token_matches("opaque-é","opaque-é"));assert!(!token_matches("opaque-é","opaque-e"));
+}
+
 #[derive(Clone)] enum State { Pending, Ready(String), Invalid }
 #[derive(Clone, Serialize, Deserialize)] struct Resume { host: String, provider: String, instance: String }
 #[derive(Default)]
