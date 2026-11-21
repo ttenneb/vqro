@@ -150,7 +150,12 @@ class Context:
                     continue
                 qualifier = "" if self.fault == "model_kind_unasserted" and field == "kind" else "asserted "
                 claims.append(f"{qualifier}{field}: {args['origin'][field]}")
-            header = "; ".join(claims) + f"\nfrom {sender} via {expected['actor']}{label}\n\n"
+            actor = expected["actor"]
+            if self.fault == "model_actor_suffix" or self.fault == "model_undeclared_actor_suffix" and actor == "undeclared":
+                actor += "-wrong"
+            if self.fault == "model_principal_suffix":
+                sender += "-wrong"
+            header = "; ".join(claims) + f"\nfrom {sender} via {actor}{label}\n\n"
             native.insert(0, {"type": "text", "text": header})
         if self.fault == "drop":
             native = native[:-1]
@@ -283,6 +288,20 @@ class ContentChecks(unittest.TestCase):
             with self.subTest(header=header):
                 self.assertFalse(subject.sender_assertion(header, sender))
 
+    def test_exact_from_via_fields_not_prefixes_other_fields_or_case_folding(self):
+        self.assertTrue(subject.framed_origin("asserted kind: agent; From P via extension:coord", "P", "extension:coord"))
+        self.assertTrue(subject.framed_origin("from undeclared via undeclared", "undeclared", "undeclared"))
+        for header, principal, actor in (
+                ("from P via extension:coord-wrong", "P", "extension:coord"),
+                ("from P-wrong via extension:coord", "P", "extension:coord"),
+                ("from p via extension:coord", "P", "extension:coord"),
+                ("from P via Extension:coord", "P", "extension:coord"),
+                ("from undeclared via undeclared-wrong", "undeclared", "undeclared"),
+                ("from undeclared-wrong via undeclared", "undeclared", "undeclared"),
+                ("asserted agent: extension:coord; from P via someone-else", "P", "extension:coord")):
+            with self.subTest(header=header):
+                self.assertFalse(subject.framed_origin(header, principal, actor))
+
     def test_body_claim_labels_do_not_rescue_missing_model_frame(self):
         expected = {"principal": "P", "actor": "extension:coord"}
         message = {"role": "user", "content": [{"type": "text", "text":
@@ -358,6 +377,15 @@ class HandlerChecks(unittest.IsolatedAsyncioTestCase):
         self.assertIn("asserted kind: agent", native)
         self.assertIn("D17-original-inbox-sender", native)
         self.assertNotIn("sender asserted", native)
+
+    async def test_d17_complete_handler_rejects_displayed_identity_prefixes(self):
+        for fault in ("model_actor_suffix", "model_principal_suffix", "model_undeclared_actor_suffix"):
+            ctx = Context(fault=fault)
+            with self.subTest(fault=fault), patch.object(subject, "public_origin_route", route), self.assertRaisesRegex(CheckFailed, "exact sender/current-actor frame"):
+                await subject.core_bound_origin(ctx)
+            if fault == "model_undeclared_actor_suffix":
+                text = json.dumps(ctx.native.messages[-1])
+                self.assertIn("from undeclared via undeclared-wrong", text)
 
     async def test_d17_complete_handler_rejects_unasserted_native_kind(self):
         with patch.object(subject, "public_origin_route", route), self.assertRaisesRegex(CheckFailed, "asserted kind claim"):

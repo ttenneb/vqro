@@ -279,6 +279,16 @@ def sender_assertion(header, sender):
                for clause in re.split(r"[\r\n;]+", header))
 
 
+def framed_origin(header, principal, actor):
+    """Match actual from/via fields, including when principal equals actor.
+
+    An ID in another field, or as a prefix of a different opaque ID, is not the
+    requested native sender/transport identity. Labels may vary in case; IDs may not.
+    """
+    pair = rf"(?i:from)\s+{re.escape(principal)}\s+(?i:via)\s+{re.escape(actor)}(?=$|[\s(\[])"
+    return any(re.match(pair, clause.strip()) is not None for clause in re.split(r"[\r\n;]+", header))
+
+
 def model_origin(message, rendering, expected, supplied, *, sender=None):
     check(message.get("role") == rendering.get("role"), "native model role differs from declared rendering")
     check(message.get("role") not in ("system", "developer"), "caller claim gained privileged model authority")
@@ -289,7 +299,7 @@ def model_origin(message, rendering, expected, supplied, *, sender=None):
     header = text.split("D17-body:", 1)[0]
     model_claims(header, supplied)
     principal = sender["principal"] if sender else expected["principal"]
-    check(principal in header and expected["actor"] in header, "native envelope omitted sender/current-actor frame")
+    check(framed_origin(header, principal, expected["actor"]), "native envelope omitted exact sender/current-actor frame")
     if sender:
         check(sender_assertion(header, sender),
               "inbox-record provenance was not labeled as this sender's extension assertion in the model frame")
