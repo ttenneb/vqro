@@ -119,9 +119,15 @@ class Root:
                 self.core.wait(15)
             except subprocess.TimeoutExpired:
                 self.core.kill()
-        # The providers exit after the core; until vqro-tmux is gone it may start its owned server again, so stop
-        # the backends only after it, and repeat until nothing of this root runs (bounded).
-        backend = lambda pid: open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")[0].endswith((b"tmux", b"herdr-core"))
+        # The providers exit after the core; until vqro-tmux is gone it may start its owned server again. So wait
+        # (bounded) until only backend processes are left, then stop the backends, repeating until nothing of this
+        # root runs. If a provider outlives the wait the stop still runs and the final leftovers check fails closed.
+        def backend(pid):
+            """The tmux server or herdr-core this root started, by exact program name (vqro-tmux is a provider)."""
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                program = f.read().split(b"\0")[0].rsplit(b"/", 1)[-1]
+            return program in (b"tmux", b"herdr-core")
+
         def only_backends():
             try:
                 return all(backend(pid) for pid in self.leftovers())
@@ -142,8 +148,9 @@ class Root:
         for pid in os.listdir("/proc"):
             if pid.isdigit() and int(pid) != os.getpid():
                 try:
-                    if self.r.encode() in open(f"/proc/{pid}/environ", "rb").read() or self.r.encode() in open(f"/proc/{pid}/cmdline", "rb").read():
-                        found.append(pid)
+                    with open(f"/proc/{pid}/environ", "rb") as env, open(f"/proc/{pid}/cmdline", "rb") as cmd:
+                        if self.r.encode() in env.read() or self.r.encode() in cmd.read():
+                            found.append(pid)
                 except OSError:
                     pass
         return found
