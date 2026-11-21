@@ -531,7 +531,9 @@ async fn actor(
     timeout: Duration,
     reader: tokio::task::JoinHandle<()>,
 ) {
-    let initial = tokio::time::timeout(timeout, async {
+    // Starting the control client and attaching is not a command reply: a short command timeout must not fail a
+    // slow start (a busy host). Bounded by the same floor as the late-reply drain.
+    let initial = tokio::time::timeout(timeout.max(DEFAULT_COMMAND_TIMEOUT), async {
         loop {
             match records.recv().await.ok_or(Error::Disconnected)?? {
                 Record::Block { error, lines, .. } => return if error { Err(Error::Rejected(lines)) } else { Ok(()) },

@@ -5,6 +5,7 @@ Invoked as the tmux binary: `fake -N -S SOCKET -f /dev/null -C attach-session -t
 The client clears its environment, so settings come from `SOCKET.conf` (JSON):
   {"slow": {"list-panes": 0.6}}  -- sleep before answering that command; like a busy tmux, every
                                      later reply waits too (commands are answered in order).
+  {"attach_delay": 0.3}          -- sleep before the attach block (a slow start or a busy host).
 Every command line is appended to `SOCKET.log`.
 """
 import json
@@ -34,6 +35,7 @@ def block(lines, error=False):
     out.flush()
 
 
+time.sleep(conf.get("attach_delay", 0))
 block([])  # the attach block
 options = {}
 for raw in sys.stdin.buffer:

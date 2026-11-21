@@ -84,6 +84,17 @@ async fn mutating_timeout_is_indeterminate_and_drops_the_client() {
 }
 
 #[tokio::test]
+async fn a_slow_attach_is_not_held_to_the_command_timeout() {
+    // Flake on f05a2409: connect waited for tmux's attach block only `command_timeout` (50 ms in these tests), so a
+    // slow start of the control client (python fake under load) failed connect with Disconnected.
+    let Some(_) = fake() else { return };
+    let dir = tempfile::Builder::new().prefix("pft").tempdir_in("/tmp").unwrap();
+    let c = client(dir.path(), r#"{"attach_delay": 0.3}"#, 50).await;
+    assert_eq!(c.command(&["display-message", "-p", "attached"]).await.unwrap(), vec![b"attached".to_vec()]);
+    c.close().await;
+}
+
+#[tokio::test]
 async fn a_late_reply_that_never_comes_is_a_desync_and_drops_the_client() {
     let Some(_) = fake() else { return };
     let dir = tempfile::Builder::new().prefix("pft").tempdir_in("/tmp").unwrap();
