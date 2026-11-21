@@ -1,0 +1,286 @@
+#!/usr/bin/python3
+"""Opt-in e2e: the same workspace behaves the same on herdr and on tmux ("same setup anywhere").
+
+Two fresh private roots, each with both providers connected (vqro-herdr on a private herdr-core, vqro-tmux on its
+private tmux server); they differ only in which one is the default backend. Each runs one scripted workspace:
+a titled shell tab split in two, a renamed second tab, the sidebar on, tab marks on, and a fake Pi agent
+(`pi.new`, tests/fixtures/fake_pi.py through the Pi bridge). What a client sees is captured as structure, not
+pixels: the layout tree, views, resources (normalized ids), the sidebar's live rows, tab marks/states, available
+commands, and the text client's outline. The two captures are compared; every difference is reported, and those
+not listed as an expected backend capability difference (EXPECTED below) fail the test.
+
+Usage: tests/e2e_same_setup.py TARGET_DIR [--keep-captures DIR]   (debug binaries in TARGET_DIR/debug)
+Private /tmp roots; nothing live is touched. Stops only what it started.
+"""
+import json, os, re, shutil, socket, subprocess, sys, tempfile, time
+
+TARGET = sys.argv[1]
+KEEP = sys.argv[sys.argv.index("--keep-captures") + 1] if "--keep-captures" in sys.argv else None
+VQRO, PHERDR, PTMUX = (os.path.join(TARGET, "debug", b) for b in ("vqro", "vqro-herdr", "vqro-tmux"))
+HC = os.path.expanduser("~/.local/bin/herdr-core")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CALL_TIMEOUT = 20
+results = []
+
+# Differences that come from what each backend is, not from a bug: (path regex, why).
+EXPECTED = [
+    (r"^resources\.\w+\.provider$", "each resource names the backend that owns it"),
+]
+HOST = socket.gethostname()
+# Differences that are known bugs, each with its finding (qol/same-setup-findings.md). A rule matches only the exact
+# shape found (path and values), so a new difference in the same place still fails.
+KNOWN = [
+    ("F1 tmux reports its automatic window name as the resource name",
+     lambda p, h, t: re.fullmatch(r"resources\.terminal\d+\.name", p) and h is None and isinstance(t, str)),
+    ("F1 ...so a tab opened on tmux is named after the window name at spawn (tmux's default-shell wrapper)",
+     lambda p, h, t: re.fullmatch(r"layout\..*\.title", p) and h == "sh" and t == "zsh"),
+    ("F1 ...and program titles never show on tmux (a named resource keeps its name)",
+     lambda p, h, t: re.fullmatch(r"text_client\[\d+\]", p) and tab_names_only(h, t)),
+    ("F2 tmux reports its default pane title (the hostname) as a program title",
+     lambda p, h, t: re.fullmatch(r"resources\.terminal\d+\.title", p) and h == "" and t == HOST),
+    ("F3 tmux reports no argv for its default shell (herdr reports the shell it ran)",
+     lambda p, h, t: re.fullmatch(r"resources\.terminal\d+\.argv", p) and h and t == []),
+]
+
+
+def check(name, ok, detail=""):
+    results.append(bool(ok))
+    print(("PASS " if ok else "FAIL ") + name + (f"\n{detail}" if detail and not ok else ""), flush=True)
+    return ok
+
+
+class Root:
+    def __init__(self, backend):
+        self.backend = backend
+        self.r = tempfile.mkdtemp(prefix=f"pss{backend[0]}", dir="/tmp")
+        for d in ("home", "st", "xst", "run", "cfg", "bin", "work"):
+            os.makedirs(os.path.join(self.r, d))
+        os.chmod(os.path.join(self.r, "run"), 0o700)
+        shutil.copytree(os.path.join(REPO, "extensions"), os.path.join(self.r, "ext"),
+                        ignore=shutil.ignore_patterns("node_modules", "opentui", "__pycache__"))
+        os.symlink("/usr/bin/python3", os.path.join(self.r, "bin", "python3"))
+        self.env = {"HOME": f"{self.r}/home", "PATH": f"{self.r}/bin", "TERM": "xterm-256color", "SHELL": "/bin/sh",
+                    "VQRO_STATE_DIR": f"{self.r}/st", "VQRO_SOCKET": f"{self.r}/p.sock", "VQRO_EXTENSIONS_DIR": f"{self.r}/ext",
+                    "XDG_STATE_HOME": f"{self.r}/xst", "XDG_RUNTIME_DIR": f"{self.r}/run", "XDG_CONFIG_HOME": f"{self.r}/cfg",
+                    "HC_SESSION": "same", "HC_SOCKET": f"{self.r}/hc.sock", "LANG": "C.UTF-8"}
+        self.core = None
+
+    def call(self, method, params=None):
+        deadline = time.monotonic() + CALL_TIMEOUT
+        with socket.socket(socket.AF_UNIX) as s:
+            s.settimeout(CALL_TIMEOUT)
+            s.connect(self.env["VQRO_SOCKET"])
+            buf = bytearray()
+            for i, (m, p) in enumerate([("hello", {"client": "e2e-same-setup"}), (method, params or {})]):
+                s.sendall((json.dumps({"jsonrpc": "2.0", "id": i, "method": m, "params": p}) + "\n").encode())
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"{method}: no reply within {CALL_TIMEOUT} s")
+                    end = buf.find(b"\n")
+                    if end < 0:
+                        s.settimeout(max(0.001, deadline - time.monotonic()))
+                        chunk = s.recv(65536)
+                        if not chunk:
+                            raise ConnectionError(f"{method}: core closed the connection")
+                        buf += chunk
+                        continue
+                    msg = json.loads(bytes(buf[:end]))
+                    del buf[:end + 1]
+                    if msg.get("id") == i:
+                        break
+        if "error" in msg:
+            raise RuntimeError(f"{method}: {msg['error']}")
+        return msg["result"]
+
+    def wait(self, pred, timeout=30):
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                v = pred()
+                if v:
+                    return v
+            except Exception:
+                pass
+            time.sleep(0.25)
+        return None
+
+    def start(self):
+        with open(f"{self.r}/serve.log", "w") as log:
+            self.core = subprocess.Popen([VQRO, "serve", "--fake"], env=self.env, stdout=log, stderr=subprocess.STDOUT)
+        self.wait(lambda: os.path.exists(self.env["VQRO_SOCKET"]), 15)
+        herdr = self.backend == "herdr"
+        self.call("workspace.apply", {"note": "providers", "ops": [
+            {"op": "set", "key": "extension/herdr", "value": {"argv": ["/usr/bin/env", "PATH=", PHERDR, "--hc", HC, "--name", "herdr"],
+                                                              "kind": "provider", "default": herdr}},
+            {"op": "set", "key": "extension/tmux", "value": {"argv": ["/usr/bin/env", "PATH=", PTMUX, "--tmux", "/usr/bin/tmux", "--name", "tmux"],
+                                                             "kind": "provider", "enabled": True, "default": not herdr}}]})
+        return self.wait(lambda: all(self.call("workspace.snapshot")["providers"].get(n, {}).get("state") == "connected"
+                                     for n in ("herdr", "tmux")), 40)
+
+    def stop(self):
+        try:
+            self.call("core.shutdown")
+        except Exception:
+            pass
+        if self.core:
+            try:
+                self.core.wait(15)
+            except subprocess.TimeoutExpired:
+                self.core.kill()
+        subprocess.run([HC, "server", "stop"], env={**self.env, "PATH": ""}, capture_output=True)
+        subprocess.run(["/usr/bin/tmux", "-N", "-S", f"{self.r}/st/tmux.sock", "kill-server"],
+                       env={"HOME": f"{self.r}/home", "PATH": "/usr/bin:/bin"}, capture_output=True)
+
+    def leftovers(self):
+        found = []
+        for pid in os.listdir("/proc"):
+            if pid.isdigit() and int(pid) != os.getpid():
+                try:
+                    if self.r.encode() in open(f"/proc/{pid}/environ", "rb").read() or self.r.encode() in open(f"/proc/{pid}/cmdline", "rb").read():
+                        found.append(pid)
+                except OSError:
+                    pass
+        return found
+
+
+def scenario(root):
+    """The same workspace, built only through public commands. Returns a note of anything that could not be done."""
+    c = root.call
+    snap = lambda: c("workspace.snapshot")
+    commands = ("tabs.open", "tabs.rename", "panes.split", "sidebar.toggle", "pi.new", "tabs.set")
+    if not root.wait(lambda: set(commands) <= {x["name"] for x in c("command.list")["commands"] if x.get("available")}, 40):
+        return "extension commands never became available"
+    native = ["/usr/bin/python3", os.path.join(REPO, "tests/fixtures/fake_pi.py"), "--bridge-e2e"]
+    c("workspace.apply", {"note": "fake Pi runtime", "ops": [{"op": "set", "key": "doc/settings/pi", "value": {"runtimes": [
+        {"name": "fake", "argv": native, "bridge_argv": ["/usr/bin/python3", "-I", f"{root.r}/ext/pi_bridge/python_launch.py"]}]}}]})
+    # Tab 1: a shell that sets its program title, then splits; tab 2: a plain shell renamed "build".
+    c("command.invoke", {"name": "tabs.open", "args": {"argv": ["/bin/sh", "-c", "printf '\\033]0;titled\\007'; exec /bin/sh"],
+                                                       "cwd": f"{root.r}/work"}})
+    c("command.invoke", {"name": "tabs.open", "args": {"argv": ["/bin/sh"], "cwd": f"{root.r}/work"}})
+    main = lambda: snap()["entries"]["layout/main"]
+    tabs_node = lambda: next(n for n in walk(main()["value"]) if "tabs" in n)
+    path_of = lambda tab: next(p for p, n in walk_paths(main()["value"]) if "tabs" in n) + [tab]
+    tab_path = path_of(0)[:-1]
+    c("command.invoke", {"name": "tabs.rename", "args": {"text": "build", "context": {"layout": "main", "layout_version": main()["version"],
+                                                                                       "tab_path": tab_path, "tab_index": 1}}})
+    c("command.invoke", {"name": "panes.split", "args": {"dir": "right", "context": {
+        "layout": "main", "layout_version": main()["version"], "path": path_of(0), "tab_path": tab_path, "tab_index": 0}}})
+    # Tab 3: a single shell that sets its program title (program-titled tabs), and tab 4: a plain shell.
+    c("command.invoke", {"name": "tabs.open", "args": {"argv": ["/bin/sh", "-c", "printf '\\033]0;solo\\007'; exec /bin/sh"],
+                                                       "cwd": f"{root.r}/work"}})
+    c("command.invoke", {"name": "tabs.open", "args": {"argv": ["/bin/sh"], "cwd": f"{root.r}/work"}})
+    c("command.invoke", {"name": "sidebar.toggle"})
+    c("command.invoke", {"name": "tabs.set", "args": {"field": "marks", "value": True}})
+    root.wait(lambda: any(r.get("name") == "fake" for r in (snap()["entries"].get("doc/settings/pi") or {}).get("value", {}).get("runtimes", [])), 10)
+    created = c("command.invoke", {"name": "pi.new", "args": {"runtime": "fake", "cwd": f"{root.r}/work"}})
+    if not root.wait(lambda: any(r["kind"] == "agent" and r.get("available") for r in snap()["resources"]), 40):
+        return f"no agent registered (pi.new: {created})"
+    root.wait(lambda: {"titled", "solo"} <= {r.get("title") for r in snap()["resources"]}, 15)
+    root.wait(lambda: snap().get("live", {}).get("sidebar"), 15)
+    time.sleep(2)  # nothing to observe: let late facts (titles, cwd, agent metadata) land before the capture
+    return None
+
+
+def walk(n):
+    yield n
+    for c in n.get("children", []):
+        yield from walk(c)
+    for t in n.get("tabs", []):
+        yield from walk(t["node"])
+
+
+def walk_paths(n, path=()):
+    yield list(path), n
+    for i, c in enumerate(n.get("children", [])):
+        yield from walk_paths(c, path + (i,))
+    for i, t in enumerate(n.get("tabs", [])):
+        yield from walk_paths(t["node"], path + (i,))
+
+
+def capture(root):
+    """What a client sees, with run-specific identifiers replaced by stable labels."""
+    snap = root.call("workspace.snapshot")
+    resources = snap["resources"]
+    order = sorted(resources, key=lambda r: (r["kind"], int(re.sub(r"\D", "", r["id"]) or 0)))
+    label = {r["id"]: f"{r['kind']}{i}" for i, r in enumerate(order)}
+    text = json.dumps(snap)
+    for rid in sorted(label, key=len, reverse=True):
+        text = re.sub(rf"(?<![\w-]){re.escape(rid)}(?![\w])", label[rid], text)
+    text = text.replace(root.r, "<root>")
+    # Names a run generates (the Pi bridge's provider instance and terminal names) carry random suffixes.
+    text = re.sub(r"pi-[0-9a-f]{8}-[0-9a-f-]{27}", "pi-<instance>", text)
+    text = re.sub(r"pi-bridge-[0-9a-f]{12}", "pi-bridge-<id>", text)
+    snap = json.loads(text)
+    keep = ("kind", "state", "available", "stale", "provider", "name", "title", "cwd", "argv", "status", "host")
+    out = {
+        "layout": snap["entries"].get("layout/main", {}).get("value"),
+        "views": {k[5:]: {f: v["value"].get(f) for f in ("kind", "resource", "title", "fallback")}
+                  for k, v in snap["entries"].items() if k.startswith("view/")},
+        "resources": {label_: {f: r.get(f) for f in keep} for label_, r in ((r["id"], r) for r in snap["resources"])},
+        "agents": {r["id"]: sorted(((r.get("data") or {}).get("agent") or {}).get("caps", {}))
+                   for r in snap["resources"] if r["kind"] == "agent"},
+        "sidebar": [{f: row.get(f) for f in ("text", "badges", "style")} for row in (snap.get("live", {}).get("sidebar") or {}).get("items", [])],
+        "commands": sorted(c["name"] for c in root.call("command.list")["commands"] if c.get("available")),
+    }
+    outline = subprocess.run([VQRO, "ui", "text", "--", "--once", "show"], env=root.env, capture_output=True, text=True, timeout=30)
+    out["text_client"] = re.sub(r"\b(terminal|agent)\d+\b", r"\1#", (outline.stdout + outline.stderr).replace(root.r, "<root>")).splitlines()
+    return out
+
+
+def tab_names_only(herdr, tmux):
+    """Two text-client `tabs:` lines that differ only where tmux shows a shell's window name (`sh`, `zsh`) as a tab's
+    name: same tabs, same order, same numbers and marks."""
+    tabs = lambda line: re.findall(r"\[([^\]]*)\]", line) if line.strip().startswith("tabs:") else None
+    h, t = tabs(herdr), tabs(tmux)
+    if not h or not t or len(h) != len(t):
+        return False
+    split = lambda tab: re.match(r"(.*?)([₀-₉]+)(.*)", tab).groups() if re.match(r"(.*?)([₀-₉]+)(.*)", tab) else (tab, "", "")
+    return all(x == y or (split(x)[1:] == split(y)[1:] and split(y)[0] in ("sh", "zsh")) for x, y in zip(h, t))
+
+
+def differences(a, b, path=""):
+    if isinstance(a, dict) and isinstance(b, dict):
+        for k in sorted(set(a) | set(b)):
+            yield from differences(a.get(k, "<missing>"), b.get(k, "<missing>"), f"{path}.{k}" if path else k)
+    elif isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        for i, (x, y) in enumerate(zip(a, b)):
+            yield from differences(x, y, f"{path}[{i}]")
+    elif a != b:
+        yield path, a, b
+
+
+captures, roots = {}, []
+try:
+    for backend in ("herdr", "tmux"):
+        root = Root(backend)
+        roots.append(root)
+        check(f"{backend}: both providers connected, {backend} the default", root.start())
+        problem = scenario(root)
+        check(f"{backend}: the scripted workspace was built", problem is None, problem or "")
+        captures[backend] = capture(root)
+        root.stop()
+    if KEEP:
+        os.makedirs(KEEP, exist_ok=True)
+        for backend, cap in captures.items():
+            with open(os.path.join(KEEP, f"capture-{backend}.json"), "w") as f:
+                json.dump(cap, f, indent=2, ensure_ascii=False)
+    found = list(differences(captures["herdr"], captures["tmux"]))
+    unexpected = []
+    for path, a, b in found:
+        why = next((why for pattern, why in EXPECTED if re.search(pattern, path)), None)
+        known = next((name for name, rule in KNOWN if rule(path, a, b)), None)
+        kind = f"expected: {why}" if why else f"known bug: {known}" if known else "UNEXPECTED"
+        print(f"DIFF {path}: herdr={json.dumps(a, ensure_ascii=False)[:200]} tmux={json.dumps(b, ensure_ascii=False)[:200]}  ({kind})", flush=True)
+        if why is None and known is None:
+            unexpected.append(path)
+    check("the same workspace looks the same to a client on herdr and on tmux (apart from expected differences)",
+          not unexpected, "\n".join(unexpected))
+finally:
+    for root in roots:
+        root.stop()
+        stray = root.wait(lambda: not root.leftovers() and [True], 10)
+        check(f"{root.backend}: nothing left running", bool(stray), str(root.leftovers()))
+        if all(results):
+            shutil.rmtree(root.r, ignore_errors=True)
+print(f"passed {sum(results)} failed {len(results) - sum(results)}")
+sys.exit(0 if all(results) else 1)

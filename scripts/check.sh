@@ -302,6 +302,7 @@ if [ "$MODE" = full ]; then
   step e2e-tui-pick-search "${CLEAN[@]}" python3 tests/e2e_tui_pick_search.py "$TARGET"
   step e2e-tui-keys "${CLEAN[@]}" python3 tests/e2e_tui_keys.py "$TARGET"
   step e2e-tui-pane-basics "${CLEAN[@]}" python3 tests/e2e_tui_pane_basics.py "$TARGET"
+  step e2e-same-setup "${CLEAN[@]}" python3 tests/e2e_same_setup.py "$TARGET"
   step e2e-workspace-tabs "${CLEAN[@]}" python3 tests/e2e_workspace_tabs.py "$TARGET"
   step e2e-tui-workspaces "${CLEAN[@]}" python3 tests/e2e_tui_workspaces.py "$TARGET"
   step e2e-herdr-drift "${CLEAN[@]}" python3 tests/e2e_herdr_drift.py "$TARGET" --receipt "$LOGS/herdr-drift-receipt.json"

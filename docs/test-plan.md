@@ -57,7 +57,7 @@ listed); state-schema rollback; late crash 30 s after load (crash budget); 5 s s
   `provider_wire`, `provider_errors`;
 - the end-to-end scripts: `e2e_providers.py`, `e2e_tui_providers.py`, `e2e_tui_paste_dropdown.py` (drop-downs over
   their popup, bracketed multi-line paste, a 200 KB paste on herdr and tmux), `e2e_tui_keys.py` (keys with
-  modifiers like xterm; Shift-Enter for kitty-protocol and modifyOtherKeys programs), `e2e_tui_pane_basics.py` (tab
+  modifiers like xterm; Shift-Enter for kitty-protocol and modifyOtherKeys programs), `e2e_same_setup.py` (the same workspace with herdr or tmux as the default backend: layout, views, resources, agent, sidebar, commands and the text client's outline compared as structure; known tmux reporting bugs listed by finding), `e2e_tui_pane_basics.py` (tab
   move by key and by dragging a chip, program titles on tabs, rename key, last pane, swap, resize, layout preset,
   break out, Ctrl-click on a URL and on `path:line`, the right-click link menu, binding `repeat`, and the tmux
   profile's pane keys), `e2e_scale_herdr.py`, and the TUI smoke
