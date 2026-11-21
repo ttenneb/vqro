@@ -663,6 +663,20 @@ class AgentPane(unittest.TestCase):
         self.agents.wake("r2")
         self.agents.flush_conversations()
         self.assertNotIn("couldn't be drawn", json.dumps(self.core.live["agents-r2"]), "it redraws on the next update")
+        self.assertNotIn(("r2", "pane"), self.agents.logged, "a good draw forgets the logged error")
+
+    def test_logged_failures_are_pruned_with_the_agent_and_capped(self):
+        import contextlib, io
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            for i in range(agents_module.LOGGED_MAX + 10):
+                self.agents.log_failure(f"r{i}", "pane", KeyError("boom"))
+            self.assertEqual(len(self.agents.logged), agents_module.LOGGED_MAX, "capped, oldest dropped")
+            self.assertNotIn(("r0", "pane"), self.agents.logged)
+            self.agents.log_failure("r300", "pane", KeyError("boom"))
+            self.agents.log_failure("r300", "attach", KeyError("boom"))
+            self.agents.publish_gone("r300")
+        self.assertFalse([k for k in self.agents.logged if k[0] == "r300"], "an agent's entries go with it")
+        self.assertEqual(err.getvalue().count("failed for r300"), 2)
 
     def test_the_waiting_line_and_the_runtimes_queue_are_pinned(self):
         items = self.make_v0(requests=[{"request": "q1", "revision": 1, "method": "confirm", "title": "Run git push?", "params": {}}],

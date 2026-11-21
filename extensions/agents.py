@@ -300,6 +300,7 @@ def unknown_badge(ext, r):
 # this extension hold unbounded state.
 VIEW_MAX_ENTITIES = 4096
 VIEW_MAX_ENTITY_BYTES = 4 * 1024 * 1024
+LOGGED_MAX = 256  # agents' last logged failures kept for de-duplication (Agents.log_failure)
 LIVE_NOTICES = 3  # the newest live notice records (agent-v0 section 4) a pane shows
 # agent-v0 section 4 "Incompatible stream": a rejection that repeats on reattach backs off, then stops and is reported.
 INCOMPATIBLE_BACKOFF_S = (2.0, 10.0)  # waits after the 1st and 2nd identical rejection
@@ -606,11 +607,16 @@ class Agents:
             self.log_failure(rid, what, error)
 
     def log_failure(self, rid, what, error):
-        """Log an agent's failure once per distinct error (a failing pane redraws several times a second while it
-        streams)."""
+        """Log an agent's failure once per distinct error: `logged` keeps the LAST line logged per (agent, step), so a
+        failing pane that redraws several times a second logs once, a different error logs again, and the same error
+        after a good draw (which forgets it) logs again. Entries go when the agent goes; at most LOGGED_MAX are kept
+        (oldest dropped)."""
         line = f"agents: {what} failed for {rid}: {type(error).__name__}: {str(error)[:300]}"
         if self.logged.get((rid, what)) != line:
+            self.logged.pop((rid, what), None)
             self.logged[(rid, what)] = line
+            while len(self.logged) > LOGGED_MAX:
+                self.logged.pop(next(iter(self.logged)))
             print(line, file=sys.stderr, flush=True)
 
     def conversation_worker(self):
@@ -1693,6 +1699,7 @@ class Agents:
             resource = self.ext.resources.get(rid) or resource
             try:
                 content = self.panel(resource)
+                self.logged.pop((rid, "pane"), None)  # a good draw: the next failure is news again
             except Exception as error:  # noqa: BLE001 - this agent's pane says so; the others keep updating
                 if self.strict:
                     raise
@@ -1715,6 +1722,8 @@ class Agents:
 
     def publish_gone(self, rid):
         self.published.pop(rid, None)
+        for key in [k for k in self.logged if k[0] == rid]:  # the agent is gone: so are its logged errors
+            del self.logged[key]
         self.open_pane.discard(rid)
         self.published_pane.pop(rid, None)
         entry = self.ext.entries.get("view/"+view(rid), {})
