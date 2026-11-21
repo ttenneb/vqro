@@ -320,6 +320,8 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
     }
     let laid: Vec<Flat>;
     let rows: &[Flat] = match &layout { Some(l) => { laid = rows.iter().map(|r| l.apply(r, icons)).collect(); &laid } None => rows };
+    let local = child_tables(rows, area.width.saturating_sub(1), icons);
+    let rows = local.as_slice();
     // `pin: "bottom"` rows (feature pin): below the list, never scrolled, at most half of what is left.
     let first_bottom = rows.iter().position(|r| r.bottom).unwrap_or(rows.len());
     let mut bottom_y = area.bottom();
@@ -509,7 +511,10 @@ fn prefix_width(r: &Flat, icons: &Icons) -> u16 {
 fn suffix_width(item: &Value) -> u16 {
     let detail = item["detail"].as_str().map(|d| icons::width(d) + 1).unwrap_or(0);
     let badge = item["badges"].get(0).and_then(|b| b["text"].as_str()).map(|t| icons::width(t) + 3).unwrap_or(0);
-    detail + badge + 1
+    let actions = item["actions"].as_array().into_iter().flatten()
+        .filter(|a| a["command"].is_string()).filter_map(|a| a["text"].as_str())
+        .fold(0u16, |n, t| n.saturating_add(icons::width(t).saturating_add(3)));
+    detail.saturating_add(badge).saturating_add(actions).saturating_add(1)
 }
 
 fn column_layout(spec: &[Value], rows: &[Flat], width: u16, icons: &Icons) -> ColumnLayout {
@@ -522,6 +527,25 @@ fn column_layout(spec: &[Value], rows: &[Flat], width: u16, icons: &Icons) -> Co
     let labelled = spec.iter().any(|c| c["label"].is_string());
     let header = labelled.then(|| join_cells(spec.iter().map(|c| c["label"].as_str().unwrap_or("").to_string()).collect(), &widths, &aligns));
     ColumnLayout { start, widths, aligns, header }
+}
+
+/// A group's `child_table` lays out only its immediate children. Descendants and
+/// neighbouring conversation rows keep their own layout; every row retains its id/hit index.
+fn child_tables(rows: &[Flat], width: u16, icons: &Icons) -> Vec<Flat> {
+    let mut out = rows.to_vec();
+    for (parent, group) in rows.iter().enumerate() {
+        let table = &group.item["child_table"];
+        let Some(spec) = table["columns"].as_array().filter(|s| !s.is_empty()) else { continue };
+        let width = table["max_width"].as_u64().filter(|w| *w > 0)
+            .map(|w| w.min(u16::MAX as u64) as u16).unwrap_or(width).min(width);
+        let children: Vec<Flat> = rows.iter().filter(|r| r.parent == Some(parent) && r.item["columns"].is_array()).cloned().collect();
+        let layout = column_layout(spec, &children, width, icons);
+        for (i, row) in rows.iter().enumerate().filter(|(_, r)| r.parent == Some(parent) && r.item["columns"].is_array()) {
+            out[i] = layout.apply(row, icons);
+            out[i].item["_child_table_width"] = Value::from(width);
+        }
+    }
+    out
 }
 
 fn join_cells(cells: Vec<String>, widths: &[usize], aligns: &[bool]) -> String {
@@ -701,6 +725,7 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
     if kind(&r.item) == "composer" { return draw_composer(buf, row, &r.item, selected, chip, i, hits, pal, icons, comp); }
     if kind(&r.item) == "message" || fold(&r.item).is_some() { return draw_block(buf, row, r, selected, i, skip, hits, pal, open); }
     let item = &r.item;
+    let row = Rect { width: item["_child_table_width"].as_u64().map(|w| (w.min(u16::MAX as u64) as u16).min(row.width)).unwrap_or(row.width), ..row };
     let w = row.width as usize;
     let y = row.y;
     let text = item["text"].as_str().unwrap_or("");
@@ -880,6 +905,38 @@ mod tests {
             s.trim_end().to_string()
         };
         (0..area.height).map(line).collect()
+    }
+
+    #[test]
+    fn child_tables_are_local_bounded_and_keep_actions_with_their_rows() {
+        let v = json!({"requires":["child_table"], "items":[
+            {"id":"g", "text":"Group", "expanded":true,
+             "child_table":{"columns":[{"width":8},{"width":"fill","min_width":8},{"width":6,"priority":1}],"max_width":60},
+             "children":[
+                {"id":"a","text":"fallback a","columns":["read","src/a.rs","20 B"],"copy":"a","actions":[{"text":"copy","command":"client.copy"}],
+                 "expanded":true,"children":[{"text":"unmodified output"}]},
+                {"id":"b","text":"fallback b","columns":["bash","pwd","3 B"],"copy":"b","actions":[{"text":"copy","command":"client.copy"}]}]},
+            {"text":"neighbour"}]});
+        let icons = Icons::default();
+        let wide = draw(&v, &icons, 180);
+        assert!(wide.iter().any(|l| l.contains("unmodified output")));
+        assert!(wide.iter().any(|l| l.contains("neighbour")));
+        let a = wide.iter().find(|l| l.contains("src/a.rs")).unwrap();
+        let b = wide.iter().find(|l| l.contains("pwd")).unwrap();
+        let column = |line: &str, text: &str| icons::width(&line[..line.find(text).unwrap()]);
+        assert_eq!(column(a, "src/a.rs"), column(b, "pwd"));
+        assert_eq!(column(a, "[copy]"), column(b, "[copy]"));
+        assert!(a.find("[copy]").unwrap() < 60);
+        for width in [18, 35, 60] {
+            let screen = draw(&v, &icons, width);
+            assert!(screen.iter().any(|l| l.contains("read")), "{width}: {screen:?}");
+        }
+        let area = Rect::new(0,0,180,10);
+        let mut buf = Buffer::empty(area);
+        let mut state = State::default();
+        let hits = render(&mut buf, area, &Arc::new(v), &mut state, true, &Palette::default(), &icons, None);
+        assert_eq!(hits.actions.len(), 2);
+        assert!(hits.actions.iter().all(|(rect, _, _)| rect.right() <= 60));
     }
 
     #[test]

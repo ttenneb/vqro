@@ -1334,6 +1334,20 @@ given rows in clients without the feature. Fixtures: `tests/fixtures/client/pane
   stays short. A narrow pane thus keeps a readable title rather than squeezing every column. A header line shows when any column has a label. `text` stays required and is what clients
   without the feature show, so write it as a readable join (`"command · agents.abort"`).
 
+- **Group-local tables** (feature `child_table`): a tree item may declare
+  `child_table: {columns: [column-spec…], max_width?: positive-cell-count}`. Its immediate children carrying
+  `columns: [text…]` share that schema, overriding panel columns; deeper descendants and unrelated rows are
+  unaffected. Column sizing and narrow-width dropping follow `columns` above, reserving room for row actions,
+  detail and badges. `max_width` bounds the entire child row, including its indent and actions, to keep actions
+  adjacent to a compact table in a wide pane; it is clamped to available width. Absent/invalid bounds use available
+  width. Empty/invalid schemas are ignored; unknown fields are ignored. Headers are ordinary child rows with
+  column cells (not automatically inserted), so they scroll and fold with their group. IDs and action semantics
+  are unchanged. Panels using this declare `child_table` in `requires` and retain readable row `text`.
+  **Client coverage:** Rust TUI renders it. Text and OpenTUI currently deliberately degrade to their ordinary tree
+  rows using the required readable `text`, with existing menu/copy/open mechanisms where supported; they do not
+  advertise `child_table` and report the unsupported requirement. They do not promise column alignment or bounded
+  action placement. This is a rendering-only extension, not a new conversation/tool-specific primitive.
+
 Illustrative panel:
 ```json
 {"facets": [{"key": "kind", "label": "Show"}], "sorts": [{"key": "name", "label": "name"}],
