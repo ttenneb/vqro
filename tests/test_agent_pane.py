@@ -239,8 +239,15 @@ class TranscriptRows(unittest.TestCase):
         for status, style in (("completed", "ok"), ("failed", "error"), ("running", "info")):
             row = agent_transcript.tool_row("t", {"title": "read", "status": status,
                                                    "locations": [{"path": "/work/a.rs"}]})
-            self.assertEqual(row["style"], style)
+            self.assertEqual(row["column_styles"][0], style)
+            self.assertEqual(row["style"], "plain", "cell styles never tint the whole tool row")
             self.assertEqual(row["children"][0]["style"], "link")
+        url = agent_transcript.tool_row("url", {"title": "fetch", "input": {"url": "https://example.com/docs"}})
+        self.assertEqual(url["column_styles"][1], "link")
+        command = agent_transcript.tool_row("cmd", {"title": "bash", "input": {"command": "echo https://example.com"}})
+        self.assertIsNone(command["column_styles"][1], "a command containing a URL is not itself a link")
+        linked = agent_transcript.content_rows([{"type": "resource_link", "uri": "https://example.com/docs"}])
+        self.assertEqual(linked[0]["style"], "link")
 
     def test_tool_calls_are_one_line_each_under_one_collapsed_activity_line(self):
         """Redesign (mockup rev 3, reply-13): Activity collapsed, one line per tool, readable arguments, output cut."""
@@ -252,7 +259,7 @@ class TranscriptRows(unittest.TestCase):
         self.assertEqual((read["text"], read["columns"][3], read["expanded"]), ("✓ read   ci.yml", "0.2s", False))
         self.assertNotIn("badges", read)
         self.assertIn("/w/ci.yml:4", [c["text"] for c in read["children"]])
-        self.assertEqual((test["text"], test["style"], test["description"]), ("✗ bash   npm test", "error", "line 0 of the test log"), "a failure says why")
+        self.assertEqual((test["text"], test["style"], test["description"]), ("✗ bash   npm test", "plain", "line 0 of the test log"), "a failure says why")
         self.assertEqual(agent_transcript.tool_row("f", {"title": "read", "status": "failed"})["description"], "failed")
         texts = [c["text"] for c in test["children"]]
         self.assertEqual(texts[0], "timeout 10000", "other arguments as name value, never JSON")
@@ -451,6 +458,8 @@ class TranscriptRows(unittest.TestCase):
         header, read, test = group["children"]
         self.assertEqual((read["columns"][:2], test["columns"][:2]), (["read", "ci.yml"], ["bash", "npm test"]))
         self.assertEqual(read["columns"][2:4], ["✓ completed", "0.2s"])
+        self.assertEqual(read["column_styles"], [None, "link", "ok", "dim", "dim"])
+        self.assertEqual(test["column_styles"], [None, None, "error", "dim", "dim"])
         self.assertTrue(test["columns"][4].endswith(" B"))
         self.assertEqual(group["child_table"], {"columns": agent_transcript.ACTIVITY_COLUMNS, "max_width": 112})
         unicode_group = agent_transcript.group_row([("unicode", {"title": "read", "content": text("界🙂")})])
@@ -759,7 +768,7 @@ class AgentPane(unittest.TestCase):
         self.assertEqual((pane["title"], pane["title_right"], pane["title_right_style"]), ("Pi r2 · ~/Projects/site", "● idle", "ok"))
         self.assertNotIn("toolbar", pane, "no top bar at all (the human, 17:00)")
         self.assertEqual(self.core.entries["menu/agents.r2.pane"]["value"]["command"], "agents.pane", "⚙ also in the pane menu (D15)")
-        gear = {"text": "", "icon": {"name": "settings", "text": "⚙"}, "command": "agents.pane", "args": {"resource": "r2"}}
+        gear = {"text": "", "icon": {"name": "settings", "text": "⚙"}, "style": "control", "icon_style": "control", "command": "agents.pane", "args": {"resource": "r2"}}
         row = next(r for r in items if r.get("id") == "gear")
         self.assertEqual((row["chips"], row["pin"], "requires_absent" in row), ([gear], "bottom", False),
                          "no message box here: the ⚙ is a bottom row for every client")
@@ -783,7 +792,7 @@ class AgentPane(unittest.TestCase):
                          ("bottom", True, "Enter", {"resource": "r2", "caps_rev": 2}))
         self.assertEqual((composer["controls"][0]["type"], composer["controls"][0]["value"]), ("select", "auto"), "one input-settings button")
         self.assertEqual(composer["controls"][1], {"type": "button", "text": "", "icon": {"name": "settings", "text": "⚙"},
-                                                   "command": "agents.pane", "args": {"resource": "r2"}}, "⚙ beside Input")
+                                                   "style": "control", "icon_style": "control", "command": "agents.pane", "args": {"resource": "r2"}}, "⚙ beside Input")
         stand_in = next(r for r in items if r.get("id") == "gear")
         self.assertEqual(stand_in["requires_absent"], ["composer_buttons"], "older clients: a ⚙ row instead, never both")
         self.assertIs(composer["send_button"], False, "no Send button: Enter sends")

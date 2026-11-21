@@ -412,6 +412,8 @@ def tool_row(eid, value, cwd=None):
     name = plain(str(value.get("title") or "tool"))
     args = value.get("input")
     main, used = primary_argument(name, args)
+    target_style = "link" if used & set(FILE_ARGS) or main.startswith(("http://", "https://")) else None
+    state_style = "error" if status == "failed" else "ok" if status == "completed" else "info" if status == "running" else None
     if used & set(FILE_ARGS) and isinstance(cwd, str) and len(cwd) > 1 and main.startswith(cwd.rstrip("/") + "/"):
         main = main[len(cwd.rstrip("/")) + 1:]  # a path argument inside the agent's folder reads relative to it
     output = text_of(value)
@@ -452,7 +454,8 @@ def tool_row(eid, value, cwd=None):
     return {"id": "t:" + eid, **({"menu": menu} if menu else {}), **({"actions": actions} if actions else {}), "text": f"{TOOL_ICON.get(status, '?')} {clip(name, 40)}" + (f"   {main}" if main else ""),
             # Aligned cells (feature columns, the panel's TOOL_COLUMNS); `text` is what other clients show.
             "columns": [f"{TOOL_ICON.get(status, '?')} {clip(name, 40)}", main],
-            "style": "error" if status == "failed" else "ok" if status == "completed" else "info" if status == "running" else None,
+            "column_styles": [state_style, target_style],
+            "style": "plain",
             **({"copy": copy} if copy else {}),
             **({"badges": [{"text": b, "style": "dim"} for b in badges]} if badges else {}),
             # A failed call says why on its line (the first line of what it returned), else just "failed".
@@ -483,6 +486,8 @@ def group_row(steps, cwd=None):
             continue
         row = tool_row(eid, value, cwd)
         output = text_of(value)
+        state_style, target_style = row["column_styles"]
+        row["column_styles"] = [None, target_style, state_style, "dim", "dim"]
         row["columns"] = [clip(plain(str(value.get("title") or "tool")), 40), row["columns"][1],
                           TOOL_ICON.get(value.get("status"), "?") + " " + str(value.get("status") or "unknown"),
                           duration(value.get("started_ms"), value.get("ended_ms")) or "—",
@@ -583,6 +588,8 @@ def tools_table(run, title, cwd=None):
         # (nested rows would also be counted by the facets), and inline buttons would cover the right-hand cells.
         for key in ("badges", "children", "actions", "expanded"):
             row.pop(key, None)
+        state_style, target_style = row["column_styles"]
+        row["column_styles"] = [state_style, None, target_style, "dim", "dim"]
         row.update(columns=[TOOL_ICON.get(status, "?"), name, row["columns"][1], f"{lines_} {plural(lines_)}" if lines_ else "—", took],
                    facets={"status": status, "tool": name},
                    sort={"name": name.lower(), "output": lines_,

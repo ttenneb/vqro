@@ -867,7 +867,7 @@ class Agents:
                          "menu": [{"label": "Answer…", "command": "agents.answer", "args": {"resource": rid}}]})
         # The pane's one settings button, ⚙ (agents.pane: view filters, agent settings, bridge terminal, stop). The
         # user's icon set draws it (a bare "⚙" is ambiguous width: its highlight came out uneven).
-        gear = {"text": "", "icon": {"name": "settings", "text": "⚙"}, "command": "agents.pane", "args": {"resource": rid}}
+        gear = {"text": "", "icon": {"name": "settings", "text": "⚙"}, "style": "control", "icon_style": "control", "command": "agents.pane", "args": {"resource": rid}}
         modes = self.modes(r)
         composing = bool(modes and r.get("available") and not ended(r))
         if composing:
