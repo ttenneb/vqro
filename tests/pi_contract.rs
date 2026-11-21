@@ -2,6 +2,7 @@
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/native.rs"] mod native;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/admission.rs"] mod admission;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/contract.rs"] mod contract;
+#[path="support/frame_metadata.rs"] mod frame_metadata;
 use contract::{Context,send};
 use serde_json::{json,Value};
 fn context()->Context<'static> {Context {caps_rev:1,epoch:"e1",session:Some("s1"),owner_proven:false,images:true,literal:true}}
@@ -9,6 +10,16 @@ fn input()->Value {json!({"v":0,"caps_rev":1,"epoch":"e1","guard":{"session":"s1
     "origin":{"principal":"agent:a","actor":"worker","kind":"agent"},"content":[{"type":"text","text":"/literal\nunchanged"}]})}
 fn image()->Value {json!({"type":"image","mime":"image/png","data":"AQ=="})}
 fn refusal(args:&Value,ctx:&Context<'_>,kind:&str) {assert_eq!(send(args,ctx).err().unwrap().kind,kind);}
+
+#[test]
+fn untrusted_frame_metadata_rejects_cc_cf_zl_zp_without_filtering_body() {
+    for (label,args) in frame_metadata::invalid_inputs(&input()) {
+        assert_eq!(send(&args,&context()).err().unwrap().kind,"invalid","{label}");
+    }
+    let mut args=input();let body="literal\n\r\u{2028}\u{2029}\u{202e}body";
+    args["content"][0]["text"]=json!(body);
+    assert!(send(&args,&context()).unwrap().args["message"].as_str().unwrap().ends_with(body));
+}
 
 #[test]
 fn typed_order_is_exact_never_reordered_or_concatenated() {

@@ -1,5 +1,6 @@
 //! Private native subprocess/real SDK component tests. No live core, agent or model.
 use super::*;
+#[path="../../../tests/support/frame_metadata.rs"] mod frame_metadata;
 use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader,DuplexStream,ReadHalf,WriteHalf};
 #[test]
 fn stop_reply_preserves_requested_coverage_without_claiming_wider_effects(){
@@ -72,6 +73,25 @@ async fn c2_effect_identity_mismatch_is_forbidden_before_any_native_write(){
     }
     let ledger=std::fs::read_to_string(root.path().join("ledger")).unwrap();let rows:Vec<Value>=ledger.lines().map(|line|serde_json::from_str(line).unwrap()).collect();let prompts:Vec<_>=rows.iter().filter(|row|row["type"]=="prompt").collect();assert_eq!(prompts.len(),1);assert!(prompts[0]["message"].as_str().unwrap().ends_with("\n\nexact literal"));assert_eq!(prompts[0]["message"],"Quoted provenance (asserted, not the effective sender): asserted source\nfrom p:sender via extension:coord\nasserted kind: agent\nasserted agent: r99\n\nexact literal");dispose(&shared,&provider).await;
 }
+#[tokio::test]
+async fn injectable_frame_metadata_is_rejected_before_any_native_write(){
+    let root=tempfile::tempdir().unwrap();let (shared,provider,mut core)=fixture(root.path(),true).await;
+    let base=json!({"v":0,"mode":"start","delivery":"invalid-frame","content":[{"type":"text","text":"literal body"}],"origin":{"kind":"agent"}});
+    for (index,(label,mut args)) in frame_metadata::invalid_inputs(&base).into_iter().enumerate(){
+        args["delivery"]=json!(format!("invalid-frame-{index}"));
+        let wire=json!({"jsonrpc":"2.0","id":index,"method":"effect.invoke","params":{"generation":1,"effect":format!("invalid-frame-{index}"),"op":"agent.send","ref":"agent","incarnation":"","args":args,"deadline_ms":2000,"principal":"p:sender","actor":"extension:coord","initiator":"p:original"}});
+        core.w.write_all(format!("{wire}\n").as_bytes()).await.unwrap();
+        let request=core.requests.as_mut().unwrap().recv().await.unwrap();let Request::Effect(effect)=request else{panic!("not an effect")};
+        let respond_owner=async{let get=core.recv().await;assert_eq!(get["method"],"workspace.get");core.reply(&get,json!({"value":"other-owner"})).await;};
+        let (result,())=tokio::join!(invoke(&shared,&provider,&effect),respond_owner);let result=result.unwrap();
+        assert!(matches!(result,Outcome::Rejected{ref kind,..} if kind=="invalid"),"{label}: {result:?}");
+        assert!(!root.path().join("ledger").exists(),"{label} reached native input");
+        effect.respond(Ok(result));let reply=core.recv().await;assert_eq!(reply["id"],index);
+    }
+    assert!(shared.agent.lock().unwrap().receipts.is_empty());
+    dispose(&shared,&provider).await;
+}
+
 #[tokio::test]
 async fn owner_human_effect_reaches_native_as_exact_typed_text(){
     let root=tempfile::tempdir().unwrap();let (shared,provider,mut core)=fixture(root.path(),true).await;

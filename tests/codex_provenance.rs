@@ -1,5 +1,7 @@
 use serde_json::{Value, json};
 use vqro::codex::{Endpoint, capabilities, provider_capabilities};
+#[path = "support/frame_metadata.rs"]
+mod frame_metadata;
 
 fn endpoint() -> Endpoint {
     let mut e = Endpoint::new("slot".into(), "inc".into(), "server".into(), "e".into());
@@ -37,6 +39,24 @@ fn declared_topology_request_scopes_and_ordered_content_select_the_right_cases()
     let call = endpoint().prepare_send(&send()).unwrap();
     assert_eq!(call.params["input"][1]["text"], "first");
     assert_eq!(call.params["input"][2]["text"], "second");
+}
+
+#[test]
+fn untrusted_frame_metadata_rejects_cc_cf_zl_zp_without_filtering_body() {
+    for (label, args) in frame_metadata::invalid_inputs(&send()) {
+        assert_eq!(
+            endpoint().prepare_send(&args).unwrap_err().kind(),
+            "invalid",
+            "{label}"
+        );
+    }
+    let mut args = send();
+    let body = "literal\n\r\u{2028}\u{2029}\u{202e}body";
+    args["content"] = json!([{"type":"text","text":body}]);
+    assert_eq!(
+        endpoint().prepare_send(&args).unwrap().params["input"][1]["text"],
+        body
+    );
 }
 
 #[test]

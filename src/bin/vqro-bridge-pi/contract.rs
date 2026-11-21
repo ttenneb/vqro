@@ -54,6 +54,13 @@ pub fn common(args:&Value,context:&Context<'_>)->Result<(),Refusal> {
 }
 
 fn causal_string(value:&Value)->Result<&str,Refusal>{value.as_str().filter(|value|value.len()<=256).ok_or_else(||invalid("causal string must be at most256 bytes"))}
+fn frame_text(text:&str)->Result<(),Refusal>{
+    // Shared Unicode16 Cc/Cf profile plus line/paragraph separators; body text is untouched.
+    if vqro::limits::text_controls(text) || text.contains(['\u{2028}','\u{2029}']) {
+        return Err(invalid("origin/quoted metadata must be single-line text without control or format characters"));
+    }
+    Ok(())
+}
 
 /// Bind identity to C2's recorded attribution, never the caller's display/role claims.
 /// This runs before admission, receipts, queue invalidation or any native write.
@@ -99,15 +106,21 @@ pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
     let command=match mode.as_str() {"start"|"admit"=>"prompt","boundary"=>"steer","settle"=>"follow_up",_=>return Err(reject("unsupported","undeclared delivery mode"))};
     let origin=&args["origin"];
     if !origin.is_object() {return Err(invalid("effective origin is required"));}
-    for field in ["principal","actor"] {if causal_string(&origin[field])?.is_empty(){return Err(invalid("origin identity must be nonempty"));}}
+    for field in ["principal","actor"] {let text=causal_string(&origin[field])?;if text.is_empty(){return Err(invalid("origin identity must be nonempty"));}frame_text(text)?;}
     if let Some(initiator)=origin.get("initiator"){if causal_string(initiator)?.is_empty(){return Err(invalid("origin initiator must be nonempty"));}}
-    id(&origin["kind"])?;
-    if let Some(agent)=origin.get("agent") {id(agent)?;}
+    frame_text(id(&origin["kind"])?)?;
+    if let Some(agent)=origin.get("agent") {frame_text(id(agent)?)?;}
+    if let Some(sender)=origin.get("sender") {
+        let text=sender.as_str().or_else(||sender.get("principal").and_then(Value::as_str)).filter(|text|!text.is_empty())
+            .ok_or_else(||invalid("sender requires a nonempty principal string"))?;
+        frame_text(text)?;
+    }
     if vqro::limits::encoded_bytes(origin)>2048 {return Err(invalid("origin exceeds2048 bytes"));}
     let quoted=args.get("quoted").cloned();
     if let Some(quoted)=&quoted {
         if !quoted.is_object() || quoted["label"].as_str().is_none_or(|s|s.len()>1024) || vqro::limits::encoded_bytes(quoted)>2048 {return Err(invalid("quoted provenance requires a bounded label"));}
-        for field in ["principal","kind"] {if let Some(value)=quoted.get(field) {id(value)?;}}
+        frame_text(quoted["label"].as_str().unwrap())?;
+        for field in ["principal","kind"] {if let Some(value)=quoted.get(field) {frame_text(id(value)?)?;}}
     }
     let default=json!(["participant","attributed_user"]);
     let render=args.get("render").unwrap_or(&default).as_array().ok_or_else(||invalid("render must be an ordered array"))?;

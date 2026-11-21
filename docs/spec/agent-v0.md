@@ -279,6 +279,9 @@ concatenated.
   Every other sender uses the short plain-text `from <sender> via <actor>` header with labelled asserted `kind`
   and supplied `agent` claims, and a supplied inbox sender is explicitly extension-asserted. Any quoted label is
   plain text explicitly marked asserted. These labels do not upgrade the native user role or confer authority.
+  Frame metadata is single-line text: principal/actor, claimed kind/agent, sender or sender.principal, and quoted
+  label/principal/kind reject Unicode Cc, Cf, Zl and Zp characters as `invalid` before any native write. This
+  validation never filters or rewrites the literal content body.
 - **Rendering** is declared per runtime, each with its native role and resulting authority:
   `"origin": [{"as": "user", "role": "user"}, {"as": "attributed_user", "role": "user", "frame": "sender_header"},
   {"as": "participant", "role": "<native>"}, {"as": "context", "role": "system_reminder", "authority":

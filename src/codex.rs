@@ -131,6 +131,34 @@ fn optional_id(value: &Value, field: &str) -> Result<Option<String>, RpcError> {
         id(value, field).map(Some)
     }
 }
+fn frame_text(text: &str) -> Result<(), RpcError> {
+    // Shared Unicode16 Cc/Cf profile, plus Unicode line/paragraph separators.
+    if crate::limits::text_controls(text) || text.contains(['\u{2028}', '\u{2029}']) {
+        return Err(rejected(
+            "invalid",
+            "origin/quoted metadata must be single-line text without control or format characters",
+        ));
+    }
+    Ok(())
+}
+
+fn frame_origin(origin: &Value) -> Result<(), RpcError> {
+    for field in ["principal", "actor", "kind", "agent"] {
+        if let Some(text) = origin.get(field).and_then(Value::as_str) {
+            frame_text(text)?;
+        }
+    }
+    if let Some(sender) = origin.get("sender") {
+        let text = sender
+            .as_str()
+            .or_else(|| sender.get("principal").and_then(Value::as_str))
+            .filter(|text| !text.is_empty())
+            .ok_or_else(|| rejected("invalid", "sender requires a nonempty principal string"))?;
+        frame_text(text)?;
+    }
+    Ok(())
+}
+
 fn small(value: &Value, limit: usize) -> bool {
     crate::limits::encoded_bytes(value) <= limit
 }
@@ -358,12 +386,9 @@ impl Endpoint {
         if !small(&args["origin"], 1024) {
             return Err(rejected("invalid", "origin exceeds 1024-byte bound"));
         }
-        if principal.chars().any(char::is_control) || actor.chars().any(char::is_control) {
-            return Err(rejected(
-                "invalid",
-                "origin principal contains control characters",
-            ));
-        }
+        frame_text(&principal)?;
+        frame_text(&actor)?;
+        frame_origin(&args["origin"])?;
         let kind = id(&args["origin"], "kind")?;
         if !matches!(kind.as_str(), "human" | "agent" | "tool") && !kind.starts_with('_') {
             return Err(rejected("unsupported", "unknown origin rendering"));
@@ -399,6 +424,11 @@ impl Endpoint {
             }
             optional_id(quoted, "principal")?;
             optional_id(quoted, "kind")?;
+            for field in ["label", "principal", "kind"] {
+                if let Some(text) = quoted.get(field).and_then(Value::as_str) {
+                    frame_text(text)?;
+                }
+            }
         }
         let content = args["content"]
             .as_array()

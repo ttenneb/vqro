@@ -16,6 +16,9 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 #[path = "codex_provider/items.rs"]
 mod items;
 
+#[path = "support/frame_metadata.rs"]
+mod frame_metadata;
+
 struct Core {
     peer: Peer,
     generation: u64,
@@ -240,6 +243,48 @@ async fn finish(mut child: Child) {
 
 fn send(delivery: &str) -> Value {
     json!({"v":0,"mode":"admit","delivery":delivery,"content":[{"type":"text","text":"literal /no-command\nline2"}],"origin":{"principal":"p:test","actor":"actor:test","kind":"agent","agent":"r7"}})
+}
+
+#[tokio::test]
+async fn injectable_frame_metadata_is_rejected_before_any_native_ipc() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = UnixListener::bind(root.path().join("core.sock")).unwrap();
+    let child = bridge(&root, 1, 0, &[]);
+    let mut core = Core::accept(&listener, 1, "bootstrap").await;
+    core.wait(|facts| facts.len() == 1).await;
+    core.effect(
+        "new",
+        "endpoint-1",
+        "agent.session",
+        json!({"v":0,"action":"new"}),
+        1000,
+    )
+    .await;
+    let before = std::fs::read_to_string(root.path().join("native.jsonl")).unwrap();
+    for (index, (label, mut args)) in frame_metadata::invalid_inputs(&send("invalid-frame"))
+        .into_iter()
+        .enumerate()
+    {
+        args["delivery"] = json!(format!("invalid-frame-{index}"));
+        let result = core
+            .effect(
+                &format!("invalid-frame-{index}"),
+                "endpoint-1",
+                "agent.send",
+                args,
+                1000,
+            )
+            .await;
+        assert_eq!(result["outcome"], "rejected", "{label}");
+        assert_eq!(result["error"]["kind"], "invalid", "{label}");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("native.jsonl")).unwrap(),
+            before,
+            "{label} reached native IPC"
+        );
+    }
+    finish(child).await;
+    core.close().await;
 }
 
 #[tokio::test]
