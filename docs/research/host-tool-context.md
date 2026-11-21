@@ -48,6 +48,12 @@ requires; actual_author distinguishes connections, not endpoint ownership. Expli
 available. No new tool actor or per-endpoint env capability is invented. After rotation/re-registration old maps
 fail forbidden and the producer exports a fresh map for NEW tools; it never replays an uncertain call.
 
+Python now has an explicit diagnostic_data(JSON) redacted-copy path and safe ProviderError str/repr, masking
+known credential keys and echoes (including quoted/Unicode text) before formatting. The raw message/data and
+private RPC replies remain unchanged. A synthetic-secret baseline leaks via str (real red); new redaction,
+nonmutation and wire-separation tests3 plus existing provider28 and host-helper3 tests pass. No new logger,
+implicit payload normalization or universal secret-discovery guarantee is added.
+
 All scratch evidence under prim-slice1-host-context. Whole final-candidate gate, independent review and K1 PartB
 reprobe remain pending; no harness gap closure or live install is claimed by focused tests alone. Names/semantics
 sent to spec owner for batch7 consistency review. No install/network/model calls or live sessions touched.

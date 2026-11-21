@@ -17,12 +17,49 @@ MAX_DATA = 65536
 OUTCOMES = frozenset({"dispatched", "accepted", "observed", "rejected"})
 
 
+def diagnostic_data(value):
+    """Redacted JSON copy for diagnostics ONLY; original evidence/wire data remains sensitive and unchanged."""
+    keys = {"resume_token", "token", "extension_token", "bridge_token", "host_context"}
+    secrets = set()
+    def collect(node):
+        if isinstance(node, dict):
+            for key, item in node.items():
+                if key in keys and isinstance(item, str) and item:
+                    secrets.add(item)
+                collect(item)
+        elif isinstance(node, list):
+            for item in node:
+                collect(item)
+    collect(value)
+    ordered = sorted(secrets, key=len, reverse=True)
+    def text(item):
+        for secret in ordered:
+            item = item.replace(secret, "[redacted]")
+        return item
+    def redact(node):
+        if isinstance(node, dict):
+            return {text(key) if isinstance(key, str) else key: "[redacted]" if key in keys else redact(item) for key, item in node.items()}
+        if isinstance(node, list):
+            return [redact(item) for item in node]
+        return text(node) if isinstance(node, str) else node
+    return redact(value)
+
+
 class ProviderError(Exception):
     def __init__(self, kind, message, *, remote=False, data=None):
         super().__init__(message)
-        self.kind = kind
+        self.kind, self.message = kind, str(message)
         self.remote = remote  # An explicit RPC error reply, not a local transport gap.
-        self.data = dict(data or {})  # Preserve structured refusal reasons/outcomes.
+        self.data = dict(data or {})  # Raw evidence: never feed diagnostics back into the wire.
+
+    def diagnostic_data(self):
+        return diagnostic_data({"kind": self.kind, "message": self.message, "remote": self.remote, "data": self.data})
+
+    def __str__(self):
+        return self.diagnostic_data()["message"]
+
+    def __repr__(self):
+        return f"ProviderError({self.diagnostic_data()!r})"
 
 
 class _IdentityLedger:
@@ -415,7 +452,7 @@ class Provider:
             row["result"] = result
         else:
             row["error"] = {"code": -32601 if error.kind == "unknown_method" else -32602 if error.kind == "invalid" else -32000,
-                            "message": str(error), "data": {"kind": error.kind}}
+                            "message": error.message, "data": {"kind": error.kind}}
         await self._write(row)
 
     def _generation(self, params):

@@ -404,7 +404,10 @@ reply, and a later sync/setup failure does not erase the observed credential. Ba
 `None`. This is access to evidence already received, not persistence, retry or replay; callers must not log the
 credential-bearing reply. `ProviderError` diagnostics redact known token fields recursively (and known token
 values echoed in messages); `Config` diagnostics redact its bootstrap token. Explicit `data`/registration/token
-access still returns the original sensitive evidence and must not be logged.
+access still returns the original sensitive evidence and must not be logged. Python exposes
+`diagnostic_data(json_value)` for redacted copies (including a raw registration reply); `ProviderError` str/repr
+use that path, while `message`/`data` and private RPC replies retain the original evidence. No automatic logging
+or wire/payload rewrite is introduced; unknown fields are not general secret discovery.
 
 ### 9.3 Facts (G1)
 
