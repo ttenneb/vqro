@@ -1050,6 +1050,46 @@ mod tests {
         assert!(j.first_retained() > 1);
     }
 
+    /// O12 (agent-v0-conformance): a small append whose resulting whole snapshot put exceeds the record bound returns
+    /// too_large and changes nothing: the entity's value and revision, the journal seq, the retained log and its bytes,
+    /// and the digest. Covered for decoded-byte appends and text appends.
+    #[test]
+    fn small_appends_past_the_record_bound_are_refused_atomically_for_bytes_and_text() {
+        type Append = fn(&mut ItemJournal, &str, &str, &str) -> Result<u64, ProviderError>;
+        let bytes: Append = |j, kind, id, field| j.append_bytes(kind, id, field, &[0xAB; 16]);
+        let text: Append = |j, kind, id, field| j.append_text(kind, id, field, &"t".repeat(16));
+        for (name, append, field) in [("bytes", bytes, "/raw"), ("text", text, "/text")] {
+            let mut j = ItemJournal::new("e1", JournalConfig::default());
+            j.put("message", "m", json!({"text": "", "raw": ""})).unwrap();
+            let state = |j: &ItemJournal| {
+                let (rev, value) = j.entity("message", "m").unwrap();
+                (rev, value.clone(), j.seq(), j.log.len(), j.retained_bytes(), j.first_retained(), j.digest())
+            };
+            // Grow by small appends until one is refused; it must be refused for the record bound, not earlier, and
+            // the refused call itself must leave every observable unchanged.
+            let mut accepted = 0;
+            let refusal = loop {
+                let pre = state(&j);
+                match append(&mut j, "message", "m", field) {
+                    Ok(_) => accepted += 1,
+                    Err(error) => {
+                        assert_eq!(state(&j), pre, "{name}: the refused append changed state");
+                        break error;
+                    }
+                }
+                assert!(accepted < 10_000, "{name}: small appends never reached the record bound");
+            };
+            assert_eq!(refusal.kind, "too_large", "{name}: refused for the record bound");
+            assert!(accepted > 1000, "{name}: refused only near the bound ({accepted} small appends accepted)");
+            let before = state(&j);
+            // The same small append again: refused again, and nothing moved.
+            assert_eq!(append(&mut j, "message", "m", field).unwrap_err().kind, "too_large", "{name}: retry refused");
+            assert_eq!(state(&j), before, "{name}: the refused append left entity, rev, seq and log unchanged");
+            // Every snapshot line, the entity's whole put included, is still within the record bound.
+            assert!(j.snapshot().split(|b| *b == b'\n').all(|l| l.len() + 1 <= j.cfg.max_record_bytes), "{name}");
+        }
+    }
+
     #[test]
     fn appends_never_grow_an_entity_past_one_snapshot_record() {
         let mut j = ItemJournal::new("e1", JournalConfig::default());
