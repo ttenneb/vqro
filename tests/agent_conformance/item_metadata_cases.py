@@ -435,7 +435,9 @@ async def observe_public_rendering(ctx):
     for filename in ('vqro_provider.py', 'vqro_provider_stream.py'):
         if not (sdk / filename).is_file():
             raise HarnessGap('O13 public producer SDK dependency absent: ' + filename)
-    for path in sdk.rglob('*.py'):
+    # viewer_sha256 declares the top-level viewer/SDK module closure (same
+    # contract as O14), not unrelated client and pi_bridge packages.
+    for path in sdk.glob('*.py'):
         relative = path.relative_to(sdk).as_posix()
         if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != hashes.get(relative):
             raise FixtureFailed('O13 production viewer/SDK source pin mismatch: ' + relative)

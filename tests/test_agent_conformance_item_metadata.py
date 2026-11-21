@@ -316,7 +316,7 @@ class PublicRendererPhaseTests(unittest.IsolatedAsyncioTestCase):
             source = Path(__file__).resolve().parents[1] / 'extensions'
             ctx.manifest.update(viewer_extensions=str(source), viewer_revision='f' * 40,
                 viewer_sha256={path.relative_to(source).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
-                               for path in source.rglob('*.py')})
+                               for path in source.glob('*.py')})
             ctx.backend = SimpleNamespace(env={'VQRO_SOCKET': '/private/unit-only'}, tracked=[])
             ctx.peers = []
             async def facts(): return {'epoch': 'e1', 'caps': {'rev': 1, 'agent.send': {'modes': {'start': {}}}}}
