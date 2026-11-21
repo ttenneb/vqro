@@ -170,9 +170,31 @@ async def start_item_provider(ctx, sdk_dir, name, scenarios, epoch=None):
     script, log, spec = root / (name + "_provider.py"), root / (name + "_provider.jsonl"), root / (name + "_scenarios.json")
     script.write_text(PROVIDER)
     spec.write_text(json.dumps({"provider": name, "epoch": epoch or name + "-e1", "scenarios": scenarios}))
-    process = subprocess.Popen(["/usr/bin/python3", str(script), str(sdk_dir), str(log), str(spec)], env=dict(ctx.backend.env),
-                               stdout=open(root / (name + "_provider.log"), "ab"), stderr=subprocess.STDOUT)
+    with open(root / (name + "_provider.log"), "ab") as output:  # the parent's handle is closed once the child has it
+        process = subprocess.Popen(["/usr/bin/python3", str(script), str(sdk_dir), str(log), str(spec)],
+                                   env=dict(ctx.backend.env), stdout=output, stderr=subprocess.STDOUT)
+    ctx.evidence.append({"kind": "owned_provider", "name": name, "pid": process.pid, "birth": process_birth(process.pid)})
     return process, log
+
+
+def process_birth(pid):
+    """Best-effort process start identity (Linux /proc start time in clock ticks); None where unavailable."""
+    try:
+        return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def stop_provider(ctx, process):
+    """Terminate, then kill on timeout, and always reap; the outcome is recorded as owned-child cleanup evidence."""
+    process.terminate()
+    try:
+        process.wait(5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(5)
+    ctx.evidence.append({"kind": "owned_provider_reaped", "pid": getattr(process, "pid", None),
+                         "returncode": getattr(process, "returncode", None)})
 
 
 O14_ENTITY_BYTES = 3000  # deliberately unlike any viewer ceiling, so a reported limit is unambiguous
@@ -206,30 +228,48 @@ SCENARIO_GRADES = {
 
 
 async def install_production_viewer(ctx):
-    """Copy the pinned production agents extension into the private fixture and enable it by ordinary configuration."""
-    import hashlib, shutil
+    """Install the production agents extension into the private fixture and enable it by ordinary configuration.
+    viewer_extensions is a TEST-ONLY path input, never a capability. It is conformance authority only when bound to
+    trusted source: viewer_revision is a full commit reachable from the trusted harness main, and every *.py in the
+    directory equals both its viewer_sha256 pin and its blob under extensions/ at that commit. Everything is read and
+    verified in memory before anything is written, so a HarnessGap leaves no copied file behind."""
+    import hashlib
+    from . import evidence
     source = ctx.manifest.get("viewer_extensions")
     pinned = ctx.manifest.get("viewer_sha256")
     revision = ctx.manifest.get("viewer_revision")
     if not source or not Path(source).is_absolute() or not (Path(source) / "agents.py").is_file():
         raise HarnessGap("O14 needs the pinned production agents viewer source (manifest viewer_extensions with "
                          "agents.py, vqro_items.py and their SDK); none was declared")
-    # TEST-ONLY path input, never a capability: only a kit-pinned viewer is conformance authority.
-    if not isinstance(pinned, dict) or not pinned or not isinstance(revision, str) or not revision:
+    if not isinstance(pinned, dict) or not pinned or not isinstance(revision, str):
         raise HarnessGap("O14 viewer source is not pinned (manifest viewer_revision and viewer_sha256 for every copied "
                          "*.py are required; an arbitrary caller-edited viewer is not accepted)")
-    ext = Path(ctx.root) / "ext"
-    hashes = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(Path(source).glob("*.py"))}
+    revision = evidence.commit(evidence.HARNESS_REPO, revision)  # full immutable id, resolves in the trusted repository
+    trusted_main = evidence.git(evidence.HARNESS_REPO, "rev-parse", "--verify", "refs/heads/main^{commit}").decode().strip()
+    try:
+        evidence.git(evidence.HARNESS_REPO, "merge-base", "--is-ancestor", revision, trusted_main)
+    except HarnessGap as error:
+        raise HarnessGap("O14 viewer_revision is not reachable from trusted harness main") from error
+    files = {path.name: path.read_bytes() for path in sorted(Path(source).glob("*.py"))}
+    hashes = {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}
     if hashes != pinned:
         mismatched = sorted(name for name in set(hashes) | set(pinned) if hashes.get(name) != pinned.get(name))
-        raise HarnessGap("O14 viewer source differs from its pinned kit hashes: " + ", ".join(mismatched[:8]))
-    for name in hashes:
-        data = (Path(source) / name).read_bytes()
-        if hashlib.sha256(data).hexdigest() != pinned[name]:
-            raise HarnessGap("O14 viewer file changed while copying: " + name)
-        (ext / name).write_bytes(data)
+        raise HarnessGap("O14 viewer source differs from its pinned hashes: " + ", ".join(mismatched[:8]))
+    for name, digest in hashes.items():
+        try:
+            blob = evidence.git(evidence.HARNESS_REPO, "show", f"{revision}:extensions/{name}")
+        except HarnessGap as error:
+            raise HarnessGap(f"O14 viewer file {name} is not in extensions/ at viewer_revision") from error
+        if hashlib.sha256(blob).hexdigest() != digest:
+            raise HarnessGap(f"O14 viewer file {name} differs from extensions/{name} at viewer_revision")
+    ext = Path(ctx.root) / "ext"
+    for name, data in files.items():  # only verified bytes are written; no check can fail past this point
+        staged = ext / (name + ".o14-staged")
+        staged.write_bytes(data)
+        staged.replace(ext / name)
     ctx.evidence.append({"kind": "o14_production_viewer", "source": str(source), "viewer_revision": revision,
-                         "sha256": hashes, "verified_against_pin": True, "test_only_path": True})
+                         "trusted_main": trusted_main, "sha256": hashes, "verified_against_revision": True,
+                         "test_only_path": True})
     await ctx.peer.call("workspace.apply", {"ops": [{"op": "set", "key": "extension/agents",
         "value": {"enabled": True, "argv": ["/usr/bin/python3", str(ext / "agents.py")]}}]})
     return ext
@@ -290,9 +330,7 @@ async def incompatible_viewers(ctx):
             check(result["reported"], f"{ref}: the viewer visibly reports an incompatible stream with its cause and limit",
                   component="viewer")
     finally:
-        process.terminate()
-        try: process.wait(5)
-        except subprocess.TimeoutExpired: process.kill()
+        stop_provider(ctx, process)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -326,10 +364,13 @@ def strings(value):
 
 def message_texts(reducer, needle, baseline=None):
     """Correlate the emitted message once: (texts, other_texts). `texts` are ALL text blocks (body and any marker
-    block) of every message entity carrying `needle` in some block, in entity order; `other_texts` are the strings of
+    block) of every message entity carrying `needle` in some block, in timeline (position) order; `other_texts` are the strings of
     every other entity new or changed since `baseline` (a {key: rev} map), e.g. an omission-only notice."""
     texts, others = [], []
-    for key, entity in sorted(reducer.entities.items(), key=lambda item: str(item[0])):
+    def timeline(item):  # the message's own position, never the opaque entity id; unpositioned entities last
+        position = (item[1].get("value") or {}).get("position")
+        return (0, position, str(item[0])) if isinstance(position, int) and not isinstance(position, bool) else (1, 0, str(item[0]))
+    for key, entity in sorted(reducer.entities.items(), key=timeline):
         kind, value = key[0], entity.get("value") or {}
         blocks = [block["text"] for block in value.get("content", []) if isinstance(block, dict)
                   and isinstance(block.get("text"), str)] if kind == "message" and isinstance(value.get("content"), list) else []
