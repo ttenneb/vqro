@@ -647,6 +647,7 @@ class AgentPane(unittest.TestCase):
         self.core.resources["r5"] = dict(self.core.resources["r2"], id="r5", name="Other")
         self.agents.event("resource", {"id": "r5"})
         self.agents.flush_conversations()
+        self.agents.strict = False  # production behaviour (the fixture is strict so other tests catch masked bugs)
         real = self.agents.panel
         self.agents.panel = lambda r: (_ for _ in ()).throw(KeyError("boom")) if r["id"] == "r2" else real(r)
         with contextlib.redirect_stderr(io.StringIO()) as err:
@@ -657,7 +658,7 @@ class AgentPane(unittest.TestCase):
         self.assertEqual(broken["style"], "error")
         self.assertIn("couldn't be drawn (KeyError: 'boom')", broken["text"])
         self.assertNotIn("couldn't be drawn", json.dumps(self.core.live["agents-r5"]), "the other agent's pane is drawn")
-        self.assertIn("pane failed for r2", err.getvalue())
+        self.assertEqual(err.getvalue().count("pane failed for r2"), 1, "logged once per distinct error, not per redraw")
         self.agents.panel = real
         self.agents.wake("r2")
         self.agents.flush_conversations()

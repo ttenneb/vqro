@@ -9,6 +9,7 @@ OPS = ("prompt", "steer", "follow_up", "abort", "clear_queue", "answer")
 class FakeCore:
     def __init__(self, name="agents"):
         self.name = name
+        self.strict_render = True  # agents.Agents: a render bug raises in tests instead of becoming an error row
         self.cache_lock = threading.RLock()
         self.entries, self.resources, self.handlers, self.live = {}, {}, {}, {}
         self.providers = {"other": {"name": "other", "capabilities": {"agent."+op: {} for op in OPS}}}

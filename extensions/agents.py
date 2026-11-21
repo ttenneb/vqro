@@ -415,6 +415,9 @@ def broken_panel(r, error):
 class Agents:
     def __init__(self, ext):
         self.ext, self.lock = ext, threading.RLock()
+        # strict: a render failure raises instead of becoming that pane's error row (tests set it, so a masked render
+        # bug still fails them); logged: the last failure logged per (agent, step), to log each distinct one once.
+        self.strict, self.logged = bool(getattr(ext, "strict_render", False)), {}
         self.open_requests = set()
         self.open_settings = set()
         self.open_pane, self.published_pane = set(), {}  # ⚙ popups shown (republished as the view or agent changes)
@@ -596,7 +599,17 @@ class Agents:
         try:
             fn(*args)
         except Exception as error:  # noqa: BLE001 - any bug in one agent's step
-            print(f"agents: {what} failed for {rid}: {type(error).__name__}: {str(error)[:300]}", file=sys.stderr, flush=True)
+            if self.strict:
+                raise
+            self.log_failure(rid, what, error)
+
+    def log_failure(self, rid, what, error):
+        """Log an agent's failure once per distinct error (a failing pane redraws several times a second while it
+        streams)."""
+        line = f"agents: {what} failed for {rid}: {type(error).__name__}: {str(error)[:300]}"
+        if self.logged.get((rid, what)) != line:
+            self.logged[(rid, what)] = line
+            print(line, file=sys.stderr, flush=True)
 
     def conversation_worker(self):
         while True:
@@ -1679,7 +1692,9 @@ class Agents:
             try:
                 content = self.panel(resource)
             except Exception as error:  # noqa: BLE001 - this agent's pane says so; the others keep updating
-                print(f"agents: pane failed for {rid}: {type(error).__name__}: {str(error)[:300]}", file=sys.stderr, flush=True)
+                if self.strict:
+                    raise
+                self.log_failure(rid, "pane", error)
                 content = broken_panel(resource, error)
             if self.published.get(rid) != content:
                 self.ext.publish(view(rid), content)
@@ -1688,6 +1703,9 @@ class Agents:
                 try:
                     gear = self.gear_panel(resource)
                 except Exception as error:  # noqa: BLE001
+                    if self.strict:
+                        raise
+                    self.log_failure(rid, "pane options", error)
                     gear = broken_panel(resource, error)
                 if self.published_pane.get(rid) != gear:
                     self.ext.publish("agents-pane-" + rid, gear)
