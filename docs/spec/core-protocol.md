@@ -696,8 +696,8 @@ A full bounded input queue returns `overloaded` without dispatching that input. 
 produces `stream.error {stream, error, outcome: "rejected"}` instead; it is never replayed.
 
 **Terminal engines** (Rust TUI; client mechanism). The emulator that draws terminal panes is a built-in engine
-chosen by `doc/settings/tui.terminal_engine` (Settings > Interface): `vt100` (the default until libghostty's
-independent audit; always available, the fallback) or `libghostty` (Ghostty's libghostty-vt). Both keep exactly `scrollback_lines` of history and number
+chosen by `doc/settings/tui.terminal_engine` (Settings > Interface): `libghostty` (Ghostty's libghostty-vt; the
+default since its independent audit cleared pin 9ad3c422) or `vt100` (always available, the fallback). Both keep exactly `scrollback_lines` of history and number
 history rows so a selection or search match keeps naming its line while older rows are dropped; a row number never
 names another row's text (after a resize, a cleared history, a reset or a screen switch, rows get new numbers and
 a selection is dropped). Changing it switches open panes, which start a

@@ -695,7 +695,8 @@ The OpenTUI client stays optional and separately installed, never bundled (human
 `EngineKind`). The engines are built in and chosen in Settings (`doc/settings/tui.terminal_engine`). There are no
 runtime plug-ins. `libghostty` (Ghostty's libghostty-vt, vendored at 9ad3c422 and built with Zig 0.17.1; first c5a21edf
 with Zig 0.15.2, moved by Q-GH-4 (b), 2026-11-21, for the upstream crash fixes the audit needed) becomes the
-default after its independent audit (plan G8); until then vt100 is the default. vt100 stays selectable and is the fallback. An engine that can't be selected or started is replaced
+default after its independent audit (plan G8); until then vt100 is the default. Done 2026-11-21: ghostty-audit
+cleared pin 9ad3c422 (`qol/libghostty-audit-findings-3.md`) and libghostty became the default. vt100 stays selectable and is the fallback. An engine that can't be selected or started is replaced
 by vt100 for that pane, with a notice. A crash inside a native engine can't be caught that way, so native engines
 keep their FFI defensive. One shared conformance suite (`tests/fixtures/client/engines.json`) has a baseline every
 engine must pass and fidelity extras each engine claims for itself; alacritty_terminal can join later through the

@@ -122,8 +122,9 @@ pub enum EngineKind {
 impl EngineKind {
     pub const ALL: [EngineKind; 2] = [EngineKind::Libghostty, EngineKind::Vt100];
     /// The engine used when the setting names none (or one this client doesn't know).
-    /// vt100 until the independent audit and the secondary review clear libghostty; libghostty is selectable.
-    pub const DEFAULT: EngineKind = EngineKind::Vt100;
+    /// libghostty, since ghostty-audit cleared pin 9ad3c422 (findings 3, 2026-11-21); vt100 stays selectable and is
+    /// the fallback when libghostty can't start.
+    pub const DEFAULT: EngineKind = EngineKind::Libghostty;
 
     pub fn name(self) -> &'static str {
         match self { EngineKind::Vt100 => "vt100", EngineKind::Libghostty => "libghostty" }
