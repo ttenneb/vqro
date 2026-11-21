@@ -288,13 +288,21 @@ impl Agent {
         // record matching no open message, gets a new entity; nothing is ever written into another message's entity.
         let identity=(message["role"].clone(),message["timestamp"].clone());
         let starting=std::mem::take(&mut self.starting);
-        let found=if starting {None} else {self.open.iter().rposition(|(role,timestamp,_)|*role==identity.0
-            && (*timestamp==identity.1 || count(timestamp).is_none() || count(&identity.1).is_none()))};
+        // An exact identity (same role and the same valid timestamp) wins; only without one may a missing timestamp match.
+        let found=if starting {None} else {
+            self.open.iter().rposition(|(role,timestamp,_)|*role==identity.0 && count(timestamp).is_some() && *timestamp==identity.1)
+                .or_else(||self.open.iter().rposition(|(role,timestamp,_)|*role==identity.0
+                    && (*timestamp==identity.1 || count(timestamp).is_none() || count(&identity.1).is_none())))
+        };
         let id=if let Some(index)=found {self.open[index].2.clone()}else{
             self.position+=1;let id=self.next("m");
             self.open.push((identity.0.clone(),identity.1.clone(),id.clone()));if self.open.len()>OPEN_MESSAGES{self.open.remove(0);}
             // Only the entity a correlated user message_start creates gets that origin; any other new entity gets none.
-            self.current_origin=self.start_origin.take().filter(|_|message["role"]=="user" && count(&message["timestamp"]).is_some()).map(|entry|(id.clone(),entry,message["timestamp"].clone()));id
+            // A new entity never replaces another open message's binding unless it is itself a correlated start.
+            if let Some(entry)=self.start_origin.take().filter(|_|message["role"]=="user" && count(&message["timestamp"]).is_some()){
+                self.current_origin=Some((id.clone(),entry,message["timestamp"].clone()));
+            }
+            id
         };
         self.start_origin=None;
         let position=self.journal.entity("message",&id).and_then(|(_,value)|value["position"].as_u64()).unwrap_or(self.position);
@@ -313,7 +321,9 @@ impl Agent {
             let same=self.journal.entity("message",&id).and_then(|(_,old)|old.pointer(&field)).and_then(Value::as_str)
                 .zip(value.pointer(&field).and_then(Value::as_str)).is_some_and(|(old,new)|new.len()==old.len()+delta.len() && new.starts_with(old) && new.ends_with(delta));
             // A dropped binding must re-put the whole entity: an append keeps the old origin/delivery/role.
-            same && !final_value && !dropped && self.journal.append_text("message",&id,&field,delta).is_ok()
+            // Nor may an append keep an origin already published on this entity that no live binding backs any more.
+            let stale=extra.is_none() && self.journal.entity("message",&id).is_some_and(|(_,old)|old.get("origin").is_some());
+            same && !final_value && !dropped && !stale && self.journal.append_text("message",&id,&field,delta).is_ok()
         }else{false};
         if !appended {self.store("message",&id,value,true);}
         if final_value {

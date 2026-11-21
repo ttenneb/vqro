@@ -182,6 +182,39 @@ fn an_interleaved_stray_record_does_not_lose_the_open_message() {
     assert!(rows.iter().any(|r|r["id"]!="m1" && r["value"]["content"][0]["text"]=="B" && r["value"]["role"]=="user"));
 }
 
+/// as-reviewer R1 on 1fc694be: a stray message opening its own entity must not unbind A, and A returning with
+/// changed text must not keep A's old published origin through the append path.
+#[test]
+fn a_stray_message_never_rebinds_and_a_changed_return_never_keeps_the_origin() {
+    let mut a=make();
+    let origin=json!({"principal":"p:owner","kind":"human"});
+    a.origins.arm(origins::Entry::new("d-origin",&origin,&json!({"message":"hello"})));
+    event(&mut a,json!({"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}));
+    event(&mut a,json!({"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"hello"}],"timestamp":1000}}));
+    event(&mut a,json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"B"}],"timestamp":2000}}));
+    assert_eq!(entities(&a,"message").iter().find(|r|r["id"]=="m1").unwrap()["value"]["origin"],origin,"B does not unbind A");
+    event(&mut a,json!({"type":"message_update","message":{"role":"user","content":[{"type":"text","text":"hello world"}],"timestamp":1000},
+        "assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" world"}}));
+    let m1=entities(&a,"message").into_iter().find(|r|r["id"]=="m1").unwrap();
+    assert_eq!(m1["value"]["content"][0]["text"],"hello world");
+    assert!(m1["value"].get("origin").is_none() && m1["value"].get("delivery").is_none(),"changed text keeps no origin: {m1}");
+}
+
+/// as-reviewer R2 on 1fc694be: a newer same-role message without a timestamp does not shadow an open message with an
+/// exact identity.
+#[test]
+fn an_exact_identity_wins_over_a_timestamp_missing_message() {
+    let mut a=make();
+    event(&mut a,json!({"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"he"}],"timestamp":1000}}));
+    event(&mut a,json!({"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"B"}]}}));
+    event(&mut a,json!({"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"hello"}],"timestamp":1000},
+        "assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"llo"}}));
+    event(&mut a,json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"hello"}],"timestamp":1000,"stopReason":"stop"}}));
+    let rows=entities(&a,"message");
+    let text=|id:&str|rows.iter().find(|r|r["id"]==id).unwrap()["value"]["content"][0]["text"].clone();
+    assert_eq!((text("m1"),text("m2")),(json!("hello"),json!("B")),"{rows:?}");
+}
+
 #[test]
 fn modules_are_versioned_descriptor_maps_for_resource_and_provider() {
     let a=make();
