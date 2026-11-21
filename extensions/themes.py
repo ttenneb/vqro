@@ -33,8 +33,11 @@ THEMES = [
                     "muted": "gray", "border": "darkgray"},
     },
     {
+        # https://github.com/primer/primitives/blob/v7.15.0/src/tokens/base/color/light/light.json5
         "name": "light", "title": "Light", "credit": "for terminals with a light background",
         "palette": {
+            "heading": "#8250df", "control": "#0969da", "link": "#0969da", "info": "#0969da",
+            "you": "#bc4c00", "agent": "#8250df", "other_agent": "#1a7f37", "changed": "#9a6700",
             "text": "default", "muted": "#57606a", "dim": "#8c959f", "accent": "#0969da", "ok": "#1a7f37",
             "warn": "#9a6700", "error": "#cf222e", "prompt": "#8250df", "border": "#d0d7de",
             "border_focus": "#0969da", "selection": "#ddf4ff", "selection_text": "#1f2328", "badge": "#6e7781",
@@ -45,6 +48,8 @@ THEMES = [
         # https://www.nordtheme.com/docs/colors-and-palettes
         "name": "nord", "title": "Nord", "credit": "palette by Arctic Ice Studio",
         "palette": {
+            "heading": "#81a1c1", "control": "#5e81ac", "link": "#88c0d0", "info": "#8fbcbb",
+            "you": "#d08770", "agent": "#b48ead", "other_agent": "#a3be8c", "changed": "#ebcb8b",
             "text": "default", "muted": "#d8dee9", "dim": "#616e88", "accent": "#88c0d0", "ok": "#a3be8c",
             "warn": "#ebcb8b", "error": "#bf616a", "prompt": "#b48ead", "border": "#4c566a",
             "border_focus": "#88c0d0", "selection": "#434c5e", "selection_text": "#eceff4", "badge": "#d8dee9",
@@ -55,6 +60,8 @@ THEMES = [
         # https://github.com/morhetz/gruvbox
         "name": "gruvbox", "title": "Gruvbox dark", "credit": "palette by Pavel Pertsev (morhetz)",
         "palette": {
+            "heading": "#fabd2f", "control": "#83a598", "link": "#83a598", "info": "#8ec07c",
+            "you": "#fe8019", "agent": "#d3869b", "other_agent": "#8ec07c", "changed": "#fabd2f",
             "text": "default", "muted": "#a89984", "dim": "#928374", "accent": "#fabd2f", "ok": "#b8bb26",
             "warn": "#fe8019", "error": "#fb4934", "prompt": "#d3869b", "border": "#665c54",
             "border_focus": "#fabd2f", "selection": "#504945", "selection_text": "#ebdbb2", "badge": "#a89984",
@@ -105,6 +112,8 @@ THEMES = [
         # https://draculatheme.com/contribute
         "name": "dracula", "title": "Dracula", "credit": "palette by Zeno Rocha and the Dracula team",
         "palette": {
+            "heading": "#bd93f9", "control": "#8be9fd", "link": "#8be9fd", "info": "#8be9fd",
+            "you": "#ffb86c", "agent": "#ff79c6", "other_agent": "#8be9fd", "changed": "#f1fa8c",
             "text": "default", "muted": "#f8f8f2", "dim": "#6272a4", "accent": "#bd93f9", "ok": "#50fa7b",
             "warn": "#f1fa8c", "error": "#ff5555", "prompt": "#ff79c6", "border": "#44475a",
             "border_focus": "#bd93f9", "selection": "#44475a", "selection_text": "#f8f8f2", "badge": "#6272a4",
@@ -115,6 +124,8 @@ THEMES = [
         # https://github.com/folke/tokyonight.nvim
         "name": "tokyo-night", "title": "Tokyo Night", "credit": "palette by enkia; values from folke/tokyonight.nvim (night)",
         "palette": {
+            "heading": "#bb9af7", "control": "#7aa2f7", "link": "#7dcfff", "info": "#2ac3de",
+            "you": "#ff9e64", "agent": "#bb9af7", "other_agent": "#73daca", "changed": "#e0af68",
             "text": "default", "muted": "#a9b1d6", "dim": "#565f89", "accent": "#7aa2f7", "ok": "#9ece6a",
             "warn": "#e0af68", "error": "#f7768e", "prompt": "#bb9af7", "border": "#414868",
             "border_focus": "#7aa2f7", "selection": "#292e42", "selection_text": "#c0caf5", "badge": "#545c7e",
@@ -125,6 +136,8 @@ THEMES = [
         # https://ethanschoonover.com/solarized/
         "name": "solarized-dark", "title": "Solarized Dark", "credit": "palette by Ethan Schoonover",
         "palette": {
+            "heading": "#6c71c4", "control": "#268bd2", "link": "#268bd2", "info": "#2aa198",
+            "you": "#cb4b16", "agent": "#6c71c4", "other_agent": "#2aa198", "changed": "#b58900",
             "text": "default", "muted": "#93a1a1", "dim": "#586e75", "accent": "#268bd2", "ok": "#859900",
             "warn": "#b58900", "error": "#dc322f", "prompt": "#d33682", "border": "#073642",
             "border_focus": "#2aa198", "selection": "#073642", "selection_text": "#eee8d5", "badge": "#586e75",
@@ -133,8 +146,11 @@ THEMES = [
     },
     {
         # https://github.com/atom/atom/tree/master/packages/one-dark-ui
+        # Syntax hues: https://github.com/atom/one-dark-syntax/blob/master/styles/colors.less
         "name": "one-dark", "title": "One Dark", "credit": "palette from Atom's One Dark",
         "palette": {
+            "heading": "#c678dd", "control": "#61afef", "link": "#56b6c2", "info": "#56b6c2",
+            "you": "#d19a66", "agent": "#c678dd", "other_agent": "#56b6c2", "changed": "#e5c07b",
             "text": "default", "muted": "#abb2bf", "dim": "#5c6370", "accent": "#61afef", "ok": "#98c379",
             "warn": "#e5c07b", "error": "#e06c75", "prompt": "#c678dd", "border": "#3e4451",
             "border_focus": "#61afef", "selection": "#3e4451", "selection_text": "#d7dae0", "badge": "#5c6370",
@@ -145,6 +161,8 @@ THEMES = [
         # https://rosepinetheme.com/palette/
         "name": "rose-pine", "title": "Rosé Pine", "credit": "palette by Rosé Pine",
         "palette": {
+            "heading": "#c4a7e7", "control": "#31748f", "link": "#9ccfd8", "info": "#31748f",
+            "you": "#f6c177", "agent": "#ebbcba", "other_agent": "#9ccfd8", "changed": "#f6c177",
             "text": "default", "muted": "#908caa", "dim": "#6e6a86", "accent": "#c4a7e7", "ok": "#9ccfd8",
             "warn": "#f6c177", "error": "#eb6f92", "prompt": "#ebbcba", "border": "#26233a",
             "border_focus": "#c4a7e7", "selection": "#403d52", "selection_text": "#e0def4", "badge": "#6e6a86",
@@ -155,6 +173,8 @@ THEMES = [
         # https://github.com/rebelot/kanagawa.nvim
         "name": "kanagawa", "title": "Kanagawa", "credit": "palette by Tommaso Laurenzi (rebelot/kanagawa.nvim, wave)",
         "palette": {
+            "heading": "#957fb8", "control": "#7e9cd8", "link": "#7fb4ca", "info": "#7aa89f",
+            "you": "#ffa066", "agent": "#957fb8", "other_agent": "#7aa89f", "changed": "#dca561",
             "text": "default", "muted": "#c8c093", "dim": "#727169", "accent": "#7e9cd8", "ok": "#98bb6c",
             "warn": "#e6c384", "error": "#e46876", "prompt": "#957fb8", "border": "#363646",
             "border_focus": "#7e9cd8", "selection": "#2d4f67", "selection_text": "#dcd7ba", "badge": "#727169",
@@ -177,6 +197,13 @@ for t in THEMES:
     if t["name"] in ACCENTS:
         t["accents"] = {n: "#" + h for n, h in zip(ACCENT_NAMES, ACCENTS[t["name"]].split())}
         t["accent"] = "lavender"
+        roles = {"heading": "lavender", "control": "blue", "link": "sapphire", "info": "sky",
+                 "you": "peach", "agent": "mauve", "other_agent": "teal", "changed": "yellow"}
+        if t["name"] == "catppuccin-latte":
+            # Lavender, sapphire, sky, peach and yellow are below 3:1 on Latte's base.
+            # Use its darker published accents, not invented/darkened colours.
+            roles.update(heading="mauve", link="blue", info="teal", you="maroon", changed="maroon")
+        t["palette"].update({role: t["accents"][name] for role, name in roles.items()})
         # Calmer than pink for the prompt line: mauve.
         t["palette"]["prompt"] = t["accents"]["mauve"]
         for k in ACCENT_TOKENS:
