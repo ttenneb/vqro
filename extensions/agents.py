@@ -442,7 +442,7 @@ class Agents:
         self.ext, self.lock = ext, threading.RLock()
         # strict: a render failure raises instead of becoming that pane's error row (tests set it, so a masked render
         # bug still fails them); logged: the last failure logged per (agent, step), to log each distinct one once.
-        self.strict, self.logged = bool(getattr(ext, "strict_render", False)), {}
+        self.strict, self.logged, self.log_lock = bool(getattr(ext, "strict_render", False)), {}, threading.Lock()
         self.open_requests = set()
         self.open_settings = set()
         self.open_pane, self.published_pane = set(), {}
@@ -636,12 +636,14 @@ class Agents:
         after a good draw (which forgets it) logs again. Entries go when the agent goes; at most LOGGED_MAX are kept
         (oldest dropped)."""
         line = f"agents: {what} failed for {rid}: {type(error).__name__}: {str(error)[:300]}"
-        if self.logged.get((rid, what)) != line:
+        with self.log_lock:  # the worker logs while the event thread prunes (publish_gone)
+            if self.logged.get((rid, what)) == line:
+                return
             self.logged.pop((rid, what), None)
             self.logged[(rid, what)] = line
             while len(self.logged) > LOGGED_MAX:
                 self.logged.pop(next(iter(self.logged)))
-            print(line, file=sys.stderr, flush=True)
+        print(line, file=sys.stderr, flush=True)
 
     def conversation_worker(self):
         while True:
@@ -1749,7 +1751,8 @@ class Agents:
             resource = self.ext.resources.get(rid) or resource
             try:
                 content = self.panel(resource)
-                self.logged.pop((rid, "pane"), None)  # a good draw: the next failure is news again
+                with self.log_lock:
+                    self.logged.pop((rid, "pane"), None)  # a good draw: the next failure is news again
             except Exception as error:  # noqa: BLE001 - this agent's pane says so; the others keep updating
                 if self.strict:
                     raise
@@ -1783,8 +1786,9 @@ class Agents:
 
     def publish_gone(self, rid):
         self.published.pop(rid, None)
-        for key in [k for k in self.logged if k[0] == rid]:  # the agent is gone: so are its logged errors
-            del self.logged[key]
+        with self.log_lock:  # the agent is gone: so are its logged errors
+            for key in [k for k in self.logged if k[0] == rid]:
+                del self.logged[key]
         self.open_pane.discard(rid)
         self.published_pane.pop(rid, None)
         self.open_tools.pop(rid, None)
