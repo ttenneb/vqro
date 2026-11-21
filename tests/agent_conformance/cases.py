@@ -1302,12 +1302,15 @@ async def first_valid_answer(ctx):
     rejection(await answer(ctx, request, response), kinds=("stale",))
     check(not ctx.native.writes(mark), "already-answered request was sent again")
     declaration = await caps(ctx, "agent.respond")
-    if declaration.get("native_timeout") == "unrepresentable_positive":
+    from .request_fixture_cases import expiry_exclusion, r2_native_withdrawal
+    excluded = expiry_exclusion(declaration)
+    if excluded:
         ctx.evidence.append({"kind": "subcase", "case": "R2.expiry", "status": "not-applicable",
-                             "exclusion": {"path": "agent.respond.native_timeout", "actual": "unrepresentable_positive"}})
+                             "exclusion": {"path": "agent.respond.native_timeout", "actual": excluded}})
         expiry_gap = None
+        if excluded == "none":  # no expiry, but the runtime can still stop waiting: keep that witness
+            await r2_native_withdrawal(ctx, declaration)
     else:
-        from .request_fixture_cases import r2_native_withdrawal
         expiry_gap = await r2_native_withdrawal(ctx, declaration)
     _, dead = await make_request(ctx)
     await reject_answer_after_native_end(ctx, dead)

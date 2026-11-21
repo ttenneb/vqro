@@ -73,6 +73,13 @@ async def c6_non_confirm(ctx, declaration):
                          "full_request_detail_preserved": True})
 
 
+def expiry_exclusion(declaration):
+    """R2 'expired' is excluded only by an explicit declaration: `unrepresentable_positive` (positive native timeouts
+    the adapter cannot represent, Pi) or `none` (the runtime has no request expiry at all, Codex app-server)."""
+    value = declaration.get("native_timeout")
+    return value if value in ("unrepresentable_positive", "none") else None
+
+
 async def r2_native_withdrawal(ctx, declaration):
     """The runtime itself stops waiting (its own resolution notice): an answer is then refused before any native write.
     Returns a reason when the declared runtime has no representable native expiry, so the caller keeps an honest gap."""

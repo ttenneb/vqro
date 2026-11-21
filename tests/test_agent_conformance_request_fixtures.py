@@ -126,6 +126,14 @@ def run(branch, fault=None):
         return asyncio.run(branch(fake, DECLARATION))
 
 
+class ExpiryExclusion(unittest.TestCase):
+    def test_only_explicit_declarations_exclude_expiry(self):
+        self.assertEqual(branches.expiry_exclusion({"native_timeout": "none"}), "none")
+        self.assertEqual(branches.expiry_exclusion({"native_timeout": "unrepresentable_positive"}), "unrepresentable_positive")
+        for declaration in ({}, {"native_timeout": None}, {"native_timeout": "None"}, {"native_timeout": 0}, {"native_timeout": "unknown"}):
+            self.assertIsNone(branches.expiry_exclusion(declaration))
+
+
 class RequestFixtureNegatives(unittest.TestCase):
     def test_conforming_fakes_pass(self):
         run(branches.c6_non_confirm)
