@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 import secrets
 import signal
+import time
 
 from . import cases
 from .core import Native
@@ -34,6 +35,7 @@ from .results import CheckFailed, HarnessGap, check
 
 LATE_END_WINDOW_S = 3.0   # how long the resumed old bridge has to (wrongly) affect the replacement
 SETUP_S = 10.0            # each bounded setup wait (the handler deadline is 45 s)
+MAX_OBSERVED = 4096       # bounded arrival log of the dedicated public observer
 MAX_SOCKET_PATH = 100     # Unix socket paths stay under the 103-byte macOS limit
 
 
@@ -95,6 +97,15 @@ def grade_replacement(obs):
     provider = late.get("provider_after") or {}
     add((provider.get("instance") or "").endswith(":" + str(b)) and provider.get("state") == "connected",
         "the provider is still the replacement's connected instance after the old incarnation's late return")
+    exit_ns = (obs.get("own_host") or {}).get("exit_ns")
+    arrivals = obs.get("arrivals")
+    add(isinstance(exit_ns, int) and isinstance(arrivals, list) and len(arrivals) < MAX_OBSERVED,
+        "the replacement's own exit is fenced: its native ledger exit time and the public arrival log exist", "fixture")
+    premature = [row for row in arrivals or [] if row.get("id") in new_ids and row.get("lifecycle") == "ended"
+                 and isinstance(exit_ns, int) and row.get("ns", exit_ns) < exit_ns]
+    add(not premature,
+        "no replacement endpoint was ended by any public event that arrived before its own native host exited "
+        "(observed from registration through the own exit)")
     own_host = obs.get("own_host") or {}
     add(own_host.get("exited") is True and "exit" in (own_host.get("ledger") or []),
         "the replacement's own native host really ended (its captured process is gone and its ledger records exit)",
@@ -227,6 +238,19 @@ async def many_host_replacement(ctx):
                              "within the bounded setup")
         new_ids = sorted(row["id"] for row in new_rows)
         new_host = host_of(new_rows[0]["data"]["agent"])
+        # A dedicated public observer timestamps every resource event on arrival (CLOCK_MONOTONIC, the same clock as
+        # the native ledger's ns), from here through the replacement's own exit. ctx.peer is never touched.
+        arrivals = []
+        observer = await ctx.viewer()
+        def arrived(event):
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            if event.get("type") == "resource" and len(arrivals) < MAX_OBSERVED:
+                agent = (data.get("data") or {}).get("agent") or {}
+                arrivals.append({"ns": time.monotonic_ns(), "id": data.get("id"), "lifecycle": agent.get("lifecycle"),
+                                 "incarnation": host_of(agent).get("incarnation")})
+        observer.on("event", arrived)
+        snapshot = await observer.call("workspace.snapshot")
+        await observer.call("events.subscribe", {"epoch": snapshot["epoch"], "from": snapshot["seq"], "types": ["resource"]})
         b = new_host.get("incarnation")
         native_b_process = identity((await native_b.call("state"))["pid"])
         if native_b_process:
@@ -272,7 +296,9 @@ async def many_host_replacement(ctx):
         async def own_host_gone():
             return not live(native_b_process)
         own_host_exited = bool(await poll(own_host_gone, SETUP_S))
-        own_host_exit_rows = [row.get("kind") for row in native_b.records(after=own_ledger_mark)][-4:]
+        own_rows = native_b.records(after=own_ledger_mark)
+        own_host_exit_rows = [row.get("kind") for row in own_rows][-4:]
+        own_exit_ns = next((row.get("ns") for row in own_rows if row.get("kind") == "exit" and isinstance(row.get("ns"), int)), None)
         def own_end_seen():
             rows = {rid: (ctx.resource_cache.get(rid) or {}).get("data", {}).get("agent") for rid in new_ids}
             return rows if all((row or {}).get("lifecycle") == "ended" for row in rows.values()) else None
@@ -292,7 +318,8 @@ async def many_host_replacement(ctx):
                "work_before": work_before, "work_after": work_after, "after_end": after_end,
                "available_after": available_after, "old_after": old_after, "settled": settled,
                "history": history, "order": order, "late_return": late_return, "own_end": own_end,
-               "own_host": {"exited": own_host_exited, "ledger": own_host_exit_rows}}
+               "own_host": {"exited": own_host_exited, "ledger": own_host_exit_rows, "exit_ns": own_exit_ns},
+               "arrivals": list(arrivals)}
         brief = lambda f: {k: (f or {}).get(k) for k in ("state", "run", "lifecycle")} | {
             "incarnation": host_of(f).get("incarnation")}
         ctx.evidence.append({"kind": "l3_replacement", "old_host": host, "new_host": new_host,
@@ -303,7 +330,10 @@ async def many_host_replacement(ctx):
                              "settled": brief(settled), "own_end": {rid: brief(f) for rid, f in own_end.items()},
                              "late_return": late_return,
                              "own_host": {"process": native_b_process, "exited": own_host_exited,
-                                          "ledger": own_host_exit_rows},
+                                          "ledger": own_host_exit_rows, "exit_ns": own_exit_ns},
+                             "arrivals": {"count": len(arrivals), "bounded_at": MAX_OBSERVED,
+                                          "replacement_ends": [row for row in arrivals if row.get("id") in new_ids
+                                                               and row.get("lifecycle") == "ended"][:8]},
                              "executables": {"old_bridge": {"pid": image.get("pid"), "birth": image.get("birth"),
                                                             "sha256": image.get("sha256")},
                                              "replacement_bridge": image_b,

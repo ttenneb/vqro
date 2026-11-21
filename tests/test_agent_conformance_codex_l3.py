@@ -1,6 +1,7 @@
 """Self-tests for the Part A L3 many-host replacement branch: each realistic failure must FAIL, the correct run PASS."""
 import asyncio
 from copy import deepcopy
+import time
 import importlib
 from types import SimpleNamespace
 import unittest
@@ -28,7 +29,9 @@ def valid_obs():
             "old_ids": ["r2", "r3", "r4"], "new_ids": ["r6", "r7", "r8"], "same_image": True,
             "work_before": work, "work_after": dict(work),
             "own_end": {rid: facts(B, lifecycle="ended") for rid in ("r6", "r7", "r8")},
-            "own_host": {"exited": True, "ledger": ["exit"]},
+            "own_host": {"exited": True, "ledger": ["exit"], "exit_ns": 1000},
+            "arrivals": [{"ns": 900, "id": "r6", "lifecycle": "live", "incarnation": B}]
+                        + [{"ns": 1100, "id": rid, "lifecycle": "ended", "incarnation": B} for rid in ("r6", "r7", "r8")],
             "after_end": after, "available_after": {rid: True for rid in after},
             "old_after": {"r2": None, "r3": None, "r4": None},
             "settled": facts(B, "idle", None, completion={"reason": "completed"}),
@@ -59,6 +62,10 @@ class GradeReplacement(unittest.TestCase):
         def other_image(o): o["same_image"] = False
         def own_host_still_live(o): o["own_host"]["exited"] = False
         def own_host_no_exit_row(o): o["own_host"]["ledger"] = []
+        def ended_before_own_exit(o): o["arrivals"].insert(1, {"ns": 950, "id": "r7", "lifecycle": "ended", "incarnation": B})
+        def ended_old_attribution_before_exit(o): o["arrivals"].insert(1, {"ns": 950, "id": "r8", "lifecycle": "ended", "incarnation": A})
+        def no_exit_time(o): o["own_host"]["exit_ns"] = None
+        def arrival_log_truncated(o): o["arrivals"] = o["arrivals"] * (m.MAX_OBSERVED // 4 + 1)
         def never_completes(o): o["settled"] = facts(B, "running", "turn-1")
         def ended_attributed_to_new(o): o["history"].append(("r2", facts(B, lifecycle="ended")))
         def old_resurrected(o): o["old_after"]["r3"] = (True, facts(A))
@@ -73,6 +80,8 @@ class GradeReplacement(unittest.TestCase):
                   session_switched: "adapter", run_rebound_to_old_host: "adapter", own_end_not_ended: "adapter",
                   own_end_misattributed: "adapter", other_image: "fixture",
                   own_host_still_live: "fixture", own_host_no_exit_row: "fixture",
+                  ended_before_own_exit: "adapter", ended_old_attribution_before_exit: "adapter",
+                  no_exit_time: "fixture", arrival_log_truncated: "fixture",
                   ended_attributed_to_new: "adapter", old_resurrected: "adapter", old_took_provider: "adapter",
                   provider_lost: "adapter", not_a_replacement: "harness", old_ids_reused: "harness",
                   old_host_never_ended: "harness", wrong_order: "harness"}
@@ -132,7 +141,8 @@ class SimulatedCore:
     """A tiny public-surface simulation for whole-handler controls: two bridges under one provider name, the core's
     one-live-connection rule, and a scenario hook deciding what the old incarnation's late return does."""
 
-    def __init__(self, late_return, own_end=None, foreign=False, native_b_lives=False):
+    def __init__(self, late_return, own_end=None, foreign=False, native_b_lives=False, before_own_exit=None):
+        self.before_own_exit = before_own_exit or (lambda core: None)
         self.late_return, self.native_b_lives, self.sends = late_return, native_b_lives, []
         self.own_end = own_end or SimulatedCore.ends_replacement_endpoints
         self.resources = {"r1": {"id": "r1", "kind": "terminal", "provider": "herdr", "available": True}}
@@ -150,9 +160,14 @@ class SimulatedCore:
     def ends_replacement_endpoints(core):  # the correct owns_lifecycle end of the replacement host
         for rid in ("r6", "r7", "r8"):
             core.resources[rid]["data"]["agent"]["lifecycle"] = "ended"
+            core.publish(rid)
+
+    observers = ()
 
     def publish(self, rid):
         self.history.append((None, len(self.history), deepcopy(self.resources[rid]), 1))
+        for callback in self.observers:  # public resource events reach every subscribed observer, in order
+            callback({"type": "resource", "data": deepcopy(self.resources[rid])})
 
     async def call(self, method, params=None):
         params = params or {}
@@ -177,8 +192,13 @@ class SimulatedCore:
         raise AssertionError(method)
 
 
-def run_control(late_return, own_end=None, foreign=False, native_b_lives=False):
-    core = SimulatedCore(late_return, own_end, foreign, native_b_lives)
+def run_control(late_return, own_end=None, foreign=False, native_b_lives=False, before_own_exit=None):
+    core = SimulatedCore(late_return, own_end, foreign, native_b_lives, before_own_exit)
+    class Observer:
+        def on(self, method, callback): core.observers = (*core.observers, callback)
+        async def call(self, method, params=None):
+            return {"epoch": "e", "seq": 0} if method == "workspace.snapshot" else {}
+    async def viewer(): return Observer()
     ledger = []
     class NativeA:
         endpoint, path = "/r/c.sock", "/r/native.jsonl"
@@ -197,7 +217,8 @@ def run_control(late_return, own_end=None, foreign=False, native_b_lives=False):
         async def call(self, verb, **kw):
             if verb == "state": return {"pid": 99}
             if verb == "host_exit":
-                ledger_b.append({"kind": "exit"}); core.own_end(core)
+                core.before_own_exit(core)  # whatever arrives while the exit request is still in flight
+                ledger_b.append({"kind": "exit", "ns": time.monotonic_ns()}); core.own_end(core)
             if verb == "turn" and core.resources.get("r6", {}).get("available"):
                 agent = core.resources["r6"]["data"]["agent"]
                 if agent["state"] == "running":
@@ -231,7 +252,8 @@ def run_control(late_return, own_end=None, foreign=False, native_b_lives=False):
         metadata={"adapter_image": {"pid": 7, "birth": "1", "sha256": "img"}}, evidence=[], resource_history=core.history,
         resource_cache=resource_cache, peer=SimpleNamespace(call=core.call, wait=peer_wait),
         backend=SimpleNamespace(hc=lambda *a: {"pid": 98}, tracked=[]),
-        resources=listing, facts=get_facts, ensure_session=AsyncMock(), send=send, wait_facts=wait_facts)
+        resources=listing, facts=get_facts, ensure_session=AsyncMock(), send=send, wait_facts=wait_facts,
+        viewer=viewer)
     async def cache_then(ctx_, predicate, description):
         await listing(); return await lifecycle_wait(ctx_, predicate, description)
     with patch.object(m, "Native", NativeB), patch.object(m, "signal_owned", lambda process, sig: True), \
@@ -287,6 +309,16 @@ class WholeHandlerControls(unittest.TestCase):
         for own_end in (own_host_end_ignored, own_host_end_attributed_to_old):
             with self.subTest(own_end.__name__):
                 self.assertFalse(self.accepts(fenced, own_end))
+
+    def test_delayed_old_end_in_flight_before_own_exit_is_refused(self):
+        def delayed_old_end(core):  # #94 L3 finding: arrives while the own host_exit request is in flight
+            for rid in ("r6", "r7", "r8"):
+                core.resources[rid]["data"]["agent"]["lifecycle"] = "ended"
+                core.publish(rid)
+        with self.assertRaises(CheckFailed) as caught:
+            run_control(lambda core: None, before_own_exit=delayed_old_end)
+        self.assertIn("before its own native host exited", str(caught.exception))
+        self.assertEqual(getattr(caught.exception, "component", None), "adapter")
 
     def test_replacement_native_still_live_is_never_green(self):
         with self.assertRaises(CheckFailed) as caught:
