@@ -132,6 +132,30 @@ class CloseOutsideTheLock(unittest.TestCase):
 
 
 class TranscriptRows(unittest.TestCase):
+    def test_empty_signed_thinking_has_honest_final_indicator(self):
+        block = {"type": "thought", "text": "", "thinkingSignature": "opaque-never-render"}
+        value = {"role": "assistant", "content": [block], "final": True}
+        expected = "thinking · content not shared by the model"
+        self.assertEqual(agent_transcript.thought_text(value), expected)
+        names = agent_transcript.Names({"r2": {"name": "Pi", "kind": "agent"}}, "r2")
+        for mode in ("show", "hide"):
+            rows = agent_transcript.rows({("message", "s"): (1, dict(value, position=1))}, names,
+                                         "all_retained", agent_transcript.view_settings({"thinking": mode}))
+            flat = json.dumps(rows, ensure_ascii=False)
+            self.assertEqual(expected in flat, mode == "show")
+            self.assertNotIn("opaque-never-render", flat)
+            if mode == "show":
+                self.assertIn('"style": "dim"', flat)
+        self.assertEqual(agent_transcript.content_rows(value["content"]), [])
+        value["final"] = False
+        self.assertEqual(agent_transcript.thought_text(value), "")
+        value["final"] = True
+        block["text"] = "Readable summary"
+        self.assertEqual(agent_transcript.thought_text(value), "Readable summary")
+        block["text"] = ""
+        del block["thinkingSignature"]
+        self.assertEqual(agent_transcript.thought_text(value), "")
+
     def rows(self, entities=CONVERSATION, coverage=None):
         names = agent_transcript.Names({"r2": {"name": "Pi"}, "r7": {"name": "vqro-lead", "kind": "agent", "principal": "p:lead"}}, "r2")
         return base(agent_transcript.rows({k: (1, v) for k, v in entities.items()}, names, coverage))

@@ -148,8 +148,11 @@ def thought_text(value):
     content = value.get("content") if isinstance(value.get("content"), list) else []
     if value.get("role") == "thought":
         return "\n".join(b["text"] for b in content if isinstance(b, dict) and isinstance(b.get("text"), str))
-    return "\n".join(str(b.get("text") or b.get("thinking") or "") for b in content
-                     if isinstance(b, dict) and b.get("type") in THOUGHT_BLOCKS).strip()
+    blocks = [b for b in content if isinstance(b, dict) and b.get("type") in THOUGHT_BLOCKS]
+    text = "\n".join(str(b.get("text") or b.get("thinking") or "") for b in blocks).strip()
+    if not text and value.get("final") is True and any(b.get("thinkingSignature") for b in blocks):
+        return "thinking · content not shared by the model"
+    return text
 
 
 def hidden_rows(texts, style, line_bytes=LINE_BYTES):
