@@ -171,7 +171,7 @@ class SidebarTree(unittest.TestCase):
         self.assertEqual(self.ext.value(prefs)["worktrees"], {"limit": 0, "changed_only": False, "hide_detached": True})
         with self.assertRaises(vqro_ext.VqroError):
             self.module["worktrees_cmd"]({"key": "limit", "value": -1})
-        self.assertIn({"text": "↑2", "style": "accent"}, find(self.build(), "wt:/w/wt-ahead")["badges"])
+        self.assertIn({"text": "↑2", "style": "info"}, find(self.build(), "wt:/w/wt-ahead")["badges"])
 
     def test_show_popup_and_settings_page_are_the_same_rows_over_one_state(self):
         self.module["preset"]({"show": {"tabs": False}})

@@ -58,6 +58,23 @@ class SidebarTests(unittest.TestCase):
         self.assertIn({"text": "blocked", "style": "warn"}, row("r1")["badges"])
         self.assertIn({"text": "idle", "style": None}, row("r3")["badges"], "the terminal's own OSC 7501 status wins")
 
+    def test_rows_use_the_meaning_roles(self):
+        # Colour batch 3: working is `info`, blocked `warn`, a live agent's name `agent`; a plain shell stays plain.
+        module = load(); ext = module["ext"]
+        ext.resources = {
+            "r1": {"id": "r1", "kind": "terminal", "argv": ["zsh"], "state": "live"},
+            "r2": {"id": "r2", "kind": "terminal", "argv": ["pi"], "state": "live", "status": {"state": "working"}},
+            "r3": {"id": "r3", "kind": "terminal", "argv": ["pi"], "state": "exited", "status": {"state": "done"}}}
+        ext.live["agents.terminal_status"] = {"data": {}}
+        rows = module["build"]()
+        row = lambda rid: next(x for x in rows if x.get("args", {}).get("resource") == rid)
+        self.assertEqual((row("r1")["style"], row("r1")["icon_style"]), (None, "muted"))
+        self.assertEqual((row("r2")["style"], row("r2")["icon_style"]), ("agent", "info"))
+        self.assertIn({"text": "working", "style": "info"}, row("r2")["badges"])
+        self.assertEqual(row("r3")["style"], "dim", "an ended agent is dim, not coloured")
+        self.assertEqual(module["git_badges"]({"branch": "main", "dirty": 3, "ahead": 2}),
+                         [{"text": "main"}, {"text": "±3", "style": "changed"}, {"text": "↑2", "style": "info"}])
+
     def test_agents_group_their_bridge_and_ended_items_are_marked(self):
         module = load(); ext = module["ext"]
         ext.resources = {

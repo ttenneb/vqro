@@ -74,7 +74,8 @@ SHORT = {"everything": "all", "panes under workspaces": "no tabs", "tabs only": 
 WORKTREES_DEFAULT = {"limit": 10, "changed_only": False, "hide_detached": False}
 LIMITS = [0, 3, 5, 10, 20]
 expanded_worktrees = set()  # workspaces whose "+N more" was clicked this run (derived view state, not history)
-STATUS = {"working": "accent", "blocked": "warn", "error": "error", "done": "ok"}
+# Meaning roles (core-protocol.md, Themes): working is in progress (`info`), blocked needs you, done succeeded.
+STATUS = {"working": "info", "blocked": "warn", "error": "error", "done": "ok"}
 # What a row is, at a glance, by icon name (the active icon set draws it, D20). Without a set, Nerd Font
 # glyphs where the client has one, plain Unicode otherwise. The icon's style carries its state.
 ICON = {
@@ -172,7 +173,7 @@ def term_row(rid, r, where=False):
     elif st.get("state"):
         badges.append({"text": st["state"], "style": STATUS.get(st["state"])})
     if isinstance(st.get("progress"), (int, float)):
-        badges.append({"text": f"{int(st['progress'])}%", "style": "accent"})
+        badges.append({"text": f"{int(st['progress'])}%", "style": "info"})
     live = r.get("state") == "live"
     # A terminal whose program reports status (OSC 7501) is an agent; its icon takes the status colour,
     # and a set with a glyph for the state shows that instead of the agent's (shape, not only colour).
@@ -182,7 +183,7 @@ def term_row(rid, r, where=False):
     if agent and st.get("state") in STATUS:
         icon = dict(icon, name=[st["state"], "agent"])
     return {
-        "id": f"term:{rid}", "text": label, "style": None if live else "dim",
+        "id": f"term:{rid}", "text": label, "style": ("agent" if agent else None) if live else "dim",
         "icon": icon, "icon_style": icon_style,
         "badges": badges,
         "command": "sidebar.show", "args": {"resource": rid},
@@ -248,7 +249,7 @@ def rollup(rows):
     if c.get("blocked"):
         out.append({"text": f"{c['blocked']} blocked", "style": "warn"})
     if c.get("working"):
-        out.append({"text": f"{c['working']} working", "style": "accent"})
+        out.append({"text": f"{c['working']} working", "style": "info"})
     return out
 
 
@@ -262,9 +263,9 @@ def git_badges(w):
     if w.get("branch"):
         b.append({"text": w["branch"]})
     if w.get("dirty"):
-        b.append({"text": f"±{w['dirty']}", "style": "warn"})
+        b.append({"text": f"±{w['dirty']}", "style": "changed"})
     if w.get("ahead"):
-        b.append({"text": f"↑{w['ahead']}", "style": "accent"})
+        b.append({"text": f"↑{w['ahead']}", "style": "info"})
     return b
 
 
@@ -510,14 +511,14 @@ def build(sh=None, compact=True):
                 inner = tab_rows(t.get("layout"), hide_ended) + loose_group(t["path"], loose.get(t["path"], []), compact)
                 kids.append({
                     "id": f"wt:{t['path']}", "text": os.path.basename(t["path"].rstrip("/")), "expanded": True, "_level": "worktree",
-                    "icon": ICON["worktree"], "icon_style": "warn" if t.get("dirty") else "accent",
+                    "icon": ICON["worktree"], "icon_style": "changed" if t.get("dirty") else "muted",
                     "badges": git_badges(t) + rollup(inner), **current_when(t.get("layout")), "children": inner,
                     "command": "workspaces.open", "args": {"path": t["path"]},
                     "menu": [{"label": "Switch to its tabs", "command": "workspaces.open", "args": {"path": t["path"]}},
                              {"label": "Open shell here", "command": "workspaces.shell", "args": {"path": t["path"]}}],
                 })
             if cut:
-                kids.append({"id": f"more:{w['path']}", "text": f"+{cut} more worktrees", "style": "dim", "_level": "worktree",
+                kids.append({"id": f"more:{w['path']}", "text": f"+{cut} more worktrees", "style": "control", "_level": "worktree",
                              "command": "sidebar.worktrees_more", "args": {"path": w["path"]}, "children": []})
             menu = [{"label": "Switch to its tabs", "command": "workspaces.open", "args": {"path": w["path"]}},
                     {"label": "Open shell here", "command": "workspaces.shell", "args": {"path": w["path"]}}]
@@ -528,7 +529,7 @@ def build(sh=None, compact=True):
             rows.append({
                 "id": f"ws:{w['path']}", "text": w["name"], "expanded": True, "_level": "workspace",
                 "icon": ICON["repo" if w.get("git") else "folder"],
-                "icon_style": "error" if w.get("missing") else ("warn" if w.get("dirty") else "accent") if w.get("git") else "muted",
+                "icon_style": "error" if w.get("missing") else ("changed" if w.get("dirty") else "muted"),
                 "style": "error" if w.get("missing") else "bold",
                 "badges": ([{"text": "missing", "style": "error"}] if w.get("missing") else git_badges(w)) + rollup(kids), **current_when(w.get("layout")),
                 "children": kids, "command": "workspaces.open", "args": {"path": w["path"]}, "menu": menu,
@@ -561,7 +562,7 @@ def assemble(rows, layouts, stray, have_ws, sh):
             items.append({"type": "header", "text": "Workspaces"})
         items += skip_hidden(rows, sh)
         if sh["workspaces"]:
-            items.append({"id": "add", "text": "add workspace…", "style": "dim", "icon": ICON["add"], "icon_style": "dim",
+            items.append({"id": "add", "text": "add workspace…", "style": "control", "icon": ICON["add"], "icon_style": "control",
                           "command": "workspaces.add", "input": "Folder path"})
         # Scratch (and an unclaimed layout in use) sit with the workspaces: no "Layouts" section (see `scratch`).
         place = len(items) - (1 if sh["workspaces"] else 0)
