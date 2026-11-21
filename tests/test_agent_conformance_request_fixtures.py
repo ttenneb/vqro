@@ -56,6 +56,8 @@ class Fake:
             summaries.append({"padding": "p" * (70 << 10)})
         if self.fault == "silent_title_cut" and summaries:
             summaries[0]["title"] = summaries[0]["title"][:3]
+        if self.fault == "summary_omits_title" and summaries:
+            summaries[0].pop("title")
         return {"state": self.state, "requests": summaries}
 
     async def wait_facts(self, predicate, timeout=2):
@@ -65,13 +67,17 @@ class Fake:
         return facts
 
     async def make_request(self, ctx, method=None, **options):
-        if len([e for e in self.requests.values() if e["status"] == "pending"]) >= self.BUDGET:
-            if self.fault != "silent_overflow":
-                self.native.add("answer", request="overflow", normalized_response={"action": "cancel"})
-            raise CheckFailed("public agent facts did not reach the required state")
         method = method or "permission"
         self.serial += 1
         native_id, key = "native-%d" % self.serial, "q%d" % self.serial
+        self.native.add("request", request=native_id)
+        if len([e for e in self.requests.values() if e["status"] == "pending"]) >= self.BUDGET:
+            if self.fault == "overflow_other_error":
+                raise CheckFailed("request method changed during normalization")
+            if self.fault != "silent_overflow":
+                target = "native-elsewhere" if self.fault == "overflow_wrong_cancel" else native_id
+                self.native.add("answer", request=target, normalized_response={"action": "cancel"})
+            raise CheckFailed("public agent facts did not reach the required state")
         detail = options.get("command") or options.get("message") or ""
         if self.fault == "detail_lost":
             detail = detail[:16]
@@ -106,6 +112,11 @@ class Fake:
             self.state = "idle"
             return {"outcome": "accepted"}
         entity = self.requests.get(args["request"])
+        if entity is not None and entity["status"] == "cancelled" and self.fault == "stale_indeterminate":
+            return {"outcome": "indeterminate", "error": {"data": {"kind": "timeout"}}}
+        if entity is not None and entity["status"] == "cancelled" and self.fault == "stale_writes":
+            self.native.add("command", effectful=True)
+            return {"outcome": "rejected", "error": {"data": {"kind": "stale"}}}
         if entity is None or (entity["status"] != "pending" and self.fault != "answer_withdrawn"):
             return {"outcome": "rejected", "error": {"data": {"kind": "stale"}}}
         self.native.add("command", effectful=True)
@@ -141,10 +152,11 @@ class RequestFixtureNegatives(unittest.TestCase):
         run(branches.r6_background_foreground)
 
     def test_each_broken_rule_fails(self):
-        for branch, faults in ((branches.c6_non_confirm, ("oversized_facts", "silent_title_cut", "detail_lost", "silent_overflow")),
+        for branch, faults in ((branches.c6_non_confirm, ("oversized_facts", "silent_title_cut", "summary_omits_title", "detail_lost",
+                                                          "silent_overflow", "overflow_other_error", "overflow_wrong_cancel")),
                                (branches.r2_native_withdrawal, ("ignore_native_resolution", "answer_withdrawn")),
                                (branches.r6_background_foreground, ("interrupt_withdraws_all", "background_bound_to_foreground",
-                                                                    "answer_wrong_native"))):
+                                                                    "answer_wrong_native", "stale_indeterminate", "stale_writes"))):
             for fault in faults:
                 with self.subTest(branch=branch.__name__, fault=fault), self.assertRaises(CheckFailed):
                     run(branch, fault)

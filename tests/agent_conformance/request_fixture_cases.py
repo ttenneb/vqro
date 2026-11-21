@@ -12,6 +12,7 @@ import json
 from .results import CheckFailed, HarnessGap, check
 
 FACTS_BOUND = 64 << 10
+SUMMARY_FIELDS = ("request", "revision", "method", "title")  # agent-v0 facts request summary
 
 
 def encoded(value):
@@ -33,15 +34,22 @@ async def c6_non_confirm(ctx, declaration):
     # Each request carries ~3 KiB of real native detail (permission: the native command; form: the question text).
     detail = "C6-native-request-detail:" + "x" * 3072
     options = {"command": detail, "title": "C6 approval"} if method == "permission" else {"message": detail}
-    made, refused = [], 0
+    made, overflow = [], None
     mark = ctx.native.mark()
     for index in range(16):
+        attempt = ctx.native.mark()
         try:
             _, request = await make_request(ctx, method, **options)
         except CheckFailed as error:
-            # A request the adapter cannot represent is cancelled once, never silently dropped (checked below).
-            refused += 1
-            ctx.evidence.append({"kind": "c6_request_not_observable", "index": index, "error": str(error)[:300]})
+            # Only "never became observable" can be the adapter's budget refusal; anything else is a real failure.
+            if "did not reach the required state" not in str(error):
+                raise
+            issued = [row.get("request") for row in ctx.native.records("request", after=attempt)]
+            if len(issued) != 1:
+                raise CheckFailed("C6: the unobservable attempt has no single native request identity", component="fixture")
+            overflow = issued[0]
+            ctx.evidence.append({"kind": "c6_request_not_observable", "index": index, "native_request": overflow,
+                                 "error": str(error)[:300]})
             break
         made.append(request)
         facts = await ctx.facts()
@@ -58,17 +66,21 @@ async def c6_non_confirm(ctx, declaration):
         summary = summaries.get(request["request"])
         check(summary is not None and summary.get("method") == request["method"] and summary.get("revision") == request["revision"],
               "C6: a pending request summary disagrees with its entity")
-        cut = {key for key, value in summary.items() if key in request and value != request[key]}
+        # Every summary field the entity carries must be present and equal, or explicitly marked incomplete.
+        cut = {key for key in SUMMARY_FIELDS if key in request and summary.get(key, object()) != request[key]}
         if cut:
             incomplete = summary.get("incomplete")
             check(incomplete is True or (isinstance(incomplete, list) and cut <= set(incomplete)),
                   f"C6: summary fields {sorted(cut)} were cut without an incomplete marker")
     answers = ctx.native.records("answer", after=mark)
-    if refused:
-        # Over the adapter's pending-request budget: exactly one definite native cancellation, no silent loss.
-        check(len(answers) == 1 and answers[0].get("normalized_response") == {"action": "cancel"},
-              "C6: a request beyond the facts/request budget was silently dropped instead of cancelled once")
-    ctx.evidence.append({"kind": "bounded_facts", "method": method, "requests": len(made), "over_budget_cancelled": refused,
+    if overflow is not None:
+        # Over the adapter's pending-request budget: exactly one definite native cancellation of THAT request.
+        check(len(answers) == 1 and answers[0].get("request") == overflow
+              and answers[0].get("normalized_response") == {"action": "cancel"},
+              "C6: a request beyond the facts/request budget was not cancelled exactly once (or another request was)")
+    else:
+        check(not answers, "C6: native requests were answered during facts pressure")
+    ctx.evidence.append({"kind": "bounded_facts", "method": method, "requests": len(made), "over_budget_cancelled": overflow,
                          "fact_bytes": encoded(facts), "native_detail_bytes": len(detail.encode()),
                          "full_request_detail_preserved": True})
 
@@ -128,8 +140,11 @@ async def r6_background_foreground(ctx, declaration):
           "R6: the native runtime withdrew a different set than the foreground request", component="fixture")
     check(not ctx.native.records("answer", after=mark), "R6: withdrawal produced a native answer instead of a runtime resolution")
     # The background request stays answerable; the withdrawn foreground one is refused before native write.
+    from .cases import rejection
+    mark = ctx.native.mark()
     stale = await answer(ctx, foreground, valid_response(foreground))
-    check(stale.get("outcome") not in ("accepted", "dispatched"), "R6: the withdrawn foreground request was still answerable")
+    rejection(stale, kinds=("stale",))
+    check(not ctx.native.writes(mark), "R6: an answer to the withdrawn foreground request reached the native runtime")
     mark = ctx.native.mark()
     result = await answer(ctx, background, valid_response(background))
     check(result.get("outcome") in ("accepted", "dispatched"), f"R6: the background request was no longer answerable: {result}")
