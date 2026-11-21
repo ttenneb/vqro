@@ -180,8 +180,9 @@ impl Palette {
 /// A card for a theme that declares only its base background: 5% of the way toward white on a dark background,
 /// toward black on a light one (core-protocol.md, Themes).
 pub fn card_from_background(r: u8, g: u8, b: u8) -> Color {
-    let light = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32 >= 127.5;
-    let step = |c: u8| if light { (c as f32 * 0.95).round() as u8 } else { (c as f32 + (255.0 - c as f32) * 0.05).round() as u8 };
+    // Integer weights and half-up rounding are identical in both clients, including threshold ties.
+    let light = 2126 * r as u32 + 7152 * g as u32 + 722 * b as u32 >= 1_275_000;
+    let step = |c: u8| ((19 * c as u32 + if light { 0 } else { 255 } + 10) / 20) as u8;
     Color::Rgb(step(r), step(g), step(b))
 }
 
@@ -214,6 +215,15 @@ mod tests {
         assert_eq!(parse_color(&json!("#12345")), None);
         assert_eq!(parse_color(&json!("chartreuse")), None);
         assert_eq!(parse_color(&json!({"r": 1})), None);
+    }
+
+    #[test]
+    fn shared_card_background_cases() {
+        let cases: Value = serde_json::from_str(include_str!("../../tests/fixtures/client/cardcolor.json")).unwrap();
+        for case in cases["cases"].as_array().unwrap() {
+            let Color::Rgb(r, g, b) = parse_color(&case["background"]).unwrap() else { panic!("RGB fixture required") };
+            assert_eq!(card_from_background(r, g, b), parse_color(&case["expect"]).unwrap(), "{}", case["name"]);
+        }
     }
 
     #[test]

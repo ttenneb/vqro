@@ -1163,7 +1163,9 @@ New row types, components and view kinds are progressive enhancements: every cli
   replies plain, other agents' messages framed on cards). Clients without the feature, and unknown `look` values,
   draw the framed block; where a frame would mislead (your own messages never get one), give the row
   `requires: ["card"]` and a `fallback` (plain rows). The text client claims it and prints a card as its sender line
-  and body (no background); the TUI and the OpenTUI client draw the background. Shared model:
+  and body (no background); the TUI and the OpenTUI client draw the background. For nested rows, the TUI fills
+  from the row's indent, leaving the indent columns on the pane background; OpenTUI still fills the whole row.
+  Shared model:
   `message_look(item, features)`; conformance: `panels.json` (`looks`).
 - **`fold: N`** (feature `fold`) on a text row (wrapped or markdown) or a message: the client shows the first N
   lines and then "▸ M more lines". Enter, Space, → or a click on that line unfolds; "▾ less", ← or Enter folds
@@ -1378,7 +1380,7 @@ Colours: a name (the 16 ANSI names such as `cyan`, `darkgray`, `lightblue`), `#R
 | `selection`, `selection_text` | the selected row; unset `selection` means reverse video | unset |
 | `badge`, `badge_text` | neutral badge and unchecked chip fill; text on any filled background | `darkgray`, `black` |
 | `surface` | fill of plain chips and inactive tab chips | `#282830` |
-| `card` | background of card blocks (`message` rows with `look: "card"`): a little lighter than the pane, below `surface`; `default` means the terminal's own background. A theme without a readable `card` uses its `surface`; with neither, a card derived from its `background` (5% toward white on a dark background, toward black on a light one); else the client's default | `#202026` |
+| `card` | background of card blocks (`message` rows with `look: "card"`): a little lighter than the pane, below `surface`; `default` means the terminal's own background. A theme without a readable `card` uses its `surface`; with neither, a card derived from its `background` (5% toward white on a dark background, toward black on a light one; light means `2126*r + 7152*g + 722*b >= 1275000` on 0–255 channels, with resulting channels rounded half up); else the client's default | `#202026` |
 | `background` | informational: the theme's base background (`#RRGGBB`). Clients don't paint it (the terminal's background stays); they derive `card` from it when a theme has neither `card` nor `surface` | unset |
 | `tab_active`, `tab_active_text` | the active tab (bold) | `blue`, `white` |
 | `tab_bar` | background of the whole tab bar row and the gaps between tab chips | `235` |

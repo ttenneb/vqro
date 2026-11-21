@@ -1,0 +1,10 @@
+{
+  "cases": [
+    {"name": "black background", "background": "#000000", "expect": "#0d0d0d"},
+    {"name": "white background", "background": "#ffffff", "expect": "#f2f2f2"},
+    {"name": "dark background", "background": "#1e1e2e", "expect": "#292938"},
+    {"name": "exact luminance threshold is light", "background": "#1e99a2", "expect": "#1d919a"},
+    {"name": "below luminance threshold is dark", "background": "#1e99a1", "expect": "#299ea6"},
+    {"name": "above luminance threshold is light", "background": "#1e99a3", "expect": "#1d919b"}
+  ]
+}

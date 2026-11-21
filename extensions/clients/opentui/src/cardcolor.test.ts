@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
 import { cardFromBackground, cardSource } from "./cardcolor";
+import cardCases from "../../../../tests/fixtures/client/cardcolor.json";
+
+test("shared card background cases", () => {
+  for (const c of cardCases.cases) expect(cardFromBackground(c.background), c.name).toBe(c.expect);
+});
 
 // The client's parser accepts these (theme.ts parseColor); `default` is handled by cardSource itself.
 const readable = (v: any) => typeof v === "string" && /^#[0-9a-f]{6}$|^(cyan|gray)$/i.test(v.trim());

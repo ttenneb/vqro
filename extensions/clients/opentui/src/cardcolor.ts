@@ -9,8 +9,9 @@ export function cardFromBackground(v: any): string | null {
   if (typeof v !== "string" || !/^#[0-9a-f]{6}$/i.test(v.trim())) return null;
   const s = v.trim();
   const [r, g, b] = [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
-  const light = 0.2126 * r + 0.7152 * g + 0.0722 * b >= 127.5;
-  const step = (c: number) => Math.round(light ? c * 0.95 : c + (255 - c) * 0.05);
+  // Integer weights and half-up rounding match Rust, including threshold ties.
+  const light = 2126 * r + 7152 * g + 722 * b >= 1_275_000;
+  const step = (c: number) => Math.floor((19 * c + (light ? 0 : 255) + 10) / 20);
   return "#" + [r, g, b].map((c) => step(c).toString(16).padStart(2, "0")).join("");
 }
 
