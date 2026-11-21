@@ -390,8 +390,18 @@ class WholeHandlerControls(unittest.TestCase):
             "newly shown current refusal marker": (
                 lambda t: {("message", "m"): message(2, 1, t[:60000], "[current output omitted: too large]")},
                 {("message", "m"): message(1, 1, full[:1000], old_seen_marker)}, True),
-            "marker at the tail of a long raw line, clipped out of the shown rows": (
-                lambda t: {("message", "m"): message(1, 1, t[:60000] + " [output truncated: too large]")}, None, False),
+            # vqro-lead ruling: graded on the item stream (not the pane's clipping), so an inline warning after the body
+            # in the same block is published display content (prim-agent-ux d39d3421 HOLD, class 1).
+            "inline warning after the body in the same block": (
+                lambda t: {("message", "m"): message(1, 1, t[:60000] + " [output truncated: too large]")}, None, True),
+            "warning on its own line in the same block as the body": (
+                lambda t: {("message", "m"): message(1, 1, t[:60000] + "\n[output truncated: too large]")}, None, True),
+            "same-block old warning retained while the body freshly truncates": (
+                lambda t: {("message", "m"): message(2, 1, t[:60000] + "\n" + old_seen_marker)},
+                {("message", "m"): message(1, 1, full[:1000] + "\n" + old_seen_marker)}, False),
+            "NUL-joined old body against the new two-block complete body": (  # class 2: unambiguous fingerprint
+                lambda t: {("message", "m"): message(2, 1, t[:40000], t[40000:])},
+                {("message", "m"): message(1, 1, full[:40000] + "\x00" + full[40000:])}, True),
             "marker only inside stripped OSC hyperlink metadata": (
                 lambda t: {("message", "m"): message(1, 1, t[:1000] + "\x1b]8;;https://omitted.example/\x07link\x1b]8;;\x07")},
                 None, False),

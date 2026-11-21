@@ -505,62 +505,90 @@ def body_texts(value):
 
 
 def body_fingerprint(value):
-    """The raw body's identity: sha256 of its text blocks joined (the shown rows clip long lines, so two different
-    bodies can render identically; this keeps raw freshness separate from shown freshness)."""
+    """The raw body's identity: sha256 of the JSON list of its text blocks. Unambiguous: block boundaries and any
+    character inside a block (NUL included) are distinct, so one block "a\x00b" never collides with ["a", "b"]."""
     import hashlib
-    return hashlib.sha256("\x00".join(body_texts(value)).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(body_texts(value), ensure_ascii=False).encode()).hexdigest()
 
 
-def shown_baseline(reducer):
-    """The item stream before the native emission: {key: {"shown": [display texts], "body": raw body fingerprint}} per
-    entity, plus the live notices already delivered under NOTICES."""
-    baseline = {key: {"shown": shown_texts(entity.get("value") or {}), "body": body_fingerprint(entity.get("value") or {})}
+def added_lines(text, emitted, needle):
+    """The display lines an adapter ADDED around the emitted text: `text` with every maximal run that is a substring
+    of `emitted` removed, then split into non-blank lines. A warning on its own line or inline after (or before) the
+    body inside the same block survives; the emitted text itself never does. Without `emitted`, lines carrying
+    `needle` are treated as body."""
+    if not emitted:
+        return [line for line in text.split("\n") if line.strip() and needle not in line]
+    out, i, window = [], 0, 32
+    while i < len(text):
+        j = text.find(needle, i)
+        start = emitted.find(text[j:j + window]) if j >= 0 else -1
+        if j < 0 or start < 0:
+            if j < 0:
+                out.append(text[i:])
+                break
+            out.append(text[i:j + len(needle)])
+            i = j + len(needle)
+            continue
+        b, es = j, start  # extend the emitted run backwards, then forwards, character by character
+        while b > i and es > 0 and text[b - 1] == emitted[es - 1]:
+            b, es = b - 1, es - 1
+        out.append(text[i:b])
+        length = 0
+        while b + length < len(text) and es + length < len(emitted) and text[b + length] == emitted[es + length]:
+            length += 1
+        out.append("\n")  # the removed run separates what was added before it from what was added after it
+        i = b + length
+    return [line.strip() for line in "".join(out).split("\n") if line.strip()]
+
+
+def marker_lines(texts, emitted, needle):
+    return [line for text in texts for line in added_lines(text, emitted, needle)]
+
+
+def shown_baseline(reducer, emitted=None, needle="O12-"):
+    """The item stream before the native emission: per entity {"shown": [added display lines], "body": raw body
+    fingerprint}, plus the live notices already delivered under NOTICES. `emitted` is the exact text about to be
+    emitted, so the baseline's display lines are reduced exactly as the later ones are."""
+    baseline = {key: {"shown": marker_lines(shown_texts(entity.get("value") or {}), emitted, needle),
+                      "body": body_fingerprint(entity.get("value") or {})}
                 for key, entity in reducer.entities.items()}
-    baseline[NOTICES] = {"shown": notice_texts(reducer), "body": ""}
+    baseline[NOTICES] = {"shown": marker_lines(notice_texts(reducer), emitted, needle), "body": ""}
     return baseline
 
 
-def message_texts(reducer, needle, baseline=None):
-    """The emitted message's evidence from CURRENT output only, given shown_baseline() taken before the emission.
-    Returns (body_texts, fresh_shown):
+def message_texts(reducer, needle, baseline=None, emitted=None):
+    """The emitted message's evidence from CURRENT output only, given shown_baseline(reducer, emitted) taken before
+    the emission. Returns (body_texts, fresh_markers):
     - body_texts: the raw text blocks of every message entity whose raw body carries `needle` and changed since the
       baseline (new entity or new body fingerprint), in timeline (position) order: whole-text preservation only;
-    - fresh_shown: every item-stream display text (shown_texts; live notices) new since the baseline, from any
-      entity, EXCEPT the emitted body's own blocks (those carrying `needle`): marker only. A refusal marker is published
-      apart from the body; a word inside the body text (an escaped URL, a tail) is body content, not a marker.
-    A revision bump that changes neither the raw body nor the shown rows is history and contributes nothing."""
+    - fresh_markers: every display line an adapter ADDED (added_lines: item-stream display content with the emitted
+      text itself removed; live notices included) that is new since the baseline, from any entity: marker only. A
+      warning on its own line or inline in the same block as the body counts; the emitted text never does.
+    A revision bump that changes neither the raw body nor the added lines is history and contributes nothing."""
     baseline = baseline or {}
     if any(not isinstance(row, dict) or not isinstance(row.get("shown"), list) or not isinstance(row.get("body"), str)
            for row in baseline.values()):
         raise ValueError("message_texts baseline is shown_baseline() ({key: {shown, body}}), not a revision map")
-    bodies, fresh_shown = [], []
+    bodies, fresh = [], []
     def timeline(item):  # the message's own position, never the opaque entity id; unpositioned entities last
         position = (item[1].get("value") or {}).get("position")
         return (0, position, str(item[0])) if isinstance(position, int) and not isinstance(position, bool) else (1, 0, str(item[0]))
+    def new_lines(lines, before):
+        before = list(before)
+        for line in lines:  # multiset difference against what was already there
+            if line in before:
+                before.remove(line)
+            else:
+                fresh.append(line)
     for key, entity in sorted(reducer.entities.items(), key=timeline):
         value = entity.get("value") or {}
         before = baseline.get(key)
         body = body_texts(value) if key[0] == "message" else []
-        emitted = any(needle in text for text in body) and (before is None or before["body"] != body_fingerprint(value))
-        if emitted:
+        if any(needle in text for text in body) and (before is None or before["body"] != body_fingerprint(value)):
             bodies += body
-        # The body's own blocks (the emitted text) are never markers.
-        body_rows = shown_texts({"content": [{"type": "text", "text": text} for text in body if needle in text]}) if emitted else []
-        shown_before = list(before["shown"]) if before else []
-        for text in shown_texts(value):  # shown rows not already shown before (multiset difference)
-            if text in shown_before:
-                shown_before.remove(text)
-            elif text in body_rows:
-                body_rows.remove(text)
-            else:
-                fresh_shown.append(text)
-    notices_before = list((baseline.get(NOTICES) or {"shown": []})["shown"])
-    for text in notice_texts(reducer):  # live notices delivered since the baseline
-        if text in notices_before:
-            notices_before.remove(text)
-        else:
-            fresh_shown.append(text)
-    return bodies, fresh_shown
+        new_lines(marker_lines(shown_texts(value), emitted, needle), before["shown"] if before else [])
+    new_lines(marker_lines(notice_texts(reducer), emitted, needle), (baseline.get(NOTICES) or {"shown": []})["shown"])
+    return bodies, fresh
 
 
 @case("O12")
@@ -579,9 +607,10 @@ async def producer_append_bounds(ctx):
     # Adapter half: an oversized assistant message streamed through the actual bridge.
     from .cases import fresh_view
     view = await fresh_view(ctx)
-    baseline = shown_baseline(view.reducer)
-    mark = ctx.native.mark()
     chunks = ["O12-" + "x" * 1020 for _ in range(70)]  # about 70 KiB of text_delta appends in one message
+    expected = "0:" + "".join(chunks)  # the fixture's exact emitted text (seam 5d9b0590: "<index>:" + chunks)
+    baseline = shown_baseline(view.reducer, expected)
+    mark = ctx.native.mark()
     # Fixture seam 5d9b0590 (prim-final-review): retain with chunks emits one assistant message as len(chunks)
     # native deltas, text "0:" + "".join(chunks), and one native_emit ledger row (Pi message_end, Codex item/completed).
     await ctx.native.call("retain", count=1, chunks=chunks, timeout=10)
@@ -592,13 +621,13 @@ async def producer_append_bounds(ctx):
                          "(native_emit message_end with text_bytes and text_sha256)")
     witness = emitted[-1]
     def settled(reducer):
-        texts, others = message_texts(reducer, "O12-", baseline)
+        texts, others = message_texts(reducer, "O12-", baseline, expected)
         return adapter_preserves_or_marks(texts, witness["text_bytes"], witness["text_sha256"], other_texts=others)
     try:
         await ctx.wait_view(view, settled, timeout=15)
     except Exception:
         pass  # graded below from what the stream actually holds
-    texts, others = message_texts(view.reducer, "O12-", baseline)
+    texts, others = message_texts(view.reducer, "O12-", baseline, expected)
     ctx.evidence.append({"kind": "o12_adapter", "emitted": witness, "stream_text_bytes": [len(t.encode()) for t in texts],
                          "other_new_entity_strings": [t[:200] for t in others][:16]})
     check(adapter_preserves_or_marks(texts, witness["text_bytes"], witness["text_sha256"], other_texts=others),
