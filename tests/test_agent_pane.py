@@ -56,6 +56,81 @@ def base(rows, features=()):
     return out
 
 
+class CloseOutsideTheLock(unittest.TestCase):
+    """vqro-lead-secondary close-lock finding (stale-109): the waiting/stop path of Agents.attach called the SDK's
+    synchronous stream.close while holding the conversation lock; the reader thread, delivering an old stream's
+    callback, blocked on that lock and could not read close's reply. Scripted in-memory wire, real Agents.attach and
+    real SDK close/RPC/reader methods (vqro-lead-secondary probe-close-lock.py)."""
+
+    def test_the_waiting_close_never_waits_on_a_reader_blocked_by_the_conversation_lock(self):
+        import base64, collections, threading
+        import vqro_ext as sdk
+        from agents import StreamSink
+        deadline = sdk.CALL_DEADLINE
+        sdk.CALL_DEADLINE = 0.3  # this private test only; a deadlock shows as an RPC timeout instead of a hang
+        self.addCleanup(setattr, sdk, "CALL_DEADLINE", deadline)
+        pane = AgentPane()
+        pane.setUp()
+        c = pane.agents.conversations["r2"]
+        stream = c.stream
+        c.data(snapshot(CONVERSATION, seq=4))
+        c.data(line({"op": "put", "seq": 5, "kind": "message"}))  # rejected: a backoff wait, no worker pass yet
+        self.assertTrue(c.view.broken and c.retry_at > 0)
+        captured, release, sent = threading.Event(), threading.Event(), threading.Event()
+        wire, errors, state = {}, [], {"rpc_timeout": False}
+
+        class Gated(StreamSink):  # the reader is mid-delivery of an old-stream callback when close runs
+            def data(self, body):
+                captured.set()
+                assert release.wait(1)
+                super().data(body)
+
+        v = sdk.Vqro.__new__(sdk.Vqro)
+        v.lock, v.waiting, v.next, v.patient = threading.Lock(), {}, 100, False
+        v.closed_lock, v.closed = threading.Lock(), collections.deque(maxlen=256)
+        v.streams = {stream: Gated(c, c.generation)}
+        def send(message):
+            wire.update(message)
+            sent.set()
+        v._send = send
+        real_call = v._call
+        def observed(*args, **kw):
+            try:
+                return real_call(*args, **kw)
+            except sdk.VqroError as error:
+                state["rpc_timeout"] = error.kind == "timeout"
+                raise
+        v._call = observed
+        pane.core.vqro = v
+        pane.core.close_stream = lambda value: sdk.Extension.close_stream(pane.core, value)
+
+        def reader():
+            try:
+                v._line({"method": "stream.data", "params": {"stream": stream, "data": base64.b64encode(b"{}\n").decode()}}, 100)
+                assert sent.wait(1)
+                v._line({"id": wire["id"], "result": {}}, 100)
+            except Exception as error:
+                errors.append(repr(error))
+        def worker():
+            try:
+                pane.agents.attach("r2")  # the production waiting-close path
+            except Exception as error:
+                errors.append(repr(error))
+        a = threading.Thread(target=reader)
+        a.start()
+        self.assertTrue(captured.wait(1))
+        b = threading.Thread(target=worker)
+        b.start()
+        self.assertTrue(sent.wait(1), "close was sent")
+        release.set()
+        a.join(2)
+        b.join(2)
+        self.assertFalse(a.is_alive() or b.is_alive())
+        self.assertEqual(errors, [])
+        self.assertFalse(state["rpc_timeout"], "close's reply was read: no lock held across the SDK call")
+        self.assertEqual(wire.get("method"), "stream.close")
+
+
 class TranscriptRows(unittest.TestCase):
     def rows(self, entities=CONVERSATION, coverage=None):
         names = agent_transcript.Names({"r2": {"name": "Pi"}, "r7": {"name": "vqro-lead", "kind": "agent", "principal": "p:lead"}}, "r2")

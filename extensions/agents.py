@@ -574,31 +574,38 @@ class Agents:
         c, r = self.conversations.get(rid), self.ext.resources.get(rid)
         if c is None or r is None or not self.streams_items(r):
             return
+        # Lock order: never call the SDK (close_stream and attach_items are synchronous RPCs whose replies the reader
+        # thread delivers) while holding c.lock. That reader may be blocked on c.lock delivering an old stream's
+        # callback, and could then never read the reply. Decide and detach under the lock; call the SDK after.
         with c.lock:
             waiting = c.retry_at - time.monotonic()
-            if c.incompatible or waiting > 0 or c.stream is not None and not c.view.broken:
+            stop = bool(c.incompatible or waiting > 0 or c.stream is not None and not c.view.broken)
+            if stop:
+                old = None
                 if (c.incompatible or waiting > 0) and c.stream is not None and c.view.broken:
                     old, c.stream = c.stream, None  # stop the rejected stream now; never read past the rejection
                     c.view.stream_ended()
-                    c.generation += 1
-                    self.ext.close_stream(old)
+                    c.generation += 1  # its late callbacks are now non-current: its StreamSink drops them
                 if c.incompatible:
                     c.compat = c.compat or self.items_bounds(rid)
                 elif waiting > 0 and not c.retry_scheduled:  # back off: one delayed reattach, never a tight loop
                     c.retry_scheduled = True
                     self.later(waiting, rid)
-                return
-            c.retry_scheduled = False
-            old, c.stream = c.stream, None
-            # After lost records, start over from a fresh snapshot: simple, bounded, and right whatever the loss was
-            # (vqro_items keeps after() at the last record applied, but a snapshot also repairs an over-bound view).
-            lost = c.view.broken
-            if old is not None:
-                c.view.stream_ended()
-                c.generation += 1
-            after, generation = None if lost else c.view.after(), c.generation
+            else:
+                c.retry_scheduled = False
+                old, c.stream = c.stream, None
+                # After lost records, start over from a fresh snapshot: simple, bounded, and right whatever the loss
+                # was (vqro_items keeps after() at the last record applied, but a snapshot also repairs an over-bound
+                # view).
+                lost = c.view.broken
+                if old is not None:
+                    c.view.stream_ended()
+                    c.generation += 1
+                after, generation = None if lost else c.view.after(), c.generation
         if old is not None:
-            self.ext.close_stream(old)  # data was lost: reattach from the last installed cursor
+            self.ext.close_stream(old)  # outside the lock (see above)
+        if stop:
+            return
         try:
             reply = self.ext.attach_items(rid, StreamSink(c, generation), after)
         except VqroError:
