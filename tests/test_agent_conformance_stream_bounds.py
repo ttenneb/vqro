@@ -264,8 +264,17 @@ class WholeHandlerControls(unittest.TestCase):
                                                            "body": self.report(ref)["items"][0]["text"]}]}
         typed_select_visible = lambda ref: {"items": [{"type": "select", "text": "Status", "value": 1, "options": [
             {"value": True, "label": "Loading"}, {"value": 1, "label": self.report(ref)["items"][0]["text"]}]}]}
+        null_select = lambda ref: {"items": [{"type": "select", "text": "Status", "value": None, "options": [
+            {"label": "Loading"}, {"value": None, "label": self.report(ref)["items"][0]["text"]}]}]}
+        missing_value_select = lambda ref: {"items": [{"type": "select", "text": "Status", "options": [
+            "not-an-object", {"value": None, "label": self.report(ref)["items"][0]["text"]}]}]}
+        null_select_visible = lambda ref: {"items": [{"type": "select", "text": "Status", "value": None, "options": [
+            {"label": self.report(ref)["items"][0]["text"]}, {"value": None, "label": "Loading"}]}]}
         controls = {
             "valid back-off and visible cause/limit": (reset_once, self.report, True),
+            "select null: an option without value matches first (missing reads as Null)": (reset_once, null_select, False),
+            "select without value: a non-object option matches first": (reset_once, missing_value_select, False),
+            "select null: the first (valueless) option shows the cause/limit": (reset_once, null_select_visible, True),
             "message with empty title and the cause/limit in its body": (reset_once, empty_title_visible_body, True),
             "select whose typed-equal option shows the cause/limit": (reset_once, typed_select_visible, True),
             "message with empty title and body hides its text (Option::or)": (reset_once, empty_message, False),

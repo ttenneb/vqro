@@ -95,8 +95,12 @@ def visible_text(content):
             shown += [chip["text"] for chip in node.get("chips", []) if isinstance(chip, dict) and isinstance(chip.get("text"), str)]
         elif kind == "select":
             value = node.get("value")
-            label = next((option.get("label") for option in node.get("options", []) or []
-                          if isinstance(option, dict) and "value" in option and json_equal(option["value"], value)), None)
+            # Rust `item["options"].as_array()...find(|x| x["value"] == value).and_then(|x| x["label"].as_str())`:
+            # indexing a missing field or a non-object option yields Null, and a non-array `options` has no options.
+            options = node.get("options") if isinstance(node.get("options"), list) else []
+            chosen = next((option for option in options
+                           if json_equal(option.get("value") if isinstance(option, dict) else None, value)), None)
+            label = chosen.get("label") if isinstance(chosen, dict) else None
             shown += [text(node), label if isinstance(label, str) else value if isinstance(value, str) else None]
         elif kind in ("header", "text"):
             shown.append(folded(text(node), node))
