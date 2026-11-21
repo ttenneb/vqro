@@ -68,16 +68,9 @@ sys.path.insert(0, sys.argv[1])
 from vqro_provider import Provider, Limits, ProviderError, integer
 from vqro_provider_stream import Stream
 LOG = sys.argv[2]
-EPOCH = "o14-e1"
-ENTITY_BYTES = 3000  # deliberately unlike any viewer ceiling, so a reported limit is unambiguous
-SCENARIOS = {
-    "o14-bad-record": {"live": {"op": "put", "seq": 2, "kind": "message"}},
-    "o14-unknown-op": {"live": {"op": "o14-future-op", "seq": 2, "kind": "message", "id": "m2", "rev": 2}},
-    "o14-over-bound": {"snapshot_extra": {"op": "put", "kind": "message", "id": "huge", "rev": 1,
-                       "value": {"role": "assistant", "content": [{"type": "text", "text": "O14-PARTIAL-CUT-" + "x" * 9000}]}}},
-}
-GOOD = {"op": "put", "kind": "message", "id": "m1", "rev": 1,
-        "value": {"role": "assistant", "position": 1, "final": True, "content": [{"type": "text", "text": "O14-last-good"}]}}
+SPEC = json.load(open(sys.argv[3]))
+NAME, EPOCH = SPEC["provider"], SPEC["epoch"]
+SCENARIOS = SPEC["scenarios"]  # ref -> {"snapshot": [records], "live": [records], "entity_bytes": n}
 def log(**row):
     with open(LOG, "a") as out: out.write(json.dumps(dict(row, t=time.monotonic())) + "\n")
 def line(row): return json.dumps(row, separators=(",", ":")).encode() + b"\n"
@@ -86,7 +79,8 @@ class P(Provider):
         if params.get("channel") != "items": return await super()._open(params)
         ref = params.get("ref"); ident = integer(params.get("stream"))
         after = params.get("after")
-        cont = isinstance(after, dict) and after.get("epoch") == EPOCH and after.get("seq") == 1
+        row = SCENARIOS.get(ref, {}); end = row.get("end_seq", len(row.get("snapshot", [])))
+        cont = isinstance(after, dict) and after.get("epoch") == EPOCH and after.get("seq") == end
         log(kind="open", ref=ref, after=after, initial="continue" if cont else "reset")
         stream = Stream(self, params); self.streams[ident] = stream
         self._work(self.serve(stream, ref, cont))
@@ -96,11 +90,9 @@ class P(Provider):
         try:
             if not cont:
                 await stream.send(line({"op": "snapshot", "phase": "begin", "epoch": EPOCH, "coverage": "all_retained"}))
-                await stream.send(line(GOOD))
-                if "snapshot_extra" in s: await stream.send(line(s["snapshot_extra"]))
-                await stream.send(line({"op": "snapshot", "phase": "end", "seq": 1}))
-            if "live" in s:
-                await stream.send(line(s["live"]))
+                for record in s.get("snapshot", []): await stream.send(line(record))
+                await stream.send(line({"op": "snapshot", "phase": "end", "seq": s.get("end_seq", len(s.get("snapshot", [])))}))
+            for record in s.get("live", []): await stream.send(line(record))
             while not stream.closed: await asyncio.sleep(0.2)
         except ProviderError:
             pass
@@ -108,11 +100,12 @@ def agent(ref):
     return {"ref": ref, "incarnation": "i:" + ref, "kind": "agent", "state": "live", "name": ref, "status": {"state": "idle"},
             "data": {"agent": {"v": 0, "epoch": "e1", "state": "idle", "lifecycle": "live", "session": {"id": "s1"}, "run": None,
                                "caps": {"rev": 1}, "incomplete": []},
-                     "items": {"retain_bytes": 131072, "entities": 512, "entity_bytes": ENTITY_BYTES}}}
+                     "items": {"retain_bytes": 131072, "entities": 512, "entity_bytes": SCENARIOS[ref].get("entity_bytes", 65536)}}}
 async def main():
-    caps = {"agent": {"v": 0, "modules": {}}, "items.stream": {"retain_bytes": 131072, "entities": 512, "entity_bytes": ENTITY_BYTES}}
-    provider = P("o14-scripted", "o14-instance", caps, limits=Limits(pending=64, max_streams=64),
-                 software={"name": "o14-scripted-test-provider", "version": "0"})
+    bound = max([row.get("entity_bytes", 65536) for row in SCENARIOS.values()] or [65536])
+    caps = {"agent": {"v": 0, "modules": {}}, "items.stream": {"retain_bytes": 131072, "entities": 512, "entity_bytes": bound}}
+    provider = P(NAME, NAME + "-instance", caps, limits=Limits(pending=64, max_streams=64),
+                 software={"name": NAME + "-test-provider", "version": "0"})
     await provider.connect()
     await provider.full_sync([agent(ref) for ref in SCENARIOS])
     log(kind="ready")
@@ -141,14 +134,37 @@ def provider_log(path):
     return rows
 
 
-async def start_scripted_provider(ctx, sdk_dir):
+async def start_item_provider(ctx, sdk_dir, name, scenarios, epoch=None):
+    """Generic public item producer for Part A handlers: a separate process speaking only the public provider protocol
+    through the pinned SDK. It registers one kind:agent resource per ref (items.stream declared, entity_bytes per ref)
+    and, on each items open, serves a reset snapshot of exactly scenarios[ref]["snapshot"] (public item records, seq
+    as given; the snapshot end carries "end_seq", default the record count) and then scenarios[ref]["live"]; an after cursor at the snapshot end continues instead. Every
+    open is logged (ref, after, initial, monotonic t). No store writes and no authority: just a provider.
+    Returns (process, log path); the caller terminates the process."""
     root = Path(ctx.root)
-    script, log = root / "o14_provider.py", root / "o14_provider.jsonl"
+    script, log, spec = root / (name + "_provider.py"), root / (name + "_provider.jsonl"), root / (name + "_scenarios.json")
     script.write_text(PROVIDER)
-    env = dict(ctx.backend.env)
-    process = subprocess.Popen(["/usr/bin/python3", str(script), str(sdk_dir), str(log)], env=env,
-                               stdout=open(root / "o14_provider.log", "ab"), stderr=subprocess.STDOUT)
+    spec.write_text(json.dumps({"provider": name, "epoch": epoch or name + "-e1", "scenarios": scenarios}))
+    process = subprocess.Popen(["/usr/bin/python3", str(script), str(sdk_dir), str(log), str(spec)], env=dict(ctx.backend.env),
+                               stdout=open(root / (name + "_provider.log"), "ab"), stderr=subprocess.STDOUT)
     return process, log
+
+
+O14_ENTITY_BYTES = 3000  # deliberately unlike any viewer ceiling, so a reported limit is unambiguous
+O14_GOOD = {"op": "put", "kind": "message", "id": "m1", "rev": 1,
+            "value": {"role": "assistant", "position": 1, "final": True, "content": [{"type": "text", "text": "O14-last-good"}]}}
+O14_SCENARIOS = {
+    "o14-bad-record": {"snapshot": [O14_GOOD], "live": [{"op": "put", "seq": 2, "kind": "message"}], "entity_bytes": O14_ENTITY_BYTES, "end_seq": 1},
+    "o14-unknown-op": {"snapshot": [O14_GOOD], "entity_bytes": O14_ENTITY_BYTES, "end_seq": 1,
+                       "live": [{"op": "o14-future-op", "seq": 2, "kind": "message", "id": "m2", "rev": 2}]},
+    "o14-over-bound": {"entity_bytes": O14_ENTITY_BYTES, "end_seq": 1, "snapshot": [O14_GOOD, {
+        "op": "put", "kind": "message", "id": "huge", "rev": 1,
+        "value": {"role": "assistant", "content": [{"type": "text", "text": "O14-PARTIAL-CUT-" + "x" * 9000}]}}]},
+}
+
+
+async def start_scripted_provider(ctx, sdk_dir):
+    return await start_item_provider(ctx, sdk_dir, "o14-scripted", O14_SCENARIOS, epoch="o14-e1")
 
 
 SCENARIO_GRADES = {
