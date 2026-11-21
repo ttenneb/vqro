@@ -3,7 +3,9 @@ import asyncio
 import json
 import unittest
 
+# Load the shared registry first, then this slice explicitly (K1 adds the module import at the end of cases.py).
 from agent_conformance.cases import HANDLERS
+import agent_conformance.view_causality_cases  # noqa: F401  (registers C11/C12)
 from agent_conformance.results import CheckFailed
 
 STRINGS = ("kind", "id", "provenance", "endpoint", "epoch", "boot")

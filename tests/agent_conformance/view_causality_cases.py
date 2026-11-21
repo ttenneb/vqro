@@ -10,7 +10,7 @@ evidence, never counted as a core pass for the adapter's own receipt echo (C9 gr
 """
 import json
 
-from .cases import case, caps
+from .cases import audit_fence, case, caps
 from .results import CheckFailed, HarnessGap, check
 
 KNOWN = ("kind", "id", "provenance", "endpoint", "epoch", "boot")
@@ -53,16 +53,6 @@ def base_args(ctx, mode, text):
             "origin": origin, "render": ["user", "participant", "attributed_user"]}
 
 
-async def final_audit(ctx, effect):
-    def found():
-        return next((row for row in ctx.events if row.get("type") == "effect" and row.get("data", {}).get("effect") == effect
-                     and row["data"].get("outcome") is not None), None)
-    try:
-        return (await ctx.peer.wait(found))["data"]
-    except Exception as error:
-        raise CheckFailed("final effect audit was not delivered", component="core") from error
-
-
 async def accepted_form(ctx, mode, label, *, root=None, args=None, adapter_may_decline=False):
     """The core must dispatch this form and audit its links unchanged. A non-`asserted` provenance is a caller claim an
     adapter may definitely decline after dispatch (its own policy); the core's audit is still graded."""
@@ -78,7 +68,7 @@ async def accepted_form(ctx, mode, label, *, root=None, args=None, adapter_may_d
     check(result.get("outcome") == "accepted" or (adapter_may_decline and declined),
           f"C12 {label}: valid causality form was not accepted: {result}", component="adapter")
     effect_id = result.get("effect") or error_data.get("effect")
-    audit = await final_audit(ctx, effect_id)
+    audit = (await audit_fence(ctx, {"effect": effect_id}))["data"]
     expected = {}
     for field in ("cause", "correlation"):
         value = (root or {}).get(field, (args or {}).get(field))
@@ -193,10 +183,10 @@ def native_report(wire, *, window=None, used=None, tokens=None, cost=None):
             report["modelContextWindow"] = window
             expected["context"] = {"window": window}
         if tokens is not None:
-            total = {"inputTokens": tokens[0], "outputTokens": tokens[1], "cachedInputTokens": tokens[2],
-                     "reasoningOutputTokens": 0, "totalTokens": sum(tokens)}
-            report["total"] = total
-            report["last"] = dict(total)  # last-turn totals: never context occupancy
+            # Fields as decoded by src/codex.rs:644-669 and docs/research/codex-adapter.md:50 (no other native fields).
+            report["total"] = {"inputTokens": tokens[0], "outputTokens": tokens[1], "cachedInputTokens": tokens[2],
+                               "totalTokens": tokens[0] + tokens[1]}
+            report["last"] = {"totalTokens": tokens[0] + tokens[1]}  # last-turn total: never context occupancy
             expected["tokens"] = {"input": tokens[0], "output": tokens[1], "cache_read": tokens[2]}
         return report, expected
     raise HarnessGap("C11 needs a native usage-report fixture for wire " + str(wire))
