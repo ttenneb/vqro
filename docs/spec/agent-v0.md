@@ -138,7 +138,8 @@ still have no inferred core origin/delivery. Pi echoes no input id, so a user me
 core-bound `origin` and `delivery` only under evidence: Pi's `prompt` ACK said `started` and it is that run's starting
 message with exactly the bridge's text and images, or Pi said `queued` and it is the oldest bridge entry of the queue
 Pi just delivered from, with exact text and no identical text from anyone else in that queue. Anything else (text Pi
-rewrote, `handled`, a cleared queue, a new session, a bridge restart) has no origin; receipts are unaffected. A newly evidenced empty native session starts `all_retained`; a
+rewrote, a batch delivered together, `handled`, a cleared queue, a new session, a bridge restart) has no origin and
+shows as plain user input; receipts are unaffected. A newly evidenced empty native session starts `all_retained`; a
 loaded/unknown history starts `tail`, and pruning, omissions or protocol gaps downgrade coverage to `tail`.
 A new observation epoch or native command ACK alone never proves complete native history.
 

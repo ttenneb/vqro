@@ -30,6 +30,9 @@ pub struct Origins {
     delivered:Option<(&'static str,String)>, // the queue entry Pi removed for the next user message
 }
 
+/// Image identity without retaining up to 768 KiB per pending entry: mime, length and a 64-bit hash of the base64
+/// data. It only compares what the bridge wrote with what Pi echoes, so a false match would need Pi to rewrite the
+/// data into a same-length collision; a resized image (Pi's normalization) never matches.
 fn image_key(block:&Value)->Option<(String,u64,usize)>{
     let data=block["data"].as_str()?;let mut hasher=std::collections::hash_map::DefaultHasher::new();data.hash(&mut hasher);
     Some((block["mimeType"].as_str()?.to_string(),hasher.finish(),data.len()))
