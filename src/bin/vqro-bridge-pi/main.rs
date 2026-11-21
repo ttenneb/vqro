@@ -274,6 +274,10 @@ async fn invoke(shared:&Arc<Shared>,provider:&Provider,effect:&EffectRequest)->R
 }
 fn stop_report(covers:&[Value],exit:Option<&native::Exit>)->Value {json!({"covers":covers,"covers_evidence":"requested","exit":exit.map(|exit|json!({"code":exit.code})),"pending":"unknown"})}
 fn native_message(reply:&native::Reply)->String {reply.error.as_str().unwrap_or("native operation failed; outcome unknown").chars().take(1024).collect()}
+/// Pi's prompt ACK carries `data.disposition` (`started | queued | handled`, rpc-mode.js prompt case). Only `queued`
+/// is evidence of placement (held by the runtime); `started` is not yet insertion and `handled` is not declared, so
+/// both stay `admitted` (placement unknown), as does an ACK without a disposition.
+fn ack_stage(reply:&native::Reply)->&'static str {if reply.data["disposition"]=="queued" {"queued"} else {"admitted"}}
 fn record_receipt(shared:&Shared,delivery:&str,value:Value){shared.agent.lock().unwrap().receipt(delivery,value);shared.wake();}
 async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant,owner_proven:bool)->Result<Outcome,ProviderError> {
     let prepared={
@@ -293,7 +297,7 @@ async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant,owner_proven:bool
     let weak=Arc::downgrade(shared);let d=delivery.clone();let metadata=base.clone();
     let receipt:admission::Receipt=Arc::new(move|id,result|{
         if let Some(shared)=weak.upgrade(){let mut value=metadata.clone();value["native"]=json!({"request":id});
-            value["stage"]=json!(match &result {Ok(reply) if reply.success=>"admitted",Err(error) if !error.may_have_acted=>"rejected",_=>"unknown"});
+            value["stage"]=json!(match &result {Ok(reply) if reply.success=>ack_stage(reply),Err(error) if !error.may_have_acted=>"rejected",_=>"unknown"});
             record_receipt(&shared,&d,value);
         }
     });
@@ -305,7 +309,7 @@ async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant,owner_proven:bool
     match result {
         Admission::Acknowledged {native,reply}=>{
             if !reply.success{return Err(ProviderError::new("backend",native_message(&reply)));}
-            let mut value=base;value["stage"]=json!("admitted");value["native"]=json!({"request":native});Ok(Outcome::Accepted(Some(json!({"receipt":value}))))
+            let mut value=base;value["stage"]=json!(ack_stage(&reply));value["native"]=json!({"request":native});Ok(Outcome::Accepted(Some(json!({"receipt":value}))))
         }
         Admission::Dispatched {native}=>{let mut value=base;value["stage"]=json!("dispatched");value["native"]=json!({"request":native});record_receipt(shared,&delivery,value.clone());Ok(Outcome::Dispatched(Some(json!({"receipt":value}))))}
         Admission::Refused(error)=>rejected(error.kind,error.message),Admission::Unknown(error)=>native_failure(error),

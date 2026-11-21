@@ -235,7 +235,8 @@ async fn settle_and_boundary_start_an_idle_pi_and_queue_on_a_busy_one_exactly_on
         assert_eq!(shared.agent.lock().unwrap().state(),"idle");
         // Idle: one native prompt that starts a run; nothing is parked.
         let outcome=send(&shared,&provider,&mut core,1,mode,&format!("{mode} while idle")).await;
-        let Outcome::Accepted(Some(value))=&outcome else{panic!("{mode}: not accepted: {outcome:?}")};assert_eq!(value["receipt"]["stage"],"admitted");
+        let Outcome::Accepted(Some(value))=&outcome else{panic!("{mode}: not accepted: {outcome:?}")};
+        assert_eq!(value["receipt"]["stage"],"admitted","{mode}: Pi said started, which is not yet insertion evidence");
         until(&shared,"the run to start",|shared|shared.agent.lock().unwrap().state()!="idle").await;
         let sent=prompts(&trace);
         assert_eq!(sent.len(),1,"{mode}: exactly one native write: {sent:?}");
@@ -244,7 +245,9 @@ async fn settle_and_boundary_start_an_idle_pi_and_queue_on_a_busy_one_exactly_on
         // Busy: the same native op queues (Pi decides atomically); still exactly one write, and it is in Pi's queue.
         until(&shared,"the start preflight to settle",|shared|shared.starts.get().unwrap().session_guard().is_ok()).await;
         let outcome=send(&shared,&provider,&mut core,2,mode,&format!("{mode} while busy")).await;
-        assert!(matches!(outcome,Outcome::Accepted(_)),"{mode}: {outcome:?}");
+        let Outcome::Accepted(Some(value))=&outcome else{panic!("{mode}: not accepted: {outcome:?}")};
+        assert_eq!(value["receipt"]["stage"],"queued","{mode}: Pi's queued disposition is placement evidence");
+        assert_eq!(shared.agent.lock().unwrap().receipts["d2"]["stage"],"queued");
         until(&shared,"Pi's queue update",|shared|shared.agent.lock().unwrap().queue.as_ref().is_some_and(|queue|!queue.as_array().unwrap().is_empty())).await;
         let queued=shared.agent.lock().unwrap().queue.clone().unwrap();
         assert_eq!(queued.as_array().unwrap().len(),1,"{mode}: one queued entry: {queued}");

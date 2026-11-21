@@ -174,7 +174,7 @@ impl Agent {
     }
     pub fn receipt(&mut self,delivery:&str,mut value:Value) {
         // A late ACK may win the race with the provider-deadline dispatched reply; never downgrade it.
-        if self.receipts.get(delivery).is_some_and(|old|old["stage"]=="admitted" && value["stage"]=="dispatched") {return;}
+        if self.receipts.get(delivery).is_some_and(|old|(old["stage"]=="admitted" || old["stage"]=="queued") && value["stage"]=="dispatched") {return;}
         value["delivery"]=json!(delivery);
         // Native has at most32 unresolved calls. Keep those in addition to256 completed receipts.
         if value["stage"]!="dispatched" && !self.receipt_order.iter().any(|id|id==delivery) {self.receipt_order.push_back(delivery.into());}
