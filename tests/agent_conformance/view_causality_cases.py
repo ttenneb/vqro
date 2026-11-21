@@ -455,7 +455,18 @@ def c11_dispatch_readback(turn, ack, read, response, thread, selected):
     actual = result.get("thread") if isinstance(result, dict) else None
     if not isinstance(actual, dict) or actual.get("id") != thread:
         return None
-    if (actual.get("status") or {}).get("type") == "notLoaded":
+    # Thread.model may be persisted rather than current unless the schema says loaded.
+    # Unknown future statuses/flags must not certify an adapter's confirmation.
+    status = actual.get("status")
+    if not isinstance(status, dict):
+        return None
+    kind = status.get("type")
+    loaded = kind in ("idle", "systemError")
+    if kind == "active":
+        flags = status.get("activeFlags")
+        loaded = isinstance(flags, list) and all(
+            flag in ("waitingOnApproval", "waitingOnUserInput") for flag in flags)
+    if not loaded:
         return None
     model = actual.get("model")
     return model if isinstance(model, str) and model else None

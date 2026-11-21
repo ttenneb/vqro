@@ -367,7 +367,7 @@ class C11FutureFake(C11Fake):
             self.reported_model = ('other' if self.fault == 'mismatch' else None if self.fault in ('unknown', 'reject', 'request_infer', 'ack_infer', 'drop_read', 'drop_read_infer') else self.selected)
             self.model = self.reported_model or self.selected
             response = {'id': 102, 'result': {'thread': {'id': 'native-s', 'model': self.reported_model,
-                                                        'status': {'type': 'active'}, 'reasoningEffort': None}, 'readState': None}}
+                                                        'status': {'type': 'active', 'activeFlags': []}, 'reasoningEffort': None}, 'readState': None}}
             if self.fault == 'wrong_response_id': response['id'] = 103
             if self.fault == 'foreign_response': response['result']['thread']['id'] = 'foreign'
             if self.fault == 'reject': response = {'id': 102, 'error': {'code': -32603, 'message': 'native read rejected'}}
@@ -394,6 +394,40 @@ class C11FutureModelHandler(unittest.TestCase):
         full = C11FutureFake()
         asyncio.run(HANDLERS['C11'](full))
         self.assertEqual(len(full.sends), 1, 'C11 must reuse the future-model witness turn, never replay it')
+
+    def test_whole_c11_requires_schema_known_loaded_status_for_confirmation(self):
+        # Secondary review's full-handler probe: change ONLY native readback status,
+        # leaving the adapter's selected-model/confirmed/pending=false claims intact.
+        absent = object()
+        cases = [('active', {'type': 'active', 'activeFlags': []}, True),
+                 ('idle', {'type': 'idle'}, True), ('systemError', {'type': 'systemError'}, True),
+                 ('active_known_flags', {'type': 'active', 'activeFlags': ['waitingOnApproval', 'waitingOnUserInput']}, True),
+                 ('notLoaded', {'type': 'notLoaded'}, False), ('missing', absent, False),
+                 ('null', None, False), ('empty_object', {}, False),
+                 ('future_unknown', {'type': 'future-state'}, False), ('empty_list', [], False),
+                 ('bare_string', 'idle', False), ('active_missing_flags', {'type': 'active'}, False),
+                 ('active_null_flags', {'type': 'active', 'activeFlags': None}, False),
+                 ('active_string_flags', {'type': 'active', 'activeFlags': 'waitingOnApproval'}, False),
+                 ('active_future_flag', {'type': 'active', 'activeFlags': ['future-flag']}, False),
+                 ('active_malformed_flag', {'type': 'active', 'activeFlags': [{}]}, False)]
+        for label, status, passes in cases:
+            class Context(C11FutureFake):
+                def record(self, kind, **value):
+                    if kind == 'native_response' and value.get('command') == 'thread/read':
+                        thread = value['value']['result']['thread']
+                        if status is absent:
+                            thread.pop('status', None)
+                        else:
+                            thread['status'] = status
+                    return super().record(kind, **value)
+            context = Context()
+            with self.subTest(status=label):
+                if passes:
+                    asyncio.run(HANDLERS['C11'](context))
+                else:
+                    with self.assertRaises(CheckFailed):
+                        asyncio.run(HANDLERS['C11'](context))
+                self.assertEqual(len(context.sends), 1, 'never retry the native mutation')
 
     def test_actual_public_send_helper_honors_admit_only_and_other_declared_modes(self):
         from types import SimpleNamespace
@@ -479,7 +513,7 @@ class C11FutureModelChecks(unittest.TestCase):
         return [{'seq': 1, 'value': {'id': 10, 'method': 'turn/start', 'params': {'threadId': 'native-s', 'model': 'choice'}}},
                 {'seq': 2, 'value': {'id': 10, 'result': {'turn': {'id': 'turn-1'}}}},
                 {'seq': 3, 'value': {'id': 11, 'method': 'thread/read', 'params': {'threadId': 'native-s', 'includeTurns': False}}},
-                {'seq': 4, 'value': {'id': 11, 'result': {'thread': {'id': 'native-s', 'model': 'choice', 'status': {'type': 'active'}}}}}]
+                {'seq': 4, 'value': {'id': 11, 'result': {'thread': {'id': 'native-s', 'model': 'choice', 'status': {'type': 'active', 'activeFlags': []}}}}}]
 
     def test_native_read_is_correlated_ordered_and_not_turn_telemetry(self):
         rows = self.envelopes()
