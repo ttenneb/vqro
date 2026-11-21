@@ -381,20 +381,21 @@ async def observe_native_state(ctx):
 async def model_route_witness(ctx, observed=None):
     """Model changes go through the advertised model-category config option: one native mutation recorded by the
     fixture, then session.model follows the runtime's own report. Absent such an option the route is undeclared and
-    this clause is recorded as unexercised (no facts-write substitute is attempted)."""
+    the required clause cannot be witnessed and the row ends as a HarnessGap (never a pass, never a facts-write
+    substitute). Returns the gap reason, or None when witnessed."""
     if observed is None:
         facts = await ctx.facts()
         if "agent.configure" not in facts.get("caps", {}) or not any(
                 row.get("category") == "model" for row in facts.get("config", [])):
             ctx.evidence.append({"kind": "c11_model_route", "declared": False,
-                                 "note": "no advertised model-category config option; clause unexercised, not passed"})
-            return
+                                 "note": "no advertised model-category config option; required clause unwitnessed"})
+            return "no advertised model-category configuration option to change the model through"
         observed = await observe_native_state(ctx)
     option, before, mark = observed
     if option.get("category") != "model":
         ctx.evidence.append({"kind": "c11_model_route", "declared": False, "observation_option": option["id"],
-                             "note": "no advertised model-category config option; clause unexercised, not passed"})
-        return
+                             "note": "no advertised model-category config option; required clause unwitnessed"})
+        return "no advertised model-category configuration option to change the model through"
     writes = ctx.native.writes(mark)
     check(len(writes) >= 1, "C11: the model-category configuration change reached no native mutation")
     after = await ctx.native.call("state")
@@ -403,6 +404,7 @@ async def model_route_witness(ctx, observed=None):
     ctx.evidence.append({"kind": "c11_model_route", "declared": True, "option": option["id"],
                          "native_before": before.get("model"), "native_after": after["model"],
                          "native_writes": [row.get("command") for row in writes], "facts_model": facts["session"]["model"]})
+    return None
 
 
 @case("C11")
@@ -439,7 +441,7 @@ async def optional_view_facts(ctx):
         check(model.get("effort") == native["effort"], f"C11: effort {model.get('effort')!r} != native {native['effort']!r}")
     ctx.evidence.append({"kind": "c11_session", "native": {"cwd": reported_cwd, "model": native.get("model"), "effort": native.get("effort")},
                          "facts": {"cwd": facts["session"].get("cwd"), "model": model}})
-    await model_route_witness(ctx, observed)
+    model_route_gap = await model_route_witness(ctx, observed)
 
     # 1. A full native report: window, occupancy (where the runtime reports it), token and cache totals, bare cost.
     report, expected = native_report(wire, window=200000, used=4321, tokens=(1100, 220, 33, 4), cost=0.75)
@@ -484,3 +486,6 @@ async def optional_view_facts(ctx):
     check(not carried, f"C11: run/thought usage was apportioned without a native report: {carried[:2]}")
     ctx.evidence.append({"kind": "c11_entities", "runs": sum(1 for key in view.reducer.entities if key[0] == "run"),
                          "messages": sum(1 for key in view.reducer.entities if key[0] == "message"), "usage_carried": 0})
+    if model_route_gap:
+        # Every other subclause above was graded; this required path has no public witness here.
+        raise HarnessGap("C11 model change through the advertised model-category config option: " + model_route_gap)

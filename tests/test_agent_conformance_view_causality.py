@@ -215,7 +215,9 @@ class C11Fake:
         model = {"id": "guessed-model" if self.fault == "guessed_model" else self.model, "effort": "off"}
         return {"state": "idle", "session": {"id": "s1", "cwd": cwd, "model": model}, "usage": self._usage(),
                 "caps": {"rev": 1, "agent.send": {"modes": {"start": {}}}, "agent.configure": {}},
-                "config": [{"id": "model", "category": "model", "type": "select", "rev": 1, "value": "a",
+                "config": [{"id": "thinking_level", "category": "thought_level", "type": "select", "rev": 1, "value": "a",
+                            "choices": [{"value": "a"}, {"value": "b"}]}] if self.fault == "effort_only_option" else
+                          [{"id": "model", "category": "model", "type": "select", "rev": 1, "value": "a",
                             "choices": [{"value": "a"}, {"value": "b"}]}]}
 
     async def ensure_session(self):
@@ -228,7 +230,9 @@ class C11Fake:
         return facts
 
     async def invoke(self, op, args, **root):
-        if op == "agent.configure" and self.fault != "configure_without_native":
+        if op == "agent.configure" and self.fault == "effort_only_option":
+            self.rows.append({"kind": "command", "effectful": True, "command": "set_thinking_level"})  # model unchanged
+        elif op == "agent.configure" and self.fault != "configure_without_native":
             self.rows.append({"kind": "command", "effectful": True, "command": "set_model"})
             self.model = "fixture-large"
         return {"outcome": "observed"}
@@ -258,6 +262,6 @@ class C11Negatives(unittest.TestCase):
 
     def test_each_broken_rule_fails(self):
         for fault in ("used_from_last_turn", "zero_tokens", "priced_cost", "late_priced_cost", "bridge_cwd", "guessed_model",
-                      "apportioned_message", "configure_without_native"):
+                      "apportioned_message", "configure_without_native", "effort_only_option"):
             with self.subTest(fault=fault), self.assertRaises(CheckFailed):
                 run11(fault)
