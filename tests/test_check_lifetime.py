@@ -1,7 +1,11 @@
 """Owned native job-lifetime regressions: real check.sh bootstrap, no gate suites/backends/builds."""
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 import errno
 import importlib.util
+import io
 import json
+import math
 import os
 from pathlib import Path
 import select
@@ -11,6 +15,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -21,15 +26,31 @@ lifetime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(lifetime)
 
 
-def collected_or_empty_cgroup(events):
-    """Only called after all owned-member pidfds reported exit; collection can race this read."""
+def collected_or_empty_cgroup(events, deadline=None):
+    """After every member pidfd exits, observe final population within the same teardown budget.
+
+    A pidfd can become readable before the cgroup's last population update. Poll the native
+    change notification, not a new sleep/retry budget; an actually populated group never passes.
+    """
     try:
-        content = events.read_text()
+        with events.open() as snapshot:
+            poll = select.poll() if deadline is not None else None
+            if poll is not None:
+                poll.register(snapshot, select.POLLPRI | select.POLLERR)
+            while True:
+                snapshot.seek(0)
+                lines = snapshot.read().splitlines()
+                if 'populated 0' in lines:
+                    return True
+                if 'populated 1' not in lines or deadline is None:
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not poll.poll(math.ceil(remaining * 1000)):
+                    return False
     except OSError as error:
         if error.errno in (errno.ENOENT, errno.ENODEV):
             return True
         raise
-    return 'populated 0' in content.splitlines()
 
 
 class CgroupObservationTests(unittest.TestCase):
@@ -37,19 +58,95 @@ class CgroupObservationTests(unittest.TestCase):
         for content, error in (('populated 0\nfrozen 0\n', None), (None, errno.ENOENT), (None, errno.ENODEV)):
             with self.subTest(content=content, error=error):
                 events = Mock()
-                if error: events.read_text.side_effect = OSError(error, 'fixture collection race')
-                else: events.read_text.return_value = content
+                if error: events.open.side_effect = OSError(error, 'fixture collection race')
+                else: events.open.return_value = io.StringIO(content)
                 self.assertTrue(collected_or_empty_cgroup(events))
-                events.read_text.assert_called_once_with()
+                events.open.assert_called_once_with()
 
     def test_populated_or_other_errors_are_not_collected(self):
         for content in ('populated 1\nfrozen 0\n', 'frozen 0\n', ''):
-            self.assertFalse(collected_or_empty_cgroup(Mock(read_text=Mock(return_value=content))))
+            self.assertFalse(collected_or_empty_cgroup(Mock(open=Mock(return_value=io.StringIO(content)))))
         for code in (errno.EACCES, errno.EIO, errno.EBADF, errno.ENOTDIR):
             with self.subTest(errno=code):
                 with self.assertRaises(OSError) as caught:
-                    collected_or_empty_cgroup(Mock(read_text=Mock(side_effect=OSError(code, 'fixture error'))))
+                    collected_or_empty_cgroup(Mock(open=Mock(side_effect=OSError(code, 'fixture error'))))
                 self.assertEqual(caught.exception.errno, code)
+
+
+@unittest.skipUnless(sys.platform == 'linux' and hasattr(select, 'poll'), 'Linux cgroup notifications')
+class CgroupNotificationTests(unittest.TestCase):
+    def event_fixture(self, contents):
+        snapshot = Mock()
+        snapshot.read.side_effect = contents
+        events = Mock(open=Mock(return_value=nullcontext(snapshot)))
+        poll = Mock()
+        return events, snapshot, poll
+
+    def test_population_change_is_observed_not_assumed_after_a_notification(self):
+        events, snapshot, poll = self.event_fixture(['populated 1\n', 'populated 0\n'])
+        poll.poll.return_value = [(42, select.POLLPRI)]
+        with patch.object(select, 'poll', return_value=poll), patch.object(time, 'monotonic', return_value=100):
+            self.assertTrue(collected_or_empty_cgroup(events, 104.25))
+        poll.register.assert_called_once_with(snapshot, select.POLLPRI | select.POLLERR)
+        poll.poll.assert_called_once_with(4250)
+        self.assertEqual(snapshot.seek.call_args_list, [unittest.mock.call(0), unittest.mock.call(0)])
+
+    def test_real_population_or_unrelated_notification_never_passes(self):
+        events, snapshot, poll = self.event_fixture(['populated 1\n', 'populated 1\n'])
+        poll.poll.side_effect = [[(42, select.POLLPRI)], []]
+        with patch.object(select, 'poll', return_value=poll), patch.object(time, 'monotonic', side_effect=[100, 103]):
+            self.assertFalse(collected_or_empty_cgroup(events, 104))
+        self.assertEqual(poll.poll.call_args_list, [unittest.mock.call(4000), unittest.mock.call(1000)])
+
+    def test_expired_budget_and_missing_marker_fail_without_a_new_wait(self):
+        for content in ('populated 1\n', 'frozen 0\n', ''):
+            with self.subTest(content=content):
+                events, snapshot, poll = self.event_fixture([content])
+                with patch.object(select, 'poll', return_value=poll), patch.object(time, 'monotonic', return_value=104):
+                    self.assertFalse(collected_or_empty_cgroup(events, 104))
+                poll.poll.assert_not_called()
+
+    def test_collection_and_unrelated_io_errors_after_notification_remain_distinct(self):
+        for code in (errno.ENOENT, errno.ENODEV, errno.EACCES, errno.EIO, errno.EBADF, errno.ENOTDIR):
+            with self.subTest(errno=code):
+                events, snapshot, poll = self.event_fixture(['populated 1\n', OSError(code, 'after event')])
+                poll.poll.return_value = [(42, select.POLLERR)]
+                with patch.object(select, 'poll', return_value=poll), patch.object(time, 'monotonic', return_value=100):
+                    if code in (errno.ENOENT, errno.ENODEV):
+                        self.assertTrue(collected_or_empty_cgroup(events, 104))
+                    else:
+                        with self.assertRaises(OSError) as caught:
+                            collected_or_empty_cgroup(events, 104)
+                        self.assertEqual(caught.exception.errno, code)
+
+
+class TeardownBudgetTests(unittest.TestCase):
+    def fixture(self, directory):
+        case = LifetimeServiceTests('test_normal_exit_tears_down_detached_children')
+        case.state = Path(directory)
+        (case.state/'cgroup').write_text('/fixture.service')
+        case.fds = [101, 102, 103]
+        case.sentinel = Mock(poll=Mock(return_value=None))
+        return case
+
+    def test_member_and_population_checks_share_the_original_ten_second_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case = self.fixture(directory)
+            with patch.object(time, 'monotonic', side_effect=[100, 100, 102, 108]), \
+                 patch.object(select, 'select', return_value=([1], [], [])) as ready, \
+                 patch(__name__+'.collected_or_empty_cgroup', return_value=True) as empty:
+                case.assert_stopped()
+            self.assertEqual([call.args[3] for call in ready.call_args_list], [10, 8, 2])
+            empty.assert_called_once_with(Path('/sys/fs/cgroup/fixture.service/cgroup.events'), 110)
+
+    def test_even_an_empty_cgroup_cannot_mask_a_surviving_owned_pidfd(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case = self.fixture(directory)
+            with patch.object(select, 'select', return_value=([], [], [])), \
+                 patch(__name__+'.collected_or_empty_cgroup', return_value=True) as empty:
+                with self.assertRaisesRegex(AssertionError, 'owned job member survived teardown'):
+                    case.assert_stopped()
+            empty.assert_not_called()
 
 
 @unittest.skipUnless(sys.platform == 'linux' and hasattr(os, 'pidfd_open'), 'Linux pidfd supervision')
@@ -198,10 +295,11 @@ exit "$code"
         self.ready()
 
     def assert_stopped(self):
+        deadline = time.monotonic() + 10
         for fd in self.fds:
-            self.assertTrue(select.select([fd], [], [], 10)[0], 'owned job member survived teardown')
+            self.assertTrue(select.select([fd], [], [], max(0, deadline - time.monotonic()))[0], 'owned job member survived teardown')
         events = Path('/sys/fs/cgroup'+(self.state/'cgroup').read_text().strip())/'cgroup.events'
-        self.assertTrue(collected_or_empty_cgroup(events), 'owned cgroup is still populated')
+        self.assertTrue(collected_or_empty_cgroup(events, deadline), 'owned cgroup is still populated')
         self.assertIsNone(self.sentinel.poll(), 'unrelated owned sentinel must not be touched')
 
     def tearDown(self):
@@ -229,6 +327,25 @@ exit "$code"
         self.launch(resistant=False)
         (self.state/'finish-fifo').write_text('0\n')
         self.assertEqual(self.process.wait(timeout=10), 0, (self.root/'controller.log').read_text())
+        self.assert_stopped()
+
+    def test_native_population_notification_waits_for_job_completion(self):
+        self.launch(resistant=False)
+        events = Path('/sys/fs/cgroup'+(self.state/'cgroup').read_text().strip())/'cgroup.events'
+        deadline = time.monotonic() + 10
+        armed = threading.Event()
+        native = select.poll()
+        class NotifyingPoll:
+            def register(self, *args): native.register(*args)
+            def poll(self, timeout):
+                armed.set()
+                return native.poll(timeout)
+        with ThreadPoolExecutor(max_workers=1) as executor, patch.object(select, 'poll', return_value=NotifyingPoll()):
+            observation = executor.submit(collected_or_empty_cgroup, events, deadline)
+            self.assertTrue(armed.wait(max(0, deadline-time.monotonic())), 'must observe populated before stopping')
+            (self.state/'finish-fifo').write_text('0\n')
+            self.assertEqual(self.process.wait(timeout=max(0, deadline-time.monotonic())), 0)
+            self.assertTrue(observation.result(timeout=max(0, deadline-time.monotonic())))
         self.assert_stopped()
 
     def test_term_int_hup_and_sigkill_of_controller_tears_down_its_job(self):

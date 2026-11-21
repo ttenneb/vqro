@@ -21,3 +21,29 @@ The leftover inventory excludes the supervising ancestors as infrastructure, as 
 `tests/test_check_lifetime.py` stages the **real check.sh bootstrap and collector**, with its ordinary suites replaced by a tiny private process forest. It checks normal completion; TERM/INT/HUP and SIGKILL of the controller; SIGKILL of the actual gate; running-parent death; and a paused service launch whose parent dies before admission. The fixture includes a double-forked, session-detached, SIGTERM-resistant member and an unrelated owned sentinel. Assertions use pidfds and cgroup population, not just process names. Output must be visible before job completion. Missing/stale owner, environment filtering, no-replay-on-launch-failure, and quick-mode unscoped fallback are separate small controls.
 
 Real service tests skip with an explicit reason if the Linux APIs/user manager are unavailable. They start no backend, model, tmux, Herdr or build; every native unit and launcher process group belongs to the fixture. The regression is native lifecycle evidence, not a whole release-image gate, real-PTY behavior or retroactive cleanup of the incident's foreign processes.
+
+## Final population observation (2026-11-21)
+
+A concurrent gate failed `test_controller_int` after every tracked member pidfd had reported
+exit: the immediate `cgroup.events` sample still said `populated 1`. A finite 24-way private
+batch of the unchanged INT control reproduced the exact failure once. That failed sample
+was followed by empty `cgroup.procs` and `cgroup.threads`, then `populated 0`, within
+204,163 ns. The failed result is retained, not retried into a pass. This establishes a
+transient final-population observation race in the reproduced case, not a persistent leak;
+the original gate did not retain its member snapshot, so its microscopic ordering is unknown.
+Evidence: `<private-notes>`.
+
+The assertion now observes the native population-change notification (`POLLPRI`/`POLLERR`)
+and rereads the final value. It still requires actual `populated 0` or collection
+(ENOENT/ENODEV), and first requires every owned pidfd to exit. Population remaining 1,
+missing markers and unrelated I/O errors are never accepted. All member and population
+checks share one existing 10-second teardown budget, rather than granting each pidfd 10
+seconds or adding a sleep/grace extension. The production supervisor and its two-second
+native stop grace are unchanged. Deterministic controls cover the notification, persistent
+population, surviving pidfds, collection errors and shared deadline; a real native test
+arms the notification while the group is populated before allowing normal completion.
+
+The kernel documents population-change notifications as the completion observation:
+[Control Group v2, (Un)populated Notification](https://docs.kernel.org/admin-guide/cgroup-v2.html#un-populated-notification).
+The diagnostic snapshots above are sequential samples, not proof of a particular final
+thread, kernel internal counter, or deleting actor.
