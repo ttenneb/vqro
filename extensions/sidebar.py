@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""vqro extension: the sidebar, one tree: workspace → worktree → tab → pane, plus "Not in a tab".
+"""vqro extension: the sidebar, one tree: workspace → worktree → tab → pane, plus "Not in a tab". Layouts no
+workspace claims are no section of their own: `main` is a workspace-like "Scratch" row (`scratch`).
 
 Data comes from public sources only: resources from the core, layouts (`layout/*`) and the `workspaces`
 extension's live data. Each workspace (and each of its git worktrees) has its own layout (named in the
@@ -408,6 +409,26 @@ def layout_rows(claimed, hide_ended=False):
     return rows
 
 
+SCRATCH = "Scratch"
+
+
+def scratch(layouts):
+    """With workspaces listed, layouts no workspace claims are not a section of their own (the human's choice (a),
+    feedback batch 4): `main`, which holds what belongs to no workspace, is one workspace-like row named "Scratch"
+    (unless the layout has its own title), and any other unclaimed layout shows only while it is the default one
+    (so it stays reachable while in use). Nothing is deleted here."""
+    active = active_layout_name()
+    out = []
+    for row in layouts:
+        name = row["id"][len("layout:"):]
+        if name == "main":
+            titled = (ext.value("doc/layout/main") or {}).get("title")
+            out.insert(0, dict(row, text=titled or SCRATCH))
+        elif name == active:
+            out.append(row)
+    return out
+
+
 def worktree_prefs():
     return dict(WORKTREES_DEFAULT, **((ext.value(PREFS) or {}).get("worktrees") or {}))
 
@@ -513,7 +534,7 @@ def build(sh=None, compact=True):
                 "children": kids, "command": "workspaces.open", "args": {"path": w["path"]}, "menu": menu,
             })
         claimed = {w.get("layout") for w in data} | {t.get("layout") for w in data for t in w.get("worktrees", [])}
-        layouts = layout_rows(claimed, hide_ended)
+        layouts = scratch(layout_rows(claimed, hide_ended))
     else:
         rows, layouts = [], layout_rows(set(), hide_ended)
     note_active(rows + layouts)
@@ -542,11 +563,9 @@ def assemble(rows, layouts, stray, have_ws, sh):
         if sh["workspaces"]:
             items.append({"id": "add", "text": "add workspace…", "style": "dim", "icon": ICON["add"], "icon_style": "dim",
                           "command": "workspaces.add", "input": "Folder path"})
-        layouts = skip_hidden(layouts, sh)
-        if layouts:
-            if sh["workspaces"]:
-                items.append({"type": "header", "text": "Layouts"})
-            items += layouts
+        # Scratch (and an unclaimed layout in use) sit with the workspaces: no "Layouts" section (see `scratch`).
+        place = len(items) - (1 if sh["workspaces"] else 0)
+        items[place:place] = skip_hidden(layouts, sh)
         if sh["stray"] and stray:
             items.append({"type": "header", "text": "Other terminals"})
             items += stray

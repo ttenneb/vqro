@@ -103,7 +103,8 @@ class SidebarTree(unittest.TestCase):
 
     def test_default_is_one_tree_workspace_tabs_panes_then_not_in_a_tab_and_worktrees(self):
         rows = self.build()
-        self.assertEqual(ids(rows), ["#Workspaces", "ws:" + WS, "add", "#Layouts", "layout:main", "#Other terminals", "term:r4"])
+        self.assertEqual(ids(rows), ["#Workspaces", "ws:" + WS, "layout:main", "add", "#Other terminals", "term:r4"])
+        self.assertEqual(find(rows, "layout:main")["text"], "Scratch", "main, as a workspace-like row (batch 4)")
         ws = rows[1]
         self.assertEqual(ids(ws["children"]), ["tab:ws-a:0", "tab:ws-a:1", "loose:" + WS,
                                                "wt:/w/wt-dirty", "wt:/w/wt-detached", "wt:/w/wt-ahead", "wt:/w/wt-clean"])
@@ -369,6 +370,19 @@ class SidebarTree(unittest.TestCase):
         self.assertIn("Split into pages", [row.get("text") for row in self.module["option_rows"]()])
         self.module["pages_cmd"]({"value": False})
         self.assertEqual(self.sidebar()["page"]["count"], 1)
+
+    def test_unclaimed_layouts_are_no_section_main_is_scratch_and_strays_show_only_while_in_use(self):
+        """Human feedback (batch 4), choice (a): no "Layouts" section; main is a workspace-like "Scratch" row; a stray
+        layout (coord-ext-…) is not listed, except while it is the default one. Nothing is deleted."""
+        self.ext.entries["layout/coord-ext-a5049bc"] = {"value": {"tabs": [{"title": "x", "node": {"view": "term-r7"}}], "active": 0}, "version": 1}
+        rows = self.build()
+        self.assertNotIn("#Layouts", ids(rows))
+        self.assertNotIn("layout:coord-ext-a5049bc", ids(rows))
+        self.ext.entries["workspace/active"] = {"value": {"layout": "coord-ext-a5049bc"}, "version": 1}
+        self.assertIn("layout:coord-ext-a5049bc", ids(self.build()), "reachable while it is the one shown")
+        self.ext.entries["doc/layout/main"] = {"value": {"title": "Home"}, "version": 1}
+        self.assertEqual(find(self.build(), "layout:main")["text"], "Home", "a title of its own wins")
+        self.assertIn("layout/coord-ext-a5049bc", self.ext.entries, "nothing deleted")
 
     def test_every_place_reports_its_triangle_in_a_small_tree_too(self):
         """vqro-lead-secondary (238): only a tree that was large or had a closed place got on_toggle on its rows, so
