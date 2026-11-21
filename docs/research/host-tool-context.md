@@ -49,8 +49,9 @@ available. No new tool actor or per-endpoint env capability is invented. After r
 fail forbidden and the producer exports a fresh map for NEW tools; it never replays an uncertain call.
 
 Python now has an explicit diagnostic_data(JSON) redacted-copy path and safe ProviderError str/repr, masking
-known credential keys and echoes (including quoted/Unicode text) before formatting. The raw message/data and
-private RPC replies remain unchanged. A synthetic-secret baseline leaks via str (real red); new redaction,
+known credential field values and echoes (including quoted/Unicode text) before formatting. The raw message/data
+and provider `_reply` RPC messages remain unchanged, NOT every consumer's wire reason: bridge/program code
+serializing str(error) carries the redacted diagnostic text. A synthetic-secret baseline leaks via str (real red); new redaction,
 nonmutation and wire-separation tests3 plus existing provider28 and host-helper3 tests pass. No new logger,
 implicit payload normalization or universal secret-discovery guarantee is added.
 
@@ -61,6 +62,14 @@ new dependency, Cargo.lock or licence-inventory change. Exact equality, every on
 refusals and Unicode cases plus library279/child-supervision1/host-context1/native-CLI1 tests pass (1libraryignored);
 these are behavioural preservation tests, not a timing proof. Setup-only taskset/Zig PATH failures are retained
 separately from the real Python functional red and the successful focused run.
+
+Review of f0edaa8d found P2: key rewriting can corrupt `message` when a short secret is `e`, and sequential
+replacement can re-scan markers/collide keys. The new regression reproduces real KeyError on the prior code.
+Correction preserves ALL keys, uses one escaped-regex alternation over original string values, and str(error)
+redacts its message directly, without dictionary lookup. Tests cover short secrets, key preservation/collisions,
+replacement-marker overlap, quoted/Unicode echoes, nonmutation and the specific provider private-reply format.
+No short-secret skip or universal secret-discovery claim is added. The initial quick8/8 belongs only to f0edaa8d;
+correction needs its own exact quick and delta review, never stitched to the prior pass.
 
 All scratch evidence under prim-slice1-host-context. Whole final-candidate gate, independent review and K1 PartB
 reprobe remain pending; no harness gap closure or live install is claimed by focused tests alone. Names/semantics

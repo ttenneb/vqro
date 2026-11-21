@@ -18,11 +18,26 @@ class Diagnostics(unittest.TestCase):
         self.assertNotIn(token, repr(error))
         self.assertEqual(error.data, data)
 
+    def test_short_credentials_never_rewrite_error_fields_or_raise(self):
+        for token in ('e', 'message', 'data', 'kind', 'remote', 'redacted'):
+            error = sdk.ProviderError('backend', 'message e kind', data={'token': token})
+            self.assertIsInstance(str(error), str)
+            self.assertIsInstance(repr(error), str)
+            self.assertEqual(set(error.diagnostic_data()), {'kind', 'message', 'remote', 'data'})
+
+    def test_keys_do_not_collide_and_replacements_are_not_rescanned(self):
+        value = {'token': 'redacted', 'host_context': 'e', 'echo': 'redacted e', 'redacted': 1, 'e': 2}
+        safe = sdk.diagnostic_data(value)
+        self.assertEqual(set(safe), set(value))
+        self.assertEqual(safe['echo'], '[redacted] [redacted]')
+        self.assertEqual(safe['redacted'], 1)
+        self.assertEqual(safe['e'], 2)
+
     def test_nested_diagnostic_copy_and_unicode_echoes_do_not_mutate_input(self):
         token = 'private-quoted-"\\漢字'
         value = {'host_context': token, 'token': 'short', 'nested': [
             {'resume_token': 'short-long', 'echo': 'short-long'}, {'extension_token': 'extension-private'},
-            {'bridge_token': 'bridge-private', 'echo': token}, {token: 'key echo'}]}
+            {'bridge_token': 'bridge-private', 'echo': token}]}
         original = copy.deepcopy(value)
         safe = sdk.diagnostic_data(value)
         text = json.dumps(safe, ensure_ascii=True)

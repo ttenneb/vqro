@@ -406,8 +406,10 @@ credential-bearing reply. `ProviderError` diagnostics redact known token fields 
 values echoed in messages); `Config` diagnostics redact its bootstrap token. Explicit `data`/registration/token
 access still returns the original sensitive evidence and must not be logged. Python exposes
 `diagnostic_data(json_value)` for redacted copies (including a raw registration reply); `ProviderError` str/repr
-use that path, while `message`/`data` and private RPC replies retain the original evidence. No automatic logging
-or wire/payload rewrite is introduced; unknown fields are not general secret discovery.
+use that path, while `message`/`data` and private RPC replies retain the original evidence. No automatic logging is introduced. Keys remain unchanged; value replacements are single-pass, never re-scanning
+redaction markers. The provider `_reply` RPC message is preserved, but bridge/program consumers that serialize
+`str(error)` now carry redacted diagnostic reasons: this is NOT a promise that all wire reason text is unchanged.
+Unknown fields are not general secret discovery.
 
 ### 9.3 Facts (G1)
 

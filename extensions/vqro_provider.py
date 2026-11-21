@@ -9,6 +9,7 @@ import inspect
 import json
 import math
 import os
+import re
 import unicodedata
 import vqro_ext  # managed extension lifetime watcher
 
@@ -17,28 +18,32 @@ MAX_DATA = 65536
 OUTCOMES = frozenset({"dispatched", "accepted", "observed", "rejected"})
 
 
-def diagnostic_data(value):
-    """Redacted JSON copy for diagnostics ONLY; original evidence/wire data remains sensitive and unchanged."""
-    keys = {"resume_token", "token", "extension_token", "bridge_token", "host_context"}
+_CREDENTIAL_FIELDS = frozenset({"resume_token", "token", "extension_token", "bridge_token", "host_context"})
+
+
+def _diagnostic_text(value):
     secrets = set()
     def collect(node):
         if isinstance(node, dict):
             for key, item in node.items():
-                if key in keys and isinstance(item, str) and item:
+                if key in _CREDENTIAL_FIELDS and isinstance(item, str) and item:
                     secrets.add(item)
                 collect(item)
         elif isinstance(node, list):
             for item in node:
                 collect(item)
     collect(value)
-    ordered = sorted(secrets, key=len, reverse=True)
-    def text(item):
-        for secret in ordered:
-            item = item.replace(secret, "[redacted]")
-        return item
+    # One pass over original text: never re-scan replacement markers with a second secret.
+    pattern = re.compile('|'.join(re.escape(item) for item in sorted(secrets, key=lambda item: (-len(item), item)))) if secrets else None
+    return lambda item: pattern.sub(lambda _: '[redacted]', item) if pattern else item
+
+
+def diagnostic_data(value):
+    """Diagnostic JSON copy: redact known credential values/echoes, NEVER change keys or wire evidence."""
+    text = _diagnostic_text(value)
     def redact(node):
         if isinstance(node, dict):
-            return {text(key) if isinstance(key, str) else key: "[redacted]" if key in keys else redact(item) for key, item in node.items()}
+            return {key: "[redacted]" if key in _CREDENTIAL_FIELDS else redact(item) for key, item in node.items()}
         if isinstance(node, list):
             return [redact(item) for item in node]
         return text(node) if isinstance(node, str) else node
@@ -56,7 +61,7 @@ class ProviderError(Exception):
         return diagnostic_data({"kind": self.kind, "message": self.message, "remote": self.remote, "data": self.data})
 
     def __str__(self):
-        return self.diagnostic_data()["message"]
+        return _diagnostic_text(self.data)(self.message)
 
     def __repr__(self):
         return f"ProviderError({self.diagnostic_data()!r})"
