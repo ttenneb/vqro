@@ -256,6 +256,8 @@ async def many_host_replacement(ctx):
                                  "id": data.get("id"), "lifecycle": agent.get("lifecycle"),
                                  "incarnation": host_of(agent).get("incarnation")})
         observer.on("event", arrived)
+        missed = []  # core-protocol: lost history notifies `missed` and the subscription stays active (server.rs:828-852)
+        observer.on("missed", lambda params: missed.append(params if isinstance(params, dict) else {"raw": params}))
         snapshot = await observer.call("workspace.snapshot")
         await observer.call("events.subscribe", {"epoch": snapshot["epoch"], "from": snapshot["seq"], "types": ["resource"]})
         b = new_host.get("incarnation")
@@ -363,6 +365,13 @@ async def many_host_replacement(ctx):
                              "ledgers": {"old": ledger_summary(ctx.native), "replacement": ledger_summary(native_b)},
                              "replacement_argv_swapped": {"control": str(native_b.endpoint), "ledger": str(native_b.path)},
                              "teardown": teardown})
+        observer_failure = getattr(observer, "failure", None)
+        if missed or observer_failure is not None:
+            # A later suffix cannot prove that no premature end was published in what was lost; never a pass.
+            ctx.evidence.append({"kind": "l3_observation_invalid", "missed": missed[:8],
+                                 "observer_failure": str(observer_failure) if observer_failure is not None else None})
+            raise HarnessGap("L3 own-exit observation window is invalid: the dedicated observer lost history "
+                             "(missed or connection failure), so premature replacement ends cannot be excluded")
         results = grade_replacement(obs)
         for ok, message, component in results:
             if component in ("harness", "fixture"):

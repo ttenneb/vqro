@@ -182,10 +182,18 @@ class SimulatedCore:
             for callback in self.observers:  # public resource events reach every subscribed observer, in order
                 callback(event)
 
+    lagging = False      # the subscriber falls behind: the held batch is lost and `missed` is notified instead
+    missed_callbacks = ()
+
     def flush(self):
-        for event in self.held:
-            for callback in self.observers:
-                callback(event)
+        if self.lagging and self.held:
+            notice = {"epoch": "e", "seq": self.held[-1]["seq"], "reason": "backlog_budget"}
+            for callback in self.missed_callbacks:
+                callback(notice)
+        else:
+            for event in self.held:
+                for callback in self.observers:
+                    callback(event)
         self.held = ()
 
     async def call(self, method, params=None):
@@ -212,11 +220,17 @@ class SimulatedCore:
         raise AssertionError(method)
 
 
-def run_control(late_return, own_end=None, foreign=False, native_b_lives=False, before_own_exit=None, buffered=False):
+def run_control(late_return, own_end=None, foreign=False, native_b_lives=False, before_own_exit=None, buffered=False,
+                lagging=False):
     core = SimulatedCore(late_return, own_end, foreign, native_b_lives, before_own_exit)
-    core.buffered = buffered
+    core.buffered, core.lagging = buffered or lagging, lagging
     class Observer:
-        def on(self, method, callback): core.observers = (*core.observers, callback)
+        failure = None
+        def on(self, method, callback):
+            if method == "event":
+                core.observers = (*core.observers, callback)
+            elif method == "missed":
+                core.missed_callbacks = (*core.missed_callbacks, callback)
         async def call(self, method, params=None):
             return {"epoch": "e", "seq": core.seq} if method == "workspace.snapshot" else {}
     async def viewer(): return Observer()
@@ -224,8 +238,10 @@ def run_control(late_return, own_end=None, foreign=False, native_b_lives=False, 
     def signal_owned(process, sig):  # bridge B (pid 98) frozen: nothing it publishes until SIGCONT
         if process and process.get("pid") == 98 and sig == _signal.SIGCONT and getattr(core, "own_end_pending", False):
             core.own_end_pending = False
+            core.flush()  # a delayed observer receives (or, lagging, loses with `missed`) everything held so far
+            core.lagging = False
             core.own_end(core)
-            core.flush()  # a delayed observer receives everything, in order, only now
+            core.flush()  # then the post-fence own end
         return True
     ledger = []
     class NativeA:
@@ -348,6 +364,21 @@ class WholeHandlerControls(unittest.TestCase):
             run_control(lambda core: None, before_own_exit=delayed_old_end)
         self.assertIn("PUBLISHED before the replacement's own end could exist", str(caught.exception))
         self.assertEqual(getattr(caught.exception, "component", None), "adapter")
+
+    def test_missed_history_invalidates_the_observation(self):
+        """vqro-lead-secondary corrections-665-missed-finding: the subscription stays active after `missed`, so a later
+        own end cannot prove no premature end was lost. Any missed is a named HarnessGap, never a pass."""
+        def delayed_old_end(core):
+            for rid in ("r6", "r7", "r8"):
+                core.resources[rid]["data"]["agent"]["lifecycle"] = "ended"
+                core.publish(rid)
+        def harmless_event(core):  # an unchanged live fact, lost in the same lag: still no proof of absence
+            core.publish("r7")
+        for name, hook in (("premature ends lost with missed", delayed_old_end), ("missed with no fault", harmless_event)):
+            with self.subTest(name):
+                with self.assertRaises(HarnessGap) as caught:
+                    run_control(lambda core: None, before_own_exit=hook, lagging=True)
+                self.assertIn("lost history", str(caught.exception))
 
     def test_buffered_observer_cannot_hide_a_premature_end(self):
         """vqro-lead-secondary corrections-l3-delay-finding: an observer that receives every event late, in order,
