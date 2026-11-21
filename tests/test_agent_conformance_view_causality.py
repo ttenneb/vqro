@@ -395,6 +395,39 @@ class C11FutureModelHandler(unittest.TestCase):
         asyncio.run(HANDLERS['C11'](full))
         self.assertEqual(len(full.sends), 1, 'C11 must reuse the future-model witness turn, never replay it')
 
+    def test_actual_public_send_helper_honors_admit_only_and_other_declared_modes(self):
+        from types import SimpleNamespace
+        from agent_conformance.core import PublicImplementation
+        class DeclaredModes(C11FutureFake):
+            send = PublicImplementation.send  # REAL harness selector/origin/delivery path, not a copied algorithm.
+            def __init__(self, modes):
+                super().__init__(); self.modes, self.public_sends = modes, []
+                self.peer = SimpleNamespace(core_origin={})
+            def delivery(self): return 'C11-declared-mode-delivery'
+            async def facts(self, rid=None):
+                facts = await super().facts()
+                facts['caps']['agent.send']['modes'] = {mode: {} for mode in self.modes}
+                return facts
+            async def invoke(self, op, args, **root):
+                if op != 'agent.send': return await super().invoke(op, args, **root)
+                self.public_sends.append(args)
+                if args['mode'] not in self.modes:
+                    return {'outcome': 'rejected', 'error': {'kind': 'unsupported', 'message': 'undeclared public mode'}}
+                return await C11FutureFake.send(self, args['content'][0]['text'])
+        for modes, selected in ((('admit',), 'admit'), (('start',), 'start'), (('admit', 'start'), 'start')):
+            context = DeclaredModes(modes)
+            with self.subTest(modes=modes):
+                self.assertEqual(asyncio.run(m.future_model_route_witness(context)), (None, True))
+                self.assertEqual(len(context.sends), 1)
+                self.assertEqual(len(context.public_sends), 1)
+                self.assertEqual(context.public_sends[0]['mode'], selected)
+                self.assertEqual(context.public_sends[0]['origin'], {'kind': 'human'})
+                self.assertEqual(context.public_sends[0]['delivery'], 'C11-declared-mode-delivery')
+        unsupported = DeclaredModes(('admit',))
+        rejected = asyncio.run(unsupported.send('do not dispatch', mode='start'))
+        self.assertEqual(rejected['outcome'], 'rejected')
+        self.assertEqual(unsupported.sends, [], 'the fake public boundary must reject undeclared start before native IPC')
+
     def test_premature_application_inference_and_replay_fail(self):
         for fault in ('premature', 'clear_ack', 'request_infer', 'ack_infer', 'replay', 'early_mutation', 'early_query',
                       'wrong_model', 'foreign_read', 'foreign_response', 'wrong_response_id', 'duplicate_read', 'drop_read_infer'):

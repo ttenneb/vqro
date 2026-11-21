@@ -535,7 +535,7 @@ async def future_model_route_witness(ctx):
     sending, released = None, False
     try:
         # This is the SAME ordinary C11 observation turn reused by the remaining entity checks.
-        sending = asyncio.create_task(ctx.send("C11 run observation", mode="start"))
+        sending = asyncio.create_task(ctx.send("C11 run observation"))
         await ctx.native.wait(lambda rows: any(row.get("seq", 0) > mark and row.get("kind") == "paused"
                                                and row.get("phase") == "model_readback" and row.get("when") == "before"
                                                for row in rows), timeout=2)
