@@ -56,6 +56,7 @@ class Root:
                     "XDG_STATE_HOME": f"{self.r}/xst", "XDG_RUNTIME_DIR": f"{self.r}/run", "XDG_CONFIG_HOME": f"{self.r}/cfg",
                     "HC_SESSION": "same", "HC_SOCKET": f"{self.r}/hc.sock", "LANG": "C.UTF-8"}
         self.core = None
+        self.forced = {}  # pid -> [parent, argv] of anything stop() had to kill (see stop)
 
     def call(self, method, params=None):
         deadline = time.monotonic() + CALL_TIMEOUT
@@ -110,6 +111,10 @@ class Root:
                                      for n in ("herdr", "tmux")), 40)
 
     def stop(self):
+        """Stop this root: the core (its providers and extensions follow it), then the backends (tmux, herdr-core).
+        Anything of this root that outlives the backends' own stop is reported (pid, parent, program) and killed, and
+        `self.forced` keeps it: a check of its own then fails, so something that survives or comes back stays visible
+        without leaving processes behind."""
         try:
             self.call("core.shutdown")
         except Exception:
@@ -119,22 +124,36 @@ class Root:
                 self.core.wait(15)
             except subprocess.TimeoutExpired:
                 self.core.kill()
-        # The providers exit after the core; until vqro-tmux is gone it may start its owned server again. So wait
-        # (bounded) until only backend processes are left, then stop the backends, repeating until nothing of this
-        # root runs. If a provider outlives the wait the stop still runs and the final leftovers check fails closed.
-        def backend(pid):
-            """The tmux server or herdr-core this root started, by exact program name (vqro-tmux is a provider)."""
-            with open(f"/proc/{pid}/cmdline", "rb") as f:
-                program = f.read().split(b"\0")[0].rsplit(b"/", 1)[-1]
-            return program in (b"tmux", b"herdr-core")
 
-        def only_backends():
-            try:
-                return all(backend(pid) for pid in self.leftovers())
-            except OSError:
-                return False
-        self.wait(only_backends, 15)
-        end = time.time() + 15
+        def processes():
+            """This root's processes: pid -> (parent pid, program name, argv)."""
+            found = {}
+            for pid in self.leftovers():
+                try:
+                    with open(f"/proc/{pid}/stat") as f:
+                        parent = int(f.read().rsplit(")", 1)[1].split()[1])
+                    with open(f"/proc/{pid}/cmdline", "rb") as f:
+                        argv = f.read().split(b"\0")
+                except (OSError, IndexError, ValueError):
+                    continue
+                found[int(pid)] = (parent, argv[0].rsplit(b"/", 1)[-1], argv)
+            return found
+
+        def backend_owned(pid, found):
+            """A tmux server or herdr-core (by exact program name; vqro-tmux is a provider), or a program running in
+            one of their panes (by ancestry)."""
+            seen = set()
+            while pid in found and pid not in seen:
+                seen.add(pid)
+                parent, program, _ = found[pid]
+                if program in (b"tmux", b"herdr-core"):
+                    return True
+                pid = parent
+            return False
+
+        # Until the core's providers are gone, vqro-tmux could still act on its server: wait (bounded) for them.
+        self.wait(lambda: all(backend_owned(pid, found) for found in [processes()] for pid in found), 15)
+        end = time.time() + 5
         while True:
             subprocess.run([HC, "server", "stop"], env={**self.env, "PATH": ""}, capture_output=True)
             subprocess.run(["/usr/bin/tmux", "-N", "-S", f"{self.r}/st/tmux.sock", "kill-server"],
@@ -142,6 +161,16 @@ class Root:
             if not self.leftovers() or time.time() > end:
                 break
             time.sleep(0.5)
+        left = processes()
+        if left:
+            report = {pid: [parent, b" ".join(argv).decode(errors="replace")[:160]] for pid, (parent, _, argv) in left.items()}
+            print(f"STOP {self.backend}: survived the backends' own stop, killed: {report}", flush=True)
+            self.forced.update(report)
+            for pid in left:
+                try:
+                    os.kill(pid, 9)
+                except OSError:
+                    pass
 
     def leftovers(self):
         found = []
@@ -311,6 +340,7 @@ finally:
         root.stop()
         stray = root.wait(lambda: not root.leftovers() and [True], 10)
         check(f"{root.backend}: nothing left running", bool(stray), str(root.leftovers()))
+        check(f"{root.backend}: its backends' own stop ended everything (nothing had to be killed)", not root.forced, str(root.forced))
         if all(results):
             shutil.rmtree(root.r, ignore_errors=True)
 print(f"passed {sum(results)} failed {len(results) - sum(results)}")
