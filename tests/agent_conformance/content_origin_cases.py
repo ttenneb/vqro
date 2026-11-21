@@ -252,30 +252,36 @@ def model_claims(header, supplied):
     parentheticals ("agent: endpoint (claimed)"). A claim about one field never
     qualifies a different field, and opaque values remain case-sensitive.
     """
-    def affirmative(pattern):
-        return any(re.search(r"(?i:\b(?:not|never|no)(?:\s+the)?\s*)$", header[:match.start()]) is None
-                   for match in re.finditer(pattern, header))
+    qualifier = r"(?i:asserted|claimed)"
+    start = r"(?:^|[\r\n;,(\[])[ \t]*"
+    end = r"[ \t]*(?=$|[\r\n;,)\]])"
+    # One tokenizer consumes complete qualified values OR rejects an annotation.
+    # Positive claims and extra fields cannot use different delimiter rules.
+    # Consume from/via scalar identities without interpreting their contents as
+    # labels; model_origin independently checks their exact values below.
+    alternatives = [r"(?P<identity>(?:^|[\r\n;])[ \t]*(?i:from)[ \t]+\S+[ \t]+(?i:via)[ \t]+[^\s(\[;,]+)"]
     for field in ("kind", "agent"):
-        label = rf"(?i:{field})"
-        qualifier = r"(?i:asserted|claimed)"
-        # Inventory field annotations, including UNQUALIFIED ones. Anchor the
-        # label to a framing boundary: `from agent:opaque-id via ...` is an
-        # identity, not an agent annotation. A comma separates annotations only
-        # with whitespace, which cannot occur inside these principal IDs.
-        annotations = list(re.finditer(
-            rf"(?:^|[\r\n;(\[]|,[ \t]+)[ \t]*(?P<annotation>(?:{qualifier}\s+)?{label}\s*[:=])", header))
         if field not in supplied:
-            check(not annotations, "model invented " + field + " absent from the supplied origin")
             continue
-        value = re.escape(supplied[field])
-        before = rf"\b{qualifier}\s+{label}\s*[:=]\s*{value}(?=$|[\s;,)\]])"
-        after = rf"\b{label}\s*[:=]\s*{value}\s*\(\s*{qualifier}\b[^()\r\n;]*\)"
-        check(affirmative(before) or affirmative(after),
-              "model envelope omitted/changed the asserted " + field + " claim")
-        for annotation in annotations:
-            tail = header[annotation.start('annotation'):]
-            check(re.match(before, tail) is not None or re.match(after, tail) is not None,
-                  "model added an unqualified/changed " + field + " annotation")
+        label, value = rf"(?i:{field})", re.escape(supplied[field])
+        before = rf"{qualifier}\s+{label}\s*[:=]\s*{value}"
+        after = rf"{label}\s*[:=]\s*{value}\s*\(\s*{qualifier}\b[^()\r\n;,]*\)"
+        alternatives.append(rf"(?P<claim_{field}>{start}(?:{before}|{after}){end})")
+    alternatives.append(rf"{start}(?:{qualifier}\s+)?(?P<unqualified>(?i:kind|agent))\s*[:=]")
+    seen = set()
+    for token in re.finditer("|".join(alternatives), header):
+        if token.group('identity') is not None:
+            continue
+        if token.group('unqualified') is not None:
+            field = token.group('unqualified').lower()
+            check(False, "model invented " + field + " absent from the supplied origin" if field not in supplied
+                  else "model added an unqualified/changed " + field + " annotation; omitted/changed the asserted " + field + " claim")
+        for field in ("kind", "agent"):
+            if field in supplied and token.group('claim_' + field) is not None:
+                seen.add(field)
+    for field in ("kind", "agent"):
+        if field in supplied:
+            check(field in seen, "model envelope omitted/changed the asserted " + field + " claim")
 
 
 def sender_assertion(header, sender):

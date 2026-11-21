@@ -160,7 +160,14 @@ class Context:
                 actor += "-wrong"
             if self.fault == "model_principal_suffix":
                 sender += "-wrong"
-            header = "; ".join(claims) + f"\nfrom {sender} via {actor}{label}\n\n"
+            delimiters = {"comma": ",", "comma_space": ", ", "semicolon": ";", "semicolon_space": "; ",
+                          "space": " ", "tab": "\t"}
+            separator, suffix = "; ", ""
+            if self.fault and self.fault.startswith("model_extra_agent_"):
+                suffix = delimiters[self.fault.removeprefix("model_extra_agent_")] + "agent: invented-endpoint"
+            if self.fault and self.fault.startswith("model_valid_separator_"):
+                separator = delimiters[self.fault.removeprefix("model_valid_separator_")]
+            header = separator.join(claims) + suffix + f"\nfrom {sender} via {actor}{label}\n\n"
             native.insert(0, {"type": "text", "text": header})
         if self.fault == "drop":
             native = native[:-1]
@@ -279,6 +286,26 @@ class ContentChecks(unittest.TestCase):
         for header in ("asserted kind: agent; asserted agent: A1", "asserted kind: agent; agent: A1 (claimed)"):
             with self.subTest(header=header), self.assertRaises(CheckFailed):
                 subject.model_claims(header, {"kind": "agent"})
+
+    def test_one_tokenizer_handles_delimiters_and_complete_values(self):
+        supplied = {"kind": "agent", "agent": "A1"}
+        for delimiter in (",", ", ", ";", "; "):
+            with self.subTest(delimiter=delimiter):
+                subject.model_claims("asserted kind: agent" + delimiter + "asserted agent: A1", supplied)
+                for extra in ("agent: invented-endpoint", "asserted agent: wrong"):
+                    with self.assertRaises(CheckFailed):
+                        subject.model_claims("asserted kind: agent; asserted agent: A1" + delimiter + extra, supplied)
+                with self.assertRaisesRegex(CheckFailed, "invented agent"):
+                    subject.model_claims("asserted kind: agent" + delimiter + "agent: invented-endpoint", {"kind": "agent"})
+        for suffix in (" extra", "\tagent: invented-endpoint", " (claimed)agent: invented-endpoint"):
+            with self.subTest(suffix=suffix), self.assertRaises(CheckFailed):
+                subject.model_claims("asserted kind: agent; asserted agent: A1" + suffix, supplied)
+        # Full opaque supplied values and from/via identity contents are not re-lexed as invented labels.
+        subject.model_claims("asserted kind: agent; asserted agent: A1,agent:literal", {"kind": "agent", "agent": "A1,agent:literal"})
+        subject.model_claims("asserted kind: agent\nfrom human,agent:opaque via extension:coord", {"kind": "agent"})
+        for delimiter in (",", ";"):
+            with self.subTest(frame_delimiter=delimiter), self.assertRaises(CheckFailed):
+                subject.model_claims("asserted kind: agent\nfrom P via extension:coord" + delimiter + "agent: invented", {"kind": "agent"})
 
     def test_sender_qualification_is_associated_with_actual_sender(self):
         sender = {"principal": "actual-sender"}
@@ -429,6 +456,20 @@ class HandlerChecks(unittest.IsolatedAsyncioTestCase):
     async def test_d17_complete_handler_rejects_extra_unqualified_agent_with_good_claim(self):
         with patch.object(subject, "public_origin_route", route), self.assertRaisesRegex(CheckFailed, "unqualified/changed agent"):
             await subject.core_bound_origin(Context(fault="model_extra_unqualified_agent"))
+
+    async def test_d17_complete_handler_rejects_extra_agent_for_all_delimiters(self):
+        for delimiter in ("comma", "comma_space", "semicolon", "semicolon_space", "space", "tab"):
+            ctx = Context(fault="model_extra_agent_" + delimiter)
+            with self.subTest(delimiter=delimiter), patch.object(subject, "public_origin_route", route), self.assertRaises(CheckFailed):
+                await subject.core_bound_origin(ctx)
+            native = json.dumps(ctx.native.messages[-1])
+            self.assertIn("asserted agent: D17-asserted-agent", native)
+            self.assertIn("agent: invented-endpoint", native)
+
+    async def test_d17_complete_handler_accepts_qualified_separator_variants(self):
+        for delimiter in ("comma", "comma_space", "semicolon", "semicolon_space"):
+            with self.subTest(delimiter=delimiter), patch.object(subject, "public_origin_route", route):
+                await subject.core_bound_origin(Context(fault="model_valid_separator_" + delimiter))
 
     async def test_d17_complete_handler_rejects_unasserted_native_kind(self):
         with patch.object(subject, "public_origin_route", route), self.assertRaisesRegex(CheckFailed, "asserted kind claim"):
