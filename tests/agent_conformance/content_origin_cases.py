@@ -245,43 +245,71 @@ def bound_origin(receipt, expected, supplied):
     return origin
 
 
-def model_claims(header, supplied):
-    """Grade explicit field/value assertions in the frame, not body keywords.
+def model_claims(header, supplied, *, frame=None, sender=None):
+    """Consume the whole header; never search past unrecognized residue.
 
-    Recognize labeled claims ("asserted kind: agent") and field-local
-    parentheticals ("agent: endpoint (claimed)"). A claim about one field never
-    qualifies a different field, and opaque values remain case-sensitive.
+    Tokens are qualified values, from/via identities, supplied sender assertions,
+    ASCII separators and balanced round/square groups. Unknown framing fails.
     """
     qualifier = r"(?i:asserted|claimed)"
-    start = r"(?:^|[\r\n;,()\[\]])[ \t]*"
     end = r"[ \t]*(?=$|[\r\n;,)\]])"
-    # One tokenizer consumes complete qualified values OR rejects an annotation.
-    # Positive claims and extra fields cannot use different delimiter rules.
-    # Consume from/via scalar identities without interpreting their contents as
-    # labels; model_origin independently checks their exact values below.
-    alternatives = [r"(?P<identity>(?:^|[\r\n;])[ \t]*(?i:from)[ \t]+\S+[ \t]+(?i:via)[ \t]+[^\s(\[;,]+)"]
+    principal, actor = (map(re.escape, frame) if frame else (r"\S+", r"[^\s()\[\];,]+"))
+    frame_end = r"[ \t]*(?=$|[\r\n;,()\[\]])"
+    patterns = [(None, re.compile(rf"(?i:from)[ \t]+{principal}[ \t]+(?i:via)[ \t]+{actor}{frame_end}"))]
+    if sender:
+        sender_actor = re.escape(frame[1]) if frame else r"[^\s()\[\];,]+"
+        for pattern in sender_patterns(re.escape(sender['principal']), actor=sender_actor):
+            patterns.append((None, re.compile(pattern + end)))
     for field in ("kind", "agent"):
         if field not in supplied:
             continue
         label, value = rf"(?i:{field})", re.escape(supplied[field])
-        before = rf"{qualifier}\s+{label}\s*[:=]\s*{value}"
-        after = rf"{label}\s*[:=]\s*{value}\s*\(\s*{qualifier}\b[^()\r\n;,]*\)"
-        alternatives.append(rf"(?P<claim_{field}>{start}(?:{before}|{after}){end})")
-    alternatives.append(rf"{start}(?:{qualifier}\s+)?(?P<unqualified>(?i:kind|agent))\s*[:=]")
-    seen = set()
-    for token in re.finditer("|".join(alternatives), header):
-        if token.group('identity') is not None:
+        before = rf"{qualifier}[ \t]+{label}[ \t]*[:=][ \t]*{value}"
+        qualification = rf"{qualifier}(?:[ \t]+(?i:by (?:the )?extension))?"
+        after = rf"{label}[ \t]*[:=][ \t]*{value}[ \t]*\([ \t]*{qualification}[ \t]*\)"
+        patterns.append((field, re.compile(rf"(?:{before}|{after}){end}")))
+    seen, groups, position, count = set(), [], 0, 0
+    while position < len(header):
+        char = header[position]
+        if char in " \t\r\n;,":
+            position += 1
             continue
-        if token.group('unqualified') is not None:
-            field = token.group('unqualified').lower()
-            check(False, "model invented " + field + " absent from the supplied origin" if field not in supplied
-                  else "model added an unqualified/changed " + field + " annotation; omitted/changed the asserted " + field + " claim")
-        for field in ("kind", "agent"):
-            if field in supplied and token.group('claim_' + field) is not None:
-                seen.add(field)
+        if char in "([":
+            groups.append((")" if char == "(" else "]", count))
+            position += 1
+            continue
+        if char in ")]":
+            check(groups and groups[-1][0] == char and count > groups[-1][1],
+                  "model envelope contains an unmatched/empty framing group")
+            groups.pop()
+            position += 1
+            continue
+        for field, pattern in patterns:
+            token = pattern.match(header, position)
+            if token is not None:
+                position, count = token.end(), count + 1
+                if field is not None:
+                    seen.add(field)
+                break
+        else:
+            annotation = re.match(rf"(?:{qualifier}[ \t]+)?(?P<field>(?i:kind|agent))[ \t]*[:=]", header[position:])
+            if annotation:
+                field = annotation['field'].lower()
+                check(False, "model invented " + field + " absent from the supplied origin" if field not in supplied
+                      else "model added an unqualified/changed " + field + " annotation; omitted/changed the asserted " + field + " claim")
+            check(False, "model envelope contains unrecognized framing residue at " + str(position))
+    check(not groups, "model envelope contains an unclosed framing group")
     for field in ("kind", "agent"):
         if field in supplied:
             check(field in seen, "model envelope omitted/changed the asserted " + field + " claim")
+
+
+def sender_patterns(identity, *, actor=r"[^\s()]+"):
+    """Supported explicit/local assertions shared by lexical and sender checks."""
+    label = r"(?i:(?:asserted|claimed)\s+sender(?:\s+provenance)?|sender(?:\s+provenance)?\s+(?:assertion|(?:is\s+)?(?:asserted|claimed)))"
+    explicit = rf"{label}\s*[:=]\s*{identity}(?:\s+(?i:via)\s+{actor})?"
+    local_note = r"(?i:sender(?:\s+provenance)?\s+(?:is\s+)?(?:asserted|claimed)(?:\s+by\s+(?:the\s+)?extension)?(?:,\s*not\s+core-(?:proven|attested))?)"
+    return explicit, local_note
 
 
 def sender_assertion(header, sender):
@@ -293,9 +321,7 @@ def sender_assertion(header, sender):
     """
     identity = re.escape(sender['principal'])
     actor = r"[^\s()]+"
-    label = r"(?i:(?:asserted|claimed)\s+sender(?:\s+provenance)?|sender(?:\s+provenance)?\s+(?:assertion|(?:is\s+)?(?:asserted|claimed)))"
-    explicit = rf"{label}\s*[:=]\s*{identity}(?:\s+(?i:via)\s+{actor})?"
-    local_note = r"(?i:sender(?:\s+provenance)?\s+(?:is\s+)?(?:asserted|claimed)(?:\s+by\s+(?:the\s+)?extension)?(?:,\s*not\s+core-(?:proven|attested))?)"
+    explicit, local_note = sender_patterns(identity)
     for clause in re.split(r"[\r\n;]+", header):
         clause = clause.strip()
         if re.fullmatch(explicit, clause):
@@ -326,7 +352,6 @@ def model_origin(message, rendering, expected, supplied, *, sender=None):
     # Original content starts at this independently checked literal marker.
     # Claims planted in the input body cannot stand in for framing metadata.
     header = text.split("D17-body:", 1)[0]
-    model_claims(header, supplied)
     principal = sender["principal"] if sender else expected["principal"]
     check(framed_origin(header, principal, expected["actor"]), "native envelope omitted exact sender/current-actor frame")
     if sender:
@@ -334,6 +359,7 @@ def model_origin(message, rendering, expected, supplied, *, sender=None):
               "inbox-record provenance was not labeled as this sender's extension assertion in the model frame")
         check(expected["principal"] != principal and expected.get("initiator") != principal,
               "dispatch identity was rewritten to the original inbox sender", component="harness")
+    model_claims(header, supplied, frame=(principal, expected['actor']), sender=sender)
     return text
 
 

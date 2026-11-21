@@ -309,6 +309,21 @@ class ContentChecks(unittest.TestCase):
             with self.subTest(frame_delimiter=delimiter), self.assertRaises(CheckFailed):
                 subject.model_claims("asserted kind: agent\nfrom P via extension:coord" + delimiter + "agent: invented", {"kind": "agent"})
 
+    def test_full_header_parser_checks_groups_and_sender_token_contents(self):
+        supplied = {'kind': 'agent', 'agent': 'A1'}
+        frame = ('P,agent:opaque', 'extension:coord')
+        sender = {'principal': frame[0]}
+        prefix = 'asserted kind: agent; asserted agent: A1\nfrom ' + frame[0] + ' via ' + frame[1]
+        subject.model_claims(prefix + ' (sender claimed, not core-attested)', supplied, frame=frame, sender=sender)
+        subject.model_claims(prefix + '\nasserted sender: ' + frame[0] + ' via ' + frame[1], supplied, frame=frame, sender=sender)
+        for suffix in ('()', '[]', '(garbage)', ' [asserted agent: A1)', '\u00a0', '\u200b',
+                       '\nasserted sender: ' + frame[0] + ' via extension:coord;agent:invented',
+                       '\nasserted sender: ' + frame[0] + ' via extension:wrong'):
+            with self.subTest(suffix=ascii(suffix)), self.assertRaises(CheckFailed):
+                subject.model_claims(prefix + suffix, supplied, frame=frame, sender=sender)
+        with self.assertRaises(CheckFailed):
+            subject.model_claims('kind: agent (claimed agent: invented-endpoint)', {'kind': 'agent'})
+
     def test_sender_qualification_is_associated_with_actual_sender(self):
         sender = {"principal": "actual-sender"}
         self.assertTrue(subject.sender_assertion("from actual-sender via extension:coord (sender asserted by extension)", sender))
@@ -473,6 +488,50 @@ class HandlerChecks(unittest.IsolatedAsyncioTestCase):
         for delimiter in ("comma", "comma_space", "semicolon", "semicolon_space"):
             with self.subTest(delimiter=delimiter), patch.object(subject, "public_origin_route", route):
                 await subject.core_bound_origin(Context(fault="model_valid_separator_" + delimiter))
+
+    async def test_d17_full_header_residue_matrix(self):
+        import itertools
+        separators = ("", " ", "\t", "\n", "\r\n", ",", ";", "|", "||", ":", "=", "/", "\\",
+                      "—", "–", "·", "，", "；", "、", "：", "\u200b", "\u00a0", "\u2060")
+        residues = [""] + [separator + payload for separator in separators
+                            for payload in ("agent: invented-endpoint", "garbage")]
+        for opening, closing in (("{", "}"), ("<", ">"), ("'", "'"), ('"', '"'), ("`", "`"), ("(", ")"),
+                                 ("[", "]"), ("«", "»"), ("“", "”"), ("‘", "’"), ("（", "）")):
+            residues.extend(opening + payload + closing for payload in ("agent: invented-endpoint", "garbage"))
+
+        class Residue(Context):
+            def __init__(self, field, postfix, opening, closing, suffix):
+                super().__init__()
+                self.field, self.postfix, self.opening, self.closing, self.suffix = field, postfix, opening, closing, suffix
+                self.mutations = 0
+
+            def evaluate(self, request, expected):
+                result = super().evaluate(request, expected)
+                supplied = request['args']['origin']
+                if result.get('outcome') == 'accepted' and expected['principal'] != 'fixture-owner' and self.field in supplied:
+                    needle = 'asserted ' + self.field + ': ' + supplied[self.field]
+                    claim = self.field + ': ' + supplied[self.field] + ' (claimed)' if self.postfix else needle
+                    for block in self.native.messages[-1]['content']:
+                        if block.get('type') == 'text' and needle in block['text']:
+                            block['text'] = block['text'].replace(needle, self.opening + claim + self.closing + self.suffix)
+                            self.mutations += 1
+                return result
+
+        positives = negatives = 0
+        for field, postfix, (opening, closing), suffix in itertools.product(
+                ('kind', 'agent'), (False, True), (('', ''), ('(', ')'), ('[', ']')), residues):
+            ctx = Residue(field, postfix, opening, closing, suffix)
+            with self.subTest(field=field, postfix=postfix, opening=opening, suffix=ascii(suffix)), patch.object(subject, 'public_origin_route', route):
+                if suffix:
+                    with self.assertRaises(CheckFailed):
+                        await subject.core_bound_origin(ctx)
+                    negatives += 1
+                else:
+                    await subject.core_bound_origin(ctx)
+                    positives += 1
+                self.assertGreater(ctx.mutations, 0, 'residue mutation was not exercised')
+            await asyncio.sleep(0)  # Yield between independent mock cases, not a timing oracle.
+        self.assertEqual((positives, negatives), (12, 816))
 
     async def test_d17_complete_handler_rejects_unasserted_native_kind(self):
         with patch.object(subject, "public_origin_route", route), self.assertRaisesRegex(CheckFailed, "asserted kind claim"):
