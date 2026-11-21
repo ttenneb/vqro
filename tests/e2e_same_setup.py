@@ -25,7 +25,7 @@ results = []
 
 # Differences that come from what each backend is, not from a bug: (path regex, why).
 EXPECTED = [
-    (r"^resources\.\w+\.provider$", "each resource names the backend that owns it"),
+    (r"^resources\.terminal\d+\.provider$", "each terminal names the backend that owns it"),
 ]
 HOST = socket.gethostname()
 # Differences that are known bugs, each with its finding (qol/same-setup-findings.md), matched by exact path and
@@ -50,6 +50,7 @@ class Root:
         shutil.copytree(os.path.join(REPO, "extensions"), os.path.join(self.r, "ext"),
                         ignore=shutil.ignore_patterns("node_modules", "opentui", "__pycache__"))
         os.symlink("/usr/bin/python3", os.path.join(self.r, "bin", "python3"))
+        os.symlink(os.path.join(TARGET, "debug", "vqro-bridge-pi"), os.path.join(self.r, "bin", "vqro-bridge-pi"))
         self.env = {"HOME": f"{self.r}/home", "PATH": f"{self.r}/bin", "TERM": "xterm-256color", "SHELL": SHELL,
                     "VQRO_STATE_DIR": f"{self.r}/st", "VQRO_SOCKET": f"{self.r}/p.sock", "VQRO_EXTENSIONS_DIR": f"{self.r}/ext",
                     "XDG_STATE_HOME": f"{self.r}/xst", "XDG_RUNTIME_DIR": f"{self.r}/run", "XDG_CONFIG_HOME": f"{self.r}/cfg",
@@ -142,8 +143,10 @@ def scenario(root):
     if not root.wait(lambda: set(commands) <= {x["name"] for x in c("command.list")["commands"] if x.get("available")}, 40):
         return "extension commands never became available"
     native = ["/usr/bin/python3", os.path.join(REPO, "tests/fixtures/fake_pi.py"), "--bridge-e2e"]
+    # The production bridge (the default launcher, which execs vqro-bridge-pi): its PATH on the terminal host is
+    # this root's bin (python3 and vqro-bridge-pi only), so the agent declares its real native capabilities.
     c("workspace.apply", {"note": "fake Pi runtime", "ops": [{"op": "set", "key": "doc/settings/pi", "value": {"runtimes": [
-        {"name": "fake", "argv": native, "bridge_argv": ["/usr/bin/python3", "-I", f"{root.r}/ext/pi_bridge/python_launch.py"]}]}}]})
+        {"name": "fake", "argv": native, "bridge_env": {"PATH": f"{root.r}/bin"}}]}}]})
     # Tab 1: a shell that sets its program title, then splits; tab 2: a plain shell renamed "build".
     c("command.invoke", {"name": "tabs.open", "args": {"argv": ["/bin/sh", "-c", "printf '\\033]0;titled\\007'; exec /bin/sh"],
                                                        "cwd": f"{root.r}/work"}})
@@ -166,8 +169,12 @@ def scenario(root):
     created = c("command.invoke", {"name": "pi.new", "args": {"runtime": "fake", "cwd": f"{root.r}/work"}})
     if not root.wait(lambda: any(r["kind"] == "agent" and r.get("available") for r in snap()["resources"]), 40):
         return f"no agent registered (pi.new: {created})"
-    root.wait(lambda: {"titled", "solo"} <= {r.get("title") for r in snap()["resources"]}, 15)
-    root.wait(lambda: snap().get("live", {}).get("sidebar"), 15)
+    if not root.wait(lambda: {"titled", "solo"} <= {r.get("title") for r in snap()["resources"]}, 15):
+        return "the program titles titled and solo were never reported"
+    if not root.wait(lambda: len((snap().get("live", {}).get("sidebar") or {}).get("items", [])) > 0, 15):
+        return "the sidebar never published rows"
+    if not root.wait(lambda: any((((r.get("data") or {}).get("agent") or {}).get("caps")) for r in snap()["resources"] if r["kind"] == "agent"), 20):
+        return "the agent never declared its capabilities"
     time.sleep(2)  # nothing to observe: let late facts (titles, cwd, agent metadata) land before the capture
     return None
 
@@ -200,6 +207,7 @@ def capture(root):
     text = text.replace(root.r, "<root>")
     # Names a run generates (the Pi bridge's provider instance and terminal names) carry random suffixes.
     text = re.sub(r"pi-[0-9a-f]{8}-[0-9a-f-]{27}", "pi-<instance>", text)
+    text = re.sub(r"\bpi-[0-9a-f]{32}\b", "pi-<instance>", text)  # the Rust bridge's provider instance
     text = re.sub(r"pi-bridge-[0-9a-f]{12}", "pi-bridge-<id>", text)
     snap = json.loads(text)
     keep = ("kind", "state", "available", "stale", "provider", "name", "title", "cwd", "argv", "status", "host")
@@ -208,7 +216,7 @@ def capture(root):
         "views": {k[5:]: {f: v["value"].get(f) for f in ("kind", "resource", "title", "fallback")}
                   for k, v in snap["entries"].items() if k.startswith("view/")},
         "resources": {label_: {f: r.get(f) for f in keep} for label_, r in ((r["id"], r) for r in snap["resources"])},
-        "agents": {r["id"]: sorted(((r.get("data") or {}).get("agent") or {}).get("caps", {}))
+        "agents": {r["id"]: ((r.get("data") or {}).get("agent") or {}).get("caps")  # with their values (modes, limits)
                    for r in snap["resources"] if r["kind"] == "agent"},
         "sidebar": [{f: row.get(f) for f in ("text", "badges", "style")} for row in (snap.get("live", {}).get("sidebar") or {}).get("items", [])],
         "commands": sorted(c["name"] for c in root.call("command.list")["commands"] if c.get("available")),
@@ -258,6 +266,12 @@ try:
     # Honest reporting on both backends (findings F1-F4): no name nobody gave, no title no program set, and a
     # spawn without argv runs, and reports, the host's $SHELL.
     for backend, cap in captures.items():
+        owners = {k: r.get("provider") for k, r in cap["resources"].items() if r["kind"] == "terminal"}
+        check(f"{backend}: every terminal (shells, split, agent bridge) belongs to the default backend, {backend}",
+              len(owners) == 6 and set(owners.values()) == {backend}, owners)
+        caps = next(iter(cap["agents"].values()), None)
+        check(f"{backend}: the agent declares native capabilities (production bridge), compared with their values",
+              isinstance(caps, dict) and caps.get("agent.send"), caps)
         terms = {k: r for k, r in cap["resources"].items() if r["kind"] == "terminal" and not str(r.get("name") or "").startswith("pi-bridge")}
         check(f"{backend}: terminals nobody named have no name (F1)", all(r.get("name") is None for r in terms.values()),
               {k: r.get("name") for k, r in terms.items()})
