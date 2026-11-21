@@ -46,7 +46,7 @@ impl Entry {
         Some(Self {delivery:delivery.into(),origin:origin.clone(),queue,text:native["message"].as_str()?.to_string(),images})
     }
     /// Exactly the bridge's text and images, in Pi's user content shape (one text block, then images).
-    fn matches(&self,message:&Value)->bool{
+    pub fn matches(&self,message:&Value)->bool{
         let Some(blocks)=message["content"].as_array() else {return message["content"].as_str()==Some(self.text.as_str()) && self.images.is_empty();};
         let Some((first,rest))=blocks.split_first() else {return false;};
         first["type"]=="text" && first["text"].as_str()==Some(self.text.as_str()) && rest.len()==self.images.len()

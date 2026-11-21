@@ -46,6 +46,60 @@ fn correlated_origin_never_leaks_to_a_later_uncorrelated_user_message() {
     }
 }
 
+/// A stray native user end merged into the still-open correlated message A replaces A's content: the entity then
+/// holds text the bridge never wrote, so it loses the origin for good (never "B's words, A's sender").
+#[test]
+fn content_merged_into_an_open_correlated_message_drops_its_origin() {
+    let mut a=make();
+    let origin=json!({"principal":"p:owner","kind":"human"});
+    a.origins.arm(origins::Entry::new("d-origin",&origin,&json!({"message":"owned A"})));
+    event(&mut a,json!({"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}));
+    event(&mut a,json!({"type":"message_start","message":{"role":"user","content":"owned A"}}));
+    assert_eq!(entities(&a,"message")[0]["value"]["origin"],origin,"A is correlated while open");
+    event(&mut a,json!({"type":"message_end","message":{"role":"user","content":"native B, not sent by bridge"}}));
+    let rows=entities(&a,"message");assert_eq!(rows.len(),1,"B merged into the open entity");
+    let value=&rows[0]["value"];assert_eq!(value["content"][0]["text"],"native B, not sent by bridge");
+    assert!(value.get("origin").is_none() && value.get("delivery").is_none(),"{value}");
+    event(&mut a,json!({"type":"message_start","message":{"role":"user","content":"owned A"}}));
+    assert!(entities(&a,"message").iter().all(|row|row["value"].get("origin").is_none()),"the binding is gone");
+    // Byte-identical text from another message (its own timestamp) merged into the open A: also no origin.
+    let mut a=make();
+    a.origins.arm(origins::Entry::new("d-origin",&origin,&json!({"message":"ok"})));
+    event(&mut a,json!({"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}));
+    event(&mut a,json!({"type":"message_start","message":{"role":"user","content":"ok","timestamp":1000}}));
+    assert_eq!(entities(&a,"message")[0]["value"]["origin"],origin);
+    event(&mut a,json!({"type":"message_end","message":{"role":"user","content":"ok","timestamp":2000}}));
+    assert!(entities(&a,"message")[0]["value"].get("origin").is_none(),"identical text, another message");
+    // The same message ending (same timestamp) keeps it.
+    let mut a=make();
+    a.origins.arm(origins::Entry::new("d-origin",&origin,&json!({"message":"ok"})));
+    event(&mut a,json!({"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}));
+    event(&mut a,json!({"type":"message_start","message":{"role":"user","content":"ok","timestamp":1000}}));
+    event(&mut a,json!({"type":"message_end","message":{"role":"user","content":"ok","timestamp":1000}}));
+    assert_eq!(entities(&a,"message")[0]["value"]["origin"],origin,"its own end keeps the origin");
+}
+
+/// The entity bound is checked after the correlated origin/delivery are merged; the content-omitted fallback keeps them.
+#[test]
+fn a_correlated_origin_never_pushes_a_message_over_the_entity_bound() {
+    let origin=json!({"principal":"p:owner","kind":"human","actor":"extension:agents","initiator":"p:owner"});
+    let mut over=0;
+    for slack in (0..600).step_by(10) {
+        let mut a=make();
+        let text="x".repeat(state::ENTITY_BYTES-slack);
+        a.origins.arm(origins::Entry::new("d-origin",&origin,&json!({"message":text})));
+        event(&mut a,json!({"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}));
+        let message=json!({"role":"user","content":text});
+        event(&mut a,json!({"type":"message_start","message":message}));event(&mut a,json!({"type":"message_end","message":message}));
+        let rows=entities(&a,"message");assert_eq!(rows.len(),1,"slack {slack}: the message entity exists");
+        let value=&rows[0]["value"];
+        assert!(vqro::limits::encoded_bytes(value)<=state::ENTITY_BYTES,"slack {slack}: entity over the bound");
+        assert_eq!((&value["origin"],&value["delivery"]),(&origin,&json!("d-origin")),"slack {slack}: origin kept");
+        if value.get("incomplete").is_some(){over+=1;}
+    }
+    assert!(over>0 && over<60,"some sizes need the content-omitted fallback, some fit whole: {over}");
+}
+
 #[test]
 fn modules_are_versioned_descriptor_maps_for_resource_and_provider() {
     let a=make();

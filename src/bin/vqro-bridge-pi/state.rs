@@ -54,7 +54,7 @@ pub struct Agent {
     pub configuration:super::configuration::Configuration,pub commands:super::commands::Commands,
     // A correlated origin is bound to the one message entity its user message_start created (origins.rs): a later
     // entity, even one created by a standalone native message_end, never inherits it.
-    pub origins:super::origins::Origins,start_origin:Option<Value>,current_origin:Option<(String,Value)>,
+    pub origins:super::origins::Origins,start_origin:Option<super::origins::Entry>,current_origin:Option<(String,super::origins::Entry,Value)>,
     pub requests:super::requests::Requests,ui_cancels:Vec<(String,Value)>,ui_unconfirmed:BTreeSet<String>,pub ui_overflow:bool,
     receipt_order:VecDeque<String>,
     history:VecDeque<(String,String)>,
@@ -259,16 +259,21 @@ impl Agent {
             }
         }
     }
-    fn message_value(&mut self,message:&Value,final_value:bool,position:u64)->Value {
+    /// `extra`: top-level fields (a correlated origin/delivery) merged before the entity bound is checked, and kept
+    /// on the content-omitted fallback.
+    fn message_value(&mut self,message:&Value,final_value:bool,position:u64,extra:Option<&Value>)->Value {
+        let merge=|value:&mut Value|{if let Some(fields)=extra.and_then(Value::as_object){for (key,field) in fields {value[key]=field.clone();}}};
         let content=project_content(&message["content"]);
         let mut native=message.as_object().cloned().unwrap_or_default();native.remove("role");native.remove("content");
         let mut value=json!({"position":position,"role":message["role"],"content":content,"final":final_value,"native":native});
         let at_ms=count(&message["timestamp"]);
         if let Some(at_ms)=at_ms{value["at_ms"]=json!(at_ms);}
+        merge(&mut value);
         if vqro::limits::encoded_bytes(&value)>ENTITY_BYTES {
             self.incomplete.insert("items".into());self.journal.set_coverage(Coverage::Tail);
             value=json!({"position":position,"role":message["role"],"content":[{"type":"text","text":"[Native message exceeds the declared entity bound; content omitted]"}],"final":final_value,"incomplete":["content"]});
             if let Some(at_ms)=at_ms{value["at_ms"]=json!(at_ms);}
+            merge(&mut value);
         }
         value
     }
@@ -278,15 +283,17 @@ impl Agent {
         let id=if let Some(id)=&self.current_message {id.clone()}else{
             self.position+=1;let id=self.next("m");self.current_message=Some(id.clone());
             // Only the entity a correlated user message_start creates gets that origin; any other new entity gets none.
-            self.current_origin=self.start_origin.take().filter(|_|message["role"]=="user").map(|fields|(id.clone(),fields));id
+            self.current_origin=self.start_origin.take().filter(|_|message["role"]=="user").map(|entry|(id.clone(),entry,message["timestamp"].clone()));id
         };
         self.start_origin=None;
         let position=self.journal.entity("message",&id).and_then(|(_,value)|value["position"].as_u64()).unwrap_or(self.position);
-        let mut value=self.message_value(message,final_value,position);
-        // A correlated bridge send: its core-bound origin and delivery, kept even when content is omitted.
-        if message["role"]=="user" {if let Some((_,fields))=self.current_origin.as_ref().filter(|(bound,_)|*bound==id){
-            if let Some(fields)=fields.as_object(){for (key,field) in fields {value[key]=field.clone();}}
-        }}
+        // A correlated bridge send keeps its core-bound origin/delivery only while this entity still holds exactly what
+        // the bridge wrote: other content merged into the open message (a stray native end) loses it for good.
+        // Same message too: Pi's user message keeps its creation timestamp from start to end (a stray identical text has its own).
+        let bound=self.current_origin.as_ref().is_some_and(|(bound,_,_)|*bound==id);
+        if bound && !(message["role"]=="user" && self.current_origin.as_ref().is_some_and(|(_,entry,timestamp)|entry.matches(message) && message["timestamp"]==*timestamp)) {self.current_origin=None;}
+        let extra=self.current_origin.as_ref().filter(|(bound,_,_)|*bound==id).map(|(_,entry,_)|super::origins::fields(entry));
+        let value=self.message_value(message,final_value,position,extra.as_ref());
         let event=&record["assistantMessageEvent"];
         let field=event["contentIndex"].as_u64().map(|index|format!("/content/{index}/text"));
         let appended=if let (Some(field),Some(delta))=(field,event["delta"].as_str()) {
@@ -301,7 +308,7 @@ impl Agent {
                 self.error=message["errorMessage"].as_str().map(|s|s.chars().take(1024).collect());
             }
             self.current_message=None;
-            if self.current_origin.as_ref().is_some_and(|(bound,_)|*bound==id){self.current_origin=None;}
+            if self.current_origin.as_ref().is_some_and(|(bound,_,_)|*bound==id){self.current_origin=None;}
         }
     }
     fn tool(&mut self,record:&Value,status:&str) {
@@ -371,7 +378,7 @@ impl Agent {
                 Some("message_start")=>{
                     self.current_message=None;
                     // Only a user message the bridge sent, under the evidence rules in origins.rs; never inferred.
-                    self.start_origin=if record["message"]["role"]=="user"{self.origins.user_message(&record["message"]).map(|entry|super::origins::fields(&entry))}else{None};
+                    self.start_origin=if record["message"]["role"]=="user"{self.origins.user_message(&record["message"])}else{None};
                     self.message(record,false);
                 },
                 Some("message_update")=>self.message(record,false),Some("message_end")=>self.message(record,true),
