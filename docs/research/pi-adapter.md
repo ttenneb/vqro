@@ -28,6 +28,9 @@ Installed Pi1 `dist/modes/rpc/rpc-mode.js:40-88,175-196,632-645` is the source e
 - UI answers have no ACK and remain `dispatched`. A later get_state read on the same pipe can fence the native
   synchronous response-map update; that is never reported as handled versus already cancelled.
 - notify/setStatus/setWidget/setTitle/set_editor_text are fire-and-forget UI, despite having IDs, not questions.
+  `notify` (human-facing `message`, optional `notifyType` info/warning/error) becomes a standard `notice` entity
+  `{position, text, severity?, native}` that viewers show; severity only from a known `notifyType` (`warning` → `warn`).
+  The others, and a notify without text, stay private `_ui` entities.
 - First valid answer claims the live request revision atomically. No-write failure can release a claim; an
   uncertain write cannot. Reconnect/epoch changes expire unverifiable pending dialogs and cancel once.
 - Facts summaries carry params up to2KiB; larger params mark the summary incomplete/Cancel-only, while the full

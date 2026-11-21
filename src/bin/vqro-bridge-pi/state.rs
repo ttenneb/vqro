@@ -18,6 +18,17 @@ fn project_content(content:&Value)->Value{
         block
     }).collect());}Value::Null
 }
+/// Pi `notify` (pi-coding-agent rpc-types.d.ts: `{method:"notify", message: string, notifyType?: "info"|"warning"|"error"}`)
+/// as a standard `notice {text, severity?}`. Severity only when Pi gives a known one (`warning` → `warn`, as in agent-v0's
+/// notice example); the native fields stay under `native`. No text, no notice: the row stays private `_ui` state.
+fn notify_notice(row:&Value)->Option<Value>{
+    if row["method"]!="notify" {return None;}
+    let text=row["message"].as_str()?;
+    let mut notice=json!({"text":text,"native":{"method":"notify"}});
+    if let Some(kind)=row.get("notifyType"){notice["native"]["notifyType"]=kind.clone();}
+    if let Some(severity)=match row["notifyType"].as_str(){Some("info")=>Some("info"),Some("warning")=>Some("warn"),Some("error")=>Some("error"),_=>None}{notice["severity"]=json!(severity);}
+    Some(notice)
+}
 fn count(value:&Value)->Option<u64>{value.as_u64().filter(|n|*n<(1u64<<53))}
 fn project_usage(data:&Value,metadata:&Value)->Option<Value>{
     let mut usage=json!({});
@@ -142,7 +153,7 @@ impl Agent {
     pub fn ensure_session_epoch(&mut self,prior:&str){if self.epoch()==prior{self.new_session_epoch();if let Some(session)=self.session.clone(){self.store("session","current",session,false);}self.refresh();}}
     pub fn configuration_pending(&mut self,pending:bool){if pending{self.invalidate_usage();}self.configuration.pending=pending;if !pending{self.session_pending=false;}self.configuration.rebuild(&self.signals.current().metadata);self.refresh();}
     pub fn transcript(&self)->Value{
-        let entities=self.history.iter().filter(|(kind,_)|matches!(kind.as_str(),"message"|"tool"|"_ui")).filter_map(|(kind,id)|self.journal.entity(kind,id).map(|(_,value)|(kind.as_str(),value))).collect();
+        let entities=self.history.iter().filter(|(kind,_)|matches!(kind.as_str(),"message"|"tool"|"notice")).filter_map(|(kind,id)|self.journal.entity(kind,id).map(|(_,value)|(kind.as_str(),value))).collect();
         super::panel::transcript(entities,self.incomplete.contains("items") || self.incomplete.contains("native"))
     }
     fn runtime_notice(&mut self,record:&Value){
@@ -211,9 +222,12 @@ impl Agent {
                 self.store("request",&id,json!({"request":id,"revision":1,"method":"_unrepresentable","title":reason,"scope":{"operation":format!("ui-{id}")},"status":"cancelled","incomplete":true}),true);
                 self.queue_ui_cancel(id,native);self.incomplete.insert("native_ui".into());
             }
-            super::requests::Incoming::Notice {id,mut value}=>{
+            super::requests::Incoming::Notice {id,value}=>{
+                // notify is human-facing text: a standard `notice` entity the Agents pane shows. The other
+                // fire-and-forget methods (status, widget, title, editor text) stay private `_ui` state.
+                let (kind,mut value)=match notify_notice(&value){Some(notice)=>("notice",notice),None=>("_ui",value)};
                 self.position+=1;value["position"]=json!(self.position);
-                if vqro::limits::encoded_bytes(&value)<=ENTITY_BYTES{self.store("_ui",&id,value,true);}else{self.incomplete.insert("native_ui".into());}
+                if vqro::limits::encoded_bytes(&value)<=ENTITY_BYTES{self.store(kind,&id,value,true);}else{self.incomplete.insert("native_ui".into());}
             }
         }
     }

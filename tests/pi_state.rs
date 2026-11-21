@@ -158,6 +158,35 @@ fn timed_dialog_cancel_is_once_and_notifications_are_not_questions(){
 }
 
 #[test]
+fn notify_is_a_standard_notice_and_other_fire_and_forget_ui_stays_private(){
+    let mut a=make();
+    for (id,kind) in [("n-warn",json!("warning")),("n-err",json!("error")),("n-info",json!("info")),("n-future",json!("success"))]{
+        event(&mut a,json!({"type":"extension_ui_request","id":id,"method":"notify","message":format!("{id} text\nsecond line"),"notifyType":kind}));
+    }
+    event(&mut a,json!({"type":"extension_ui_request","id":"n-plain","method":"notify","message":"plain"}));
+    event(&mut a,json!({"type":"extension_ui_request","id":"status","method":"setStatus","statusKey":"k","statusText":"private status"}));
+    event(&mut a,json!({"type":"extension_ui_request","id":"n-empty","method":"notify"}));
+    let notices=entities(&a,"notice");
+    let values:Vec<&Value>=notices.iter().map(|row|&row["value"]).collect();
+    assert_eq!(values.len(),5,"every notify with text is a notice: {values:?}");
+    assert_eq!(values.iter().map(|v|v["severity"].clone()).collect::<Vec<_>>(),vec![json!("warn"),json!("error"),json!("info"),Value::Null,Value::Null],
+        "severity only from a known Pi notifyType; never invented");
+    assert_eq!(values[0]["text"],"n-warn text\nsecond line");assert_eq!(values[4]["text"],"plain");
+    assert_eq!(values[0]["native"],json!({"method":"notify","notifyType":"warning"}));
+    assert_eq!(values[3]["native"],json!({"method":"notify","notifyType":"success"}),"an unknown native type is kept, not mapped");
+    assert_eq!(values[4]["native"],json!({"method":"notify"}));
+    let positions:Vec<u64>=values.iter().map(|v|v["position"].as_u64().unwrap()).collect();
+    assert!(positions.windows(2).all(|w|w[0]<w[1]),"notices are placed on the timeline in arrival order");
+    let private=entities(&a,"_ui");
+    assert_eq!(private.len(),2,"setStatus and a notify without text stay private: {private:?}");
+    assert!(private.iter().all(|row|row["value"]["method"]=="setStatus" || row["value"]["message"].is_null()));
+    assert!(a.take_ui_cancels().is_empty());assert!(a.request_summaries().is_empty());
+    let transcript=a.transcript().to_string();
+    assert!(transcript.contains("system> n-warn text") && transcript.contains("system> second line") && transcript.contains("system> plain"));
+    assert!(!transcript.contains("private status"));
+}
+
+#[test]
 fn native_queue_membership_is_observed_not_inferred_from_admission() {
     let mut a=make();
     event(&mut a,json!({"type":"queue_update","steering":["queued"],"followUp":[]}));
