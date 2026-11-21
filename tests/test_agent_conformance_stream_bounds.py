@@ -91,6 +91,29 @@ class ReviewCounterexamples(unittest.TestCase):
         g = m.SCENARIO_GRADES["o14-over-bound"]
         self.assertTrue(m.incompatibility_reported(shown, g["cause"], g["limit"]))
 
+    def test_label_on_a_text_row_is_not_visible(self):
+        g = m.SCENARIO_GRADES["o14-over-bound"]
+        labelled = {"items": [{"type": "text", "text": "Loading conversation",
+                               "label": "Incompatible stream: an entity larger than 3000 bytes"}]}
+        self.assertFalse(m.incompatibility_reported(labelled, g["cause"], g["limit"]))
+        described = {"items": [{"type": "text", "text": "Loading conversation",
+                                "description": "Incompatible stream: an entity larger than 3000 bytes"}]}
+        self.assertFalse(m.incompatibility_reported(described, g["cause"], g["limit"]), "text rows draw no description")
+        action = {"items": [{"type": "action", "text": "Incompatible stream",
+                             "description": "an entity larger than 3000 bytes"}]}
+        self.assertTrue(m.incompatibility_reported(action, g["cause"], g["limit"]), "non-text rows draw description")
+
+    def test_o12_hidden_metadata_is_not_a_marker(self):
+        from types import SimpleNamespace
+        import hashlib
+        text = "0:" + "O12-" + "x" * 70000
+        n, sha = len(text.encode()), hashlib.sha256(text.encode()).hexdigest()
+        entities = {("message", "a"): {"rev": 1, "value": {"content": [{"type": "text", "text": text[:60000]}],
+                                                           "native": {"note": "tail omitted: too large"}}},
+                    ("notice", "n"): {"rev": 1, "value": {"native": {"reason": "output omitted"}, "id": "truncated"}}}
+        texts, others = m.message_texts(SimpleNamespace(entities=entities), "O12-", {})
+        self.assertFalse(m.adapter_preserves_or_marks(texts, n, sha, other_texts=others), "hidden metadata only")
+
     def test_o12_separate_marker_block_and_omission_entity_pass(self):
         from types import SimpleNamespace
         import hashlib

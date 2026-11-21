@@ -46,24 +46,30 @@ def cursor_never_advanced(afters, last_good_seq, epoch):
     return True
 
 
-VISIBLE_KEYS = ("title", "title_right", "text", "description", "label")
-NESTED_KEYS = ("items", "children", "chips", "badges")
-
-
 def visible_text(content):
-    """The text a published pane actually shows (core-protocol view content: title, title_right and each row's
-    text/description/label, recursing into rows, children, chips and badges). Hidden metadata such as copy payloads,
-    ids, args or extension-specific fields is not visible and never counts as a report."""
+    """The text a published pane actually draws, per the production renderer (src/tui/panel.rs): the panel title and
+    title_right; text and header rows draw only their `text` (draw_row :686, markdown :732, plain :749); chips rows draw each chip's
+    `text`; other rows draw `text` and their `description` (:689). Nested `children` rows are drawn the same way.
+    Labels, copy payloads, ids, args and any other field are not visible and never count as a report."""
     out = []
-    def walk(node):
-        if isinstance(node, list):
-            for child in node: walk(child)
-        elif isinstance(node, dict):
-            out.extend(node[key] for key in VISIBLE_KEYS if isinstance(node.get(key), str))
-            for key in NESTED_KEYS:
-                if isinstance(node.get(key), list):
-                    for child in node[key]: walk(child)
-    walk(content)
+    def row(node):
+        if not isinstance(node, dict):
+            return
+        kind = node.get("type", "text")
+        if isinstance(node.get("text"), str):
+            out.append(node["text"])
+        if kind == "chips":
+            out.extend(chip["text"] for chip in node.get("chips", []) if isinstance(chip, dict) and isinstance(chip.get("text"), str))
+        elif kind not in ("text", "header") and isinstance(node.get("description"), str):
+            out.append(node["description"])
+        for child in node.get("children", []) if isinstance(node.get("children"), list) else []:
+            row(child)
+    if isinstance(content, list):
+        for node in content: row(node)
+    elif isinstance(content, dict):
+        out.extend(content[key] for key in ("title", "title_right") if isinstance(content.get(key), str))
+        for node in content.get("items", []) if isinstance(content.get("items"), list) else []:
+            row(node)
     return "\n".join(out)
 
 
@@ -354,18 +360,20 @@ O12_TEST = ("provider_client::items::tests::small_appends_past_the_record_bound_
             "src/provider_client/items.rs")
 
 
-def strings(value):
-    """Every string inside an entity value (for marker search in entities that are not messages)."""
-    if isinstance(value, str): return [value]
-    if isinstance(value, dict): return [s for v in value.values() for s in strings(v)]
-    if isinstance(value, list): return [s for v in value for s in strings(v)]
-    return []
+def shown_texts(value):
+    """The user-facing text of an item entity: its content text blocks and a top-level `text`. Nested native or other
+    metadata is never a visible marker."""
+    texts = [value["text"]] if isinstance(value.get("text"), str) else []
+    if isinstance(value.get("content"), list):
+        texts += [block["text"] for block in value["content"] if isinstance(block, dict) and isinstance(block.get("text"), str)]
+    return texts
 
 
 def message_texts(reducer, needle, baseline=None):
     """Correlate the emitted message once: (texts, other_texts). `texts` are ALL text blocks (body and any marker
     block) of every message entity carrying `needle` in some block, in timeline (position) order; `other_texts` are the strings of
-    every other entity new or changed since `baseline` (a {key: rev} map), e.g. an omission-only notice."""
+    every other entity new or changed since `baseline` (a {key: rev} map), e.g. an omission-only notice; only their
+    shown text (shown_texts), never hidden metadata."""
     texts, others = [], []
     def timeline(item):  # the message's own position, never the opaque entity id; unpositioned entities last
         position = (item[1].get("value") or {}).get("position")
@@ -377,7 +385,7 @@ def message_texts(reducer, needle, baseline=None):
         if any(needle in text for text in blocks):
             texts += blocks
         elif (baseline or {}).get(key) != entity.get("rev"):
-            others += strings(value)
+            others += shown_texts(value)
     return texts, others
 
 
