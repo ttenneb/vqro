@@ -475,8 +475,19 @@ def group_row(steps, cwd=None):
     """A run of tool calls as one Activity line (Pi style, collapsed): count, total time, failures; each tool with its
     status on the right. The agent's thinking between its calls (steps with no text of their own) sits inside, in order."""
     tools = [(eid, value) for eid, value in steps if "__thought__" not in value]
-    children = [thought_step(eid, value["__thought__"]) if "__thought__" in value else tool_row(eid, value, cwd)
-                for eid, value in steps]
+    children = []
+    for eid, value in steps:
+        if "__thought__" in value:
+            children.append(thought_step(eid, value["__thought__"]))
+            continue
+        row = tool_row(eid, value, cwd)
+        output = text_of(value)
+        row["columns"] = [clip(plain(str(value.get("title") or "tool")), 40), row["columns"][1],
+                          TOOL_ICON.get(value.get("status"), "?") + " " + str(value.get("status") or "unknown"),
+                          duration(value.get("started_ms"), value.get("ended_ms")) or "—",
+                          f"{len(output.encode('utf-8'))} B" if output else "—"]
+        row.pop("badges", None)  # status/time/size are cells, not distant right-aligned chips
+        children.append(row)
     # One Activity is one row, which the panel budget can't split: keep its newest steps within ACTIVITY_BYTES and say
     # how many earlier ones are left out (the counts and badges above still cover all of them).
     kept, size = [], 0
@@ -489,7 +500,9 @@ def group_row(steps, cwd=None):
         left = len(children) - len(kept)
         kept.insert(0, {"type": "text", "style": "dim",
                         "text": f"… {left} earlier {'step' if left == 1 else 'steps'} not shown here (pane limit)"})
-    children = kept
+    children = [{"id": "gh:" + tools[0][0], "text": "Tool · Target · Status · Time · Output · Actions",
+                 "columns": ["Tool", "Target", "Status", "Time", "Output"], "detail": "Actions",
+                 "style": "bold", "focusable": False}] + kept
     starts = [v.get("started_ms") for _, v in tools if type(v.get("started_ms")) is int]
     ends = [v.get("ended_ms") for _, v in tools if type(v.get("ended_ms")) is int]
     took = duration(min(starts), max(ends)) if starts and ends else None
@@ -505,8 +518,13 @@ def group_row(steps, cwd=None):
     table = [{"text": "Table", "command": "agents.tools", "args": {"run": run}}]  # this turn's tools as a table
     return {"id": "g:" + run, "text": "Activity · " + " · ".join(summary), "badges": badges,
             "actions": table, "menu": [{"label": "Tools of this turn as a table…", **{k: table[0][k] for k in ("command", "args")}}],
+            "child_table": {"columns": ACTIVITY_COLUMNS, "max_width": 112},
             "children": children, "expanded": False}
 
+
+ACTIVITY_COLUMNS = [{"width": 12}, {"width": "fill", "min_width": 16},
+                    {"width": 12, "priority": 3}, {"width": 7, "priority": 1},
+                    {"width": 9, "priority": 2}]
 
 # The conversation panel's column layout: only rows carrying `columns` (tool lines) use it; no header (no labels).
 TOOL_COLUMNS = [{"width": 12}, {"width": "fill"}]
@@ -751,13 +769,17 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
     blocks, tools, hidden, last_sender = [], [], {}, None
     tail = {"agent": None, "work": None}  # the last block, if it is the agent's message / its unlabelled work
 
-    def work(rows_):
-        """The agent's work (an Activity, thinking) joins the agent's labelled block (mockup Screens A, C): after the
-        agent's message it continues that block; before one, the message's label moves above it."""
-        if blocks and tail["agent"] == len(blocks) - 1:
+    def work(rows_, value=None):
+        """Work starts a labelled agent block immediately, even before a reply exists.
+        The eventual reply replaces that provisional label, never moves the Activity."""
+        if blocks and (tail["agent"] == len(blocks) - 1 or tail["work"] == len(blocks) - 1):
             blocks[-1].extend(rows_)
         else:
-            blocks.append(rows_)
+            value = value or {}
+            header = message_rows("work:" + rows_[0].get("id", "activity"),
+                                  {"role": "assistant", "at_ms": value.get("at_ms", value.get("started_ms"))},
+                                  names, {}, thinking="hide")[0]
+            blocks.append([header] + rows_)
             tail["work"] = len(blocks) - 1
 
     def flush_hidden():
@@ -809,7 +831,7 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
             if mode == "summary":
                 real = [v for _, v in tools if "__thought__" not in v]
                 group["text"], group["style"] = summary_text("Activity", real, view["summary"], len(real)), "dim"
-            work([group])
+            work([group], next(value for _, value in tools if "__thought__" not in value))
         tools.clear()
 
     for _, kind, eid, value in timeline:
@@ -849,7 +871,7 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
                 # Another sender's message: a framed block that folds after 4 lines (the human's Q3, reply-13); the
                 # plain rows (folded the same way) for clients without the frame.
                 if key == "agent" and role == "assistant" and blocks and tail["work"] == len(blocks) - 1:
-                    blocks[-1] = body[:1] + blocks[-1] + body[1:]  # the label above the work that led to this reply
+                    blocks[-1] = body[:1] + blocks[-1][1:] + body[1:]  # replace the provisional label in place
                     tail["agent"], tail["work"] = len(blocks) - 1, None
                 elif key == "agent" and role == "assistant":
                     blocks.append(body)

@@ -231,8 +231,10 @@ class TranscriptRows(unittest.TestCase):
         group = next(r for r in self.rows() if r.get("text", "").startswith("Activity"))
         self.assertEqual((group["text"], group["expanded"]), ("Activity · 2 tools · 4.8s · 1 failed", False))
         self.assertEqual([b["text"] for b in group["badges"]], ["✓ read", "✗ bash"])
-        read, test = group["children"]
-        self.assertEqual((read["text"], [b["text"] for b in read["badges"]], read["expanded"]), ("✓ read   ci.yml", ["0.2s"], False))
+        header, read, test = group["children"]
+        self.assertEqual(header["columns"], ["Tool", "Target", "Status", "Time", "Output"])
+        self.assertEqual((read["text"], read["columns"][3], read["expanded"]), ("✓ read   ci.yml", "0.2s", False))
+        self.assertNotIn("badges", read)
         self.assertIn("/w/ci.yml:4", [c["text"] for c in read["children"]])
         self.assertEqual((test["text"], test["style"], test["description"]), ("✗ bash   npm test", "error", "line 0 of the test log"), "a failure says why")
         self.assertEqual(agent_transcript.tool_row("f", {"title": "read", "status": "failed"})["description"], "failed")
@@ -305,6 +307,15 @@ class TranscriptRows(unittest.TestCase):
         self.assertEqual(texts[i:i + 3], ["Let me look.", "First the CI log.", "Activity · 2 tools · 4.8s · 1 failed"], "no break")
         work_first = {("tool", "t1"): dict(CONVERSATION[("tool", "t1")], position=1),
                       ("message", "a"): {"position": 2, "role": "assistant", "final": True, "content": text("Done.")}}
+        streaming = self.rows({("tool", "t1"): work_first[("tool", "t1")]})
+        self.assertTrue(streaming[0]["text"].startswith("Pi"), "the label exists before the reply arrives")
+        self.assertEqual(streaming[1]["id"], "g:t1")
+        for final, content in ((False, ""), (False, "Done"), (True, "Done.")):
+            snapshot = {**work_first, ("message", "a"): {**work_first[("message", "a")],
+                                                        "final": final, "content": text(content)}}
+            shown = self.rows(snapshot)
+            self.assertTrue(shown[0]["text"].startswith("Pi"))
+            self.assertEqual(shown[1]["id"], streaming[1]["id"], "Activity never crosses the label")
         self.assertEqual([r.get("text") for r in self.rows(work_first)], ["Pi", "Activity · 1 tool · 0.2s", "Done."])
         again = {**work_first, ("tool", "t2"): dict(CONVERSATION[("tool", "t1")], position=3),
                  ("message", "b"): {"position": 4, "role": "assistant", "final": True, "content": text("Next.")}}
@@ -355,7 +366,7 @@ class TranscriptRows(unittest.TestCase):
         self.assertLessEqual(len(json.dumps(rows).encode()), agent_transcript.BUDGET)
         self.assertIn("Why is the build red?", [r.get("text") for r in base(rows)], "the older conversation survives")
         group = next(r for r in rows if r.get("text", "").startswith("Activity"))
-        rest = group["children"][1]["children"][-1]["children"]
+        rest = group["children"][2]["children"][-1]["children"]
         self.assertEqual(len(rest), agent_transcript.HIDDEN_ROWS + 1)
         self.assertTrue(rest[-1]["text"].endswith("more lines not shown here"))
 
@@ -368,7 +379,7 @@ class TranscriptRows(unittest.TestCase):
         rows = agent_transcript.rows({k: (1, v) for k, v in reads.items()}, names, "all_retained")
         self.assertLessEqual(len(json.dumps(rows, ensure_ascii=False).encode()), agent_transcript.BUDGET)
         group = next(r for r in rows if r.get("text", "").startswith("Activity · 40 tools"))
-        self.assertRegex(group["children"][0]["text"], r"^… \d+ earlier steps not shown here \(pane limit\)$")
+        self.assertRegex(group["children"][1]["text"], r"^… \d+ earlier steps not shown here \(pane limit\)$")
         self.assertEqual(group["children"][-1]["text"], "✓ read   file-39.txt", "the newest step is kept")
 
     def test_one_tool_with_thousands_of_arguments_stays_within_the_budget(self):
@@ -378,7 +389,7 @@ class TranscriptRows(unittest.TestCase):
             value = {"position": 1, "title": "custom_tool", "status": "completed", "input": {f"k{i}": 0 for i in range(count)}}
             rows = agent_transcript.rows({("tool", "one"): (1, value)}, names, "all_retained")
             self.assertLessEqual(len(json.dumps(rows, ensure_ascii=False).encode()), agent_transcript.BUDGET, count)
-            step = rows[0]["children"][0]
+            step = next(row for row in rows if row.get("id") == "g:one")["children"][1]
             if count == 10:
                 self.assertEqual(len(step["children"]), 10, "small: every argument shown")
             else:
@@ -421,8 +432,11 @@ class TranscriptRows(unittest.TestCase):
     def test_tool_lines_carry_aligned_cells_and_the_activity_opens_a_turn_table(self):
         """Cards/table slice (the human's relay-12 answers): tool lines line up; Activity → [Table] of this turn only."""
         group = next(r for r in self.rows() if r.get("text", "").startswith("Activity"))
-        read, test = group["children"]
-        self.assertEqual((read["columns"], test["columns"]), (["✓ read", "ci.yml"], ["✗ bash", "npm test"]))
+        header, read, test = group["children"]
+        self.assertEqual((read["columns"][:2], test["columns"][:2]), (["read", "ci.yml"], ["bash", "npm test"]))
+        self.assertEqual(read["columns"][2:4], ["✓ completed", "0.2s"])
+        self.assertTrue(test["columns"][4].endswith(" B"))
+        self.assertEqual(group["child_table"], {"columns": agent_transcript.ACTIVITY_COLUMNS, "max_width": 112})
         self.assertEqual(group["id"], "g:t1", "the run is named by its first tool")
         self.assertEqual(group["actions"], [{"text": "Table", "command": "agents.tools", "args": {"run": "t1"}}])
         self.assertEqual(group["menu"][0]["command"], "agents.tools")
@@ -830,7 +844,8 @@ class AgentPane(unittest.TestCase):
     def test_the_turn_table_opens_from_the_pane_and_follows_the_conversation(self):
         self.feed(snapshot(CONVERSATION))
         pane = self.core.live["agents-r2"]
-        self.assertEqual(pane["columns"], agent_transcript.TOOL_COLUMNS, "the pane declares the tool cells' layout")
+        self.assertNotIn("child_table", pane.get("requires", []), "optional tables must not block other clients")
+        self.assertNotIn("columns", pane, "local table columns never affect conversation rows")
         reply = self.core.handlers["agents.tools"]({"resource": "r2", "run": "t1"})
         self.assertEqual(reply["client"]["popup"]["view"], "agents-tools-r2")
         self.assertEqual(len(self.core.live["agents-tools-r2"]["items"]), 2)
@@ -1144,8 +1159,8 @@ class AgentPane(unittest.TestCase):
         sender = next(r for r in content["items"] if r.get("id") == "m:m2")
         self.assertEqual((sender["focusable"], sender["copy"]), (True, "Let me look.\nFirst the CI log."))
         group = next(r for r in content["items"] if str(r.get("id", "")).startswith("g:"))
-        self.assertEqual(group["children"][1]["copy"].splitlines()[0], "line 0 of the test log", "a tool row copies its output")
-        self.assertEqual(json.loads(group["children"][0]["copy"]), {"path": "ci.yml"}, "or its input when there is no output")
+        self.assertEqual(group["children"][2]["copy"].splitlines()[0], "line 0 of the test log", "a tool row copies its output")
+        self.assertEqual(json.loads(group["children"][1]["copy"]), {"path": "ci.yml"}, "or its input when there is no output")
         colours = agent_transcript.tool_row("t9", {"status": "completed", "content": text("\x1b[31mred\x1b[0m \x1b]0;title\x07ok")})
         self.assertEqual(colours["copy"], "red ok", "copied without terminal colour codes")
         for expected in ("summary", "hide", "show"):

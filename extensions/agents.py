@@ -1574,7 +1574,7 @@ class Agents:
         conversation = self.conversation_rows(r)
         if conversation is not None:
             # The agent's own item stream: the conversation is drawn here (agent pane, K3 phase 2).
-            content = {**self.frame(r), "follow": True, "search": True, "columns": agent_transcript.TOOL_COLUMNS,
+            content = {**self.frame(r), "follow": True, "search": True,
                        "items": [*conversation, *self.bottom_rows(r),
                 agent_transcript.facts_footer(agent_facts(r), plain(str(r.get("name") or r["id"])))]}
         elif sources:
