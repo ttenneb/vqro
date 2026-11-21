@@ -42,14 +42,37 @@ def bounded_state(reducer, declaration):
     return size
 
 
+def state_value(reducer):
+    values = [row['value'] for (kind, _), row in reducer.entities.items() if kind == 'state']
+    return values[0] if len(values) == 1 else {}
+
+
+async def public_state(ctx, predicate):
+    # Pi does NOT expose run in data.agent facts. Observe the actual public
+    # state item; an absent optional fact is unknown, never inferred as run=None.
+    peer = await ctx.viewer()
+    try:
+        view = await ctx.attach(peer=peer)
+        check(view.initial == 'reset', 'O10 boundary observation starts a fresh public snapshot')
+        await ctx.wait_view(view, lambda reducer: reducer.snapshots > 0 and reducer.staged is None
+                            and not reducer.pending and predicate(state_value(reducer)))
+        check(view.reducer.epoch == view.epoch, 'O10 boundary snapshot uses the actual reply epoch')
+        return deepcopy(state_value(view.reducer))
+    finally:
+        await peer.close()
+
+
 async def begin_native(ctx, label):
     prior = await ctx.facts()
-    if prior.get('run'):
+    if prior.get('state') != 'idle':
         raise HarnessGap('O10 controlled pressure needs an idle native run boundary, not unrelated work')
     await ctx.native.call('turn', state='start')
-    started = await ctx.wait_facts(lambda facts: isinstance(facts.get('run'), str) and bool(facts['run']), timeout=5)
-    ctx.evidence.append({'kind': 'o10_native_started', 'phase': label, 'public_facts': deepcopy(started)})
-    return started['run'], started.get('epoch')
+    started = await ctx.wait_facts(lambda facts: facts.get('state') == 'running', timeout=5)
+    state = await public_state(ctx, lambda value: value.get('state') == 'running'
+                               and isinstance(value.get('run'), str) and bool(value['run']))
+    ctx.evidence.append({'kind': 'o10_native_started', 'phase': label, 'public_facts': deepcopy(started),
+                         'public_state_item': state})
+    return state['run'], started.get('epoch')
 
 
 async def settle_native(ctx, run, epoch, label):
@@ -57,13 +80,16 @@ async def settle_native(ctx, run, epoch, label):
     # turn/completed/thread-status idle. Default fixture script has no timers.
     await ctx.native.call('turn', state='settled')
     try:
-        ended = await ctx.wait_facts(lambda facts: facts.get('state') == 'idle' and not facts.get('run')
+        ended = await ctx.wait_facts(lambda facts: facts.get('state') == 'idle'
             and (facts.get('completion') or {}).get('id') == run, timeout=5)
+        state = await public_state(ctx, lambda value: value.get('state') == 'idle' and 'run' in value
+                                   and value['run'] is None and (value.get('completion') or {}).get('id') == run)
     except CheckFailed as error:
         raise HarnessGap('O10 native pressure did not reach the matching public quiescent boundary') from error
     check(ended.get('epoch') == epoch, 'O10 pressure does not change session/agent epoch')
     ctx.evidence.append({'kind': 'o10_native_quiescent', 'phase': label, 'run': run,
-                         'public_facts': deepcopy(ended), 'basis': 'matching public ended/idle facts, not control ACK or sleep'})
+                         'public_facts': deepcopy(ended), 'public_state_item': state,
+                         'basis': 'matching public ended/idle facts AND explicit public state-item run=None, not absent fact/control ACK/sleep'})
     return ended
 
 

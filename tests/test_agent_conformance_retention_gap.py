@@ -152,11 +152,14 @@ class PressureContext:
         self.native = self; self.run = None; self.completion = None; self.number = 0
         self.phase = ''; self.text = 'before'; self.after = []; self.attaches = []
         self.gap = gap; self.settle = settle; self.target = None
-        self.native_calls = []; self.paused = False
+        self.native_calls = []; self.paused = False; self.views = []; self.omit_run_fact = False
+        self.omit_state_run = False
 
     async def facts(self):
-        return {'run': self.run, 'completion': self.completion, 'state': 'idle' if not self.run else 'running',
-                'epoch': 'agent-e1', 'items': {'entities': 512, 'entity_bytes': 524288, 'retain_bytes': 131072}}
+        value = {'run': self.run, 'completion': self.completion, 'state': 'idle' if not self.run else 'running',
+                 'epoch': 'agent-e1', 'items': {'entities': 512, 'entity_bytes': 524288, 'retain_bytes': 131072}}
+        if self.omit_run_fact: value.pop('run')
+        return value
 
     async def wait_facts(self, predicate, **kwargs):
         facts = await self.facts()
@@ -191,18 +194,26 @@ class PressureContext:
         if not predicate(): raise asyncio.TimeoutError()
 
     async def viewer(self):
-        return NS(writer=NS(transport=self), failure=None, close=self.close, wait=self.wait)
+        peer = NS(failure=None, close=self.close, wait=self.wait)
+        def pause():
+            self.pause_reading()
+            self.target = next(view for view in self.views if view.peer is peer)
+        peer.writer = NS(transport=NS(pause_reading=pause, resume_reading=self.resume_reading, is_reading=self.is_reading))
+        return peer
 
     async def attach(self, **kwargs):
         self.attaches.append(kwargs)
         value = reducer(self.text)
+        state = {'state': 'running' if self.run else 'idle', 'run': self.run, 'completion': self.completion}
+        if self.omit_state_run: state.pop('run')
+        value.entities[('state', 'actual-native-current')] = {'value': state}
         if kwargs.get('after') is not None:
             self.after.append(deepcopy(kwargs['after']))
             self.assert_quiescent = self.run is None
             value.snapshots = kwargs['seed'].snapshots + 1
             value.cursor['seq'] = kwargs['after']['seq'] + 1
         view = NS(initial='reset', reducer=value, epoch='items-e1', peer=kwargs['peer'], closed=None, close_notice=None)
-        if len(self.attaches) == 5: self.target = view
+        self.views.append(view)
         return view
 
     async def wait_view(self, view, predicate, **kwargs):
@@ -226,6 +237,20 @@ class PressureControls(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ctx.paused)
         pressure = next(row for row in ctx.evidence if row['kind'] == 'retention_pressure')
         self.assertEqual(len(pressure['samples']), 4)
+
+    async def test_pi_absent_run_fact_uses_actual_public_state(self):
+        ctx = PressureContext(); ctx.omit_run_fact = True
+        with patch.object(probe, 'process_rss', return_value=1000):
+            await probe.public_retention_bounds(ctx)
+        self.assertEqual(len(ctx.after), 1)
+        starts = [row for row in ctx.evidence if row['kind'] == 'o10_native_started']
+        self.assertTrue(all('run' not in row['public_facts'] for row in starts))
+        self.assertTrue(all(row['public_state_item']['run'] for row in starts))
+
+    async def test_absent_public_state_run_is_unknown_not_none(self):
+        ctx = PressureContext(); ctx.omit_run_fact = True; ctx.omit_state_run = True
+        with self.assertRaises(CheckFailed): await probe.begin_native(ctx, 'test')
+        self.assertEqual(ctx.after, [])
 
     async def test_no_actual_gap_does_not_reset_then_pass(self):
         ctx = PressureContext(gap=False)
