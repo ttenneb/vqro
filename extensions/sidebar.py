@@ -25,7 +25,9 @@ the tab; clicking a resource shows it. Each window marks the layout it shows its
 rows), since this content is shared. Showing/hiding the sidebar applies to every layout.
 Rows are live content (`view.publish`): not saved, not in history, so each publication is bounded. Ended
 terminals no tab shows fold into one "N ended" row per place, opened by hand. A tree that fits `WHOLE_BYTES`
-(60 KB) is published whole: no pager. A larger one first shows the places that are
+(60 KB) is published whole: no pager. A place closed by its ▸ is one row at any size: clients with lazy rows
+(`lazy_children`) report the ▸ (`sidebar.place`), and a closed place's contents are sent only once it opens
+again. A larger tree first shows the places that are
 not open as single rows (open: the default workspace, the ones recently shown as default, or expanded by
 hand; "Expand here"/"Collapse" in row menus); only if that still does not fit are there pages (by bytes,
 keeping folder ancestors and each agent/bridge group together), the pager being the last resort at extreme
@@ -512,9 +514,16 @@ def build(sh=None, compact=True):
     note_active(rows + layouts)
     stray = fold_ended("stray", stray, compact)
     items = assemble(rows, layouts, stray, data is not None, sh)
-    if compact and sh["workspaces"] and encoded(items) > WHOLE_BYTES:
-        opened = open_places(rows + layouts)
-        items = assemble(collapse(rows, opened), collapse(layouts, opened), stray, data is not None, sh)
+    if compact and sh["workspaces"]:
+        # Places closed by hand (▸, which a client with lazy rows reports) are published as one row each, whatever
+        # the size; a tree still over WHOLE_BYTES also closes the places that are not open.
+        known = {row["id"] for row in rows + layouts}
+        closed = collapsed_places & known
+        if closed:
+            items = assemble(collapse(rows, closed), collapse(layouts, closed), stray, data is not None, sh)
+        if encoded(items) > WHOLE_BYTES:
+            closed = known - open_places(rows + layouts)
+            items = assemble(collapse(rows, closed, large=True), collapse(layouts, closed, large=True), stray, data is not None, sh)
     return items or [{"type": "text", "text": "nothing to show"}]
 
 
@@ -572,18 +581,22 @@ def open_places(places):
     return ((set(recent_places) | expanded_places) - collapsed_places) & known
 
 
-def collapse(places, opened):
-    """Places not open become one row (badges keep their roll-up); their menus can open or close them here."""
+def collapse(places, closed, large=False):
+    """Places in `closed` become one row (badges keep their roll-up): a lazy row (feature `lazy_children`) whose ▸
+    asks for its contents (`sidebar.place`). Clients without the feature ignore those fields and show a plain row
+    whose "Expand here" menu opens it. Open places report their own ▸ the same way; in a `large` tree their menu can
+    also close them here."""
     out = []
     for row in places:
-        if row["id"] in opened:
-            out.append(dict(row, menu=(row.get("menu") or []) + [{"label": "Collapse", "command": "sidebar.collapse", "args": {"id": row["id"]}}]))
+        toggle = {"command": "sidebar.place", "args": {"id": row["id"]}}
+        if row["id"] not in closed:
+            menu = (row.get("menu") or []) + ([{"label": "Collapse", "command": "sidebar.collapse", "args": {"id": row["id"]}}] if large else [])
+            out.append(dict(row, menu=menu, on_toggle=toggle))
             continue
         # Small on purpose (hundreds of them at scale): its full menu comes back once it is open.
-        kept = {k: v for k, v in row.items() if k not in ("children", "expanded", "menu")}
+        kept = {k: v for k, v in row.items() if k not in ("children", "expanded", "menu", "_level")}
         kept["menu"] = [{"label": "Expand here", "command": "sidebar.expand", "args": {"id": row["id"]}}]
-        kept["_level"] = row.get("_level")
-        out.append(kept)
+        out.append(dict(kept, has_children=True, expanded=False, on_toggle=toggle, _level=row.get("_level")))
     return out
 
 
@@ -922,6 +935,18 @@ def expand_cmd(args):
 def ended_cmd(args):
     with ext.cache_lock:
         expanded_ended.symmetric_difference_update({args.get("id")})
+    refresh_now()
+
+
+@ext.command("sidebar.place", "A place's ▸ was opened or closed in a client (args: id, open)")
+def toggle_cmd(args):
+    with ext.cache_lock:
+        if args.get("open") is True:
+            expanded_places.add(args.get("id"))
+            collapsed_places.discard(args.get("id"))
+        else:
+            expanded_places.discard(args.get("id"))
+            collapsed_places.add(args.get("id"))
     refresh_now()
 
 

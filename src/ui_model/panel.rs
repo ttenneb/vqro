@@ -89,7 +89,7 @@ pub struct Flat {
 
 
 /// Panel features this client renders. A panel may list what it needs in `requires`.
-pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow", "markdown", "pin", "composer", "multiline", "search", "facets", "sort", "columns", "message", "fold", "actions", "title_actions", "composer_buttons", "card"];
+pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow", "markdown", "pin", "composer", "multiline", "search", "facets", "sort", "columns", "message", "fold", "actions", "title_actions", "composer_buttons", "card", "lazy_children"];
 
 /// Features a panel needs that this client lacks.
 pub fn missing(v: &Value) -> Vec<String> { missing_for(v, SUPPORTED) }
@@ -115,6 +115,15 @@ pub fn message_look(item: &Value, features: &[&str]) -> (bool, bool) {
     if kind(item) != "message" { return (false, false); }
     let card = item["look"] == "card" && features.contains(&"card");
     (card, !card || item["frame"] == true)
+}
+
+/// The command a lazy row (feature `lazy_children`) runs when it is opened or closed: `on_toggle` with `open` added to
+/// its args. None for any other row.
+pub fn toggle_command(item: &Value, open: bool) -> Option<(String, Value)> {
+    let command = item["on_toggle"]["command"].as_str()?;
+    let mut args = if item["on_toggle"]["args"].is_object() { item["on_toggle"]["args"].clone() } else { serde_json::json!({}) };
+    args["open"] = serde_json::json!(open);
+    Some((command.to_string(), args))
 }
 
 pub fn selectable(item: &Value) -> bool {
@@ -447,7 +456,9 @@ pub fn rows_for(v: &Value, st: &State, features: &[&str]) -> Vec<Flat> {
             return;
         }
         let children = item["children"].as_array().cloned().unwrap_or_default();
-        let has_children = !children.is_empty();
+        // A lazy row (feature `lazy_children`) has children its panel sends only while it is open: it can open
+        // before they arrive (`has_children: true`), and opening or closing it runs its `on_toggle`.
+        let has_children = !children.is_empty() || (item["has_children"] == true && features.contains(&"lazy_children"));
         // Filtering (text or facets) opens everything that matched below.
         let expanded = has_children && (narrowed || st.open.get(&id).copied().unwrap_or(item["expanded"] == true));
         let mut row = item.clone();

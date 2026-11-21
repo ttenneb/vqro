@@ -97,6 +97,10 @@ class SidebarTree(unittest.TestCase):
     def build(self):
         return self.module["build"]()
 
+    def sidebar(self):
+        """The sidebar content published last."""
+        return [value for name, value in self.ext.published if name == "sidebar"][-1]
+
     def test_default_is_one_tree_workspace_tabs_panes_then_not_in_a_tab_and_worktrees(self):
         rows = self.build()
         self.assertEqual(ids(rows), ["#Workspaces", "ws:" + WS, "add", "#Layouts", "layout:main", "#Other terminals", "term:r4"])
@@ -260,12 +264,12 @@ class SidebarTree(unittest.TestCase):
         # "+N more" opens the rest (a tree this large pages again until collapse reaches the extension); a page
         # click publishes in its own call, not after the worker's coalescing wait.
         self.module["worktrees_more"]({"path": WS})
-        content = self.ext.published[-1][1]
+        content = self.sidebar()
         self.assertGreater(content["page"]["count"], 1)
         before = len(self.ext.published)
         self.module["page_cmd"]({"delta": 1})
         self.assertGreater(len(self.ext.published), before, "published at once")
-        self.assertEqual(self.ext.published[-1][1]["page"]["number"], 2)
+        self.assertEqual(self.sidebar()["page"]["number"], 2)
 
     def test_a_tree_between_a_page_and_the_whole_budget_is_still_one_page(self):
         g = self.module["build"].__globals__
@@ -286,7 +290,12 @@ class SidebarTree(unittest.TestCase):
         ws = {row["id"]: row for row in rows if row.get("id", "").startswith(("ws:", "layout:"))}
         self.assertIn("children", ws["ws:" + WS], "the default workspace stays open")
         self.assertNotIn("children", ws["ws:/w/extra3"])
-        self.assertEqual(ws["ws:/w/extra3"]["menu"], [{"label": "Expand here", "command": "sidebar.expand", "args": {"id": "ws:/w/extra3"}}])
+        # A lazy row (its ▸ asks for the contents); clients without lazy_children ignore those fields and open it
+        # with "Expand here".
+        lazy = ws["ws:/w/extra3"]
+        self.assertEqual((lazy["has_children"], lazy["expanded"]), (True, False))
+        self.assertEqual(lazy["on_toggle"], {"command": "sidebar.place", "args": {"id": "ws:/w/extra3"}})
+        self.assertEqual(lazy["menu"], [{"label": "Expand here", "command": "sidebar.expand", "args": {"id": "ws:/w/extra3"}}])
         self.assertIn({"label": "Collapse", "command": "sidebar.collapse", "args": {"id": "ws:" + WS}}, ws["ws:" + WS]["menu"])
         self.module["expand_cmd"]({"id": "ws:/w/extra3"})
         self.assertIn("children", find(self.build(), "ws:/w/extra3"))
@@ -304,6 +313,26 @@ class SidebarTree(unittest.TestCase):
         self.assertIn({"text": "1 blocked", "style": "warn"}, find(self.build(), "ws:/w/extra7")["badges"])
         self.assertEqual(self.module["status_counts"](), {"blocked": 1})
         g["PAGE_BYTES"], g["WHOLE_BYTES"] = 48 * 1024, 60 * 1024
+
+    def test_a_place_closed_by_its_triangle_is_published_as_one_row_so_hidden_rows_never_page(self):
+        """Human feedback (batch 1): pages 1/3 and 2/3 showed only a collapsed "▸ vqro", because the ▸ was the
+        window's own and the published tree still held vqro's rows. A client with lazy_children reports the ▸
+        (sidebar.place): the place is then published as one lazy row, at any size, and opening it brings it back."""
+        self.ext.entries["workspace/active"] = {"value": {"layout": "ws-a"}, "version": 1}
+        w = self.ext.live["workspaces"]["data"][0]
+        w["worktrees"] = [{"path": f"/w/wt{i}", "branch": f"b{i}", "dirty": 0, "layout": f"wt-{i}"} for i in range(185)]
+        self.module["worktrees_more"]({"path": WS})  # every worktree listed: 112 KB, pages
+        self.assertGreater(self.sidebar()["page"]["count"], 1)
+        open_row = find(self.build(), "ws:" + WS)
+        self.assertEqual(open_row["on_toggle"], {"command": "sidebar.place", "args": {"id": "ws:" + WS}}, "an open place reports its ▸ too")
+        self.module["toggle_cmd"]({"id": "ws:" + WS, "open": False})
+        content = self.sidebar()
+        self.assertEqual(content["page"]["count"], 1, "no pager: the closed place's rows are not published")
+        closed = find(content["items"], "ws:" + WS)
+        self.assertNotIn("children", closed)
+        self.assertTrue(closed["has_children"])
+        self.module["toggle_cmd"]({"id": "ws:" + WS, "open": True})
+        self.assertIn("children", find(self.sidebar()["items"], "ws:" + WS))
 
     def test_search_covers_every_row_with_its_place(self):
         g = self.module["build"].__globals__

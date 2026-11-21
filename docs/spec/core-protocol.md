@@ -1190,6 +1190,13 @@ New row types, components and view kinds are progressive enhancements: every cli
   without a command or menu, are skipped; in a frame too narrow to show them they are not clickable. For clients
   without the feature, add the same button as a toolbar chips row with `requires_absent: ["title_actions"]`
   (Fallbacks), and keep the commands in the pane menu too (recovery, D15).
+- **Lazy children** (feature `lazy_children`): a row with `has_children: true` shows an expander before its
+  `children` are sent, and `on_toggle: {command, args?}` runs, in the panel's context with `open: true|false` added
+  to its args, whenever the user opens or closes the row (expander click, ←/→, Enter on a row without a command).
+  The panel then publishes the row with or without its `children`. Open state stays the client's own. Collapsing a
+  large place this way really shrinks what the panel publishes, which a window-local collapse can't. Clients
+  without the feature ignore both fields and draw a plain row without children, so give it another way to open
+  (e.g. an "Expand here" menu entry). The Rust TUI implements it.
 - **Row `actions`** (feature `actions`): `[{text, command, args?, input?}]`. These are drawn right-aligned in the
   row as `[text]` buttons, before its detail and badges. A click runs the action in the row's context. Put the same
   entries in the row's `menu` for clients without the feature.

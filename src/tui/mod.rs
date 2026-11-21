@@ -283,6 +283,8 @@ struct App {
     /// The last left press in a terminal: when, where and how many in a row (double and triple clicks).
     last_press: Option<(std::time::Instant, String, scrollback::Pos, u8)>,
     scroll_mode: Option<ScrollMode>,
+    /// Nesting of panel key/click handling: only the outermost reports lazy rows opened or closed (`fire_toggles`).
+    toggle_depth: usize,
     /// Engine fallbacks already reported (each reason once per session).
     engine_notes: HashSet<String>,
     /// A popup whose view hasn't arrived yet: view, width, context, and until when it may still open.
@@ -611,7 +613,7 @@ impl App {
             peer, tx, ws: Workspace::default(), safe_selected: BTreeSet::new(), owner_unset:false,
             terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(), typed: None,
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
-            filtering: None, filter_detail: false, toast: None, bells: HashMap::new(), selections: HashMap::new(), selecting: None, last_press: None, scroll_mode: None, engine_notes: HashSet::new(), pending_popup: None, cursor_style: CursorShape::Default, cursor_sent: CursorShape::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
+            filtering: None, filter_detail: false, toast: None, bells: HashMap::new(), selections: HashMap::new(), selecting: None, last_press: None, scroll_mode: None, toggle_depth: 0, engine_notes: HashSet::new(), pending_popup: None, cursor_style: CursorShape::Default, cursor_sent: CursorShape::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
             under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, autofocused: None, window: Window::default(), pending_focus: None, tab_press: None, link_click: None, repeat_until: None, focus_now: None, focus_last: None, seen: HashMap::new(), kbd_enhance: false,
             held: KeyModifiers::NONE, message: String::new(), key_hint: None,
@@ -1200,6 +1202,40 @@ impl App {
 
     /// Keys for a panel (in a pane or a popup). Returns whether it used the key.
     fn panel_key(&mut self, key: &str, view: &str, k: KeyEvent, ctx: Value) -> bool {
+        let before = self.toggle_watch(key, view);
+        let handled = self.panel_key_inner(key, view, k, ctx.clone());
+        self.fire_toggles(key, view, before, ctx);
+        handled
+    }
+
+    /// Rows whose opening or closing their panel wants to hear about (`on_toggle`, feature `lazy_children`), and
+    /// whether each is open now; None while an outer call already watches (only the outermost one reports).
+    fn toggle_watch(&mut self, key: &str, view: &str) -> Option<HashMap<String, bool>> {
+        self.toggle_depth += 1;
+        if self.toggle_depth > 1 { return None; }
+        let value = self.panel_value(view);
+        let st = self.pstate.get(key).cloned().unwrap_or_default();
+        Some(panel::rows(&value, &st).into_iter().filter(|r| r.item["on_toggle"].is_object() && r.has_children).map(|r| (r.id, r.expanded)).collect())
+    }
+
+    /// Runs `on_toggle` for each watched row the user opened or closed, in the panel's context.
+    fn fire_toggles(&mut self, key: &str, view: &str, before: Option<HashMap<String, bool>>, ctx: Value) {
+        self.toggle_depth = self.toggle_depth.saturating_sub(1);
+        let Some(before) = before else { return };
+        if before.is_empty() { return; }
+        let value = self.panel_value(view);
+        let st = self.pstate.get(key).cloned().unwrap_or_default();
+        let mut ctx = ctx;
+        ctx["panel"] = json!(key);
+        ctx["panel_view"] = json!(view);
+        for r in panel::rows(&value, &st) {
+            if before.get(&r.id).is_some_and(|was| *was != r.expanded) {
+                if let Some((command, args)) = panel::toggle_command(&r.item, r.expanded) { self.run_command(&command, args, ctx.clone(), None); }
+            }
+        }
+    }
+
+    fn panel_key_inner(&mut self, key: &str, view: &str, k: KeyEvent, ctx: Value) -> bool {
         let mut ctx = ctx;
         ctx["panel"] = json!(key);
         ctx["panel_view"] = json!(view);
@@ -2775,6 +2811,13 @@ impl App {
     /// A click in a panel: page tabs, expanders, rows (left activates, right opens the row's menu).
     /// Returns whether it hit something.
     fn panel_click(&mut self, key: &str, view: &str, pos: Position, button: MouseButton, ctx: Value) -> bool {
+        let before = self.toggle_watch(key, view);
+        let handled = self.panel_click_inner(key, view, pos, button, ctx.clone());
+        self.fire_toggles(key, view, before, ctx);
+        handled
+    }
+
+    fn panel_click_inner(&mut self, key: &str, view: &str, pos: Position, button: MouseButton, ctx: Value) -> bool {
         // Every click path (inline actions, a row's menu, chips, rows) runs in the panel's context, as keys do.
         let mut ctx = ctx;
         ctx["panel"] = json!(key);
@@ -4316,6 +4359,33 @@ mod tests {
         assert_eq!(app.pstate["p"].sel, 0);
         assert_eq!(app.pstate["p"].editing.as_deref(), Some("c"), "typing goes on");
         assert_eq!(app.pstate["p"].composers["c"].editor.string(), "draft");
+    }
+
+    #[tokio::test]
+    async fn a_lazy_row_opens_before_its_children_arrive_and_reports_open_and_close() {
+        let (mut app, _) = app();
+        let lazy = json!({"id":"ws:big","text":"big","has_children":true,"expanded":false,"on_toggle":{"command":"x.toggle","args":{"id":"ws:big"}}});
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","items":[lazy.clone(),{"text":"after"}]}}}}));
+        app.leaves = vec!["p".into()];
+        let rows = |app: &App| panel::rows(&app.panel_value("p"), &app.pstate.get("p").cloned().unwrap_or_default());
+        assert!(rows(&app)[0].has_children && !rows(&app)[0].expanded, "an expander without children yet");
+        // → opens it: the client shows it open and asks the panel for its children.
+        app.panel_key("p", "p", KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), json!({}));
+        assert!(rows(&app)[0].expanded);
+        assert_eq!(app.message, "running x.toggle…");
+        // The children arrive; ← closes it and reports that too; a nested key (a click's Enter) reports once.
+        app.message.clear();
+        let mut open = lazy.clone();
+        open["children"] = json!([{"text":"child"}]);
+        app.load(&json!({"epoch":"e","seq":2,"entries":{"view/p":{"value":{"kind":"panel","items":[open,{"text":"after"}]}}}}));
+        assert_eq!(rows(&app)[1].item["text"], "child");
+        app.panel_key("p", "p", KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), json!({}));
+        assert!(!rows(&app)[0].expanded);
+        assert_eq!(app.message, "running x.toggle…");
+        assert_eq!(app.toggle_depth, 0);
+        // A row without on_toggle runs nothing.
+        assert_eq!(panel::toggle_command(&json!({"text":"x"}), true), None);
+        assert_eq!(panel::toggle_command(&lazy, false), Some(("x.toggle".into(), json!({"id":"ws:big","open":false}))));
     }
 
     #[tokio::test]
