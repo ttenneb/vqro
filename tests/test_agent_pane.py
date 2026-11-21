@@ -314,6 +314,13 @@ class TranscriptRows(unittest.TestCase):
         self.assertEqual(group["menu"][0]["command"], "agents.tools")
         runs = agent_transcript.tool_runs({k: (1, v) for k, v in CONVERSATION.items()})
         self.assertEqual({k: [e for e, _ in v] for k, v in runs.items()}, {"t1": ["t1", "t2"]})
+        split = {("tool", "a"): dict(CONVERSATION[("tool", "t1")], position=1),
+                 ("notice", "n"): {"position": 2, "native": {"type": "notify"}, "text": ""},
+                 ("tool", "b"): dict(CONVERSATION[("tool", "t2")], position=3)}
+        groups = [r for r in agent_transcript.rows({k: (1, v) for k, v in split.items()}, agent_transcript.Names({}, "r2"))
+                  if str(r.get("id", "")).startswith("g:")]
+        self.assertEqual([g["id"] for g in groups], ["g:a"], "an entity with nothing to show doesn't split the Activity")
+        self.assertEqual(list(agent_transcript.tool_runs({k: (1, v) for k, v in split.items()})), ["a"], "nor the table's run")
         table = agent_transcript.tools_table(runs["t1"], "Tools · Pi r2 · this turn")
         self.assertEqual([c["label"] for c in table["columns"]], ["", "Tool", "What", "Output", "Time"])
         self.assertEqual([r["columns"] for r in table["items"]],

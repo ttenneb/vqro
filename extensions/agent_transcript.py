@@ -504,6 +504,19 @@ TOOL_COLUMNS = [{"width": 12}, {"width": "fill"}]
 TABLE_BYTES = 512 * 1024  # one tools table popup, well under the core's 1 MiB live item
 
 
+def is_step(kind, value):
+    """An assistant message with no text of its own (thinking, tool calls): a step of the work, not a reply."""
+    return kind == "message" and value.get("role") == "assistant" and value.get("final") is not False \
+        and not content_rows(value.get("content"))
+
+
+def run_goes_on(kind, eid, value):
+    """Does a run of tool calls go on past this (non-tool) timeline entity? Yes for a step of the work and for an
+    entity of another kind with nothing to show. One rule for rows() and tool_runs(), so a [Table] always lists exactly
+    its Activity's tools (review P2: an empty notice split the Activity but not the table's run)."""
+    return is_step(kind, value) or (kind not in ("message", "plan", "compaction") and not entity_rows(kind, eid, value))
+
+
 def tool_runs(entities):
     """The runs of tool calls rows() draws as one Activity each, keyed by the run's first tool id: the same grouping
     (a step with no text continues a run; any other message, plan, compaction or shown entity ends it)."""
@@ -516,11 +529,8 @@ def tool_runs(entities):
         if kind == "tool":
             run.append((eid, value))
             continue
-        if kind == "message" and value.get("role") == "assistant" and value.get("final") is not False \
-                and not content_rows(value.get("content")):
-            continue  # a step of the work: the run goes on
-        if kind not in ("message", "plan", "compaction") and not entity_rows(kind, eid, value):
-            continue  # an entity with nothing to show doesn't break the run (rows() draws nothing for it)
+        if run_goes_on(kind, eid, value):
+            continue
         if run:
             runs[run[0][0]] = run
         run = []
@@ -563,9 +573,12 @@ def tools_table(run, title, cwd=None):
             "columns": [{"label": "", "width": 1}, {"label": "Tool", "width": 10}, {"label": "What", "width": "fill"},
                         {"label": "Output", "width": 10, "align": "right", "priority": 2, "min_width": 6},
                         {"label": "Time", "width": 7, "align": "right", "priority": 1, "min_width": 4}],
+            # Every status agent-v0 defines, so none counts only under All (review P3); labels as the tool lines show them.
             "facets": [{"key": "status", "label": "Show", "values": [{"value": "completed", "label": "✓ done"},
                                                                      {"value": "failed", "label": "✗ failed"},
-                                                                     {"value": "running", "label": "… running"}]},
+                                                                     {"value": "running", "label": "… running"},
+                                                                     {"value": "pending", "label": "pending"},
+                                                                     {"value": "cancelled", "label": "cancelled"}]},
                        {"key": "tool", "label": "Tool"}],
             "sorts": [{"key": "time", "label": "time", "desc": True}, {"key": "output", "label": "output", "desc": True},
                       {"key": "name", "label": "name"}],
@@ -794,13 +807,14 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
         if kind == "tool":
             tools.append((eid, value))
             continue
-        if kind == "message" and value.get("role") == "assistant" and value.get("final") is not False \
-                and not content_rows(value.get("content")):
+        if is_step(kind, value):
             # A step of the agent's work with no text of its own (thinking and tool calls): it continues the current
             # Activity instead of starting a labelled block.
             if thought_text(value) and view["thinking"] != "hide":
                 tools.append(("~" + eid, {"__thought__": thought_text(value)}))
             continue
+        if run_goes_on(kind, eid, value):
+            continue  # nothing to show: it doesn't end the Activity either (the same rule as tool_runs)
         end_tools()
         if kind == "message":
             if value.get("final") is not False and not content_rows(value.get("content")) and not thought_text(value) \
