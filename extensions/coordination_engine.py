@@ -573,7 +573,7 @@ class Coordinator:
             return {'state': 'recorded', 'capacity': status['capacity'], 'entries_before': status['entries'],
                     'maintenance_pending': lost, 'history_incomplete': header['overflow'],
                     'generation': header['generation'], 'native': None}
-        return self._mutate('coord.request_route.reset_fences', args, context, reset, control=True, normal=True)
+        return self._mutate('coord.request_route.reset_fences', args, context, reset, control=True)
 
     def _trim_notice_fences(self, work, budget):
         if budget <= 0:

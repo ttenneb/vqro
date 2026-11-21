@@ -544,7 +544,9 @@ Owner capacity recovery uses the existing `coord.request_route` command, workspa
 `coord.status.request_routing.fences`. `{op,action:"reset_fences",expect:<revision>}` is **owner-only**, not a
 `configure`/`recover` grant. It acknowledges only current core-reported capacity (including zero), never a caller's
 number; unknown capacity or a stale snapshot refuses. This is protected operational metadata, not undoable route
-configuration, and uses existing normal-domain budget/control I/O priority, no native invocation or extra reserve.
+configuration. As bounded pure metadata recovery (like pause/resume), it uses existing nonarchive recovery
+capacity/control I/O priority; the archive-only escrow remains excluded. There is no native invocation or extra
+reserve. Uncertain native controls remain normal-funded and do not inherit this recovery allowance.
 
 Recovery retains every fence on growth; on shrink it keeps the newest N and durably marks any history loss BEFORE
 bounded maintenance removes older entries (at most24 bucket writes per pass, within the existing atomic budget).
