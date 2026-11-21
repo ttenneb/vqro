@@ -418,7 +418,7 @@ reasoning the runtime exposes for display):
   show (with `position`, on the timeline). `severity` only when the runtime reports one; absent is unspecified, never
   inferred. Unlike the live `notice` record it is retained. Produced by the Pi bridge for native `notify`.
 - Kinds starting with `_` are implementation-private state (for example the Pi bridge's `_ui`): retained in the
-  stream, never shown by viewers, and not part of this contract.
+  stream, which viewers need not show (a debug view may), and not part of this contract.
 
 ## 5. Requests
 
