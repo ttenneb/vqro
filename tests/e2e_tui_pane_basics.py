@@ -163,7 +163,10 @@ try:
     call("workspace.apply", {"note": "provider", "ops": [
         {"op": "set", "key": "extension/herdr", "value": {"argv": ["/usr/bin/env", "PATH=", PHERDR, "--hc", HC, "--name", "herdr"], "kind": "provider", "default": True}}]})
     check("herdr provider connected", wait(lambda: call("workspace.snapshot")["providers"].get("herdr", {}).get("state") == "connected", 30))
-    wait(lambda: any(c["name"] == "panes.swap" and c.get("available") for c in call("command.list")["commands"]), 20)
+    # Every command the test drives, not one of them: extensions register independently (a gate's load showed
+    # panes ready before tabs).
+    needed = {"panes.swap", "panes.split", "tabs.open", "tabs.move", "tabs.rename", "tabs.set", "keys.profile", "links.open"}
+    check("the extensions' commands are registered", wait(lambda: needed <= {c["name"] for c in call("command.list")["commands"] if c.get("available")}, 40))
     for _ in range(2):
         call("command.invoke", {"name": "tabs.open", "args": {"argv": ["/bin/sh"]}})
     with open(f"{R}/tui.sh", "w") as f:
