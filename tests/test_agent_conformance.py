@@ -672,30 +672,28 @@ class CommandWitnessTests(unittest.TestCase):
 class MemoryWitnessTests(unittest.IsolatedAsyncioTestCase):
     async def test_rss_samples_and_small_entities_cannot_replace_public_gap_witness(self):
         from agent_conformance.cases import public_retention_bounds
-        reducer = SimpleNamespace(cursor={"epoch": "e", "seq": 1}, epoch="e", offset=0,
-                                  max_record=65536, entities={}, snapshots=1, failure=None)
-        transport = SimpleNamespace(pause_reading=lambda: None, resume_reading=lambda: None,
-                                    is_reading=lambda: False)
-        peer = SimpleNamespace(wait=AsyncMock(), writer=SimpleNamespace(transport=transport))
-        view = SimpleNamespace(initial="reset", epoch="e", reducer=reducer, closed=None, close_notice=None, peer=peer)
-        async def burst(*args, **kwargs): reducer.offset = 1 << 20
-        ctx = SimpleNamespace(evidence=[], manifest={"wire": "pi"}, metadata={"adapter_image": {"pid": 12345}},
-            viewer=AsyncMock(return_value=peer), attach=AsyncMock(return_value=view),
-            facts=AsyncMock(return_value={"items": {"entities": 1, "entity_bytes": 1, "retain_bytes": 1}}),
-            native=SimpleNamespace(call=AsyncMock(side_effect=burst)), wait_view=AsyncMock())
+        from test_agent_conformance_retention_gap import PressureContext, modeled_shared_B
+        # Reuse the current full-handler model, not the retired single-view fixture.
+        # B is explicitly modeled here; actual O7 execution is separate evidence.
+        ctx = PressureContext(gap=False)
         module = "agent_conformance.retention_gap_cases."
-        with patch(module + "begin_native", AsyncMock(return_value=("run", "e"))), patch(
-                module + "settle_native", AsyncMock()), patch(
-                module + "sample_snapshot", AsyncMock(side_effect=[{"entities": 0, "entity_bytes": 0} for _ in range(4)])), patch(
-                module + "flood_retained", AsyncMock(return_value="needle")), patch(
+        with patch(module + "sample_snapshot", AsyncMock(side_effect=[
+                {"entities": 0, "entity_bytes": 0} for _ in range(4)])), patch(
                 module + "process_rss", side_effect=[1 << 20, 100 << 20, 200 << 20, 300 << 20]), patch(
-                module + "one_replay", new_callable=AsyncMock) as replay:
-            with self.assertRaisesRegex(HarnessGap, "did not yield a public retention gap"):
+                module + "one_replay", new_callable=AsyncMock) as replay, patch(
+                "agent_conformance.cases.stalled_viewer_isolation", modeled_shared_B):
+            with self.assertRaisesRegex(HarnessGap, "no actual provider-cursor retention gap"):
                 await public_retention_bounds(ctx)
             replay.assert_not_awaited()
-        self.assertEqual(len(ctx.evidence[0]["samples"]), 4)
-        self.assertIsNone(ctx.evidence[-1]["closed"])
-        self.assertEqual(ctx.attach.await_count, 1)
+        samples = next(row["samples"] for row in ctx.evidence if row.get("kind") == "retention_pressure")
+        self.assertEqual(len(samples), 4)
+        self.assertEqual([row["adapter_rss_bytes"] for row in samples],
+                         [1 << 20, 100 << 20, 200 << 20, 300 << 20])
+        self.assertTrue(all(row["entities"] == row["entity_bytes"] == 0 for row in samples))
+        subcases = {row["case"]: row["status"] for row in ctx.evidence if row.get("kind") == "subcase"}
+        self.assertEqual(subcases, {"O10.A.provider_retention": "fail", "O10.B.slow_viewer": "pass"})
+        self.assertEqual(ctx.B_calls, 1)
+        self.assertEqual(len(ctx.after), 1)  # Only modeled B recovered; A never replayed.
 
     async def test_o10_needs_both_public_and_internal_accounting_witnesses(self):
         from agent_conformance.cases import declared_retention_bounds
