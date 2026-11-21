@@ -426,9 +426,10 @@ class Provider:
         rows = [facts(row) for row in resources]
         if not isinstance(final, bool):
             raise ProviderError("invalid", "final must be a boolean")
-        result = await self.call("provider.sync", {"generation": self.generation, "resources": rows, "final": final})
+        # Started once sent: the core may mark the provider synced, and a client may send it an effect (whose
+        # handler upserts), before this coroutine resumes after the reply. Messages keep their order on the wire.
         self._sync_started = True
-        return result
+        return await self.call("provider.sync", {"generation": self.generation, "resources": rows, "final": final})
 
     async def full_sync(self, resources):
         chunk, size = [], 0
