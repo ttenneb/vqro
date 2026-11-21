@@ -375,16 +375,26 @@ class CodexMixin:
                 await self.event("thread/tokenUsage/updated", {"threadId": session, "turnId": thread["run"], "tokenUsage": report})
             elif verb == "retain":
                 count, text = row.get("count", 1), row.get("text", "retained fixture text")
+                chunks = row.get("chunks")
                 if not isinstance(count, int) or not 0 <= count <= 1024 or not isinstance(text, str) or len(text.encode()) > 256 * 1024:
                     raise ValueError("retain count/text bound")
+                # O12 (test-only): `chunks` streams one agentMessage as several native deltas (bounded work).
+                if chunks is not None and (not isinstance(chunks, list) or not 1 <= len(chunks) <= 256
+                        or any(not isinstance(part, str) for part in chunks)
+                        or sum(len(part.encode()) for part in chunks) > 1024 * 1024):
+                    raise ValueError("fixture delta work bound")
                 for index in range(count):
                     self.item_serial += 1
                     ident = f"assistant-{self.item_serial}"
                     item = {"id": ident, "type": "agentMessage", "text": ""}
                     await self.event("item/started", {"threadId": session, "turnId": thread["run"], "item": item})
-                    output = f"{index}:{text}"
-                    await self.event("item/agentMessage/delta", {"threadId": session, "turnId": thread["run"], "itemId": ident, "delta": output})
+                    deltas = [f"{index}:{text}"] if chunks is None else [f"{index}:" + chunks[0], *chunks[1:]]
+                    for delta in deltas:
+                        await self.event("item/agentMessage/delta", {"threadId": session, "turnId": thread["run"], "itemId": ident, "delta": delta})
+                    output = "".join(deltas)
                     await self.event("item/completed", {"threadId": session, "turnId": thread["run"], "item": {**item, "text": output}})
+                    if chunks is not None:
+                        self.native_emit("item/completed", "assistant", ident, output)
                 self.record("retain", session=session, count=count, text_bytes=len(text.encode()))
             else:
                 raise ValueError(f"unimplemented native Codex fixture verb: {verb}")

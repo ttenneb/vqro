@@ -7,6 +7,7 @@ an adapter's production effect handlers.
 """
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -72,6 +73,12 @@ class Runtime:
             os.close(fd)
         self.ledger_bytes += len(data)
         return row
+
+    def native_emit(self, kind, role, item, text):
+        """O12 (test-only) bounded witness of an emitted native assistant text: size and digest, never the text."""
+        data = text.encode()
+        self.record("native_emit", wire=self.args.wire, type=kind, role=role, item_id=item,
+                    text_bytes=len(data), text_sha256=hashlib.sha256(data).hexdigest())
 
     async def emit(self, row):
         data = json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
@@ -456,8 +463,11 @@ class Runtime:
                     await self.emit({"type": "message_update", "message": {"role": "assistant", "content": [
                         {"type": "text", "text": current}]}, "assistantMessageEvent": {
                         "type": "text_delta", "contentIndex": 0, "delta": part}})
+                final = current if chunks is not None else f"{index}:{text}"
                 await self.emit({"type": "message_end", "message": {"role": "assistant", "content": [
-                    {"type": "text", "text": current if chunks is not None else f"{index}:{text}"}], "stopReason": "stop"}})
+                    {"type": "text", "text": final}], "stopReason": "stop"}})
+                if chunks is not None:
+                    self.native_emit("message_end", "assistant", None, final)
         elif verb == "usage":
             report = row.get("report")
             if report is not None and (not isinstance(report, dict) or len(json.dumps(report).encode()) > 4096):
