@@ -605,6 +605,35 @@ class SyncStartedTests(unittest.IsolatedAsyncioTestCase):
         sync.cancel()
         await asyncio.gather(sync, return_exceptions=True)
 
+    async def test_a_queued_sync_line_counts_even_if_its_drain_waits_and_its_caller_is_cancelled(self):
+        # vqro-lead-secondary (261): the hook ran after the drain, so a cancelled caller forgot a line already sent.
+        self.provider = Provider("fake", "instance", fixture.CAPABILITIES)
+        await self.provider.connect(sock=self.sock)
+        release, entered = asyncio.Event(), asyncio.Event()
+        drain = self.provider.writer.drain
+        async def held_drain():
+            entered.set()
+            await release.wait()
+            await drain()
+        self.provider.writer.drain = held_drain
+        self.core.hold.add("provider.sync")
+        sync = asyncio.create_task(self.provider.sync([]))
+        try:
+            await self.core.wait(lambda: any(r.get("method") == "provider.sync" for r in self.core.rows))
+            await entered.wait()
+            self.assertTrue(self.provider._sync_started, "whole line written, drain still pending")
+            sync.cancel()
+            await asyncio.gather(sync, return_exceptions=True)
+            release.set()
+            await asyncio.gather(*list(self.provider._flushes), return_exceptions=True)
+            self.assertTrue(self.provider._sync_started, "a cancelled caller does not unsend its line")
+            await self.provider.upsert(self.value)
+            await self.core.wait(lambda: len(self.core.notes("resource.upsert")) == 1)
+        finally:
+            release.set()
+            sync.cancel()
+            await asyncio.gather(sync, return_exceptions=True)
+
     async def test_a_sync_refused_before_it_was_written_has_not_started(self):
         self.provider = Provider("fake", "instance", fixture.CAPABILITIES, limits=Limits(pending=1))
         await self.provider.connect(sock=self.sock)

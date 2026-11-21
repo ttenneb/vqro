@@ -333,7 +333,7 @@ class Provider:
         if not task.cancelled() and task.exception() is not None:
             self._disconnect(f"handler failure: {task.exception()}")
 
-    async def _write(self, record, deadline=None):
+    async def _write(self, record, deadline=None, on_written=None):
         if self._closed.is_set():
             raise ProviderError("unavailable", self.failure or "closed")
         wire = json.dumps(record, ensure_ascii=False, allow_nan=False).encode() + b"\n"
@@ -350,6 +350,10 @@ class Provider:
                     if self._closed.is_set():
                         raise ProviderError("unavailable", "connection closed")
                     self.writer.write(wire)
+                    if on_written is not None:
+                        # The whole line is queued: it counts as sent from here, whatever the flush or this
+                        # caller (cancelled, timed out) does next. Refused earlier, it never ran.
+                        on_written()
                     # write() queued the whole line, so framing is intact whatever happens to
                     # this caller. The flush outlives a cancelled caller and keeps the line
                     # charged to the outgoing bound until the transport has taken it.
@@ -406,9 +410,8 @@ class Provider:
         future = asyncio.get_running_loop().create_future()
         self._pending[ident] = (method, future)
         try:
-            await self._write({"jsonrpc": "2.0", "id": ident, "method": method, "params": params}, deadline)
-            if on_written is not None:
-                on_written()
+            await self._write({"jsonrpc": "2.0", "id": ident, "method": method, "params": params}, deadline,
+                              on_written=on_written)
             return await asyncio.wait_for(asyncio.shield(future), max(0, deadline - asyncio.get_running_loop().time()))
         except TimeoutError:
             raise ProviderError("timeout", "answer deadline; delivery unknown, never resent") from None
@@ -428,9 +431,10 @@ class Provider:
         rows = [facts(row) for row in resources]
         if not isinstance(final, bool):
             raise ProviderError("invalid", "final must be a boolean")
-        # Started once written: the core may mark the provider synced, and a client may send it an effect (whose
-        # handler upserts), before this coroutine resumes after the reply. Messages keep their order on the wire. A
-        # sync refused before any byte was written (the pending bound, a full outgoing queue) has not started.
+        # Started once its whole line is queued for the wire (before the flush, the reply, or this caller resuming or
+        # being cancelled): the core may mark the provider synced, and a client may send it an effect (whose handler
+        # upserts), first. Messages keep their order on the wire. A sync refused before its line was queued (the
+        # pending bound, a full outgoing queue) has not started.
         def started():
             self._sync_started = True
         return await self.call("provider.sync", {"generation": self.generation, "resources": rows, "final": final},
