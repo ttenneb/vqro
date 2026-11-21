@@ -524,8 +524,8 @@ def build(sh=None, compact=True):
         # the size; a tree still over WHOLE_BYTES also closes the places that are not open.
         known = {row["id"] for row in rows + layouts}
         closed = collapsed_places & known
-        if closed:
-            items = assemble(collapse(rows, closed), collapse(layouts, closed), stray, data is not None, sh)
+        # Always: open places carry their on_toggle too, so a ▸ closed at any size reaches here (238).
+        items = assemble(collapse(rows, closed), collapse(layouts, closed), stray, data is not None, sh)
         if encoded(items) > WHOLE_BYTES:
             closed = known - open_places(rows + layouts)
             items = assemble(collapse(rows, closed, large=True), collapse(layouts, closed, large=True), stray, data is not None, sh)

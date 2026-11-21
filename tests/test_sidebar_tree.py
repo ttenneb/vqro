@@ -346,6 +346,20 @@ class SidebarTree(unittest.TestCase):
         self.module["toggle_cmd"]({"id": "ws:" + WS, "open": True})
         self.assertIn("children", find(self.sidebar()["items"], "ws:" + WS))
 
+    def test_every_place_reports_its_triangle_in_a_small_tree_too(self):
+        """vqro-lead-secondary (238): only a tree that was large or had a closed place got on_toggle on its rows, so
+        a fresh small sidebar's ▸ stayed the window's own."""
+        rows = self.build()
+        ws = find(rows, "ws:" + WS)
+        self.assertIn("children", ws)
+        self.assertEqual(ws["on_toggle"], {"command": "sidebar.place", "args": {"id": "ws:" + WS}})
+        self.module["toggle_cmd"]({"id": "ws:" + WS, "open": False})
+        self.assertNotIn("children", find(self.build(), "ws:" + WS))
+        self.module["toggle_cmd"]({"id": "ws:" + WS, "open": True})
+        reopened = find(self.build(), "ws:" + WS)
+        self.assertIn("children", reopened)
+        self.assertIn("on_toggle", reopened, "reopened, it reports its ▸ again")
+
     def test_a_place_with_only_ended_terminals_shows_its_ended_row_without_a_not_in_a_tab_group(self):
         """The human's "▾ Not in a tab › 1 ended": a group header around one fold row."""
         del self.ext.resources["r3"]  # proj's live terminal in no tab
