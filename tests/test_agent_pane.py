@@ -855,6 +855,24 @@ class AgentPane(unittest.TestCase):
         self.assertEqual(three[:2], (1, None), "one attempt, not a sticky stop without any reattach")
         self.assertEqual(three[2], {"epoch": "e1", "seq": 0}, "the cursor never moves")
 
+    def test_one_oversized_record_at_the_default_limit_is_one_attempt(self):
+        """The same at the default 65,536-byte record bound (vqro-lead-secondary backoff-104/default-oversize.py):
+        196,611 bytes in one callback or in three 65,537-byte callbacks is one attempt, with no sticky stop."""
+        from agents import Conversation
+        def row(value): return (json.dumps(value) + "\n").encode()
+        begin = row({"op": "snapshot", "phase": "begin", "epoch": "e1", "coverage": "all_retained"}) + row({"op": "snapshot", "phase": "end", "seq": 0})
+        part = b"x" * 65537
+        def observe(parts):
+            c = Conversation("r2", lambda *a, **k: None, {})
+            self.assertEqual(c.view.max_record_bytes, 65536)
+            c.data(begin)
+            for chunk in parts:
+                c.data(chunk)
+            return (c.rejections, c.incompatible, c.generation, c.view.after())
+        one, three = observe([part * 3]), observe([part] * 3)
+        self.assertEqual(one, three)
+        self.assertEqual(three, (1, None, 0, {"epoch": "e1", "seq": 0}))
+
     def test_the_reattach_budget_still_stops_on_the_third_stream(self):
         """Counting once per stream keeps the genuine budget: three reattached streams each oversized, then stop."""
         self.agents.conversations["r2"].view.max_record_bytes = 512
