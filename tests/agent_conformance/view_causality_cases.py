@@ -152,6 +152,12 @@ async def witnessed_form(ctx, witness, label, *, root=None, args=None):
         expected = (root or {}).get(field, (args or {}).get(field))
         check(audit.get(field) == expected,
               f"C12 {label}: effect audit {field} changed or invented: sent {expected!r}, audit {audit.get(field)!r}", component="core")
+        # The provider-bound effect metadata is part of the wire contract too (agent-v0 §2.5: the core lifts the
+        # links into effect metadata): field for field equal, and absent stays absent (never invented).
+        dispatched = received[0].get(field)
+        check((field in received[0]) == (expected is not None) and dispatched == expected,
+              f"C12 {label}: dispatched effect {field} changed, dropped or invented: sent {expected!r}, provider received "
+              f"{dispatched!r}", component="core")
     ctx.evidence.append({"kind": "c12_witnessed", "form": label, "effect": result.get("effect"),
                          "dispatched_args_equal": True, "audit": {field: audit.get(field) for field in ("cause", "correlation")},
                          "dispatch_links": {field: received[0].get(field) for field in ("cause", "correlation")}})

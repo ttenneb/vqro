@@ -136,7 +136,18 @@ class Ctx:
         if self.fault == "inject_root_link" and "cause" in root and "cause" not in dispatched:
             dispatched["cause"] = root["cause"]  # the core must not rewrite args with root metadata
         if rid == self.witness.rid:
-            self.witness.received.append({"op": op, "args": dispatched})
+            # The core lifts the links into the provider-bound effect metadata (root params), args left unchanged.
+            metadata = json.loads(json.dumps(links))
+            if self.fault == "drop_dispatch_metadata":
+                metadata = {}
+            if self.fault == "rewrite_dispatch_metadata":
+                if "cause" in metadata:
+                    metadata["cause"] = dict(metadata["cause"], provenance="wrong-provider-provenance")
+                if "correlation" in metadata:
+                    metadata["correlation"] = "wrong-provider-correlation"
+            if self.fault == "invent_dispatch_metadata" and "correlation" not in metadata:
+                metadata["correlation"] = "invented"
+            self.witness.received.append({"op": op, "args": dispatched, **metadata})
         self.events.append({"type": "effect", "data": {"effect": effect, "op": op, "outcome": "accepted", **audit}})
         self.native.rows.append({"kind": "command", "effectful": True})
         return {"outcome": "accepted", "effect": effect, "data": {"receipt": {"delivery": args.get("delivery")}}}
@@ -152,7 +163,8 @@ class C12Negatives(unittest.TestCase):
 
     def test_each_broken_rule_fails(self):
         for fault in ("accept_invalid", "accept_conflict", "write_on_refusal", "drop_cause", "rewrite_provenance",
-                      "drop_dispatched_cause", "inject_root_link"):
+                      "drop_dispatched_cause", "inject_root_link", "drop_dispatch_metadata", "rewrite_dispatch_metadata",
+                      "invent_dispatch_metadata"):
             with self.subTest(fault=fault), self.assertRaises(CheckFailed):
                 run(fault)
 
