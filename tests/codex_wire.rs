@@ -473,6 +473,19 @@ async fn late_model_readback_clears_pending_without_replaying_admitted_input() {
         runtime.facts()[0]["data"]["agent"]["session"]["model"]["id"],
         "fake-model"
     );
+    let overlap=runtime.invoke("endpoint-1","inc","agent.send",json!({"v":0,"mode":"admit","delivery":"overlap-not-sent","origin":{"principal":"p","actor":"actor","kind":"agent"},"content":[{"type":"text","text":"must not dispatch"}]}),deadline()).await.unwrap();
+    assert!(
+        matches!(overlap,Outcome::Rejected{ref kind,ref message} if kind=="overloaded" && message.contains("momentary overlap") && message.contains("input not sent") && message.contains("retry"))
+    );
+    let blocked_ledger = std::fs::read_to_string(root.path().join("ledger.jsonl")).unwrap();
+    assert_eq!(
+        blocked_ledger
+            .lines()
+            .filter(|line| serde_json::from_str::<Value>(line).unwrap()["method"] == "turn/start")
+            .count(),
+        1,
+        "held-read overlap must not send a second native input"
+    );
     std::fs::write(root.path().join("model-release"), b"release").unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {

@@ -497,7 +497,7 @@ impl Runtime {
             .map_err(|_| {
                 Fault::Reject(RpcError::new(
                     "overloaded",
-                    "one native admission/session preflight is already in flight",
+                    "momentary overlap with another native send, session change, or model readback; input not sent, retry",
                 ))
             })?;
         let permit = self
