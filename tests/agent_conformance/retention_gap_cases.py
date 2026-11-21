@@ -13,49 +13,6 @@ from .cases import flood_retained, has_message, process_rss
 from .results import check, HarnessGap, CheckFailed, FixtureFailed
 
 
-class SteadyReader:
-    """Owned viewer workload: one RPC line per turn, not a quiescence clock.
-
-    Pause the transport between reads too: delaying only the reducer would let
-    asyncio read ahead and would not exercise a genuinely slower connection.
-    No independent timer task, native input, reader cancellation or core edits.
-    """
-    def __init__(self, peer, cadence=.05):
-        self.peer, self.original = peer, peer.reader
-        self.transport, self.cadence = peer.writer.transport, cadence
-        self.enabled, self.lines, self.data_lines = False, 0, 0
-
-    def start(self):
-        self.enabled = True
-        self.peer.reader = self
-        # Peer may already await the ORIGINAL reader. Let that in-flight read
-        # complete; its next iteration enters this gate. Starting fully paused
-        # here would deadlock that old await and never exercise steady reading.
-        self.transport.pause_reading()
-        self.transport.resume_reading()
-
-    def stop(self):
-        self.enabled = False
-        self.peer.reader = self.original
-        self.transport.resume_reading()
-
-    async def readline(self):
-        if not self.enabled:
-            return await self.original.readline()
-        self.transport.pause_reading()
-        await asyncio.sleep(self.cadence)  # workload cadence ONLY
-        self.transport.resume_reading()
-        try:
-            line = await self.original.readline()
-            self.lines += 1
-            if line and json.loads(line).get('method') == 'stream.data':
-                self.data_lines += 1
-            return line
-        finally:
-            if self.enabled:
-                self.transport.pause_reading()
-
-
 def cursor_valid(cursor):
     return (isinstance(cursor, dict) and isinstance(cursor.get('epoch'), str) and bool(cursor['epoch'])
             and type(cursor.get('seq')) is int and cursor['seq'] >= 0)
@@ -211,8 +168,10 @@ async def public_retention_bounds(ctx):
         samples.append(sample)
     ctx.evidence.append({'kind': 'retention_pressure', 'declared': declaration, 'samples': samples,
                          'native_payload_bytes': 4 * 96 * 8192, 'rss_is_measurement_not_cross_runtime_slo': True})
-    # Establish a live committed target cursor BEFORE the final burst. Pause only
-    # its reader; facts/control use different public/private connections.
+    # Establish a live committed target cursor BEFORE the final burst. Stall
+    # only this reader; facts/control use separate connections. Section4 gives
+    # slow viewers slow_consumer. ONLY an actual PROVIDER-cursor retention gap
+    # qualifies here; this fixture remains FAIL when the provider keeps up.
     peer = await ctx.viewer()
     target = await ctx.attach(peer=peer)
     check(target.initial == 'reset', 'O10 live target begins at a fresh committed snapshot')
@@ -221,12 +180,8 @@ async def public_retention_bounds(ctx):
           'O10 live gap target has an installed public cursor')
     initial_bytes = target.reducer.offset
     transport = peer.writer.transport
-    paced = SteadyReader(peer) if ctx.manifest.get('wire', 'pi') == 'pi' else None
     run, epoch = await begin_native(ctx, 'O10-gap-burst')
-    if paced:
-        paced.start()
-    else:
-        transport.pause_reading()
+    transport.pause_reading()
     try:
         # Same 512 final messages and final payload as the old burst. Native
         # deltas add legal journal pressure, not an invented gap/retention budget.
@@ -240,13 +195,9 @@ async def public_retention_bounds(ctx):
         else:
             await ctx.native.call('retain', count=512, chunks=chunks, timeout=5)
         await settle_native(ctx, run, epoch, 'O10-gap-burst')
-        check(paced.enabled if paced else not transport.is_reading(),
-              'O10 requested reader workload remained active through native pressure', component='harness')
+        check(not transport.is_reading(), 'O10 target remained stalled throughout native pressure', component='harness')
     finally:
-        if paced:
-            paced.stop()
-        else:
-            transport.resume_reading()
+        transport.resume_reading()
     needle = '511:O10-gap-burst:'
     try:
         await peer.wait(lambda: target.closed is not None or has_message(target.reducer, needle), timeout=5)
@@ -258,15 +209,12 @@ async def public_retention_bounds(ctx):
         ctx.evidence.append({'kind': 'o10_target_terminal_observation', 'closed': target.closed,
                              'notice': deepcopy(target.close_notice), 'failure': target.reducer.failure,
                              'cursor': deepcopy(target.reducer.cursor),
-                             'reader_workload': 'steady' if paced else 'stalled',
-                             'requested_cadence_s': paced.cadence if paced else None,
-                             'paced_rpc_lines': paced.lines if paced else None,
-                             'paced_data_lines': paced.data_lines if paced else None})
-    if paced and not paced.data_lines:
-        raise HarnessGap('O10 steady reader did not observe any paced public data line')
+                             'reader_workload': 'stalled',
+                             'witness_scope': 'provider-cursor retention, not downstream slow-viewer policy'})
     # No reset-only, slow_consumer, EOF or corrupted-record substitute qualifies.
     actual_gap(target)
     ctx.evidence.append({'kind': 'o10_public_gap_after_quiescence', 'notice': deepcopy(target.close_notice),
+                         'witness_label': 'stalled reader, provider-cursor retention',
                          'observed_wire_bytes': target.reducer.offset - initial_bytes,
                          'burst_final_messages': 512, 'chunks_per_message_requested': 8,
                          'native_control_segments_requested': [256, 256] if ctx.manifest.get('wire', 'pi') == 'pi' else [512],
