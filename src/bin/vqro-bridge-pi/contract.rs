@@ -149,9 +149,16 @@ pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
     // Keep provenance in the receipt. The human owner's native input is the literal typed body,
     // including when the default route is attributed_user; never serialize metadata into a prompt.
     let mut message=if rendering=="attributed_user" && !owner_human {
-        let sender=origin.get("sender").and_then(|sender|sender.get("principal").and_then(Value::as_str).or_else(||sender.as_str()))
-            .unwrap_or_else(||origin["principal"].as_str().unwrap());
-        format!("from {sender} via {}\n\n{body}",origin["actor"].as_str().unwrap())
+        let asserted_sender=origin.get("sender").and_then(|sender|sender.get("principal").and_then(Value::as_str).or_else(||sender.as_str()));
+        let sender=asserted_sender.unwrap_or_else(||origin["principal"].as_str().unwrap());
+        let mut header=format!("from {sender} via {}",origin["actor"].as_str().unwrap());
+        if asserted_sender.is_some(){header.push_str(" (sender asserted by extension)");}
+        // Classification is caller data even when an identity looks human/agent-like.
+        // Never present it as core attestation or let it change the native user role.
+        for field in ["kind","agent"]{if let Some(value)=origin.get(field).and_then(Value::as_str){
+            header.push_str(&format!("\nasserted {field}: {value}"));
+        }}
+        format!("{header}\n\n{body}")
     } else {body.to_string()};
     if !owner_human {if let Some(quoted)=&quoted {
         message=format!("Quoted provenance (asserted, not the effective sender): {}\n{message}",quoted["label"].as_str().unwrap());

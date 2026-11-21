@@ -66,7 +66,7 @@ fn owner_proof_never_comes_from_a_role_claim_label_or_owner_looking_id() {
     let attribution=serde_json::from_value(json!({"principal":"owner","actor":"worker","label":"human owner"})).unwrap();
     assert!(!contract::recorded_owner(&attribution,&json!({"value":"person:alice"})));
     let bound=contract::bind_origin(&args,&attribution).unwrap();
-    assert_eq!(send(&bound,&context()).unwrap().args["message"],"from owner via worker\n\n/literal\nunchanged");
+    assert_eq!(send(&bound,&context()).unwrap().args["message"],"from owner via worker\nasserted kind: human\n\n/literal\nunchanged");
     for value in [Value::Null,json!({}),json!("undeclared"),json!("owner-unset"),json!("extension:agents")] {
         let principal=value.as_str().unwrap_or("person:alice");
         let attribution=serde_json::from_value(json!({"principal":principal,"actor":"extension:agents"})).unwrap();
@@ -74,7 +74,7 @@ fn owner_proof_never_comes_from_a_role_claim_label_or_owner_looking_id() {
     }
     assert!(!contract::recorded_owner(&Default::default(),&json!({"value":"person:alice"})));
     args=input();args["origin"]["kind"]=json!("tool");
-    assert_eq!(send(&args,&Context {owner_proven:true,..context()}).unwrap().args["message"],"from agent:a via worker\n\n/literal\nunchanged");
+    assert_eq!(send(&args,&Context {owner_proven:true,..context()}).unwrap().args["message"],"from agent:a via worker\nasserted kind: tool\n\n/literal\nunchanged");
 }
 
 #[test]
@@ -121,12 +121,31 @@ fn effective_origin_uses_core_identity_and_keeps_role_claims_and_initiator_separ
     let mut args=input();args["origin"]=json!({"principal":"p:sender","actor":"extension:coord","kind":"human","agent":"r99","claimed":[]});args["origin"]["sender"]=json!({"principal":"p:inbox-original","actor":"p:inbox-original","provenance":"inbox-record"});args["quoted"]=json!({"label":"asserted original","principal":"other"});
     let bound=contract::bind_origin(&args,&attribution).unwrap();assert_eq!(bound["origin"]["initiator"],"p:original");assert_eq!(bound["origin"]["actor"],"extension:coord");assert_eq!(bound["origin"]["kind"],"human");assert_eq!(bound["origin"]["claimed"],json!(["kind","agent","sender"]));assert_eq!(bound["origin"]["sender"],args["origin"]["sender"]);assert_eq!(bound["quoted"],args["quoted"]);
     let prepared=send(&bound,&context()).unwrap();
-    assert_eq!(prepared.args["message"],"Quoted provenance (asserted, not the effective sender): asserted original\nfrom p:inbox-original via extension:coord\n\n/literal\nunchanged");
+    assert_eq!(prepared.args["message"],"Quoted provenance (asserted, not the effective sender): asserted original\nfrom p:inbox-original via extension:coord (sender asserted by extension)\nasserted kind: human\nasserted agent: r99\n\n/literal\nunchanged");
     assert_eq!(prepared.origin,bound["origin"]);assert_eq!(prepared.quoted,bound.get("quoted").cloned());
     for field in ["principal","actor","initiator"]{let mut spoofed=bound.clone();spoofed["origin"][field]=json!("owner");assert_eq!(contract::bind_origin(&spoofed,&attribution).err().unwrap().kind,"forbidden");}
     let mut unknown=input();unknown["origin"]=json!({"kind":"_"});let bound=contract::bind_origin(&unknown,&Default::default()).unwrap();assert_eq!(bound["origin"]["principal"],"undeclared");assert_eq!(bound["origin"]["actor"],"undeclared");assert!(bound["origin"].get("initiator").is_none());
     let derived=contract::bind_origin(&unknown,&attribution).unwrap();assert_eq!(derived["origin"]["principal"],"p:sender");assert_eq!(derived["origin"]["actor"],"extension:coord");assert_eq!(derived["origin"]["initiator"],"p:original");
     let long="p".repeat(256);unknown["origin"]["principal"]=json!(long);unknown["origin"]["actor"]=json!(long);let attribution=serde_json::from_value(json!({"principal":long,"actor":long})).unwrap();assert!(send(&contract::bind_origin(&unknown,&attribution).unwrap(),&context()).is_ok());
+}
+
+#[test]
+fn d17_native_header_preserves_asserted_classification_without_identity_inference(){
+    for principal in ["human:D17-principal","agent:D17-principal","tool:D17-principal"]{
+        let attribution=serde_json::from_value(json!({"principal":principal,"actor":"extension:coord","initiator":"p:worker"})).unwrap();
+        let mut args=input();args["origin"]=json!({"kind":"agent","agent":"D17-asserted-agent","claimed":[]});
+        let bound=contract::bind_origin(&args,&attribution).unwrap();
+        let prepared=send(&bound,&context()).unwrap();
+        assert_eq!(prepared.args["message"],format!("from {principal} via extension:coord\nasserted kind: agent\nasserted agent: D17-asserted-agent\n\n/literal\nunchanged"));
+        assert_eq!(prepared.origin["principal"],principal);assert_eq!(prepared.origin["actor"],"extension:coord");
+        assert_eq!(prepared.origin["initiator"],"p:worker");assert_eq!(prepared.origin["claimed"],json!(["kind","agent"]));
+        assert!(prepared.args.get("system").is_none() && prepared.args.get("developer").is_none());
+        args["origin"]=json!({"kind":"agent"});
+        let bound=contract::bind_origin(&args,&attribution).unwrap();
+        let prepared=send(&bound,&context()).unwrap();
+        assert_eq!(prepared.args["message"],format!("from {principal} via extension:coord\nasserted kind: agent\n\n/literal\nunchanged"));
+        assert!(prepared.origin.get("agent").is_none());
+    }
 }
 
 #[test]
