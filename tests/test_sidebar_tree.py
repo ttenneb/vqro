@@ -216,10 +216,44 @@ class SidebarTree(unittest.TestCase):
         self.assertEqual(len(content["toolbar"]), 1, "no pager chips")
         self.assertTrue(all("children" in row for row in content["items"] if row.get("id", "").startswith("ws:")))
 
+    def test_ended_terminals_no_tab_shows_fold_into_one_row_so_daily_use_needs_no_pager(self):
+        """relay-13: the human saw the pager "1/2" in daily use. Retention keeps up to 64 never-shown ended terminals,
+        one row each (~350 bytes) pushed a normal sidebar past one page. They now fold into one "N ended" row whose
+        rows are published only while it is opened."""
+        for i in range(64):
+            self.ext.resources[f"e{i}"] = term(f"e{i}", cwd=WS, state="finished", name=f"make target-{i}")
+        self.module["refresh"]()
+        content = dict(self.ext.published)["sidebar"]
+        self.assertEqual(content["page"]["count"], 1)
+        self.assertEqual(len(content["toolbar"]), 1, "no pager chips")
+        fold = find(content["items"], "ended:" + WS)
+        self.assertEqual((fold["text"], fold["children"]), ("64 ended", []))
+        def walk(rows):
+            for row in rows:
+                yield row
+                yield from walk(row.get("children") or [])
+        self.assertFalse(any(row.get("args", {}).get("resource", "").startswith("e") for row in walk(content["items"])))
+        self.module["ended_cmd"]({"id": "ended:" + WS})
+        opened = find(self.build(), "ended:" + WS)
+        self.assertEqual(len(opened["children"]), 64)
+        self.assertEqual(opened["menu"][0]["label"], "Hide them")
+        found, _ = self.module["search_rows"]("target-63")
+        self.assertTrue(found, "ended terminals stay searchable while folded")
+
+    def test_a_tree_between_a_page_and_the_whole_budget_is_still_one_page(self):
+        g = self.module["build"].__globals__
+        row = lambda i: {"id": f"term:r{i}", "text": "x" * 400}
+        rows = [{"id": "ws:root", "text": "Root", "children": [row(i) for i in range(130)]}]  # about 55 KB
+        self.assertGreater(self.module["encoded"](rows), g["PAGE_BYTES"])
+        self.assertLess(self.module["encoded"](rows), g["WHOLE_BYTES"])
+        self.assertEqual(self.module["paginate"](rows, 0)[2], 1, "published whole: no pager")
+        more = [{"id": "ws:root", "text": "Root", "children": [row(i) for i in range(170)]}]  # over WHOLE_BYTES
+        self.assertGreater(self.module["paginate"](more, 0)[2], 1, "pages stay the last resort")
+
     def test_a_large_tree_collapses_places_that_are_not_open(self):
         g = self.module["build"].__globals__
         self.add_workspaces(30)
-        g["PAGE_BYTES"] = 4000  # force compaction for this small fixture
+        g["PAGE_BYTES"] = g["WHOLE_BYTES"] = 4000  # force compaction for this small fixture
         self.ext.entries["workspace/active"] = {"value": {"layout": "ws-a"}, "version": 1}
         rows = self.build()
         ws = {row["id"]: row for row in rows if row.get("id", "").startswith(("ws:", "layout:"))}
@@ -242,12 +276,12 @@ class SidebarTree(unittest.TestCase):
         self.ext.resources["x7"]["status"] = {"state": "blocked"}
         self.assertIn({"text": "1 blocked", "style": "warn"}, find(self.build(), "ws:/w/extra7")["badges"])
         self.assertEqual(self.module["status_counts"](), {"blocked": 1})
-        g["PAGE_BYTES"] = 48 * 1024
+        g["PAGE_BYTES"], g["WHOLE_BYTES"] = 48 * 1024, 60 * 1024
 
     def test_search_covers_every_row_with_its_place(self):
         g = self.module["build"].__globals__
         self.add_workspaces(30)
-        g["PAGE_BYTES"] = 4000
+        g["PAGE_BYTES"] = g["WHOLE_BYTES"] = 4000
         set_show(self.module, self.ext, tabs=False)  # search ignores what is hidden or collapsed
         found, more = self.module["search_rows"]("EXTRA SHELL 2")
         self.assertEqual([row["args"]["resource"] for row in found], ["x2"] + [f"x{i}" for i in range(20, 30)])
@@ -258,7 +292,7 @@ class SidebarTree(unittest.TestCase):
         self.assertEqual(self.module["search_cmd"]({"text": "shell"})["client"], {"popup": {"view": "sidebar.search", "width": 60}})
         published = dict(self.ext.published)["sidebar.search"]
         self.assertEqual(len([row for row in published["items"] if row.get("command")]), 30)
-        g["PAGE_BYTES"] = 48 * 1024
+        g["PAGE_BYTES"], g["WHOLE_BYTES"] = 48 * 1024, 60 * 1024
 
     def test_without_workspace_data_layouts_are_the_places(self):
         del self.ext.live["workspaces"]

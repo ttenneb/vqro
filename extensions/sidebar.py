@@ -22,8 +22,9 @@ Clicking a tab or layout shows that layout in the window you clicked in (the rep
 `{"client": {"layout"}}`), makes it the shared default for new windows (`workspace/active`) and selects
 the tab; clicking a resource shows it. Each window marks the layout it shows itself (`current_when`
 rows), since this content is shared. Showing/hiding the sidebar applies to every layout.
-Rows are live content (`view.publish`): not saved, not in history, so each publication is bounded. A tree
-that fits one page (`PAGE_BYTES`) is published whole: no pager. A larger one first shows the places that are
+Rows are live content (`view.publish`): not saved, not in history, so each publication is bounded. Ended
+terminals no tab shows fold into one "N ended" row per place, opened by hand. A tree that fits `WHOLE_BYTES`
+(60 KB) is published whole: no pager. A larger one first shows the places that are
 not open as single rows (open: the default workspace, the ones recently shown as default, or expanded by
 hand; "Expand here"/"Collapse" in row menus); only if that still does not fit are there pages (by bytes,
 keeping folder ancestors and each agent/bridge group together), the pager being the last resort at extreme
@@ -88,8 +89,12 @@ SETTINGS_PAGE = "settings.page.sidebar"  # shown by the settings extension as a 
 refresh_pending = threading.Event()
 PUBLISH_INTERVAL = 0.5  # Coalesce status bursts into at most two sidebar updates/second.
 PAGE_BYTES = 48 * 1024  # A page fills to about this many encoded bytes: one bounded publication (< 64 KiB with ancestors).
+# A tree up to this size is published whole, with no pager and no compaction: unpaged, no ancestor repeats, so it
+# can use more of the same < 64 KiB per-publication budget than a page.
+WHOLE_BYTES = 60 * 1024
 OPEN_RECENT = 8  # Places last shown as the default stay open when the tree must be compacted.
 recent_places, expanded_places, collapsed_places = [], set(), set()  # derived view state of this run, not history
+expanded_ended = set()  # "N ended" rows opened by hand (derived view state of this run, not history)
 last_active = [None]  # the default layout when `recent_places` was last updated
 page_state = [0, 1]  # Shared sidebar page and current page count; derived, never history.
 
@@ -347,12 +352,32 @@ def tab_rows(name, hide_ended=False):
     return rows
 
 
-def loose_group(key, rows):
-    """Terminals of a place that no tab shows. A tab-level row: hiding tabs moves them up."""
+def fold_ended(key, rows, lazy=True):
+    """Ended terminals that no tab shows, as one "N ended" row: retention keeps up to 64 of them, and one row each
+    used to push a daily sidebar past one page. With `lazy` its rows are published only while it is opened by hand
+    (`sidebar.ended`); search builds without `lazy`, so they stay findable. Live rows are returned unchanged."""
+    plain = lambda row: {k: v for k, v in row.items() if k != "_ended"}
+    live = [plain(row) for row in rows if not row.get("_ended")]
+    done = [plain(row) for row in rows if row.get("_ended")]
+    if not done:
+        return live
+    fid = f"ended:{key}"
+    opened = fid in expanded_ended or not lazy
+    fold = {"id": fid, "text": f"{len(done)} ended", "style": "dim", "icon": ICON["loose"], "icon_style": "dim",
+            "_level": "pane", "expanded": opened, "children": done if opened else [],
+            "command": "sidebar.ended", "args": {"id": fid},
+            "menu": [{"label": "Hide them" if opened else "Show them", "command": "sidebar.ended", "args": {"id": fid}}]}
+    return live + [fold]
+
+
+def loose_group(key, rows, lazy=True):
+    """Terminals of a place that no tab shows (the ended ones folded, see `fold_ended`). A tab-level row: hiding
+    tabs moves them up."""
     if not rows:
         return []
+    kids = fold_ended(key, rows, lazy)
     return [{"id": f"loose:{key}", "text": "Not in a tab", "style": "dim", "icon": ICON["loose"], "icon_style": "dim",
-             "_level": "tab", **badged(rollup(rows)), "expanded": True, "children": rows}]
+             "_level": "tab", **badged(rollup(rows)), "expanded": True, "children": kids}]
 
 
 def current_when(name):
@@ -412,7 +437,7 @@ def skip_hidden(rows, sh):
 def build(sh=None, compact=True):
     """One tree: workspace → worktree → tab → pane, each level skippable; see `skip_hidden`.
 
-    `compact`: if the whole tree would not fit one page (`PAGE_BYTES`), workspaces and layouts that are
+    `compact`: if the whole tree would not be published whole (`WHOLE_BYTES`), workspaces and layouts that are
     not open are published as single rows (see `collapse`), so typical use needs no pages."""
     sh = sh or show()
     data = (ext.live.get("workspaces") or {}).get("data")
@@ -436,7 +461,7 @@ def build(sh=None, compact=True):
         folder = r.get("cwd") or (host or {}).get("cwd")
         cwd = os.path.realpath(folder) if folder else None
         home = next((key for p, key in homes if cwd and (cwd == p or cwd.startswith(p + os.sep))), None)
-        row = resource_row(rid, where=True)
+        row = dict(resource_row(rid, where=True), _ended=ended(r))
         if home is not None and data is not None:
             loose.setdefault(home, []).append(dict(row, _level="pane"))
         else:
@@ -445,9 +470,9 @@ def build(sh=None, compact=True):
     rows, layouts = [], []
     if data is not None:
         for w, wts, cut in places:
-            kids = tab_rows(w.get("layout"), hide_ended) + loose_group(w["path"], loose.get(w["path"], []))
+            kids = tab_rows(w.get("layout"), hide_ended) + loose_group(w["path"], loose.get(w["path"], []), compact)
             for t in wts:
-                inner = tab_rows(t.get("layout"), hide_ended) + loose_group(t["path"], loose.get(t["path"], []))
+                inner = tab_rows(t.get("layout"), hide_ended) + loose_group(t["path"], loose.get(t["path"], []), compact)
                 kids.append({
                     "id": f"wt:{t['path']}", "text": os.path.basename(t["path"].rstrip("/")), "expanded": True, "_level": "worktree",
                     "icon": ICON["worktree"], "icon_style": "warn" if t.get("dirty") else "accent",
@@ -478,8 +503,9 @@ def build(sh=None, compact=True):
     else:
         rows, layouts = [], layout_rows(set(), hide_ended)
     note_active(rows + layouts)
+    stray = fold_ended("stray", stray, compact)
     items = assemble(rows, layouts, stray, data is not None, sh)
-    if compact and sh["workspaces"] and encoded(items) > PAGE_BYTES:
+    if compact and sh["workspaces"] and encoded(items) > WHOLE_BYTES:
         opened = open_places(rows + layouts)
         items = assemble(collapse(rows, opened), collapse(layouts, opened), stray, data is not None, sh)
     return items or [{"type": "text", "text": "nothing to show"}]
@@ -554,7 +580,7 @@ def collapse(places, opened):
     return out
 
 
-def paginate(items, page, budget=PAGE_BYTES):
+def paginate(items, page, budget=None, whole=None):
     """Slice logical tree rows into pages of about `budget` encoded bytes, keeping ancestor context.
 
     A resource and its one bridge child are a unit. Folder ancestors can repeat across pages; no
@@ -571,8 +597,10 @@ def paginate(items, page, budget=PAGE_BYTES):
             sizes.append(encoded(own))
             measure(children(row))
     measure(items)
+    whole = (WHOLE_BYTES if budget is None else budget) if whole is None else whole
+    budget = PAGE_BYTES if budget is None else budget
     used = 0
-    for i, size in enumerate(sizes):
+    for i, size in enumerate(sizes if sum(sizes) > whole else []):  # a tree that fits `whole` is one page
         if used and used + size > budget:
             starts.append(i)
             used = 0
@@ -861,6 +889,13 @@ def expand_cmd(args):
     with ext.cache_lock:
         expanded_places.add(args.get("id"))
         collapsed_places.discard(args.get("id"))
+    refresh_pending.set()
+
+
+@ext.command("sidebar.ended", "Show or hide the ended terminals folded in an \"N ended\" row (args: id)")
+def ended_cmd(args):
+    with ext.cache_lock:
+        expanded_ended.symmetric_difference_update({args.get("id")})
     refresh_pending.set()
 
 

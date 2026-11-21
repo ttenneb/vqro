@@ -68,8 +68,16 @@ class SidebarTests(unittest.TestCase):
         agent = next(row for row in rows if row.get("args", {}).get("resource") == "r2")
         self.assertEqual(agent["children"][0]["text"], "Other r2 bridge")
         self.assertFalse(any(row.get("args", {}).get("resource") == "r1" for row in rows))
-        dead = next(row for row in rows if row.get("args", {}).get("resource") == "r3")
+        # Ended terminals no tab shows fold into one "N ended" row; opened by hand, it lists them.
+        fold = next(row for row in rows if row.get("id") == "ended:stray")
+        self.assertEqual((fold["text"], fold["children"], fold["expanded"]), ("1 ended", [], False))
+        self.assertFalse(any(row.get("args", {}).get("resource") == "r3" for row in rows))
+        module["ended_cmd"]({"id": "ended:stray"})
+        fold = next(row for row in module["build"]() if row.get("id") == "ended:stray")
+        dead = next(row for row in fold["children"] if row.get("args", {}).get("resource") == "r3")
         self.assertIn({"text": "ended", "style": "dim"}, dead["badges"])
+        self.assertNotIn("_ended", dead, "internal marks are not published")
+        module["ended_cmd"]({"id": "ended:stray"})
         with mock.patch.object(ext, "value", return_value={"hide_ended": True}):
             self.assertFalse(any(row.get("args", {}).get("resource") == "r3" for row in module["build"]()))
 
