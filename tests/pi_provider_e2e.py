@@ -609,7 +609,11 @@ class E2E:
             self.invoke(rid, 'interrupt', {'v': 0})
             self.agent(rid, lambda r: r['data']['agent']['state'] == 'idle')
             self.wait(lambda: 'rust-default-queued' in json.dumps(self.snapshot().get('live', {}).get('agent-'+rid)), 'derived Rust transcript publication')
-            assert sum(row.get('type') == 'prompt' for row in self.trace()) == 1, self.trace()
+            # One native write per send: the start, then the boundary as Pi's prompt with streamingBehavior steer (Pi queues
+            # it while busy); never Pi's queue-only steer, which would park it on an idle Pi (relay-13).
+            prompts = [row for row in self.trace() if row.get('type') == 'prompt']
+            assert [row.get('streamingBehavior') for row in prompts] == [None, 'steer'], self.trace()
+            assert not any(row.get('type') in ('steer', 'follow_up') for row in self.trace()), self.trace()
         current = self.resource(rid)['data']['agent']
         self.invoke(rid, 'stop', {'v': 0, 'covers': current['caps']['agent.stop']['covers']}, outcome='observed')
         self.wait(lambda: not live(native_process), 'owned Rust native exit')
