@@ -68,6 +68,7 @@ class Context:
     def __init__(self, shape="text_then_media", fault=None):
         self.native, self.evidence, self.events = Native(), [], []
         self.counter, self.fault = 0, fault
+        self.manifest = {"wire": "test-public-content"}  # This generic mock does not emit Pi-native DTOs.
         self.declaration = {"content": {"types": ["text", "image"], "shape": shape},
                             "modes": {"start": {}}, "origin": [{"as": "attributed_user", "role": "user", "frame": "sender_header"}]}
         self.agents = [{"id": "fixture-agent"}]
@@ -204,10 +205,12 @@ class PiModelContext(Context):
         result = super().evaluate(request, expected)
         if result.get("outcome") == "accepted" and self.native.messages:
             for block in self.native.messages[-1]["content"]:
-                if block.get("type") == "image":
+                if block.get("type") == "image" and self.fault != "pi_model_unmapped_mime_key":
                     block["mimeType"] = block.pop("mime")
                     if self.fault == "pi_model_mime_value":
                         block["mimeType"] = "image/jpeg"
+                    if self.fault == "pi_model_duplicate_mime_keys":
+                        block["mime"] = block["mimeType"]
             if self.fault == "pi_public_mime_value":
                 public = self.entities[next(reversed(self.entities))]["value"]
                 for block in public["content"]:
@@ -307,12 +310,14 @@ class ContentChecks(unittest.TestCase):
         self.assertEqual(raw, saved)
         self.assertEqual(projected, {**raw, "content": [examples()["text"], image]})
         self.assertIsNot(projected["content"][1], raw["content"][1])
-        self.assertEqual(subject.model_message_projection(projected, "pi"), projected)
+        with self.assertRaisesRegex(CheckFailed, "omitted mimeType"):
+            subject.model_message_projection(projected, "pi")
         self.assertIs(subject.model_message_projection(raw, "codex"), raw)
-        conflict = deepcopy(raw)
-        conflict["content"][1]["mime"] = "image/jpeg"
-        with self.assertRaisesRegex(CheckFailed, "conflicting MIME"):
-            subject.model_message_projection(conflict, "pi")
+        for mime in ("image/png", "image/jpeg"):
+            conflict = deepcopy(raw)
+            conflict["content"][1]["mime"] = mime
+            with self.subTest(mime=mime), self.assertRaisesRegex(CheckFailed, "unexpectedly has public mime"):
+                subject.model_message_projection(conflict, "pi")
 
     def test_pi_normalization_does_not_mask_history_or_cross_wire_changes(self):
         image = deepcopy(examples()["image"])
@@ -458,6 +463,21 @@ class HandlerChecks(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("mime", raw)
                 self.assertEqual(raw["mimeType"], projected["mime"])
                 self.assertEqual(raw["data"], projected["data"])
+
+    async def test_d16_wireless_pi_manifest_uses_the_runner_default(self):
+        ctx = PiModelContext()
+        ctx.manifest = {}
+        await subject.content_shape(ctx)
+        self.assertTrue(all(row['model_wire'] == 'pi' for row in ctx.evidence if row.get('kind') == 'D16_native_shape'))
+
+    async def test_d16_pi_native_schema_rejects_public_or_duplicate_mime_keys(self):
+        for fault in ('pi_model_unmapped_mime_key', 'pi_model_duplicate_mime_keys'):
+            ctx = PiModelContext(fault=fault)
+            with self.subTest(fault=fault), self.assertRaisesRegex(CheckFailed, 'new native model input'):
+                await subject.content_shape(ctx)
+            raw_image = next(block for block in ctx.native.messages[-1]['content'] if block['type'] == 'image')
+            self.assertIn('mime', raw_image)
+            self.assertEqual(raw_image['mime'], 'image/png')
 
     async def test_d16_pi_mime_values_remain_strict_in_model_and_public_witness(self):
         for fault, error in (("pi_model_mime_value", "new native model input"),

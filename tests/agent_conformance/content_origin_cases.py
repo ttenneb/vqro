@@ -38,11 +38,10 @@ def model_message_projection(message, wire):
     content = projected.get("content")
     if isinstance(content, list):
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "image" and "mimeType" in block:
-                mime = block.pop("mimeType")
-                check("mime" not in block or block["mime"] == mime,
-                      "Pi native image has conflicting MIME fields", component="fixture")
-                block["mime"] = mime
+            if isinstance(block, dict) and block.get("type") == "image":
+                check("mimeType" in block, "Pi native image omitted mimeType", component="adapter")
+                check("mime" not in block, "Pi native image unexpectedly has public mime", component="adapter")
+                block["mime"] = block.pop("mimeType")
     return projected
 
 
@@ -175,7 +174,7 @@ async def content_shape(ctx):
         check(len(received) == 1 and len(inserted) == 1, "valid shape was duplicated or never inserted natively")
         compare_content(content, received[0].get("content"), sender_header=framed)
         after = await model_cut(ctx, f"D16-after-{index}")
-        wire = getattr(ctx, "manifest", {}).get("wire")
+        wire = getattr(ctx, "manifest", {}).get("wire", "pi")
         native_message = new_model_message(before, after, content, sender_header=framed, wire=wire)
         message = model_message_projection(native_message, wire)
         def final_public(reducer):
