@@ -13,6 +13,7 @@ from .results import CheckFailed, HarnessGap, check
 
 FACTS_BOUND = 64 << 10
 SUMMARY_FIELDS = ("request", "revision", "method", "title")  # agent-v0 facts request summary
+WAIT_FACTS_TIMEOUT = "public agent facts did not reach the required state"  # core.py wait_facts diagnostic prefix
 
 
 def encoded(value):
@@ -43,10 +44,10 @@ async def c6_non_confirm(ctx, declaration):
         except CheckFailed as error:
             # Only "never became observable" can be the adapter's budget refusal; anything else is a real failure.
             # HarnessGap/FixtureFailed subclasses and any other assertion are never budget pressure.
-            if type(error) is not CheckFailed or "did not reach the required state" not in str(error):
+            if type(error) is not CheckFailed or not str(error).startswith(WAIT_FACTS_TIMEOUT):
                 raise
             issued = [row.get("request") for row in ctx.native.records("request", after=attempt)]
-            if len(issued) != 1:
+            if len(issued) != 1 or not isinstance(issued[0], str) or not issued[0]:
                 raise CheckFailed("C6: the unobservable attempt has no single native request identity", component="fixture")
             overflow = issued[0]
             ctx.evidence.append({"kind": "c6_request_not_observable", "index": index, "native_request": overflow,
