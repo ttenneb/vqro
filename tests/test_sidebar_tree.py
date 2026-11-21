@@ -261,6 +261,15 @@ class SidebarTree(unittest.TestCase):
         self.assertEqual(wts[:2], ["wt:/w/wt150", "wt:/w/wt160"], "the changed worktrees come first")
         self.assertEqual(len(wts), 10)
         self.assertEqual(find(content["items"], "more:" + WS)["text"], "+175 more worktrees")
+        # The limit only cuts what is shown: search still lists every worktree, and what its tabs show
+        # (vqro-lead-secondary's counterexample: wt184 and a terminal in its tab).
+        self.ext.entries["layout/wt-184"] = {"value": {"tabs": [{"title": "deep", "node": {"view": "term-r9"}}], "active": 0}, "version": 1}
+        self.ext.entries["view/term-r9"] = {"value": {"kind": "terminal", "resource": "r9"}, "version": 1}
+        self.ext.resources["r9"] = term("r9", name="needle-184")
+        found, _ = self.module["search_rows"]("wt184")
+        self.assertTrue(any(row.get("text") == "wt184" for row in found), found)
+        found, _ = self.module["search_rows"]("needle-184")
+        self.assertTrue(found, "a terminal in a cut worktree's tab is found")
         # "+N more" opens the rest (a tree this large pages again until collapse reaches the extension); a page
         # click publishes in its own call, not after the worker's coalescing wait.
         self.module["worktrees_more"]({"path": WS})

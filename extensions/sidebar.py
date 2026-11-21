@@ -412,13 +412,14 @@ def worktree_prefs():
     return dict(WORKTREES_DEFAULT, **((ext.value(PREFS) or {}).get("worktrees") or {}))
 
 
-def visible_worktrees(w, prefs):
-    """The worktrees this workspace lists (settings: hide detached, only changed, limit) and how many are cut."""
+def visible_worktrees(w, prefs, limited=True):
+    """The worktrees this workspace lists (settings: hide detached, only changed, limit) and how many are cut.
+    Without `limited` the limit (a display cut) is not applied: search lists every worktree the filters keep."""
     wts = [t for t in w.get("worktrees", [])
            if not (prefs["hide_detached"] and t.get("branch") == "(detached)")
            and not (prefs["changed_only"] and not (t.get("dirty") or t.get("ahead")))]
     limit = prefs["limit"]
-    if type(limit) is int and limit > 0 and w["path"] not in expanded_worktrees and len(wts) > limit:
+    if limited and type(limit) is int and limit > 0 and w["path"] not in expanded_worktrees and len(wts) > limit:
         # Cut to the ones with changes (uncommitted or unpushed) first, the rest in their own order.
         changed = [t for t in wts if t.get("dirty") or t.get("ahead")]
         wts = changed + [t for t in wts if not (t.get("dirty") or t.get("ahead"))]
@@ -461,7 +462,7 @@ def build(sh=None, compact=True):
     # Folders a terminal in no tab can belong to (listed workspaces and worktrees); the deepest match wins.
     places, homes = [], []
     for w in data or []:
-        wts, cut = visible_worktrees(w, prefs)
+        wts, cut = visible_worktrees(w, prefs, limited=compact)
         places.append((w, wts, cut))
         homes.append((os.path.realpath(w["path"]), w["path"]))
         homes += [(os.path.realpath(t["path"]), t["path"]) for t in wts]
