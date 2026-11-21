@@ -1,7 +1,7 @@
 {
   "name":"tmux", "title":"tmux backend", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"provider",
   "summary":"Use a separate vqro-owned tmux server as a terminal backend.",
-  "description":"Runs vqro-tmux and exposes its terminals as resources. It is off by default and never attaches to your ordinary tmux server unless explicitly configured. Turning it off disconnects the provider, not the owned server or its programs. Use the separate confirmed server-stop action to end that server and its terminals.",
+  "description":"Runs vqro-tmux and exposes its terminals as resources. It is off by default and never attaches to your ordinary tmux server unless explicitly configured. Turning it off disconnects the provider, not the owned server or its programs. Use the separate confirmed server-stop action to end that server and its terminals. Program titles use one appended pane-title-changed hook on the owned server; on an explicitly configured external server only with the --title-hook argument.",
   "requires":{"protocol":1},
   "provides":["ability/vqro.terminals","ability/vqro.resource.forget"],
   "contributes":{"commands":["Provider operations: spawn, kill, attach, resize and supported terminal operations"],"settings":["extension/tmux","vqro-tmux arguments"]}

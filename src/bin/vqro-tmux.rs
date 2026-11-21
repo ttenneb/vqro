@@ -11,6 +11,9 @@
 //! Server: `--tmux-socket PATH` attaches to an existing server (it is never killed); without it, a
 //! vqro-owned server at the core's stable state directory is created or reused. It outlives this
 //! provider; only explicit `vqro-tmux server stop` stops it. Never the default tmux server.
+//! Program titles need one server-wide `pane-title-changed` hook entry (appended, never replacing others): always on a
+//! vqro-owned server; on an external `--tmux-socket` server only with `--title-hook`, since that server is the
+//! user's own. Without it, terminals there report no program title (never tmux's default, the host name).
 //! Exit codes are not reported (tmux removes exited panes); a vanished pane is `gone` with reason
 //! `exited`, or `killed` if this provider killed it.
 
@@ -45,10 +48,12 @@ struct Args {
     socket: Option<PathBuf>,
     session: Option<String>,
     name: Option<String>,
+    /// Add vqro's title hook to an external --tmux-socket server (always added on a vqro-owned server).
+    title_hook: bool,
 }
 
 fn args() -> Result<Args, String> {
-    let mut a = Args { tmux: "tmux".into(), socket: None, session: None, name: None };
+    let mut a = Args { tmux: "tmux".into(), socket: None, session: None, name: None, title_hook: false };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -57,8 +62,9 @@ fn args() -> Result<Args, String> {
             "--tmux-socket" => a.socket = Some(value()?.into()),
             "--session" => a.session = Some(value()?),
             "--name" => a.name = Some(value()?),
+            "--title-hook" => a.title_hook = true,
             "-h" | "--help" => {
-                println!("vqro-tmux [--tmux-socket PATH] [--session NAME] [--tmux BIN] [--name NAME]\nConnects to $VQRO_SOCKET.\nvqro-tmux server status|stop [--state-dir PATH] [--tmux BIN]\nStop reads an explicit terminal-count confirmation; it never stops configured external servers.");
+                println!("vqro-tmux [--tmux-socket PATH [--title-hook]] [--session NAME] [--tmux BIN] [--name NAME]\n--title-hook: on an external server, add vqro's pane-title-changed hook entry so program titles are reported.\nConnects to $VQRO_SOCKET.\nvqro-tmux server status|stop [--state-dir PATH] [--tmux BIN]\nStop reads an explicit terminal-count confirmation; it never stops configured external servers.");
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument {other}")),
@@ -828,9 +834,12 @@ async fn registration(a: &Args, endpoint: &str, socket: &PathBuf) -> Result<(), 
     // Program titles: only a title the program set counts (tmux's default pane title is the host name).
     // Appended once, never replacing: a server may carry other pane-title-changed hooks (an external --tmux-socket
     // server is the user's own), and a reattaching provider must not add the entry again.
-    let hooks = first.command(&["show-hooks", "-g", "pane-title-changed"]).await.map_err(|e| format!("title hook: {e}"))?;
-    if !hooks.iter().any(|line| String::from_utf8_lossy(line).trim_end().ends_with(&format!("] {TITLED_HOOK}"))) {
-        first.command(&["set-hook", "-ga", "pane-title-changed", TITLED_HOOK]).await.map_err(|e| format!("title hook: {e}"))?;
+    // On an external server only when asked (--title-hook): it is the user's own configuration.
+    if a.socket.is_none() || a.title_hook {
+        let hooks = first.command(&["show-hooks", "-g", "pane-title-changed"]).await.map_err(|e| format!("title hook: {e}"))?;
+        if !hooks.iter().any(|line| String::from_utf8_lossy(line).trim_end().ends_with(&format!("] {TITLED_HOOK}"))) {
+            first.command(&["set-hook", "-ga", "pane-title-changed", TITLED_HOOK]).await.map_err(|e| format!("title hook: {e}"))?;
+        }
     }
     // The host's default shell for an empty argv (provider-v0: $SHELL on Unix); without $SHELL, tmux's own.
     let default_shell = match std::env::var("SHELL") {

@@ -128,12 +128,17 @@ impl Drop for Provider {
 }
 
 async fn start(tmux: &Tmux) -> (Core, Provider) {
+    start_with(tmux, &[]).await
+}
+
+async fn start_with(tmux: &Tmux, extra: &[&str]) -> (Core, Provider) {
     let endpoint = tmux.root.path().join("core.sock");
     let listener = UnixListener::bind(&endpoint).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_vqro-tmux"))
         .args(["--tmux", "/usr/bin/tmux", "--tmux-socket"])
         .arg(&tmux.socket)
         .args(["--name", "tmux@test"])
+        .args(extra)
         .env_clear()
         .env("HOME", tmux.root.path())
         .env("PATH", "/usr/bin:/bin")
@@ -324,18 +329,24 @@ async fn panes_created_and_closed_outside_vqro_are_reconciled() {
 
 #[tokio::test]
 #[ignore]
-async fn the_title_hook_is_appended_once_and_keeps_other_hooks() {
+async fn the_title_hook_is_opt_in_on_an_external_server_and_appended_once_keeping_other_hooks() {
     // An external server with its own pane-title-changed hook (review of 8af0738e: it was replaced).
     let tmux = Tmux::start();
     assert!(tmux.cli(&["set-hook", "-g", "pane-title-changed", "set-option -g @independent_sentinel 1"]).status.success());
-    for _ in 0..2 {  // a provider that attaches again must not add its entry twice
-        let (mut core, provider) = start(&tmux).await;
+    let hooks = || String::from_utf8_lossy(&tmux.cli(&["show-hooks", "-g", "pane-title-changed"]).stdout).into_owned();
+    // Without --title-hook an external server's hooks are left exactly as they were; with it (twice: a provider
+    // that attaches again must not add its entry twice) vqro's entry is appended once and the server's stays.
+    for extra in [&[][..], &["--title-hook"][..], &["--title-hook"][..]] {
+        let (mut core, provider) = start_with(&tmux, extra).await;
         let reg = core.read().await;
         core.reply(&reg, json!({"provider": "tmux@test", "generation": 1, "limits": {"stream_window_bytes": 65536, "max_record_bytes": 1048576}})).await;
         drop(provider);
         let _ = std::fs::remove_file(tmux.root.path().join("core.sock"));  // the next attach binds it again
+        if extra.is_empty() {
+            assert_eq!(hooks().trim(), "pane-title-changed[0] set-option -g @independent_sentinel 1", "off by default on an external server");
+        }
     }
-    let hooks = String::from_utf8_lossy(&tmux.cli(&["show-hooks", "-g", "pane-title-changed"]).stdout).into_owned();
+    let hooks = hooks();
     assert!(hooks.contains("set-option -g @independent_sentinel 1"), "the server's own hook is kept: {hooks}");
     assert_eq!(hooks.matches("set-option -p @vqro_titled 1").count(), 1, "vqro's hook is there once: {hooks}");
 }
