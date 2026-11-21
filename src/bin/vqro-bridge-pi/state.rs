@@ -400,7 +400,8 @@ impl Agent {
                     if let Some(run)=self.run.take(){let reason=if record["aborted"]==true{"cancelled"}else{&self.reason};self.completion=Some(json!({"id":run,"reason":reason,"error":self.error.as_ref().map(|message|json!({"message":message}))}));}
                 }
                 Some("message_start")=>{
-                    self.starting=true;
+                    // An ignored toolResult start must not mark the next record as a start.
+                    self.starting=record["message"]["role"]!="toolResult";
                     // Only a user message the bridge sent, under the evidence rules in origins.rs; never inferred.
                     self.start_origin=if record["message"]["role"]=="user"{self.origins.user_message(&record["message"])}else{None};
                     self.message(record,false);

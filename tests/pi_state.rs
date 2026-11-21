@@ -215,6 +215,20 @@ fn an_exact_identity_wins_over_a_timestamp_missing_message() {
     assert_eq!((text("m1"),text("m2")),(json!("hello"),json!("B")),"{rows:?}");
 }
 
+/// vqro-lead-secondary's #129 control: an ignored toolResult start/end never splits the open assistant message.
+#[test]
+fn an_ignored_tool_result_start_does_not_split_the_open_message() {
+    let mut a=make();
+    event(&mut a,json!({"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"he"}],"timestamp":1000}}));
+    let result=json!({"role":"toolResult","content":[{"type":"text","text":"ok"}],"timestamp":1500});
+    event(&mut a,json!({"type":"message_start","message":result}));event(&mut a,json!({"type":"message_end","message":result}));
+    event(&mut a,json!({"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"hello"}],"timestamp":1000},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"llo"}}));
+    event(&mut a,json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"hello"}],"timestamp":1000,"stopReason":"stop"}}));
+    let rows=entities(&a,"message");
+    assert_eq!(rows.len(),1,"{rows:?}");
+    assert_eq!((&rows[0]["value"]["content"][0]["text"],&rows[0]["value"]["final"]),(&json!("hello"),&json!(true)));
+}
+
 #[test]
 fn modules_are_versioned_descriptor_maps_for_resource_and_provider() {
     let a=make();
