@@ -125,13 +125,13 @@ class ReviewCounterexamples(unittest.TestCase):
         texts, others = m.message_texts(reducer({("message", "a"): {"rev": 1, "value": body}}), "O12-", {})
         self.assertTrue(m.adapter_preserves_or_marks(texts, n, sha, other_texts=others), "truncated body + marker block")
         omitted = {("message", "a"): {"rev": 1, "value": {"content": [{"type": "text", "text": text[:60000]}]}},
-                   ("notice", "n"): {"rev": 1, "value": {"text": "assistant output omitted: too large"}},
+                   ("notice", "n"): {"rev": 1, "value": {"content": [{"type": "text", "text": "assistant output omitted: too large"}]}},
                    ("message", "old"): {"rev": 1, "value": {"content": [{"type": "text", "text": "too large earlier"}]}}}
-        texts, others = m.message_texts(reducer(omitted), "O12-", {("message", "old"): 1})
+        texts, others = m.message_texts(reducer(omitted), "O12-", {("message", "old"): ["too large earlier"]})
         self.assertTrue(m.adapter_preserves_or_marks(texts, n, sha, other_texts=others), "omission-only entity")
         silent = {("message", "a"): {"rev": 1, "value": {"content": [{"type": "text", "text": text[:60000]}]}},
                   ("message", "old"): {"rev": 1, "value": {"content": [{"type": "text", "text": "too large earlier"}]}}}
-        texts, others = m.message_texts(reducer(silent), "O12-", {("message", "old"): 1})
+        texts, others = m.message_texts(reducer(silent), "O12-", {("message", "old"): ["too large earlier"]})
         self.assertFalse(m.adapter_preserves_or_marks(texts, n, sha, other_texts=others), "old marker is not this refusal")
 
 
@@ -270,8 +270,19 @@ class WholeHandlerControls(unittest.TestCase):
             "not-an-object", {"value": None, "label": self.report(ref)["items"][0]["text"]}]}]}
         null_select_visible = lambda ref: {"items": [{"type": "select", "text": "Status", "value": None, "options": [
             {"label": self.report(ref)["items"][0]["text"]}, {"value": None, "label": "Loading"}]}]}
+        warn = lambda ref: self.report(ref)["items"][0]["text"]
+        replaced_by_fallback = lambda ref: {"items": [{"type": "x.future", "requires": ["x.future"], "text": warn(ref),
+                                                       "fallback": {"type": "text", "text": "Loading"}}]}
+        dropped_stand_in = lambda ref: {"items": [{"type": "text", "requires_absent": ["composer_buttons"], "text": warn(ref)}]}
+        fallback_visible = lambda ref: {"items": [{"type": "x.future", "requires": ["x.future"], "text": "Loading",
+                                                   "fallback": {"type": "text", "text": warn(ref)}}]}
+        unrenderable_panel = lambda ref: {"requires": ["x.future-panel"], "items": [{"type": "text", "text": warn(ref)}]}
         controls = {
             "valid back-off and visible cause/limit": (reset_once, self.report, True),
+            "raw warning the client replaces with its Loading fallback": (reset_once, replaced_by_fallback, False),
+            "stand-in warning the client drops (requires_absent)": (reset_once, dropped_stand_in, False),
+            "warning visible only through the client's fallback": (reset_once, fallback_visible, True),
+            "panel whose own requires the client lacks": (reset_once, unrenderable_panel, False),
             "select null: an option without value matches first (missing reads as Null)": (reset_once, null_select, False),
             "select without value: a non-object option matches first": (reset_once, missing_value_select, False),
             "select null: the first (valueless) option shows the cause/limit": (reset_once, null_select_visible, True),
@@ -328,11 +339,23 @@ class WholeHandlerControls(unittest.TestCase):
             entity = message(1, 2)
             entity["value"]["native"] = {"diagnostic": "assistant output omitted: too large"}
             return {("message", "m"): entity}
+        def image_extra_marker(t):  # production content_rows shows only "[image: image/png]" for this block
+            entity = message(1, 2, t[:60000])
+            entity["value"]["content"].append({"type": "image", "mime": "image/png", "data": "AA==",
+                                               "text": "[output truncated: too large]"})
+            return {("message", "m"): entity}
+        old_marker_rev_bumped = {("message", "old"): message(1, 1, "[earlier output was truncated: too large]")}
+        def bump_old_marker_only(t):
+            return {("message", "old"): message(2, 1, "[earlier output was truncated: too large]")}
         controls = {
             "whole text in one entity": (lambda t: {("message", "m"): message(1, 2, t)}, None, True),
+            "marker only in an image block's extra text (never shown)": (image_extra_marker, None, False),
+            "rev-bumped old marker, no O12 output": (bump_old_marker_only, old_marker_rev_bumped, False),
+            "rev-bumped old marker beside silent truncation": (lambda t: {**bump_old_marker_only(t),
+                ("message", "m"): message(1, 2, t[:60000])}, old_marker_rev_bumped, False),
             "truncated body plus separate marker block": (lambda t: {("message", "m"): message(1, 2, t[:60000], "[message truncated: too large]")}, None, True),
             "truncated body plus omission-only entity": (lambda t: {("message", "m"): message(1, 2, t[:60000]),
-                                                                     ("notice", "n"): {"rev": 1, "value": {"text": "output omitted: too large"}}}, None, True),
+                                                                     ("notice", "n"): {"rev": 1, "value": {"content": [{"type": "text", "text": "output omitted: too large"}]}}}, None, True),
             "split across entities whose ids sort against the timeline": (lambda t: {("message", "b"): message(1, 2, t[:40000]),
                                                                                        ("message", "a"): message(1, 3, t[40000:])}, None, True),
             "silent truncation": (lambda t: {("message", "m"): message(1, 2, t[:60000])}, None, False),

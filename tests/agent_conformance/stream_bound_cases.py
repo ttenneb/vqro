@@ -46,6 +46,44 @@ def cursor_never_advanced(afters, last_good_seq, epoch):
     return True
 
 
+def production(name, subdir=""):
+    """A production extension module from the trusted harness repository (read-only import, never a copy)."""
+    import importlib.util, sys
+    from .evidence import HARNESS_REPO
+    base = Path(HARNESS_REPO) / "extensions"
+    path = base / subdir / (name + ".py")
+    if not path.is_file():
+        raise HarnessGap(f"production module {subdir + '/' if subdir else ''}{name}.py is absent from the harness repository")
+    key = "_o12o14_production_" + name
+    if key not in sys.modules:
+        for extra in (str(base), str(base / subdir)):
+            if extra not in sys.path:
+                sys.path.append(extra)  # its own stdlib-only sibling imports (vqro_display, ...)
+        spec = importlib.util.spec_from_file_location(key, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sys.modules[key] = module
+    return sys.modules[key]
+
+
+_CLIENT_FEATURES = None
+
+
+def client_features():
+    """The features the rendering client supports: the TUI's SUPPORTED list (src/ui_model/panel.rs), parsed from the
+    trusted harness repository, so normalization follows the client that actually draws the pane."""
+    global _CLIENT_FEATURES
+    if _CLIENT_FEATURES is None:
+        import re
+        from .evidence import HARNESS_REPO
+        source = Path(HARNESS_REPO) / "src" / "ui_model" / "panel.rs"
+        match = re.search(r"pub const SUPPORTED: &\[&str\] = &\[([^\]]*)\];", source.read_text()) if source.is_file() else None
+        if not match:
+            raise HarnessGap("the rendering client's SUPPORTED feature list is absent from src/ui_model/panel.rs")
+        _CLIENT_FEATURES = re.findall(r'"([^"]+)"', match.group(1))
+    return _CLIENT_FEATURES
+
+
 def json_equal(a, b):
     """serde_json Value equality: typed, so true != 1, 1 != 1.0 and "1" != 1 (Python's == would say true == 1)."""
     if type(a) is not type(b):
@@ -57,7 +95,7 @@ def json_equal(a, b):
     return a == b
 
 
-def visible_text(content):
+def visible_text(content, features=None):
     """The text a published pane actually draws, projected per row kind exactly as the production renderer does
     (src/tui/panel.rs at main 31c157b2, draw_row :680-:833, kind() defaulting to "item" in src/ui_model/panel.rs:107):
     - the panel title and title_right; a paged panel shows its first page (title and rows);
@@ -71,7 +109,12 @@ def visible_text(content):
     - every other kind ("item", "toggle", ...): text, detail, badge texts, action texts that have a command, and
       description (:755-:833);
     - children only when the row is expanded.
-    Labels, copy payloads, ids, args, hidden diagnostics and every other field are never visible."""
+    Labels, copy payloads, ids, args, hidden diagnostics and every other field are never visible.
+    Rows are first normalized as the production client does (vqro_client_model.expand: `requires` with `fallback`,
+    `requires_absent`, chip fallbacks) for `features` (default: the rendering TUI's SUPPORTED); a panel whose own
+    `requires` the client lacks shows nothing here (fail closed)."""
+    features = client_features() if features is None else features
+    model = production("vqro_client_model", "clients")
     out = []
     def text(node, key="text"):
         return node[key] if isinstance(node.get(key), str) else None
@@ -113,16 +156,20 @@ def visible_text(content):
                       if isinstance(action, dict) and isinstance(action.get("command"), str)]
         out.extend(value for value in shown if isinstance(value, str))
         if node.get("expanded") is True and isinstance(node.get("children"), list):
-            for child in node["children"]:
-                row(child)
+            rows(node["children"])
+    def rows(items):
+        for index, item in enumerate(items):
+            if isinstance(item, dict):
+                for shown_row, _ in model.expand(item, str(index), features):
+                    row(shown_row)
     def panel(value):
         out.extend(value[key] for key in ("title", "title_right") if isinstance(value.get(key), str))
-        for node in value.get("items", []) if isinstance(value.get("items"), list) else []:
-            row(node)
+        rows(value.get("items") if isinstance(value.get("items"), list) else [])
     if isinstance(content, list):
-        for node in content:
-            row(node)
+        rows(content)
     elif isinstance(content, dict):
+        if model.missing_for(content, features):
+            return ""  # the client cannot render this panel at all; nothing in it is visible
         pages = content.get("pages")
         if isinstance(pages, list) and pages and isinstance(pages[0], dict) and not isinstance(content.get("items"), list):
             out.extend(content[key] for key in ("title", "title_right") if isinstance(content.get(key), str))
@@ -420,34 +467,58 @@ O12_TEST = ("provider_client::items::tests::small_appends_past_the_record_bound_
 
 
 def shown_texts(value):
-    """The user-facing text of an item entity: its content text blocks and a top-level `text`. Nested native or other
-    metadata is never a visible marker."""
-    texts = [value["text"]] if isinstance(value.get("text"), str) else []
-    if isinstance(value.get("content"), list):
-        texts += [block["text"] for block in value["content"] if isinstance(block, dict) and isinstance(block.get("text"), str)]
-    return texts
+    """What the production agents pane shows for an item entity's content: the row texts of
+    agent_transcript.content_rows (text blocks as their lines; an image or audio block only as "[image: mime]", never
+    any extra field it carries). A top-level field or nested native/other metadata is never shown."""
+    content = value.get("content") if isinstance(value, dict) else None
+    if not isinstance(content, list):
+        return []
+    rows = production("agent_transcript").content_rows(content)
+    return [row["text"] for row in rows if isinstance(row, dict) and isinstance(row.get("text"), str)]
+
+
+def body_texts(value):
+    """The message body as the stream carries it: its non-blank text blocks, in order (for whole-text preservation;
+    only text blocks, never another block's extra field)."""
+    content = value.get("content") if isinstance(value, dict) else None
+    return [block["text"] for block in content or [] if isinstance(block, dict) and block.get("type") == "text"
+            and isinstance(block.get("text"), str) and block["text"].strip()]
+
+
+def shown_baseline(reducer):
+    """What every entity shows before the native emission: {key: [shown texts]}."""
+    return {key: shown_texts(entity.get("value") or {}) for key, entity in reducer.entities.items()}
 
 
 def message_texts(reducer, needle, baseline=None):
-    """Correlate the emitted message once, from CURRENT output only: entities unchanged since `baseline` (a {key: rev}
-    map taken before the native emission) are history and never count. Returns (texts, other_texts): `texts` are ALL
-    shown text blocks (body and any marker block) of every new or changed message entity carrying `needle`, in
-    timeline (position) order; `other_texts` are the shown text (shown_texts) of every other new or changed entity,
-    e.g. an omission-only notice. Hidden metadata never counts."""
+    """Correlate the emitted message once, from CURRENT shown output only. `baseline` is shown_baseline() taken before
+    the native emission; a revision bump that shows nothing new is still history. Returns (texts, other_texts):
+    `texts` are the body text blocks of every message entity whose body newly carries `needle`, in timeline (position)
+    order, followed by that entity's newly shown marker rows; `other_texts` are the shown texts of any other entity
+    that are new since the baseline (e.g. an omission-only notice). Hidden fields never count."""
+    baseline = baseline or {}
+    if any(not isinstance(shown, list) for shown in baseline.values()):
+        raise ValueError("message_texts baseline is shown_baseline() ({key: [shown texts]}), not a revision map")
     texts, others = [], []
     def timeline(item):  # the message's own position, never the opaque entity id; unpositioned entities last
         position = (item[1].get("value") or {}).get("position")
         return (0, position, str(item[0])) if isinstance(position, int) and not isinstance(position, bool) else (1, 0, str(item[0]))
     for key, entity in sorted(reducer.entities.items(), key=timeline):
-        if baseline is not None and key in baseline and baseline[key] == entity.get("rev"):
-            continue  # unchanged history, not output of this emission
-        kind, value = key[0], entity.get("value") or {}
-        blocks = [block["text"] for block in value.get("content", []) if isinstance(block, dict)
-                  and isinstance(block.get("text"), str)] if kind == "message" and isinstance(value.get("content"), list) else []
-        if any(needle in text for text in blocks):
-            texts += blocks
+        value = entity.get("value") or {}
+        before = list(baseline.get(key, []))
+        fresh = []
+        for text in shown_texts(value):  # shown texts not already shown before (multiset difference)
+            if text in before:
+                before.remove(text)
+            else:
+                fresh.append(text)
+        if not fresh:
+            continue  # nothing newly shown: history, whatever its revision
+        body = body_texts(value) if key[0] == "message" else []
+        if any(needle in text for text in body) and any(needle in text for text in fresh):
+            texts += body + [text for text in fresh if needle not in text]  # body, then its newly shown markers
         else:
-            others += shown_texts(value)
+            others += fresh
     return texts, others
 
 
@@ -467,7 +538,7 @@ async def producer_append_bounds(ctx):
     # Adapter half: an oversized assistant message streamed through the actual bridge.
     from .cases import fresh_view
     view = await fresh_view(ctx)
-    baseline = {key: entity.get("rev") for key, entity in view.reducer.entities.items()}
+    baseline = shown_baseline(view.reducer)
     mark = ctx.native.mark()
     chunks = ["O12-" + "x" * 1020 for _ in range(70)]  # about 70 KiB of text_delta appends in one message
     # Fixture seam 5d9b0590 (prim-final-review): retain with chunks emits one assistant message as len(chunks)
