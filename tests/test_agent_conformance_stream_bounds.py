@@ -317,6 +317,7 @@ class WholeHandlerControls(unittest.TestCase):
         from unittest.mock import AsyncMock, patch
         from agent_conformance import evidence
         from agent_conformance.results import CheckFailed
+        clock = SimpleNamespace(now=0.0)
         chunks, needle = m.o12_emission_chunks() if fresh_challenge else (["O12-" + "x" * 1020 for _ in range(70)], "O12-")
         text = "0:" + "".join(chunks)
         from collections import deque
@@ -373,7 +374,9 @@ class WholeHandlerControls(unittest.TestCase):
         async def wait_view(view, predicate, **kw):
             observed = predicate(view.reducer)
             if wait_error is not None and getattr(ctx.native, 'emitted', False): raise wait_error
-            if not observed and not wait_returns_early: raise CheckFailed("not reached")
+            if not observed and not wait_returns_early:
+                clock.now = 15.0
+                raise CheckFailed("item stream did not reach expected state") from asyncio.TimeoutError()
         from copy import deepcopy
         async def attach(*, peer=None, after=None, seed=None):
             self.assertIsNone(after); self.assertIsNone(seed)
@@ -389,7 +392,8 @@ class WholeHandlerControls(unittest.TestCase):
         # Inherited producer evidence is stubbed ONLY to isolate the adapter half; it proves nothing here.
         with patch.dict(evidence.REGRESSIONS, {"O12": {}}), patch.object(evidence, "component", lambda *a: ({}, None, None, None)), \
              patch.object(evidence, "regressions", lambda *a: None), patch.object(evidence, "inherited", lambda *a: None), \
-             patch.object(m, 'o12_emission_chunks', lambda: (chunks, needle)):
+             patch.object(m, 'o12_emission_chunks', lambda: (chunks, needle)), \
+             patch.object(m, 'time', SimpleNamespace(monotonic=lambda: clock.now)):
             try:
                 asyncio.run(m.producer_append_bounds(ctx))
             finally:
@@ -744,6 +748,7 @@ class O12SnapshotFrontier(unittest.TestCase):
         views = [SimpleNamespace(initial='reset', reducer=old, peer=peer, stream=1, closed=None, close_notice=None)]
         originals = [old.accept]
         calls, attaches, waits = [], [], []
+        clock, late = SimpleNamespace(now=0.0), SimpleNamespace(event=None)
         revision = 6 if historical else 1
         def gap(view, reason='retention'):
             view.closed = reason; view.reducer.failure = reason
@@ -756,9 +761,9 @@ class O12SnapshotFrontier(unittest.TestCase):
                 self.text = '0:' + ''.join(params['chunks'])
                 if mode == 'uncertain_native': raise RuntimeError('native outcome unknown')
                 feed(old, put(revision, value(self.text[:6000], flag=True if mode == 'newer_true' else None,
-                                              final=mode.startswith('late') or mode == 'negative'), seq=1))
+                                              final=mode.startswith('late') or mode in ('negative', 'frontier_after_cut', 'spent_budget')), seq=1))
                 if mode == 'late_batched': feed(old, put(2, value(self.text[:6000], flag=True), seq=2))
-                if mode not in ('late_batched', 'late_split', 'negative'):
+                if mode not in ('late_batched', 'late_split', 'negative', 'frontier_after_cut', 'spent_budget'):
                     gap(views[0], 'slow_consumer' if mode == 'nonretention' else 'retention')
             def records(self, *args, **params):
                 return [{'type': 'message_end', 'role': 'assistant', 'text_bytes': len(self.text.encode()),
@@ -771,6 +776,7 @@ class O12SnapshotFrontier(unittest.TestCase):
             view = SimpleNamespace(initial='continue' if mode == 'continue' else 'reset', reducer=new,
                                    peer=peer, stream=2, closed=None, close_notice=None)
             views.append(view)
+            if mode == 'spent_budget': clock.now += .75
             if early_notices: feed(new, *({'op': 'notice', 'value': value} for value in notices))
             return view
         async def wait(view, predicate, **params):
@@ -779,11 +785,22 @@ class O12SnapshotFrontier(unittest.TestCase):
                 if view.reducer.failure: raise CheckFailed('item reconstruction gap/error:' + view.reducer.failure)
                 self.assertTrue(predicate(view.reducer)); return
             text = ctx.native.text
+            if view.reducer.snapshots:
+                if late.event is not None: await late.event
+                if mode == 'second_after_cut': gap(view); raise CheckFailed('second retention after installed snapshot')
+                if mode == 'early_timeout': raise CheckFailed('early observer timeout') from asyncio.TimeoutError()
+                if mode == 'wait_failure': raise CheckFailed('observer interrupted')
+                if predicate(view.reducer): return
+                clock.now = 15.0
+                if mode == 'unhealthy_expiry': peer.failure = RuntimeError('peer failed at expiry')
+                raise CheckFailed('item stream did not reach expected state') from asyncio.TimeoutError()
             if mode == 'late_split': feed(old, put(2, value(text[:6000], flag=True), seq=2))
             data = value(text[:6000], flag=True)
             rows = [put(6 if historical else 2, data)]
-            if mode in ('negative', 'partial', 'notice_retention'):
+            if mode in ('negative', 'partial', 'notice_retention', 'frontier_after_cut', 'retention_after_cut',
+                        'early_timeout', 'wait_failure', 'unhealthy_expiry', 'second_after_cut', 'spent_budget'):
                 rows = [put(2, value(text[:6000], final=mode != 'partial'))]
+            if mode in ('frontier_after_cut', 'retention_after_cut'): rows = [put(1, value(text[:6000]))]
             if mode == 'same_rev': rows = [put(5, data)]
             if mode == 'oldbody': rows = [put(6, value('historic body', flag=True))]
             if mode == 'full': rows = [put(2, value(text[:35000])), put(1, value(text[35000:], position=2), id='m2')]
@@ -792,14 +809,24 @@ class O12SnapshotFrontier(unittest.TestCase):
                         'value': {'content': [{'type': 'text', 'text': 'assistant output omitted: too large'}]}}]
             if mode == 'staged':
                 feed(view.reducer, {'op': 'snapshot', 'phase': 'begin', 'epoch': 'e', 'coverage': 'tail'}, *rows)
-            else: cut(view.reducer, rows, epoch='other' if mode == 'epoch' else 'e', seq=2)
+            else: cut(view.reducer, rows, epoch='other' if mode == 'epoch' else 'e',
+                      seq=1 if mode in ('frontier_after_cut', 'retention_after_cut') else 2)
+            if mode in ('frontier_after_cut', 'retention_after_cut'):
+                late.event = asyncio.get_running_loop().create_future()
+                def publish_after_cut():
+                    feed(view.reducer, put(2, value(text[:6000], flag=True), seq=2))
+                    late.event.set_result(True)
+                asyncio.get_running_loop().call_soon(publish_after_cut)
             if not early_notices: feed(view.reducer, *({'op': 'notice', 'value': value} for value in notices))
             if mode == 'second_gap': gap(view); raise CheckFailed('second retention')
+            if mode == 'spent_budget': clock.now += .5
             if not predicate(view.reducer): raise CheckFailed('snapshot not installed')
         ctx = SimpleNamespace(evidence=retained if retained is not None else [], native=Native(), attach=attach, wait_view=wait)
         recorder = m.AppliedFlagPuts(old)
+        from unittest.mock import patch
         try:
-            asyncio.run(m.o12_adapter_result(ctx, views[0], recorder))
+            with patch.object(m, 'time', SimpleNamespace(monotonic=lambda: clock.now)):
+                asyncio.run(m.o12_adapter_result(ctx, views[0], recorder))
         finally:
             recorder.restore()
             self.assertEqual(len(calls), 1)
@@ -809,7 +836,7 @@ class O12SnapshotFrontier(unittest.TestCase):
             self.assertTrue(all(len(chunk.encode()) == 1024 for chunk in calls[0][1]['chunks']))
             self.assertLessEqual(len(attaches), 1)
             self.assertTrue(all(0 <= timeout <= 15 for timeout in waits))
-            if len(waits) > 1: self.assertLessEqual(waits[-1], 2)
+            if len(waits) > 1: self.assertLessEqual(waits[1], 2)  # Snapshot read, not the remaining output budget.
             for view, original in zip(views, originals): self.assertEqual(view.reducer.accept, original)
         return ctx.evidence, attaches
 
@@ -819,7 +846,8 @@ class O12SnapshotFrontier(unittest.TestCase):
                 evidence, attaches = self.run_case(mode)
                 self.assertEqual(len(attaches), 1)
                 self.assertEqual(evidence[0]['observation']['view_closed'], 'retention')
-                self.assertTrue(evidence[-1]['public_frontier'])
+                self.assertTrue(evidence[-1]['snapshot_cut_installed'])
+                self.assertFalse(evidence[-1]['observation']['budget_exhausted'])
                 self.assertTrue(evidence[-1]['disclosure_observed'])
                 if mode in ('flag', 'newer_true'):
                     self.assertTrue(evidence[-1]['incomplete_witnesses'][0]['snapshot_publication'])
@@ -834,7 +862,7 @@ class O12SnapshotFrontier(unittest.TestCase):
             self.assertEqual(retained[0]['phase'], 'initial')
             if mode == 'nonretention': self.assertEqual(len(retained), 1)
 
-    def test_late_separate_flag_is_batch_invariant_and_unmarked_frontier_still_fails(self):
+    def test_late_separate_flag_is_batch_invariant_and_healthy_budget_expiry_still_fails(self):
         from agent_conformance.results import CheckFailed, HarnessGap
         for mode, attach_count in (('late_batched', 0), ('late_split', 1)):
             evidence, attaches = self.run_case(mode)
@@ -845,7 +873,68 @@ class O12SnapshotFrontier(unittest.TestCase):
         self.assertNotIsInstance(raised.exception, HarnessGap)
         self.assertEqual(raised.exception.component, 'adapter')
         self.assertTrue(retained[-1]['public_frontier'])
-        self.assertIsNone(retained[-1]['observation']['wait_error'])
+        self.assertTrue(retained[-1]['observation']['budget_exhausted'])
+        self.assertEqual(retained[-1]['observation']['budget_deadline'], 15.0)
+        self.assertEqual(retained[-1]['observation']['wait_error']['cause']['type'], 'TimeoutError')
+
+    def test_snapshot_cut_is_not_completion_and_next_event_flag_counts(self):
+        for mode in ('frontier_after_cut', 'retention_after_cut'):
+            with self.subTest(mode=mode):
+                evidence, attaches = self.run_case(mode)
+                self.assertEqual(len(attaches), 1)
+                self.assertTrue(evidence[-1]['disclosure_observed'])
+                self.assertFalse(evidence[-1]['observation']['budget_exhausted'])
+                self.assertFalse(evidence[-1]['public_frontier'])
+                self.assertTrue(evidence[-1]['snapshot_cut_installed'])
+                self.assertEqual(evidence[-1]['observation']['sequence'], 2)
+                self.assertEqual(evidence[-1]['incomplete_witnesses'][0]['flag_put']['seq'], 2)
+
+    def test_early_timeout_other_failure_and_unhealthy_expiry_are_gaps(self):
+        from agent_conformance.results import HarnessGap
+        for mode in ('early_timeout', 'wait_failure', 'unhealthy_expiry', 'second_after_cut'):
+            with self.subTest(mode=mode), self.assertRaises(HarnessGap): self.run_case(mode)
+
+    def test_snapshot_read_uses_remaining_original_budget_not_a_reset(self):
+        from agent_conformance.results import CheckFailed, HarnessGap
+        retained = []
+        with self.assertRaises(CheckFailed) as raised: self.run_case('spent_budget', retained=retained)
+        self.assertNotIsInstance(raised.exception, HarnessGap)
+        self.assertTrue(retained[-1]['observation']['budget_exhausted'])
+        self.assertEqual(retained[-1]['observation']['budget_deadline'], 15.0)
+        self.assertEqual(retained[-1]['observation']['budget_checked_at'], 15.0)
+        self.assertEqual(retained[-1]['observation']['wait_timeout_seconds'], 13.75)
+
+    def test_real_context_wait_timeout_proves_expiry_without_an_arbitrary_error_upgrade(self):
+        import asyncio, hashlib, json, time
+        from types import MethodType, SimpleNamespace
+        from agent_conformance.core import PublicImplementation
+        from agent_conformance.wire import ItemReducer, Peer
+        from agent_conformance.results import CheckFailed, HarnessGap
+        async def run():
+            reducer = ItemReducer()
+            def feed(*rows): reducer.feed(reducer.offset, ''.join(json.dumps(row) + '\n' for row in rows).encode())
+            feed({'op': 'snapshot', 'phase': 'begin', 'epoch': 'e', 'coverage': 'tail'},
+                 {'op': 'snapshot', 'phase': 'end', 'seq': 0})
+            chunks, needle = m.o12_emission_chunks(); text = '0:' + ''.join(chunks)
+            recorder = m.AppliedFlagPuts(reducer)
+            baseline = m.shown_baseline(reducer, text, needle, applied_flags=recorder)
+            feed({'op': 'put', 'seq': 1, 'kind': 'message', 'id': 'm', 'rev': 1,
+                  'value': {'role': 'assistant', 'final': True, 'content': [{'type': 'text', 'text': text[:6000]}]}})
+            peer = SimpleNamespace(failure=None, closed=False, changed=asyncio.Event(), task=SimpleNamespace(done=lambda: False))
+            peer.wait = MethodType(Peer.wait, peer)  # ACTUAL waiter and timeout wrapper, no socket/runtime.
+            view = SimpleNamespace(reducer=reducer, peer=peer, closed=None, close_notice=None)
+            ctx = SimpleNamespace(evidence=[])
+            ctx.wait_view = MethodType(PublicImplementation.wait_view, ctx)
+            witness = {'text_bytes': len(text.encode()), 'text_sha256': hashlib.sha256(text.encode()).hexdigest()}
+            try:
+                record = await m.o12_capture(ctx, view, recorder, baseline, text, needle, witness,
+                                             recovered=True, deadline=time.monotonic() + .005)
+                self.assertTrue(record['observation']['budget_exhausted'])
+                self.assertEqual(record['observation']['wait_error']['cause']['type'], 'TimeoutError')
+                with self.assertRaises(CheckFailed) as raised: m.o12_grade(record)
+                self.assertNotIsInstance(raised.exception, HarnessGap)
+            finally: recorder.restore()
+        asyncio.run(run())
 
     def test_snapshot_notice_window_preserves_warning_before_cache_eviction(self):
         warning = {'severity': 'warn', 'text': 'assistant output omitted: too large'}

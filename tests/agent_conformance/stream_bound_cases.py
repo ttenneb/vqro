@@ -17,7 +17,7 @@ import subprocess
 import time
 
 from .cases import case
-from .results import HarnessGap, check
+from .results import CheckFailed, HarnessGap, check
 
 # ---------------------------------------------------------------------------------------------------------------------
 # O14 pure checkers (unit-tested with negatives in tests/test_agent_conformance_stream_bounds.py)
@@ -836,7 +836,8 @@ async def o12_adapter_result(ctx, view, recorder):
     deadline = time.monotonic() + 15  # Original observation budget, shared with the one possible snapshot read.
     first = await o12_capture(ctx, view, recorder, baseline, expected, needle, witness, deadline=deadline)
     retention = o12_retention_gap(first["observation"])
-    needs_frontier = (o12_healthy(first["observation"]) and not first["notice_evidence_lost"]
+    needs_frontier = (o12_healthy(first["observation"]) and not first["observation"]["budget_exhausted"]
+                      and not first["notice_evidence_lost"]
                       and not first["disclosure_observed"]
                       and first["affected_entities"]
                       and all(row["value"].get("final") is True for row in first["affected_entities"]))
@@ -849,7 +850,8 @@ async def o12_adapter_result(ctx, view, recorder):
 
 
 def o12_healthy(health):
-    return (health["wait_error"] is None and health.get("evidence_error") is None
+    return ((health["wait_error"] is None or health.get("budget_exhausted") is True)
+            and health.get("evidence_error") is None
             and health["applied_flags_known"] and health["view_known"] and health["peer_known"] and health["reducer_known"]
             and health["peer_closed"] is False and health["peer_failure"] is None and health["peer_read_done"] is False
             and health["reducer_failure"] is None and not health["staged"] and health["view_closed"] is None
@@ -942,12 +944,12 @@ async def o12_snapshot_once(ctx, old, baseline, expected, needle, witness, first
                                 "snapshots": view.reducer.snapshots,
                                 "snapshot_records": [deepcopy(row) for row in view.reducer.trace if row.get("op") == "snapshot"]}
         record = await o12_capture(ctx, view, recorder, recovered_baseline, expected, needle, witness,
-                                   recovered=True, phase=trigger + "_snapshot")
+                                   recovered=True, phase=trigger + "_snapshot", deadline=deadline)
         record["notice_evidence_lost"] = record["notice_evidence_lost"] or first["notice_evidence_lost"]
         terminal = record["observation"].get("terminal") or {}
         if terminal.get("method") == "stream.gap":
             raise HarnessGap("O12 snapshot observation gap: second/reattached stream gap")
-        o12_grade(record)  # No second reattach, output wait, native call or deadline extension.
+        o12_grade(record)  # No second attach/native call or deadline extension; a cut is NOT disclosure completion.
     finally:
         if recorder is not None:
             recorder.restore()
@@ -963,16 +965,25 @@ async def o12_capture(ctx, view, recorder, baseline, expected, needle, witness, 
         return texts, others, affected, positive
     def settled(reducer):
         _, _, affected, positive = observed(reducer)
-        # A completed partial entity must be graded FAIL rather than waiting for
-        # a positive verdict and misclassifying the resulting timeout as loss.
-        return positive or bool(affected) and all(row["value"].get("final") is True for row in affected)
+        # Initial finality may request the one fresh snapshot, never a negative verdict.
+        # After its installed cut every later disclosure within the SAME original budget counts.
+        return positive or (not recovered and bool(affected) and all(row["value"].get("final") is True for row in affected))
     wait_error = None
-    if not recovered:
-        try:
-            await ctx.wait_view(view, settled, timeout=max(0, deadline - time.monotonic()))
-        except Exception as error:
-            wait_error = error  # Only a typed retention gap below permits one public snapshot recovery.
+    remaining = max(0, deadline - time.monotonic())
+    try:
+        await ctx.wait_view(view, settled, timeout=remaining)
+    except Exception as error:
+        wait_error = error
+    checked_at = time.monotonic()
+    # Context.wait_view preserves asyncio's real observation timeout as the cause.
+    # An arbitrary/early wait failure is NOT evidence that the observation budget elapsed.
+    exhausted = (isinstance(wait_error, CheckFailed) and isinstance(wait_error.__cause__, asyncio.TimeoutError)
+                 and checked_at >= deadline)
     health = o12_observation(view, wait_error)
+    health.update(budget_deadline=deadline, budget_checked_at=checked_at, budget_exhausted=exhausted,
+                  wait_timeout_seconds=remaining)
+    if wait_error is not None and wait_error.__cause__ is not None:
+        health["wait_error"]["cause"] = {"type": type(wait_error.__cause__).__name__, "message": str(wait_error.__cause__)}
     health["applied_flags_known"] = recorder.known
     health["applied_flags_baseline"] = baseline[OBSERVATION]["applied_received"]
     health["applied_flags_received"] = recorder.received
@@ -982,7 +993,8 @@ async def o12_capture(ctx, view, recorder, baseline, expected, needle, witness, 
     except Exception as error:
         health["evidence_error"] = {"type": type(error).__name__, "message": str(error)}
         texts, others, affected, verdict = [], [], [], False
-    record = {"kind": "o12_adapter", "phase": phase, "public_frontier": recovered,
+    record = {"kind": "o12_adapter", "phase": phase, "public_frontier": exhausted,
+              "snapshot_cut_installed": recovered,
                          "emitted": witness, "stream_text_bytes": [len(t.encode()) for t in texts],
                          "other_new_entity_strings": [t[:200] for t in others][:16],
                          "affected_entities": affected,
@@ -1006,8 +1018,8 @@ def o12_grade(record):
                          "keeps, so a refusal marker may have been received and cannot be excluded")
     if not verdict and (not affected or any(row["value"].get("final") is not True for row in affected)):
         raise HarnessGap("O12 observation gap: only a held prefix/no completed affected entity was observed")
-    if not verdict and not record["public_frontier"]:
-        raise HarnessGap("O12 observation gap: no public frontier establishes completion of disclosure observation")
+    if not verdict and not health["budget_exhausted"]:
+        raise HarnessGap("O12 observation gap: original observation budget has not expired; snapshot/final is not disclosure completion")
     check(verdict,
           "after the producer refusal the adapter keeps the whole emitted text or publicly marks the affected "
           "output incomplete (no silent loss)")
