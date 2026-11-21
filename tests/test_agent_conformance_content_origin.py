@@ -161,7 +161,8 @@ class Context:
             if self.fault == "model_principal_suffix":
                 sender += "-wrong"
             delimiters = {"comma": ",", "comma_space": ", ", "semicolon": ";", "semicolon_space": "; ",
-                          "space": " ", "tab": "\t"}
+                          "space": " ", "tab": "\t", "paren": ")", "paren_space": ") ",
+                          "bracket": "]", "bracket_space": "] "}
             separator, suffix = "; ", ""
             if self.fault and self.fault.startswith("model_extra_agent_"):
                 suffix = delimiters[self.fault.removeprefix("model_extra_agent_")] + "agent: invented-endpoint"
@@ -297,7 +298,8 @@ class ContentChecks(unittest.TestCase):
                         subject.model_claims("asserted kind: agent; asserted agent: A1" + delimiter + extra, supplied)
                 with self.assertRaisesRegex(CheckFailed, "invented agent"):
                     subject.model_claims("asserted kind: agent" + delimiter + "agent: invented-endpoint", {"kind": "agent"})
-        for suffix in (" extra", "\tagent: invented-endpoint", " (claimed)agent: invented-endpoint"):
+        for suffix in (" extra", "\tagent: invented-endpoint", " (claimed)agent: invented-endpoint",
+                       ")agent: invented-endpoint", "]agent: invented-endpoint"):
             with self.subTest(suffix=suffix), self.assertRaises(CheckFailed):
                 subject.model_claims("asserted kind: agent; asserted agent: A1" + suffix, supplied)
         # Full opaque supplied values and from/via identity contents are not re-lexed as invented labels.
@@ -458,7 +460,8 @@ class HandlerChecks(unittest.IsolatedAsyncioTestCase):
             await subject.core_bound_origin(Context(fault="model_extra_unqualified_agent"))
 
     async def test_d17_complete_handler_rejects_extra_agent_for_all_delimiters(self):
-        for delimiter in ("comma", "comma_space", "semicolon", "semicolon_space", "space", "tab"):
+        for delimiter in ("comma", "comma_space", "semicolon", "semicolon_space", "space", "tab",
+                          "paren", "paren_space", "bracket", "bracket_space"):
             ctx = Context(fault="model_extra_agent_" + delimiter)
             with self.subTest(delimiter=delimiter), patch.object(subject, "public_origin_route", route), self.assertRaises(CheckFailed):
                 await subject.core_bound_origin(ctx)

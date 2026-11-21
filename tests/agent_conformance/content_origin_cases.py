@@ -253,7 +253,7 @@ def model_claims(header, supplied):
     qualifies a different field, and opaque values remain case-sensitive.
     """
     qualifier = r"(?i:asserted|claimed)"
-    start = r"(?:^|[\r\n;,(\[])[ \t]*"
+    start = r"(?:^|[\r\n;,()\[\]])[ \t]*"
     end = r"[ \t]*(?=$|[\r\n;,)\]])"
     # One tokenizer consumes complete qualified values OR rejects an annotation.
     # Positive claims and extra fields cannot use different delimiter rules.
