@@ -30,7 +30,12 @@ mod owned_server;
 /// tmux replaces control characters (tabs too) and, without a UTF-8 locale, non-ASCII bytes in format
 /// output, so fields are split on a printable ASCII token that names and titles are unlikely to contain.
 const SEP: &str = "|@vqro@|";
-const PANE_FORMAT: &str = "#{pane_id}|@vqro@|#{session_name}|@vqro@|#{window_id}|@vqro@|#{window_name}|@vqro@|#{pane_title}|@vqro@|#{pane_current_path}|@vqro@|#{pane_current_command}|@vqro@|#{pane_pid}|@vqro@|#{@vqro_bootstrap}";
+/// Pane facts. `name`, `argv` and whether a program set the title come from pane options vqro sets (`@vqro_name`,
+/// `@vqro_argv` at spawn; `@vqro_titled` by the `pane-title-changed` hook), never from tmux's own defaults: its
+/// automatic window name and its default pane title (the host name) are not what the spawn asked or the program set.
+const PANE_FORMAT: &str = "#{pane_id}|@vqro@|#{session_name}|@vqro@|#{window_id}|@vqro@|#{window_name}|@vqro@|#{pane_title}|@vqro@|#{pane_current_path}|@vqro@|#{pane_current_command}|@vqro@|#{pane_pid}|@vqro@|#{@vqro_bootstrap}|@vqro@|#{@vqro_name}|@vqro@|#{@vqro_titled}|@vqro@|#{@vqro_argv}";
+/// Marks a pane whose program set its title (OSC 0/2); installed server-wide when the provider attaches.
+const TITLED_HOOK: &str = "set-option -p @vqro_titled 1";
 const RECONCILE_EVERY: Duration = Duration::from_secs(3);
 /// Clears and homes the viewer's screen before a repaint (a screen snapshot, not replay).
 const REPAINT_PREFIX: &[u8] = b"\x1b[H\x1b[2J";
@@ -106,6 +111,8 @@ struct App {
     bin: PathBuf,
     socket: PathBuf,
     spawn_session: String,
+    /// The shell an empty argv runs (and is reported as running).
+    default_shell: String,
     state: Mutex<State>,
     reconcile: Notify,
     /// The tmux server this registration describes (its identity at registration).
@@ -267,14 +274,17 @@ impl App {
         let mut seen: BTreeMap<String, (String, String, Value)> = BTreeMap::new();
         for line in lines {
             let line = String::from_utf8_lossy(&line).into_owned();
-            let f: Vec<&str> = line.splitn(9, SEP).collect();
-            if f.len() < 9 || f[8] == "1" || seen.contains_key(f[0]) {
+            let f: Vec<&str> = line.splitn(12, SEP).collect();
+            if f.len() < 12 || f[8] == "1" || seen.contains_key(f[0]) {
                 continue;
             }
-            let argv = self.state.lock().unwrap().argv.get(f[0]).cloned().unwrap_or_default();
+            let recorded: Option<Vec<String>> = serde_json::from_str(f[11]).ok();
+            let argv = recorded.or_else(|| self.state.lock().unwrap().argv.get(f[0]).cloned()).unwrap_or_default();
             let facts = json!({
                 "ref": f[0], "incarnation": "", "kind": "terminal", "state": "live",
-                "name": f[3], "title": f[4], "cwd": if f[5].is_empty() { Value::Null } else { json!(f[5]) },
+                "name": if f[9].is_empty() { Value::Null } else { json!(f[9]) },
+                "title": if f[10] == "1" && !f[4].is_empty() { json!(f[4]) } else { Value::Null },
+                "cwd": if f[5].is_empty() { Value::Null } else { json!(f[5]) },
                 "argv": argv,
                 "data": {"session": f[1], "window": f[2], "command": f[6], "pid": f[7].parse::<u64>().ok()},
             });
@@ -439,11 +449,11 @@ impl App {
                 cmd.extend(["-e".into(), format!("{k}={v}")]);
             }
         }
-        // An empty argv runs tmux's default-shell: the host's default shell (9.4).
-        if !argv.is_empty() {
-            cmd.push("--".into());
-            cmd.extend(argv.iter().cloned());
-        }
+        // An empty argv means the host's default shell (provider-v0 terminal.spawn: $SHELL on Unix). Run it
+        // explicitly rather than tmux's default-shell, which follows the server's environment, and report it.
+        let argv = if argv.is_empty() { vec![self.default_shell.clone()] } else { argv };
+        cmd.push("--".into());
+        cmd.extend(argv.iter().cloned());
         let refs: Vec<&str> = cmd.iter().map(String::as_str).collect();
         let pane = match client.command(&refs).await {
             Ok(lines) => String::from_utf8_lossy(lines.first().map(Vec::as_slice).unwrap_or_default()).trim().to_string(),
@@ -460,6 +470,17 @@ impl App {
             return Err(ProviderError::new("backend", format!("pane {pane} spawned, but sizing outcome is unknown: {error}; do not replay spawn")));
         }
         let pane = pane.to_string();
+        // What the spawn asked, kept on the pane itself so a restarted provider still reports it.
+        let recorded = serde_json::to_string(&argv).unwrap_or_default();
+        let mut options = vec![("@vqro_argv", recorded.as_str())];
+        if let Some(name) = args["name"].as_str() {
+            options.push(("@vqro_name", name));
+        }
+        for (option, value) in options {
+            if let Err(error) = client.command(&["set-option", "-p", "-t", &pane, option, value]).await {
+                eprintln!("vqro-tmux: recording {option} on {pane}: {error}");
+            }
+        }
         self.state.lock().unwrap().argv.insert(pane.clone(), argv);
         // Publish it now, so the core can map the reply's facts.
         if let Err(e) = self.reconcile(false).await {
@@ -804,6 +825,14 @@ async fn registration(a: &Args, endpoint: &str, socket: &PathBuf) -> Result<(), 
     config.binary = a.tmux.clone();
     let first = Client::connect(config).await.map_err(|e| format!("attach {spawn_session}: {e}"))?;
     let instance = first.instance().to_string();
+    // Program titles: only a title the program set counts (tmux's default pane title is the host name).
+    first.command(&["set-hook", "-g", "pane-title-changed", TITLED_HOOK]).await.map_err(|e| format!("title hook: {e}"))?;
+    // The host's default shell for an empty argv (provider-v0: $SHELL on Unix); without $SHELL, tmux's own.
+    let default_shell = match std::env::var("SHELL") {
+        Ok(shell) if shell.starts_with('/') => shell,
+        _ => tmux_cli(&a.tmux, socket, &["show-options", "-gv", "default-shell"]).map(|s| s.trim().to_string())
+            .ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into()),
+    };
     // Re-attached uniformly by attach_sessions (which installs the notification task).
     first.close().await;
     let name = a.name.clone().unwrap_or_else(|| default_name(&instance));
@@ -820,6 +849,7 @@ async fn registration(a: &Args, endpoint: &str, socket: &PathBuf) -> Result<(), 
         bin: a.tmux.clone(),
         socket: socket.clone(),
         spawn_session: spawn_session.clone(),
+        default_shell,
         state: Mutex::new(State {
             clients: BTreeMap::new(),
             panes: BTreeMap::new(),

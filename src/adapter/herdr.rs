@@ -542,7 +542,8 @@ fn facts(t: &Value) -> ResourceFacts {
         incarnation: t.get("created_ms").and_then(Value::as_u64).map(|ms| ms.to_string()).unwrap_or_default(),
         kind: "terminal".into(),
         name: s("name"),
-        title: s("title"),
+        // herdr-core reports "" for a program that never set a title: that is no title (null), as other providers say.
+        title: s("title").filter(|t| !t.is_empty()),
         state: s("state").unwrap_or_else(|| "live".into()),
         status: t.get("status").cloned().unwrap_or(Value::Null),
         exit: json!({"reason": t.get("reason"), "exit_code": t.get("exit_code"), "signal": t.get("signal")}),

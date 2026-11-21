@@ -20,6 +20,7 @@ VQRO, PHERDR, PTMUX = (os.path.join(TARGET, "debug", b) for b in ("vqro", "vqro-
 HC = os.path.expanduser("~/.local/bin/herdr-core")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CALL_TIMEOUT = 20
+SHELL = "/bin/sh"  # the host shell the private roots declare ($SHELL): an empty argv must run it on every backend
 results = []
 
 # Differences that come from what each backend is, not from a bug: (path regex, why).
@@ -27,20 +28,10 @@ EXPECTED = [
     (r"^resources\.\w+\.provider$", "each resource names the backend that owns it"),
 ]
 HOST = socket.gethostname()
-# Differences that are known bugs, each with its finding (qol/same-setup-findings.md). A rule matches only the exact
-# shape found (path and values), so a new difference in the same place still fails.
-KNOWN = [
-    ("F1 tmux reports its automatic window name as the resource name",
-     lambda p, h, t: re.fullmatch(r"resources\.terminal\d+\.name", p) and h is None and isinstance(t, str)),
-    ("F1 ...so a tab opened on tmux is named after the window name at spawn (tmux's default-shell wrapper)",
-     lambda p, h, t: re.fullmatch(r"layout\..*\.title", p) and h == "sh" and t == "zsh"),
-    ("F1 ...and program titles never show on tmux (a named resource keeps its name)",
-     lambda p, h, t: re.fullmatch(r"text_client\[\d+\]", p) and tab_names_only(h, t)),
-    ("F2 tmux reports its default pane title (the hostname) as a program title",
-     lambda p, h, t: re.fullmatch(r"resources\.terminal\d+\.title", p) and h == "" and t == HOST),
-    ("F3 tmux reports no argv for its default shell (herdr reports the shell it ran)",
-     lambda p, h, t: re.fullmatch(r"resources\.terminal\d+\.argv", p) and h and t == []),
-]
+# Differences that are known bugs, each with its finding (qol/same-setup-findings.md), matched by exact path and
+# value shape so anything else fails. F1-F4 (tmux reported its window name, default pane title and no argv, and ran
+# another default shell) are fixed; none is known now.
+KNOWN = []
 
 
 def check(name, ok, detail=""):
@@ -59,7 +50,7 @@ class Root:
         shutil.copytree(os.path.join(REPO, "extensions"), os.path.join(self.r, "ext"),
                         ignore=shutil.ignore_patterns("node_modules", "opentui", "__pycache__"))
         os.symlink("/usr/bin/python3", os.path.join(self.r, "bin", "python3"))
-        self.env = {"HOME": f"{self.r}/home", "PATH": f"{self.r}/bin", "TERM": "xterm-256color", "SHELL": "/bin/sh",
+        self.env = {"HOME": f"{self.r}/home", "PATH": f"{self.r}/bin", "TERM": "xterm-256color", "SHELL": SHELL,
                     "VQRO_STATE_DIR": f"{self.r}/st", "VQRO_SOCKET": f"{self.r}/p.sock", "VQRO_EXTENSIONS_DIR": f"{self.r}/ext",
                     "XDG_STATE_HOME": f"{self.r}/xst", "XDG_RUNTIME_DIR": f"{self.r}/run", "XDG_CONFIG_HOME": f"{self.r}/cfg",
                     "HC_SESSION": "same", "HC_SOCKET": f"{self.r}/hc.sock", "LANG": "C.UTF-8"}
@@ -227,17 +218,6 @@ def capture(root):
     return out
 
 
-def tab_names_only(herdr, tmux):
-    """Two text-client `tabs:` lines that differ only where tmux shows a shell's window name (`sh`, `zsh`) as a tab's
-    name: same tabs, same order, same numbers and marks."""
-    tabs = lambda line: re.findall(r"\[([^\]]*)\]", line) if line.strip().startswith("tabs:") else None
-    h, t = tabs(herdr), tabs(tmux)
-    if not h or not t or len(h) != len(t):
-        return False
-    split = lambda tab: re.match(r"(.*?)([₀-₉]+)(.*)", tab).groups() if re.match(r"(.*?)([₀-₉]+)(.*)", tab) else (tab, "", "")
-    return all(x == y or (split(x)[1:] == split(y)[1:] and split(y)[0] in ("sh", "zsh")) for x, y in zip(h, t))
-
-
 def differences(a, b, path=""):
     if isinstance(a, dict) and isinstance(b, dict):
         for k in sorted(set(a) | set(b)):
@@ -275,6 +255,19 @@ try:
             unexpected.append(path)
     check("the same workspace looks the same to a client on herdr and on tmux (apart from expected differences)",
           not unexpected, "\n".join(unexpected))
+    # Honest reporting on both backends (findings F1-F4): no name nobody gave, no title no program set, and a
+    # spawn without argv runs, and reports, the host's $SHELL.
+    for backend, cap in captures.items():
+        terms = {k: r for k, r in cap["resources"].items() if r["kind"] == "terminal" and not str(r.get("name") or "").startswith("pi-bridge")}
+        check(f"{backend}: terminals nobody named have no name (F1)", all(r.get("name") is None for r in terms.values()),
+              {k: r.get("name") for k, r in terms.items()})
+        titled = {k: r.get("title") for k, r in terms.items()}
+        check(f"{backend}: only programs that set a title have one, never the host name (F2)",
+              sorted(t for t in titled.values() if t is not None) == ["solo", "titled"] and HOST not in titled.values(), titled)
+        check(f"{backend}: the split's default shell is the host's $SHELL and is reported (F3, F4)",
+              any(r.get("argv") == [SHELL] for r in terms.values()), {k: r.get("argv") for k, r in terms.items()})
+        check(f"{backend}: a program-titled tab shows its program's title", "[solo₃]" in "\n".join(cap["text_client"]),
+              "\n".join(cap["text_client"]))
 finally:
     for root in roots:
         root.stop()
