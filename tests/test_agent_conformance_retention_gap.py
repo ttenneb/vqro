@@ -461,6 +461,81 @@ class PressureControls(unittest.IsolatedAsyncioTestCase):
         view.reducer.failure = 'bad_append_base'; view.peer.failure = None
         with self.assertRaises(CheckFailed): probe.observer_health(view, deliberately_closed=True)
 
+    async def test_other_observer_fails_during_A_recovery_and_halts_B(self):
+        for mode in ('reducer', 'peer'):
+            ctx = PressureContext(); original = ctx.attach
+            async def mutate(**kwargs):
+                recovered = await original(**kwargs)
+                if kwargs.get('after') is not None and ctx.number == 5:
+                    other = next(view for view in ctx.views if view is not recovered and view is not ctx.target
+                                 and not view.peer.closed and view.closed is None)
+                    if mode == 'reducer': other.reducer.failure = 'bad_append_base during recovery'
+                    else: other.peer.failure = probe.WireFailure('other reader failed during recovery')
+                return recovered
+            ctx.attach = mutate
+            with self.subTest(mode=mode), patch.object(probe, 'process_rss', return_value=1000), self.assertRaises(CheckFailed):
+                await probe.public_retention_bounds(ctx)
+            self.assertEqual((ctx.B_calls, len(ctx.after)), (0, 1))
+            final = next(row for row in ctx.evidence if row.get('kind') == 'o10_provider_final_observations')
+            self.assertTrue(final['audit_errors'])
+
+    async def test_other_observer_mutates_during_cleanup_and_missing_is_not_safe(self):
+        for gap in (True, False):
+            for mode in ('reducer', 'peer'):
+                ctx = PressureContext(gap=gap); original = ctx.viewer
+                async def wrapped_viewer():
+                    peer = await original(); close = peer.close
+                    async def mutate_on_close():
+                        await close()
+                        if ctx.target is not None and peer is ctx.target.peer and ctx.number == 5 and ctx.run is None:
+                            other = next(view for view in ctx.views if view is not ctx.target
+                                         and not view.peer.closed and view.closed is None)
+                            if mode == 'reducer': other.reducer.failure = 'bad_append_base during cleanup'
+                            else: other.peer.failure = probe.WireFailure('reader failed during cleanup')
+                    peer.close = mutate_on_close
+                    return peer
+                ctx.viewer = wrapped_viewer
+                with self.subTest(gap=gap, mode=mode), patch.object(probe, 'process_rss', return_value=1000), self.assertRaises(CheckFailed):
+                    await probe.public_retention_bounds(ctx)
+                self.assertEqual(ctx.B_calls, 0)
+                self.assertEqual(len(ctx.after), 1 if gap else 0)
+                final = next(row for row in ctx.evidence if row.get('kind') == 'o10_provider_final_observations')
+                self.assertEqual(final['stage'], 'after reader closure/join')
+                self.assertTrue(final['audit_errors'])
+                if not gap: self.assertEqual(final['primary_error']['type'], 'MissingProviderGap')
+
+    async def test_recovered_view_late_corruption_is_also_audited(self):
+        ctx = PressureContext(); original = ctx.viewer
+        async def wrapped_viewer():
+            peer = await original(); close = peer.close
+            async def mutate():
+                await close()
+                if ctx.target is not None and peer is ctx.target.peer and ctx.after:
+                    ctx.views[-1].reducer.failure = 'recovered view corrupted during cleanup'
+            peer.close = mutate
+            return peer
+        ctx.viewer = wrapped_viewer
+        with patch.object(probe, 'process_rss', return_value=1000), self.assertRaises(CheckFailed):
+            await probe.public_retention_bounds(ctx)
+        self.assertEqual((ctx.B_calls, len(ctx.after)), (0, 1))
+
+    async def test_original_uncertain_error_preserved_with_cleanup_integrity_failure(self):
+        ctx = PressureContext(); original = ctx.call
+        primary = asyncio.TimeoutError('original control uncertainty')
+        async def uncertain(method, **kwargs):
+            if method == 'retain' and 'chunks' in kwargs:
+                next(view for view in ctx.views if not view.peer.closed).reducer.failure = 'cleanup sees prior corruption'
+                raise primary
+            return await original(method, **kwargs)
+        ctx.native = NS(call=uncertain)
+        with patch.object(probe, 'process_rss', return_value=1000), self.assertRaises(asyncio.TimeoutError) as caught:
+            await probe.public_retention_bounds(ctx)
+        self.assertIs(caught.exception, primary)
+        self.assertEqual((ctx.B_calls, len(ctx.after)), (0, 0))
+        final = next(row for row in ctx.evidence if row.get('kind') == 'o10_provider_final_observations')
+        self.assertEqual(final['primary_error']['detail'], 'original control uncertainty')
+        self.assertTrue(final['audit_errors'])
+
     async def test_failed_A_recovery_does_not_start_B(self):
         ctx = PressureContext(); original = ctx.attach
         async def wrong_mode(**kwargs):

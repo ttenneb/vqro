@@ -231,6 +231,7 @@ async def provider_retention(ctx, declaration):
     count, budget = viewer_budget(ctx, facts)
     run, epoch = await begin_native(ctx, 'O10-provider-pressure')
     views, released, replay = [], None, None
+    primary_error = None
     try:
         for _ in range(count):
             view = await ctx.attach(peer=await ctx.viewer())
@@ -294,18 +295,48 @@ async def provider_retention(ctx, declaration):
         ctx.evidence.append({'kind': 'o10_public_gap_after_quiescence', 'notice': deepcopy(target.close_notice),
                              'witness_label': 'fast public observers, provider-cursor retention'})
         replay = await one_replay(ctx, target, declaration, '511:O10-gap-burst:')
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        # Preserve raw counterexamples even when control/fencing throws. No
-        # additional native input or after-cursor attach in this cleanup path.
-        ctx.evidence.append({'kind': 'o10_provider_final_observations',
+        # Recovery itself awaits RPC/attach/snapshot work: other readers can
+        # fail during that await. Close/join every reader before the final
+        # audit, so A cannot return PASS/missing while a live reader can still
+        # mutate its state. No extra input or recovery in this cleanup fence.
+        audited = views + ([replay] if replay is not None else [])
+        audit_errors = []
+        for view in audited:
+            try:
+                observer_health(view, deliberately_closed=view is released)
+            except Exception as error:
+                audit_errors.append(error)
+        for view in audited:
+            try:
+                await view.peer.close()
+            except BaseException as error:
+                audit_errors.append(error)
+        for view in audited:
+            try:
+                observer_health(view, deliberately_closed=True)
+            except Exception as error:
+                audit_errors.append(error)
+        ctx.evidence.append({'kind': 'o10_provider_final_observations', 'stage': 'after reader closure/join',
+                             'primary_error': {'type': type(primary_error).__name__, 'detail': str(primary_error)} if primary_error else None,
+                             'audit_errors': [{'type': type(error).__name__, 'detail': str(error)} for error in audit_errors],
                              'observations': [{'closed': view.closed, 'notice': deepcopy(view.close_notice),
                                  'failure': view.reducer.failure, 'cursor': deepcopy(view.reducer.cursor),
                                  'peer_failure': str(view.peer.failure) if view.peer.failure is not None else None,
-                                 'released_for_boundary_slot': view is released} for view in views]})
-        for view in views:
-            await view.peer.close()
-        if replay is not None:
-            await replay.peer.close()
+                                 'released_for_boundary_slot': view is released,
+                                 'recovered_view': view is replay} for view in audited]})
+        if audit_errors:
+            # Preserve an original fatal/uncertain/cancelled outcome. Ordinary
+            # missing evidence is not fatal: a newly observed fatal audit must
+            # supersede it (with the missing cause retained), preventing B.
+            if primary_error is None or isinstance(primary_error, MissingProviderGap):
+                error = audit_errors[0]
+                if isinstance(error, asyncio.CancelledError):
+                    raise error
+                raise CheckFailed('O10 A final observer closure audit failed: ' + str(error)) from (primary_error or error)
 
 
 async def slow_viewer_recovery(ctx):
