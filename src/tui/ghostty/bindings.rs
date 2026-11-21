@@ -2,8 +2,9 @@
 //! (`vendor/libghostty-vt/include/ghostty/vt/*.h`, pin 9ad3c422). Only what the engine calls is here.
 //!
 //! bindgen isn't used: these declarations are checked against the headers instead. `bindings_check.c` asserts
-//! with the C compiler every size, alignment, field offset and enum value below; `build.rs` compiles it with
-//! the same Zig. On the Rust side, the `layout` tests assert the same sizes and offsets, and that every constant here
+//! with the C compiler every struct size and field offset, every constant's value, GhosttyStyle's alignment, and
+//! each function's and callback's parameter types (by assignment); `build.rs` compiles it with the same Zig. Still
+//! hand-checked: the Rust `extern` declarations themselves and what the `void*` payloads must point at. On the Rust side, the `layout` tests assert the same sizes and offsets, and that every constant here
 //! has its `SAME(..)` line there with the same value. Change both files together.
 //!
 //! C enums here are `int` (`GHOSTTY_ENUM_TYPED`), so they are `c_int` constants.

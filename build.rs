@@ -62,9 +62,10 @@ fn find_zig(vendored: &std::path::Path) -> String {
             found => panic!(
                 "ZIG={zig} is {}, but the vendored libghostty-vt needs Zig {wanted}. {}",
                 found.map(|v| format!("Zig {v}")).unwrap_or_else(|| "not a Zig that runs".into()),
-                match &local {
-                    Some(local) => format!("Unset ZIG to use {local}, or set ZIG={local}."),
-                    None => format!("Set ZIG to a Zig {wanted} (none found on PATH or at ~/.local/zig-{wanted}/zig)."),
+                match (&local, version("zig").as_deref() == Some(wanted.as_str())) {
+                    (_, true) => format!("Unset ZIG to use the `zig` on PATH (Zig {wanted})."),
+                    (Some(local), false) => format!("Unset ZIG to use {local}, or set ZIG={local}."),
+                    (None, false) => format!("Set ZIG to a Zig {wanted} (none found on PATH or at ~/.local/zig-{wanted}/zig)."),
                 }
             ),
         }

@@ -119,7 +119,9 @@ class TmuxServer:
             if exists:
                 entries["menu/tmux-server"] = {"where": "status", "label": "tmux server",
                                                "command": "tmux.server.status", "order": 40}
-            self.ext.contribute(entries)
+            # The whole set each time (exclusive): when the server goes away its menu entry is deleted, which a
+            # later non-exclusive call (the SDK's default after the first) would leave behind.
+            self.ext.contribute(entries, exclusive=True)
             self.menu = exists
         if observed != self.last:
             self.last = dict(observed)

@@ -30,7 +30,9 @@ class Ext:
             self.commands[name] = fn
             return fn
         return decorate
-    def contribute(self, entries): self.contributions.append(entries)
+    def contribute(self, entries, exclusive=None):
+        self.contributions.append(entries)
+        self.exclusive = getattr(self, "exclusive", []) + [exclusive]
     def publish(self, view, content): self.published.append((view, content))
     def notify(self, *args): self.notifications.append(args)
     def fresh(self): pass
@@ -143,6 +145,16 @@ class TmuxServerTests(unittest.TestCase):
             texts = [c["items"][0]["text"] for _, c in self.ext.published]
             self.assertTrue(any(t.startswith("Status unknown: tmux helper timed out") for t in texts), texts)
             self.assertEqual(texts.count(texts[-1]), 1, "the same failure is published once, not every poll")
+
+    def test_menu_contributions_are_the_whole_set_so_a_stopped_server_loses_its_menu(self):
+        """The real SDK deletes owned entries missing from a call only when it is exclusive (by default just the
+        first call), so later sets are exclusive too (vqro-lead-secondary, low follow-up)."""
+        self.server.current = {"running": True, "instance": "i", "terminals": 1}
+        self.server.refresh()
+        self.server.current = {"running": False, "terminals": 0}
+        self.server.refresh()
+        self.assertNotIn("menu/tmux-server", self.ext.contributions[-1])
+        self.assertEqual(self.ext.exclusive[-2:], [True, True])
 
     def test_a_missing_helper_never_hides_the_view(self):
         """The e2e-same-setup root cause: no `vqro-tmux` on the extension's PATH, and the owned server's socket
