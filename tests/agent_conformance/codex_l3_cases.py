@@ -97,15 +97,21 @@ def grade_replacement(obs):
     provider = late.get("provider_after") or {}
     add((provider.get("instance") or "").endswith(":" + str(b)) and provider.get("state") == "connected",
         "the provider is still the replacement's connected instance after the old incarnation's late return")
-    exit_ns = (obs.get("own_host") or {}).get("exit_ns")
+    fence = obs.get("exit_fence") or {}
     arrivals = obs.get("arrivals")
-    add(isinstance(exit_ns, int) and isinstance(arrivals, list) and len(arrivals) < MAX_OBSERVED,
-        "the replacement's own exit is fenced: its native ledger exit time and the public arrival log exist", "fixture")
+    epoch, s_exit = fence.get("epoch"), fence.get("seq")
+    fenced = isinstance(epoch, str) and type(s_exit) is int and isinstance(arrivals, list) and len(arrivals) < MAX_OBSERVED
+    # In-order delivery: once the observer holds a replacement end published AFTER the fence, it holds every earlier one.
+    complete = fenced and any(row.get("id") in new_ids and row.get("lifecycle") == "ended" and row.get("epoch") == epoch
+                              and type(row.get("seq")) is int and row["seq"] > s_exit for row in arrivals)
+    add(fenced and complete,
+        "the replacement's own exit is causally fenced: core publication seq read while its bridge was frozen after the "
+        "native exit, and the observer received the own end published after that seq", "fixture")
     premature = [row for row in arrivals or [] if row.get("id") in new_ids and row.get("lifecycle") == "ended"
-                 and isinstance(exit_ns, int) and row.get("ns", exit_ns) < exit_ns]
+                 and row.get("epoch") == epoch and type(row.get("seq")) is int and type(s_exit) is int and row["seq"] <= s_exit]
     add(not premature,
-        "no replacement endpoint was ended by any public event that arrived before its own native host exited "
-        "(observed from registration through the own exit)")
+        "no replacement endpoint was ended by any event the core PUBLISHED before the replacement's own end could exist "
+        "(seq at or below the fence taken after the native exit while its bridge was frozen)")
     own_host = obs.get("own_host") or {}
     add(own_host.get("exited") is True and "exit" in (own_host.get("ledger") or []),
         "the replacement's own native host really ended (its captured process is gone and its ledger records exit)",
@@ -203,7 +209,7 @@ async def many_host_replacement(ctx):
     terminal_provider = next((row.get("provider") for row in await ctx.resources() if row.get("id") == ctx.host), None)
     if not terminal_provider:
         raise HarnessGap("L3 replacement cannot identify the terminal backend hosting the bridge")
-    frozen = safe = False
+    frozen = safe = frozen_b = False
     bridge_b = native_b_process = None
     teardown = {}
     try:
@@ -238,15 +244,16 @@ async def many_host_replacement(ctx):
                              "within the bounded setup")
         new_ids = sorted(row["id"] for row in new_rows)
         new_host = host_of(new_rows[0]["data"]["agent"])
-        # A dedicated public observer timestamps every resource event on arrival (CLOCK_MONOTONIC, the same clock as
-        # the native ledger's ns), from here through the replacement's own exit. ctx.peer is never touched.
+        # A dedicated public observer records every resource event with the core's publication epoch/seq (causal order;
+        # arrival time is kept only as evidence), from here through the replacement's own end. ctx.peer is untouched.
         arrivals = []
         observer = await ctx.viewer()
         def arrived(event):
             data = event.get("data") if isinstance(event.get("data"), dict) else {}
             if event.get("type") == "resource" and len(arrivals) < MAX_OBSERVED:
                 agent = (data.get("data") or {}).get("agent") or {}
-                arrivals.append({"ns": time.monotonic_ns(), "id": data.get("id"), "lifecycle": agent.get("lifecycle"),
+                arrivals.append({"epoch": event.get("epoch"), "seq": event.get("seq"), "ns": time.monotonic_ns(),
+                                 "id": data.get("id"), "lifecycle": agent.get("lifecycle"),
                                  "incarnation": host_of(agent).get("incarnation")})
         observer.on("event", arrived)
         snapshot = await observer.call("workspace.snapshot")
@@ -291,11 +298,20 @@ async def many_host_replacement(ctx):
             settled = await ctx.facts(work_rid)
         if not native_b_process:
             raise HarnessGap("the replacement native host's process identity was not captured; its own end is unwitnessable")
+        # Causal fence: freeze the replacement bridge, so nothing it publishes can carry its own end, then end its
+        # native host, witness the exit, read the core's publication seq, and only then let the bridge run again.
+        frozen_b = signal_owned(bridge_b, signal.SIGSTOP)
+        if not frozen_b:
+            raise HarnessGap("the replacement bridge could not be held, so its own end has no causal fence")
         own_ledger_mark = native_b.mark()
         await native_b.call("host_exit", code=0)
         async def own_host_gone():
             return not live(native_b_process)
         own_host_exited = bool(await poll(own_host_gone, SETUP_S))
+        exit_snapshot = await observer.call("workspace.snapshot")
+        exit_fence = {"epoch": exit_snapshot.get("epoch"), "seq": exit_snapshot.get("seq")}
+        signal_owned(bridge_b, signal.SIGCONT)
+        frozen_b = False
         own_rows = native_b.records(after=own_ledger_mark)
         own_host_exit_rows = [row.get("kind") for row in own_rows][-4:]
         own_exit_ns = next((row.get("ns") for row in own_rows if row.get("kind") == "exit" and isinstance(row.get("ns"), int)), None)
@@ -307,6 +323,11 @@ async def many_host_replacement(ctx):
         except (asyncio.TimeoutError, Exception):
             pass  # graded below from what was observed
         own_end = {rid: (ctx.resource_cache.get(rid) or {}).get("data", {}).get("agent") for rid in new_ids}
+        async def observer_caught_up():  # the own end, published after the fence, reached the dedicated observer
+            return any(row.get("id") in new_ids and row.get("lifecycle") == "ended" and row.get("epoch") == exit_fence["epoch"]
+                       and type(row.get("seq")) is int and type(exit_fence["seq"]) is int and row["seq"] > exit_fence["seq"]
+                       for row in arrivals)
+        await poll(observer_caught_up, SETUP_S)
         async def replacement_gone():
             return not (native_b_process and live(native_b_process)) and not (bridge_b and live(bridge_b))
         await poll(replacement_gone, 3.0)  # bounded; whatever remains is reaped by the fixture's owned cleanup
@@ -319,7 +340,7 @@ async def many_host_replacement(ctx):
                "available_after": available_after, "old_after": old_after, "settled": settled,
                "history": history, "order": order, "late_return": late_return, "own_end": own_end,
                "own_host": {"exited": own_host_exited, "ledger": own_host_exit_rows, "exit_ns": own_exit_ns},
-               "arrivals": list(arrivals)}
+               "arrivals": list(arrivals), "exit_fence": exit_fence}
         brief = lambda f: {k: (f or {}).get(k) for k in ("state", "run", "lifecycle")} | {
             "incarnation": host_of(f).get("incarnation")}
         ctx.evidence.append({"kind": "l3_replacement", "old_host": host, "new_host": new_host,
@@ -331,6 +352,7 @@ async def many_host_replacement(ctx):
                              "late_return": late_return,
                              "own_host": {"process": native_b_process, "exited": own_host_exited,
                                           "ledger": own_host_exit_rows, "exit_ns": own_exit_ns},
+                             "exit_fence": exit_fence,
                              "arrivals": {"count": len(arrivals), "bounded_at": MAX_OBSERVED,
                                           "replacement_ends": [row for row in arrivals if row.get("id") in new_ids
                                                                and row.get("lifecycle") == "ended"][:8]},
@@ -350,6 +372,8 @@ async def many_host_replacement(ctx):
     finally:
         if frozen:
             signal_owned(bridge_a, signal.SIGCONT)  # never leave the old bridge frozen
+        if frozen_b:
+            signal_owned(bridge_b, signal.SIGCONT)  # nor the replacement bridge
         if safe:
             await ctx.peer.call("command.invoke", {"name": "vqro.safe_mode", "args": {"on": False}})
         if native_b_process and live(native_b_process):

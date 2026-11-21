@@ -30,8 +30,10 @@ def valid_obs():
             "work_before": work, "work_after": dict(work),
             "own_end": {rid: facts(B, lifecycle="ended") for rid in ("r6", "r7", "r8")},
             "own_host": {"exited": True, "ledger": ["exit"], "exit_ns": 1000},
-            "arrivals": [{"ns": 900, "id": "r6", "lifecycle": "live", "incarnation": B}]
-                        + [{"ns": 1100, "id": rid, "lifecycle": "ended", "incarnation": B} for rid in ("r6", "r7", "r8")],
+            "exit_fence": {"epoch": "e", "seq": 10},
+            "arrivals": [{"epoch": "e", "seq": 9, "ns": 900, "id": "r6", "lifecycle": "live", "incarnation": B}]
+                        + [{"epoch": "e", "seq": 11 + i, "ns": 1100, "id": rid, "lifecycle": "ended", "incarnation": B}
+                           for i, rid in enumerate(("r6", "r7", "r8"))],
             "after_end": after, "available_after": {rid: True for rid in after},
             "old_after": {"r2": None, "r3": None, "r4": None},
             "settled": facts(B, "idle", None, completion={"reason": "completed"}),
@@ -62,9 +64,11 @@ class GradeReplacement(unittest.TestCase):
         def other_image(o): o["same_image"] = False
         def own_host_still_live(o): o["own_host"]["exited"] = False
         def own_host_no_exit_row(o): o["own_host"]["ledger"] = []
-        def ended_before_own_exit(o): o["arrivals"].insert(1, {"ns": 950, "id": "r7", "lifecycle": "ended", "incarnation": B})
-        def ended_old_attribution_before_exit(o): o["arrivals"].insert(1, {"ns": 950, "id": "r8", "lifecycle": "ended", "incarnation": A})
-        def no_exit_time(o): o["own_host"]["exit_ns"] = None
+        def ended_before_own_exit(o): o["arrivals"].insert(1, {"epoch": "e", "seq": 10, "ns": 5000, "id": "r7", "lifecycle": "ended", "incarnation": B})
+        def ended_old_attribution_before_exit(o): o["arrivals"].insert(1, {"epoch": "e", "seq": 3, "ns": 5000, "id": "r8", "lifecycle": "ended", "incarnation": A})
+        def no_exit_time(o): o["exit_fence"] = {}
+        def own_end_never_observed_after_fence(o): o["arrivals"] = o["arrivals"][:1]
+        def fence_from_another_epoch(o): o["exit_fence"]["epoch"] = "other"
         def arrival_log_truncated(o): o["arrivals"] = o["arrivals"] * (m.MAX_OBSERVED // 4 + 1)
         def never_completes(o): o["settled"] = facts(B, "running", "turn-1")
         def ended_attributed_to_new(o): o["history"].append(("r2", facts(B, lifecycle="ended")))
@@ -82,6 +86,7 @@ class GradeReplacement(unittest.TestCase):
                   own_host_still_live: "fixture", own_host_no_exit_row: "fixture",
                   ended_before_own_exit: "adapter", ended_old_attribution_before_exit: "adapter",
                   no_exit_time: "fixture", arrival_log_truncated: "fixture",
+                  own_end_never_observed_after_fence: "fixture", fence_from_another_epoch: "fixture",
                   ended_attributed_to_new: "adapter", old_resurrected: "adapter", old_took_provider: "adapter",
                   provider_lost: "adapter", not_a_replacement: "harness", old_ids_reused: "harness",
                   old_host_never_ended: "harness", wrong_order: "harness"}
@@ -163,11 +168,25 @@ class SimulatedCore:
             core.publish(rid)
 
     observers = ()
+    seq = 0
+    buffered = False   # deliver to observers late, in order (an asynchronous, delayed observer)
+    held = ()
 
     def publish(self, rid):
-        self.history.append((None, len(self.history), deepcopy(self.resources[rid]), 1))
-        for callback in self.observers:  # public resource events reach every subscribed observer, in order
-            callback({"type": "resource", "data": deepcopy(self.resources[rid])})
+        self.seq += 1
+        self.history.append(("e", self.seq, deepcopy(self.resources[rid]), 1))
+        event = {"type": "resource", "epoch": "e", "seq": self.seq, "data": deepcopy(self.resources[rid])}
+        if self.buffered:
+            self.held = (*self.held, event)
+        else:
+            for callback in self.observers:  # public resource events reach every subscribed observer, in order
+                callback(event)
+
+    def flush(self):
+        for event in self.held:
+            for callback in self.observers:
+                callback(event)
+        self.held = ()
 
     async def call(self, method, params=None):
         params = params or {}
@@ -178,7 +197,8 @@ class SimulatedCore:
             self.provider["state"] = "disconnected" if params["args"]["on"] else "connected"
             return {}
         if method == "workspace.snapshot":
-            return {"providers": {"herdr": {"state": "connected"}, "codex-x": dict(self.provider)}}
+            return {"epoch": "e", "seq": self.seq,
+                    "providers": {"herdr": {"state": "connected"}, "codex-x": dict(self.provider)}}
         if method == "resource.list":
             return {"resources": deepcopy(list(self.resources.values()))}
         if method == "resource.spawn":
@@ -192,13 +212,21 @@ class SimulatedCore:
         raise AssertionError(method)
 
 
-def run_control(late_return, own_end=None, foreign=False, native_b_lives=False, before_own_exit=None):
+def run_control(late_return, own_end=None, foreign=False, native_b_lives=False, before_own_exit=None, buffered=False):
     core = SimulatedCore(late_return, own_end, foreign, native_b_lives, before_own_exit)
+    core.buffered = buffered
     class Observer:
         def on(self, method, callback): core.observers = (*core.observers, callback)
         async def call(self, method, params=None):
-            return {"epoch": "e", "seq": 0} if method == "workspace.snapshot" else {}
+            return {"epoch": "e", "seq": core.seq} if method == "workspace.snapshot" else {}
     async def viewer(): return Observer()
+    import signal as _signal
+    def signal_owned(process, sig):  # bridge B (pid 98) frozen: nothing it publishes until SIGCONT
+        if process and process.get("pid") == 98 and sig == _signal.SIGCONT and getattr(core, "own_end_pending", False):
+            core.own_end_pending = False
+            core.own_end(core)
+            core.flush()  # a delayed observer receives everything, in order, only now
+        return True
     ledger = []
     class NativeA:
         endpoint, path = "/r/c.sock", "/r/native.jsonl"
@@ -218,7 +246,8 @@ def run_control(late_return, own_end=None, foreign=False, native_b_lives=False, 
             if verb == "state": return {"pid": 99}
             if verb == "host_exit":
                 core.before_own_exit(core)  # whatever arrives while the exit request is still in flight
-                ledger_b.append({"kind": "exit", "ns": time.monotonic_ns()}); core.own_end(core)
+                ledger_b.append({"kind": "exit", "ns": time.monotonic_ns()})
+                core.own_end_pending = True  # the bridge publishes its own end once it runs again
             if verb == "turn" and core.resources.get("r6", {}).get("available"):
                 agent = core.resources["r6"]["data"]["agent"]
                 if agent["state"] == "running":
@@ -256,7 +285,7 @@ def run_control(late_return, own_end=None, foreign=False, native_b_lives=False, 
         viewer=viewer)
     async def cache_then(ctx_, predicate, description):
         await listing(); return await lifecycle_wait(ctx_, predicate, description)
-    with patch.object(m, "Native", NativeB), patch.object(m, "signal_owned", lambda process, sig: True), \
+    with patch.object(m, "Native", NativeB), patch.object(m, "signal_owned", signal_owned), \
          patch.object(m, "SETUP_S", 0.2), \
          patch.object(m, "executable", lambda process: {"sha256": "img"}), patch.object(m, "ledger_summary", lambda n: {}), \
          patch.object(cases, "lifecycle_wait", cache_then), patch.object(m.asyncio, "sleep", AsyncMock()), \
@@ -317,8 +346,20 @@ class WholeHandlerControls(unittest.TestCase):
                 core.publish(rid)
         with self.assertRaises(CheckFailed) as caught:
             run_control(lambda core: None, before_own_exit=delayed_old_end)
-        self.assertIn("before its own native host exited", str(caught.exception))
+        self.assertIn("PUBLISHED before the replacement's own end could exist", str(caught.exception))
         self.assertEqual(getattr(caught.exception, "component", None), "adapter")
+
+    def test_buffered_observer_cannot_hide_a_premature_end(self):
+        """vqro-lead-secondary corrections-l3-delay-finding: an observer that receives every event late, in order,
+        must still see the early ends as premature (ordered by core publication seq, not arrival)."""
+        def delayed_old_end(core):
+            for rid in ("r6", "r7", "r8"):
+                core.resources[rid]["data"]["agent"]["lifecycle"] = "ended"
+                core.publish(rid)
+        with self.assertRaises(CheckFailed) as caught:
+            run_control(lambda core: None, before_own_exit=delayed_old_end, buffered=True)
+        self.assertEqual(getattr(caught.exception, "component", None), "adapter")
+        run_control(lambda core: None, buffered=True)  # a healthy but delayed observer still passes the genuine run
 
     def test_replacement_native_still_live_is_never_green(self):
         with self.assertRaises(CheckFailed) as caught:
