@@ -11,6 +11,7 @@ import json
 
 from .cases import flood_retained, has_message, process_rss
 from .results import check, HarnessGap, CheckFailed, FixtureFailed
+from .wire import WireFailure
 
 
 def cursor_valid(cursor):
@@ -199,6 +200,32 @@ def viewer_budget(ctx, facts):
                             'resource_bound_absent_is_unknown': 'max_viewers' not in cap}
 
 
+def observer_health(view, *, deliberately_closed=False):
+    """Fatal reader/integrity errors never become ordinary missing evidence."""
+    error = view.peer.failure
+    # Peer.close deliberately feeds EOF before cancelling its reader task.
+    # This one local-close consequence is allowed ONLY after pre-release health
+    # was checked. Any other wire error, and every reducer error, stays fatal.
+    own_eof = (deliberately_closed and isinstance(error, WireFailure)
+               and str(error) == 'connection closed; pending effects are not replayed')
+    check(error is None or own_eof, 'O10 A observer RPC/reader failure: ' + str(error))
+    check(view.reducer.failure in (None, 'retention', 'slow_consumer'),
+          'O10 A observer item corruption: ' + str(view.reducer.failure))
+    check(view.reducer.epoch == view.epoch and cursor_valid(view.reducer.cursor),
+          'O10 A observer lost its installed epoch/cursor')
+    if view.closed is None:
+        check(view.reducer.failure is None, 'O10 A live observer has an unreported reducer failure')
+    else:
+        check(view.closed in ('retention', 'slow_consumer') and view.reducer.failure == view.closed,
+              'O10 A unexpected observer retirement is not normal missing evidence')
+        notice = view.close_notice or {}
+        raw = notice.get('reason')
+        reason = (raw.get('gap') if raw.get('reason') == 'gap' else raw.get('reason')) if isinstance(raw, dict) else raw
+        method = 'stream.gap' if view.closed == 'retention' else 'stream.closed'
+        check(notice.get('method') == method and reason == view.closed,
+              'O10 A observer retirement label does not match its raw public notice')
+
+
 async def provider_retention(ctx, declaration):
     facts = await ctx.facts()
     count, budget = viewer_budget(ctx, facts)
@@ -223,6 +250,12 @@ async def provider_retention(ctx, declaration):
         # Leave one stream slot for the public boundary snapshot. Prefer an
         # unneeded healthy observer; retain any already observed gap peer for
         # its actual old-connection RPC/recovery proof. No pressure restart.
+        ctx.evidence.append({'kind': 'o10_provider_pre_release', 'observations': [
+            {'closed': view.closed, 'notice': deepcopy(view.close_notice), 'failure': view.reducer.failure,
+             'peer_failure': str(view.peer.failure) if view.peer.failure is not None else None,
+             'cursor': deepcopy(view.reducer.cursor)} for view in views]})
+        for view in views:
+            observer_health(view)
         released = next((view for view in reversed(views) if view.closed is None), None)
         if released is not None:
             await released.peer.close()
@@ -237,13 +270,23 @@ async def provider_retention(ctx, declaration):
                              'not_native_capability_or_wire_fidelity_claim': True,
                              'observations': [{'closed': view.closed, 'notice': deepcopy(view.close_notice),
                                  'failure': view.reducer.failure, 'cursor': deepcopy(view.reducer.cursor),
+                                 'peer_failure': str(view.peer.failure) if view.peer.failure is not None else None,
                                  'released_for_boundary_slot': view is released,
                                  'wire_bytes': view.reducer.offset} for view in views],
                              'wait_errors': [type(value).__name__ for value in outcomes if isinstance(value, BaseException)]})
-        for view in eligible:
-            check(view.reducer.failure in (None, 'retention', 'slow_consumer'),
-                  'O10 A cannot mask item corruption as a missing provider gap')
-        candidates = [view for view in eligible if view.closed == 'retention']
+        for view in views:
+            observer_health(view, deliberately_closed=view is released)
+        timed_out = []
+        for view, outcome in zip(eligible, outcomes):
+            if isinstance(outcome, asyncio.TimeoutError):
+                # Only an otherwise healthy observation timeout is missing
+                # evidence. Do not grade a late notice on that timed-out view.
+                timed_out.append(view)
+            elif isinstance(outcome, BaseException):
+                if isinstance(outcome, asyncio.CancelledError):
+                    raise outcome
+                raise CheckFailed('O10 A fatal observer wait: ' + type(outcome).__name__ + ': ' + str(outcome)) from outcome
+        candidates = [view for view in eligible if view not in timed_out and view.closed == 'retention']
         if not candidates:
             raise MissingProviderGap('O10 A no actual provider-cursor retention gap under the approved fast-viewer pressure')
         target = candidates[0]
@@ -257,6 +300,7 @@ async def provider_retention(ctx, declaration):
         ctx.evidence.append({'kind': 'o10_provider_final_observations',
                              'observations': [{'closed': view.closed, 'notice': deepcopy(view.close_notice),
                                  'failure': view.reducer.failure, 'cursor': deepcopy(view.reducer.cursor),
+                                 'peer_failure': str(view.peer.failure) if view.peer.failure is not None else None,
                                  'released_for_boundary_slot': view is released} for view in views]})
         for view in views:
             await view.peer.close()

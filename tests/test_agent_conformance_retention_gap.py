@@ -390,6 +390,77 @@ class PressureControls(unittest.IsolatedAsyncioTestCase):
             await probe.public_retention_bounds(ctx)
         self.assertEqual(ctx.B_calls, 0)
 
+    async def test_released_observer_corruption_halts_B_with_or_without_other_gap(self):
+        for gap in (True, False):
+            ctx = PressureContext(gap=gap); original = ctx.call
+            async def corrupt_last(method, **kwargs):
+                result = await original(method, **kwargs)
+                if method == 'retain' and 'chunks' in kwargs:
+                    live = [view for view in ctx.views if not view.peer.closed and view.closed is None]
+                    live[-1].reducer.failure = 'bad_append_base'
+                return result
+            ctx.native = NS(call=corrupt_last)
+            with self.subTest(gap=gap), patch.object(probe, 'process_rss', return_value=1000), self.assertRaises(CheckFailed):
+                await probe.public_retention_bounds(ctx)
+            self.assertEqual((ctx.B_calls, len(ctx.after)), (0, 0))
+            observations = next(row for row in ctx.evidence if row.get('kind') == 'o10_provider_pre_release')['observations']
+            self.assertTrue(any(row['failure'] == 'bad_append_base' for row in observations))
+
+    async def test_non_target_failed_peer_halts_B_even_with_other_retention(self):
+        for gap in (True, False):
+            ctx = PressureContext(gap=gap); original = ctx.call
+            async def failed_peer(method, **kwargs):
+                result = await original(method, **kwargs)
+                if method == 'retain' and 'chunks' in kwargs:
+                    other = next(view for view in ctx.views if not view.peer.closed and view is not ctx.target)
+                    other.peer.failure = probe.WireFailure('non-target reader failed')
+                return result
+            ctx.native = NS(call=failed_peer)
+            with self.subTest(gap=gap), patch.object(probe, 'process_rss', return_value=1000), self.assertRaises(CheckFailed):
+                await probe.public_retention_bounds(ctx)
+            self.assertEqual((ctx.B_calls, len(ctx.after)), (0, 0))
+
+    async def test_non_target_unflagged_fatal_wait_halts_B(self):
+        for gap in (True, False):
+            ctx = PressureContext(gap=gap); original = ctx.call
+            async def fatal_wait(predicate, **kwargs): raise probe.WireFailure('unflagged malformed frame')
+            async def set_wait(method, **kwargs):
+                result = await original(method, **kwargs)
+                if method == 'retain' and 'chunks' in kwargs:
+                    other = next(view for view in ctx.views if not view.peer.closed and view is not ctx.target)
+                    other.peer.wait = fatal_wait
+                return result
+            ctx.native = NS(call=set_wait)
+            with self.subTest(gap=gap), patch.object(probe, 'process_rss', return_value=1000), self.assertRaises(CheckFailed):
+                await probe.public_retention_bounds(ctx)
+            self.assertEqual((ctx.B_calls, len(ctx.after)), (0, 0))
+            receipt = next(row for row in ctx.evidence if row.get('kind') == 'o10_provider_observers')
+            self.assertIn('WireFailure', receipt['wait_errors'])
+
+    async def test_healthy_timeout_is_only_missing_evidence_not_fatal(self):
+        ctx = PressureContext(gap=False); original = ctx.call
+        async def timeout(predicate, **kwargs): raise asyncio.TimeoutError('healthy observation timeout')
+        async def set_wait(method, **kwargs):
+            result = await original(method, **kwargs)
+            if method == 'retain' and 'chunks' in kwargs:
+                other = next(view for view in ctx.views if not view.peer.closed and view is not ctx.target)
+                other.peer.wait = timeout
+            return result
+        ctx.native = NS(call=set_wait)
+        with patch.object(probe, 'process_rss', return_value=1000), self.assertRaises(probe.MissingProviderGap):
+            await probe.public_retention_bounds(ctx)
+        self.assertEqual((ctx.B_calls, len(ctx.after)), (1, 1))
+
+    def test_only_deliberate_release_allows_exact_own_EOF(self):
+        view = gap_view(); view.epoch = view.reducer.epoch
+        view.peer.failure = probe.WireFailure('connection closed; pending effects are not replayed')
+        with self.assertRaises(CheckFailed): probe.observer_health(view)
+        probe.observer_health(view, deliberately_closed=True)
+        view.peer.failure = probe.WireFailure('bad JSON is not own close')
+        with self.assertRaises(CheckFailed): probe.observer_health(view, deliberately_closed=True)
+        view.reducer.failure = 'bad_append_base'; view.peer.failure = None
+        with self.assertRaises(CheckFailed): probe.observer_health(view, deliberately_closed=True)
+
     async def test_failed_A_recovery_does_not_start_B(self):
         ctx = PressureContext(); original = ctx.attach
         async def wrong_mode(**kwargs):
