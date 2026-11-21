@@ -717,7 +717,7 @@ class WholeHandlerControls(unittest.TestCase):
 
 class O12SnapshotFrontier(unittest.TestCase):
     """Real NDJSON reducers, unpatched random challenge, mocked native/public transport only."""
-    def run_case(self, mode, *, retained=None):
+    def run_case(self, mode, *, retained=None, notices=(), early_notices=False):
         import asyncio, hashlib, json
         from types import SimpleNamespace
         from agent_conformance.wire import ItemReducer
@@ -771,6 +771,7 @@ class O12SnapshotFrontier(unittest.TestCase):
             view = SimpleNamespace(initial='continue' if mode == 'continue' else 'reset', reducer=new,
                                    peer=peer, stream=2, closed=None, close_notice=None)
             views.append(view)
+            if early_notices: feed(new, *({'op': 'notice', 'value': value} for value in notices))
             return view
         async def wait(view, predicate, **params):
             waits.append(params['timeout'])
@@ -781,7 +782,8 @@ class O12SnapshotFrontier(unittest.TestCase):
             if mode == 'late_split': feed(old, put(2, value(text[:6000], flag=True), seq=2))
             data = value(text[:6000], flag=True)
             rows = [put(6 if historical else 2, data)]
-            if mode in ('negative', 'partial'): rows = [put(2, value(text[:6000], final=mode == 'negative'))]
+            if mode in ('negative', 'partial', 'notice_retention'):
+                rows = [put(2, value(text[:6000], final=mode != 'partial'))]
             if mode == 'same_rev': rows = [put(5, data)]
             if mode == 'oldbody': rows = [put(6, value('historic body', flag=True))]
             if mode == 'full': rows = [put(2, value(text[:35000])), put(1, value(text[35000:], position=2), id='m2')]
@@ -791,6 +793,7 @@ class O12SnapshotFrontier(unittest.TestCase):
             if mode == 'staged':
                 feed(view.reducer, {'op': 'snapshot', 'phase': 'begin', 'epoch': 'e', 'coverage': 'tail'}, *rows)
             else: cut(view.reducer, rows, epoch='other' if mode == 'epoch' else 'e', seq=2)
+            if not early_notices: feed(view.reducer, *({'op': 'notice', 'value': value} for value in notices))
             if mode == 'second_gap': gap(view); raise CheckFailed('second retention')
             if not predicate(view.reducer): raise CheckFailed('snapshot not installed')
         ctx = SimpleNamespace(evidence=retained if retained is not None else [], native=Native(), attach=attach, wait_view=wait)
@@ -843,6 +846,34 @@ class O12SnapshotFrontier(unittest.TestCase):
         self.assertEqual(raised.exception.component, 'adapter')
         self.assertTrue(retained[-1]['public_frontier'])
         self.assertIsNone(retained[-1]['observation']['wait_error'])
+
+    def test_snapshot_notice_window_preserves_warning_before_cache_eviction(self):
+        warning = {'severity': 'warn', 'text': 'assistant output omitted: too large'}
+        info = {'severity': 'info', 'text': 'progress update'}
+        for mode in ('notice_retention', 'negative'):
+            for early in (False, True):
+                for n, last in ((0, False), (63, False), (64, False), (64, True)):
+                    notices = [info] * n + [warning] if last else [warning] + [info] * n
+                    with self.subTest(mode=mode, early=early, n=n, last=last):
+                        evidence, _ = self.run_case(mode, notices=notices, early_notices=early)
+                        self.assertTrue(evidence[-1]['disclosure_observed'])
+                        self.assertEqual(evidence[-1]['notice_witnesses'][0]['value'], warning)
+                        self.assertFalse(evidence[-1]['notice_evidence_lost'])
+
+    def test_snapshot_notice_unknown_early_prefix_is_gap_but_recorded_window_survives_trace_loss(self):
+        from agent_conformance.results import HarnessGap
+        warning = {'severity': 'warn', 'text': 'assistant output omitted: too large'}
+        info = {'severity': 'info', 'text': 'progress update'}
+        for mode in ('notice_retention', 'negative'):
+            retained = []
+            with self.subTest(mode=mode), self.assertRaisesRegex(HarnessGap, 'notice observation gap'):
+                self.run_case(mode, notices=[warning] + [info] * 200, early_notices=True, retained=retained)
+            self.assertTrue(retained[-1]['notice_evidence_lost'])
+            self.assertEqual(retained[-1]['notice_witnesses'], [])
+            evidence, _ = self.run_case(mode, notices=[warning] + [info] * 200)
+            self.assertTrue(evidence[-1]['disclosure_observed'])
+            self.assertEqual(evidence[-1]['notice_witnesses'][0]['value'], warning)
+            self.assertGreater(evidence[-1]['observation']['trace_dropped'], 0)
 
     def test_uncertain_native_call_is_never_replayed_or_recovered(self):
         with self.assertRaisesRegex(RuntimeError, 'native outcome unknown'):

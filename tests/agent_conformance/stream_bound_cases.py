@@ -872,6 +872,36 @@ def o12_retention_gap(health):
             and health.get("evidence_error") is None)
 
 
+def o12_notice_witnesses(reducer, witness):
+    out = []
+    for index, value in enumerate(getattr(reducer.notices, "since", None) or [], 1):
+        text = notice_value_text(value)
+        if text is not None and adapter_preserves_or_marks([], witness["text_bytes"], witness["text_sha256"], other_texts=[text]):
+            out.append({"window_index": index, "value": deepcopy(value)})
+            if len(out) == 16:
+                break
+    return out
+
+
+def o12_start_notice_window(reducer):
+    """Bootstrap receipts delivered before attach returned, then observe appends during the snapshot wait.
+    Healthy op:notice records are applied before sequence handling; unlike puts they cannot be ignored duplicates.
+    A missing trace prefix makes negative inference unsafe, even when the cache still looks full/healthy.
+    """
+    cache = list(reducer.notices)
+    trace = [deepcopy(row.get("value")) for row in reducer.trace if row.get("op") == "notice" and "seq" not in row]
+    complete = (reducer.trace_dropped == 0 and reducer.failure is None
+                and len(cache) <= len(trace) and json_equal(cache, trace[-len(cache):] if cache else []))
+    receipts = trace if complete else cache
+    window = ReceivedNotices(receipts, maxlen=getattr(reducer.notices, "maxlen", None) or 64)
+    window.received = len(receipts)  # Known client receipts, not a native sequence; missing prefix is explicit below.
+    window.since = receipts[:window.RECORD]
+    window.lost = not complete or len(receipts) > window.RECORD
+    reducer.notices = window
+    return {"bootstrap_trace_notices": len(trace), "bootstrap_cache_notices": len(cache),
+            "bootstrap_trace_dropped": reducer.trace_dropped, "bootstrap_complete": complete}
+
+
 async def o12_snapshot_once(ctx, old, baseline, expected, needle, witness, first, deadline, *, trigger):
     recovery = {"kind": "o12_snapshot_observation", "trigger_kind": trigger, "attempt": 1,
                 "trigger": deepcopy(first["observation"]), "attach": {"after": None, "seed": None},
@@ -886,6 +916,7 @@ async def o12_snapshot_once(ctx, old, baseline, expected, needle, witness, first
             if view is old or view.reducer is old.reducer or view.initial != "reset":
                 raise HarnessGap("retention reattach did not supply a fresh snapshot reducer")
             recorder = AppliedFlagPuts(view.reducer)
+            recovery["notice_window"] = o12_start_notice_window(view.reducer)
             await ctx.wait_view(view, lambda reducer: reducer.snapshots > 0,
                                 timeout=max(0, min(2, deadline - time.monotonic())))
             if view.reducer.snapshots < 1 or view.reducer.staged is not None:
@@ -902,11 +933,8 @@ async def o12_snapshot_once(ctx, old, baseline, expected, needle, witness, first
         # Keep ORIGINAL pre-emission entity/body/revision baselines. All notices on this new,
         # unseeded stream arrived after the emission; their receipt numbering starts at zero.
         recovered_baseline = dict(baseline)
-        notices = list(view.reducer.notices)
-        limit = getattr(view.reducer.notices, "maxlen", None) or 64  # ItemReducer's declared bounded notice cache.
-        view.reducer.notices = ReceivedNotices(notices, maxlen=limit)
-        view.reducer.notices.since = notices
-        view.reducer.notices.lost = len(notices) >= limit and view.reducer.trace_dropped > 0
+        recovery["notice_window"].update(received=view.reducer.notices.received,
+                                          recorded=len(view.reducer.notices.since), lost=view.reducer.notices.lost)
         recovered_baseline[NOTICES] = {"shown": [], "body": "", "received": 0}
         recovered_baseline[OBSERVATION] = {**baseline[OBSERVATION], "applied_flags": recorder, "applied_received": 0}
         recovery["snapshot_installed"] = True
@@ -961,6 +989,7 @@ async def o12_capture(ctx, view, recorder, baseline, expected, needle, witness, 
                          "applied_flag_puts": deepcopy(recorder.records),
                          "incomplete_witnesses": [row for row in affected if row["fresh_incomplete"]],
                          "disclosure_observed": verdict, "notice_evidence_lost": getattr(view.reducer.notices, "lost", False),
+                         "notice_witnesses": o12_notice_witnesses(view.reducer, witness),
                          "observation": health}
     ctx.evidence.append(record)
     return record
