@@ -1792,3 +1792,6 @@ async def serialized_preflight(ctx):
             if task is not None and not task.done():
                 task.cancel()
         await asyncio.gather(*(task for task in (first, interrupted) if task is not None), return_exceptions=True)
+
+
+from . import view_causality_cases  # noqa: E402,F401  (registers C11/C12)
