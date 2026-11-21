@@ -85,7 +85,11 @@ impl Starts {
     pub async fn start(&self,args:Value,deadline:Instant,receipt:Receipt) -> Admission { self.prompt(args,deadline,receipt,false).await }
     pub async fn admit(&self,args:Value,deadline:Instant,receipt:Receipt) -> Admission { self.prompt(args,deadline,receipt,true).await }
     async fn prompt(&self,args:Value,deadline:Instant,receipt:Receipt,allow_busy:bool) -> Admission {
-        let Ok(guard) = self.gate.clone().try_lock_owned() else { return refuse("busy","a native start preflight is unresolved"); };
+        // Never wait for the gate: it also serializes session switches and commands, and input validated for one
+        // session must not land in the next. A momentary overlap is a plain busy the caller can retry.
+        let Ok(guard) = self.gate.clone().try_lock_owned() else {
+            return refuse("busy",if allow_busy {"momentary overlap with another native send or session change; retry"} else {"a native start preflight is unresolved"});
+        };
         let baseline = {
             let mut current = self.signals.current.lock().unwrap();
             if current.ended || (!allow_busy && !current.idle()) { return refuse("busy","native idle is not established"); }
