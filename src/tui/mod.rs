@@ -1217,17 +1217,19 @@ impl App {
     }
 
     /// A panel's rows and, when a list row with a detail panel is selected, that detail's rows, for
-    /// `toggle_watch`/`fire_toggles`: a lazy row may sit in either. Ids are scoped so they never collide: `\0r\0<id>`
-    /// for the list, `\0d\0<selected list row>\0<id>` for its detail (selecting another row is not a toggle).
+    /// `toggle_watch`/`fire_toggles`: a lazy row may sit in either. Keys are scoped so they never collide, whatever
+    /// characters ids hold: `r<id>` for the list, `d<len>:<owner><id>` for the detail of the selected list row
+    /// `<owner>` (its byte length first, so owner and id cannot trade characters). Selecting another row changes the
+    /// owner, so it is never a toggle.
     fn watched_rows(&self, key: &str, view: &str) -> Vec<panel::Flat> {
         let value = self.panel_value(view);
         let st = self.pstate.get(key).cloned().unwrap_or_default();
-        let mut rows: Vec<panel::Flat> = panel::rows(&value, &st).into_iter().map(|mut r| { r.id = format!("\0r\0{}", r.id); r }).collect();
+        let mut rows: Vec<panel::Flat> = panel::rows(&value, &st).into_iter().map(|mut r| { r.id = format!("r{}", r.id); r }).collect();
         if let Some((owner, detail)) = panel::selected_detail(&value, &st) {
             let mut root = st.clone();
             panel::sync_detail(&mut root, &owner);
             let dst = root.detail.as_deref().cloned().unwrap_or_default();
-            rows.extend(panel::rows(&Arc::new(detail), &dst).into_iter().map(|mut r| { r.id = format!("\0d\0{owner}\0{}", r.id); r }));
+            rows.extend(panel::rows(&Arc::new(detail), &dst).into_iter().map(|mut r| { r.id = format!("d{}:{owner}{}", owner.len(), r.id); r }));
         }
         rows
     }
@@ -4422,6 +4424,18 @@ mod tests {
                 "detail_panel":{"items":[{"id":"deep","text":"deep","has_children":true,"expanded":false,"on_toggle":{"command":"x.detail"}}]}}]}));
         assert!(!app.panel_key("test", "test", KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE), json!({})));
         assert!(app.message.is_empty(), "unchanged unhandled key invoked a callback: {}", app.message);
+    }
+
+    #[tokio::test]
+    async fn detail_owner_and_row_ids_cannot_trade_characters() {
+        // vqro-lead-secondary (cef follow-up): owner "a" + row "b\0c" and owner "a\0b" + row "c" made one key.
+        let (mut app, _) = app();
+        let detail = |id: &str, command: &str, expanded| json!({"items":[{"id":id,"text":"deep","has_children":true,"expanded":expanded,"on_toggle":{"command":command}}]});
+        app.ws.entries.insert("view/test".into(), json!({"kind":"panel","list_detail":{"requires":["list_detail"]},
+            "items":[{"id":"a","text":"A","detail_panel":detail("b\0c","x.a",false)},
+                     {"id":"a\0b","text":"B","detail_panel":detail("c","x.b",true)}]}));
+        assert!(app.panel_key("test", "test", KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), json!({})));
+        assert!(app.message.is_empty(), "owner/id fields aliased on selection: {}", app.message);
     }
 
     #[tokio::test]
