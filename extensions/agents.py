@@ -319,8 +319,11 @@ class Conversation:
 
     def data(self, data):
         with self.lock:
-            now = int(time.time() * 1000)
-            self.notices.extend((now, n) for n in self.view.feed(data))
+            now, epoch = int(time.time() * 1000), self.view.epoch
+            received = self.view.feed(data)
+            if self.view.epoch != epoch:  # a new epoch or session: earlier live notices are about something else
+                self.notices.clear()
+            self.notices.extend((now, n) for n in received)
             broken = self.view.broken
             if broken and self.view.errors["over_bound"]:
                 self.too_big = True
@@ -689,7 +692,7 @@ class Agents:
             if c.view.epoch is None:
                 return notes + [{"type": "text", "style": "dim", "text": "Loading the conversation…"}]
             session = agent_facts(r).get("session") if isinstance(agent_facts(r).get("session"), dict) else {}
-            live = agent_transcript.notice_rows(c.notices)
+            live = agent_transcript.notice_rows(c.notices, names.agent_name(r["id"]))
             out = notes + agent_transcript.rows(c.view.entities, names, c.view.coverage, self.view_of(r["id"]),
                                                 session.get("cwd") if isinstance(session.get("cwd"), str) else None) + live
         if c.stream is None and r.get("available") is not False:

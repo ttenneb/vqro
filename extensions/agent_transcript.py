@@ -512,7 +512,7 @@ SEVERITY_STYLE = {"warn": "warn", "warning": "warn", "error": "error"}
 ENTITY_LINES = 12  # an entity of another kind shows at most this many lines of what it says
 
 
-def entity_rows(kind, eid, value):
+def entity_rows(kind, eid, value, who="Agent"):
     """An entity of a kind the pane has no special view for (a `notice`, a kind added later): its `text` and typed
     `content`, styled by `severity`, with the kind named unless it is a notice. Hidden metadata (`native`, ids) is
     never shown and never stands in for text: an entity with nothing to say shows nothing."""
@@ -522,11 +522,12 @@ def entity_rows(kind, eid, value):
         body += content_rows(value["content"], style, ENTITY_LINES)
     if not body:
         return []
-    label = "· " + ("" if kind == "notice" else clip(plain(str(kind)), 40) + ": ")
+    # Named for the agent that sent it, so it can't pass for one of the pane's own lines (review P3).
+    label = "· " + clip(plain(str(who)), 60) + " " + ("notice" if kind == "notice" else clip(plain(str(kind)), 40)) + ": "
     return [dict(body[0], id=f"e:{clip(plain(str(kind)), 40)}:{eid}", text=label + str(body[0].get("text", "")))] + body[1:]
 
 
-def notice_rows(notices):
+def notice_rows(notices, who="Agent"):
     """Live `notice` records (agent-v0 section 4: not entities, no seq), newest last, as the pane received them."""
     out = []
     for at, value in notices:
@@ -534,7 +535,8 @@ def notice_rows(notices):
         if isinstance(text, str) and text.strip():
             style = SEVERITY_STYLE.get(value.get("severity"), "dim") if isinstance(value, dict) else "dim"
             out.append({"type": "text", "wrap": True, "style": style,
-                        "text": "· " + (when(at) + " " if when(at) else "") + clip(plain(text.strip()), NOTICE_BYTES)})
+                        "text": "· " + clip(plain(str(who)), 60) + " notice" + (" · " + when(at) if when(at) else "") + ": "
+                                + clip(plain(text.strip()), NOTICE_BYTES)})
     return out
 
 
@@ -661,7 +663,7 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
 
     def other_kind(kind, eid, value):
         """A kind this pane has no view of its own for (a notice, a later kind): what it says (entity_rows)."""
-        rows_ = entity_rows(kind, eid, value)
+        rows_ = entity_rows(kind, eid, value, names.agent_name(names.agent))
         if rows_:
             end_tools()
             flush_hidden()

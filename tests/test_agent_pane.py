@@ -176,8 +176,8 @@ class TranscriptRows(unittest.TestCase):
                ("state", "current"): {"state": "idle", "text": "facts, shown elsewhere"}}
         rows = self.rows(say)
         texts = [r.get("text") for r in rows]
-        self.assertEqual(texts, ["Pi", "partial answer", "", "· x.acme.step: indexing the repo", "",
-                                 "· assistant output omitted: too large"],
+        self.assertEqual(texts, ["Pi", "partial answer", "", "· Pi x.acme.step: indexing the repo", "",
+                                 "· Pi notice: assistant output omitted: too large"],
                          "in timeline order when positioned, after it when not; hidden metadata never shown")
         self.assertEqual(rows[-1]["style"], "warn", "severity styles it")
 
@@ -590,7 +590,9 @@ class AgentPane(unittest.TestCase):
             self.feed(line({"op": "notice", "value": {"text": f"rate limited {i}", "severity": "warn"}}))
         shown = [t for t in self.texts() if t and "rate limited" in t]
         self.assertEqual(len(shown), 3, "the newest three")
-        self.assertTrue(shown[-1].startswith("· ") and shown[-1].endswith("rate limited 4"))
+        self.assertTrue(shown[-1].startswith("· Pi notice · ") and shown[-1].endswith(": rate limited 4"), shown[-1])
+        self.feed(snapshot(CONVERSATION).replace(b'"epoch": "e1"', b'"epoch": "e2"'))
+        self.assertFalse(any(t and "rate limited" in t for t in self.texts()), "a new epoch clears earlier live notices")
 
     def test_the_waiting_line_and_the_runtimes_queue_are_pinned(self):
         items = self.make_v0(requests=[{"request": "q1", "revision": 1, "method": "confirm", "title": "Run git push?", "params": {}}],
