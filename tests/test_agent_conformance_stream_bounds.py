@@ -66,5 +66,42 @@ class AdapterPreservesOrMarks(unittest.TestCase):
         self.assertFalse(m.adapter_preserves_or_marks([], self.bytes, self.sha), "nothing at all")
 
 
+class ViewerPin(unittest.TestCase):
+    """Only a kit-pinned viewer is conformance authority: missing or mismatched hashes refuse before any copy."""
+
+    def run_install(self, manifest_extra, tamper=False):
+        import asyncio, hashlib, tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        from agent_conformance.results import HarnessGap
+        with tempfile.TemporaryDirectory() as tmp:
+            source, root = Path(tmp) / "viewer", Path(tmp) / "root"
+            source.mkdir(); (root / "ext").mkdir(parents=True)
+            for name, body in (("agents.py", b"print('agents')\n"), ("vqro_items.py", b"ITEMS = 1\n")):
+                (source / name).write_bytes(body)
+            pins = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in source.glob("*.py")}
+            if tamper: (source / "agents.py").write_bytes(b"print('edited')\n")
+            calls = []
+            async def call(method, params): calls.append(method); return {}
+            ctx = SimpleNamespace(root=root, manifest=dict({"viewer_extensions": str(source)}, **manifest_extra(pins)),
+                                  evidence=[], peer=SimpleNamespace(call=call))
+            try:
+                asyncio.run(m.install_production_viewer(ctx))
+                return "installed", calls, sorted(p.name for p in (root / "ext").glob("*.py"))
+            except HarnessGap as gap:
+                return "gap: " + str(gap), calls, sorted(p.name for p in (root / "ext").glob("*.py"))
+
+    def test_pinned_viewer_installs(self):
+        result, calls, copied = self.run_install(lambda pins: {"viewer_revision": "kit-1", "viewer_sha256": pins})
+        self.assertEqual((result, calls, copied), ("installed", ["workspace.apply"], ["agents.py", "vqro_items.py"]))
+
+    def test_unpinned_or_edited_viewer_is_refused_before_copy(self):
+        for extra, tamper in ((lambda pins: {}, False), (lambda pins: {"viewer_sha256": pins}, False),
+                              (lambda pins: {"viewer_revision": "kit-1", "viewer_sha256": pins}, True)):
+            result, calls, copied = self.run_install(extra, tamper)
+            self.assertTrue(result.startswith("gap"), result)
+            self.assertEqual((calls, copied), ([], []), "nothing copied or enabled")
+
+
 if __name__ == "__main__":
     unittest.main()

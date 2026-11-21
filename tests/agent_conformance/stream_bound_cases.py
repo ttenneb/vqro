@@ -121,6 +121,17 @@ asyncio.run(main())
 '''
 
 
+async def poll(predicate, timeout, interval=0.2):
+    """Bounded polling of an async or sync predicate; returns its first truthy value or None at the deadline."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if asyncio.iscoroutine(value): value = await value
+        if value: return value
+        await asyncio.sleep(interval)
+    return None
+
+
 def provider_log(path):
     rows = []
     if Path(path).exists():
@@ -151,15 +162,27 @@ async def install_production_viewer(ctx):
     """Copy the pinned production agents extension into the private fixture and enable it by ordinary configuration."""
     import hashlib, shutil
     source = ctx.manifest.get("viewer_extensions")
+    pinned = ctx.manifest.get("viewer_sha256")
+    revision = ctx.manifest.get("viewer_revision")
     if not source or not Path(source).is_absolute() or not (Path(source) / "agents.py").is_file():
         raise HarnessGap("O14 needs the pinned production agents viewer source (manifest viewer_extensions with "
                          "agents.py, vqro_items.py and their SDK); none was declared")
+    # TEST-ONLY path input, never a capability: only a kit-pinned viewer is conformance authority.
+    if not isinstance(pinned, dict) or not pinned or not isinstance(revision, str) or not revision:
+        raise HarnessGap("O14 viewer source is not pinned (manifest viewer_revision and viewer_sha256 for every copied "
+                         "*.py are required; an arbitrary caller-edited viewer is not accepted)")
     ext = Path(ctx.root) / "ext"
-    hashes = {}
-    for path in sorted(Path(source).glob("*.py")):
-        data = path.read_bytes(); (ext / path.name).write_bytes(data)
-        hashes[path.name] = hashlib.sha256(data).hexdigest()
-    ctx.evidence.append({"kind": "o14_production_viewer", "source": str(source), "sha256": hashes})
+    hashes = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(Path(source).glob("*.py"))}
+    if hashes != pinned:
+        mismatched = sorted(name for name in set(hashes) | set(pinned) if hashes.get(name) != pinned.get(name))
+        raise HarnessGap("O14 viewer source differs from its pinned kit hashes: " + ", ".join(mismatched[:8]))
+    for name in hashes:
+        data = (Path(source) / name).read_bytes()
+        if hashlib.sha256(data).hexdigest() != pinned[name]:
+            raise HarnessGap("O14 viewer file changed while copying: " + name)
+        (ext / name).write_bytes(data)
+    ctx.evidence.append({"kind": "o14_production_viewer", "source": str(source), "viewer_revision": revision,
+                         "sha256": hashes, "verified_against_pin": True, "test_only_path": True})
     await ctx.peer.call("workspace.apply", {"ops": [{"op": "set", "key": "extension/agents",
         "value": {"enabled": True, "argv": ["/usr/bin/python3", str(ext / "agents.py")]}}]})
     return ext
@@ -181,9 +204,19 @@ async def incompatible_viewers(ctx):
     await watcher.call("events.subscribe", {"view_content": {"prefixes": ["agents"]}})
     process, log = await start_scripted_provider(ctx, ext)
     try:
-        await asyncio.sleep(BACKOFF_WINDOW_S + 2)
-        listed = (await ctx.peer.call("resource.list", {"provider": "o14-scripted"}))["resources"]
-        ids = {row["backend_ref"]: row["id"] for row in listed}
+        # Bounded setup (the handler deadline is 45 s): the provider registers its 3 agents and the production viewer
+        # opens each stream at least once; then one back-off window is observed from the first open.
+        async def registered():
+            listed = (await ctx.peer.call("resource.list", {"provider": "o14-scripted"}))["resources"]
+            return {row["backend_ref"]: row["id"] for row in listed} if len(listed) >= len(SCENARIO_GRADES) else None
+        ids = await poll(registered, 10)
+        if not ids:
+            raise HarnessGap("O14 scripted provider did not register its agents within the bounded setup")
+        def first_opens():
+            refs = {row.get("ref") for row in provider_log(log) if row.get("kind") == "open"}
+            return refs >= set(SCENARIO_GRADES) or None
+        await poll(first_opens, 10)  # a stream the viewer never opened is graded below (opened == False)
+        await asyncio.sleep(BACKOFF_WINDOW_S)
         rows = provider_log(log)
         results = {}
         for ref, grade in SCENARIO_GRADES.items():
