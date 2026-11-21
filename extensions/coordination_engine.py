@@ -924,9 +924,11 @@ class Coordinator:
     def _caps(self, resource, native):
         return native.get("caps") or {}
 
-    def _eligibility(self, record, policy, *, at=None):
+    def _eligibility(self, record, policy, *, at=None, ordering_heads=None, frozen=None):
         agent = record["to"]["agent"]
-        if self._archive_frozen("message/" + record["delivery"]):
+        archived = (self._archive_frozen("message/" + record["delivery"]) if frozen is None
+                    else "message/" + record["delivery"] in frozen)
+        if archived:
             return "archive_pending"
         if record.get("handover_plan"):
             return "handover_pending"
@@ -963,7 +965,8 @@ class Coordinator:
             return "stale_guard"
         if guard.get("run") is not None and native.get("run") is not None and guard["run"] != native["run"]:
             return "stale_guard"
-        if self._ordering_predecessor(record, self._ordering_heads(self.records())):
+        heads = self._ordering_heads(self.records()) if ordering_heads is None else ordering_heads
+        if self._ordering_predecessor(record, heads):
             return "ordering_unknown"
         right = "send:" + (record.get("strategy") or record["mode"])
         if record.get("request_notice") is not None:
@@ -1046,6 +1049,9 @@ class Coordinator:
             if not any(record["state"] in PENDING for record in records):
                 return None
             work, policy = Working(self), self.policy()
+            # Scan-local derived facts only: never reused across claims, writes
+            # or native calls. Current rights/facts still follow their old path.
+            heads, frozen = self._ordering_heads(records), self._frozen_records(work.rows)
             in_flight = {r["to"]["agent"] for r in records if r["state"] == "claimed"} | set(self.native_inflight)
             eligible = []
             for record in records:
@@ -1053,7 +1059,7 @@ class Coordinator:
                     continue
                 if agent is not None and record["to"]["agent"] != agent:
                     continue
-                reason = self._eligibility(record, policy)
+                reason = self._eligibility(record, policy, ordering_heads=heads, frozen=frozen)
                 if reason == "archive_pending":
                     continue  # a dispatch hold must not invalidate frozen archive evidence
                 if (reason in ("integration_unavailable", "unsupported_mode", "origin_unsupported")
@@ -1316,8 +1322,10 @@ class Coordinator:
             def changed_bytes():
                 return sum(encoded(row["value"]) for row in work.changes.values() if row)
             eligible, unsupported, oversized, changed = [], 0, 0, 0
+            heads, frozen = self._ordering_heads(records), self._frozen_records(work.rows)
             for record in records:
-                if record["to"]["agent"] != agent or record["state"] not in PENDING or self._eligibility(record, policy, at=at) is not None:
+                if (record["to"]["agent"] != agent or record["state"] not in PENDING
+                        or self._eligibility(record, policy, at=at, ordering_heads=heads, frozen=frozen) is not None):
                     continue
                 reason = "unsupported_content" if any(block["type"] not in accept for block in record["content"]) else (
                     "too_large_for_consumer" if encoded(record["content"]) > max_bytes else None)
@@ -1975,9 +1983,7 @@ class Coordinator:
                     if retained != row["value"]:
                         work.put(key, retained) if retained else work.delete(key)
         finals = []
-        frozen = {record_key for name, row in work.rows.items() if name.startswith("archive/")
-                  and row["value"].get("state") in ("frozen", "exporting", "exported", "partial")
-                  for record_key in row["value"].get("frozen", {})}
+        frozen = self._frozen_records(work.rows)
         pinned = []
         request_states = notice_states(self.resources())
         for key, row in work.rows.items():
@@ -2079,9 +2085,14 @@ class Coordinator:
             return {"kind": "compaction_incomplete", "message": str(len(oversized)) + " oversized records retained; other history processed",
                     "records": oversized[:64], "count": len(oversized), "incomplete": len(oversized) > 64}
 
+    @staticmethod
+    def _frozen_records(rows):
+        return {key for name, row in rows.items() if name.startswith('archive/')
+                and row['value'].get('state') in ('frozen', 'exporting', 'exported', 'partial')
+                for key in row['value'].get('frozen', {})}
+
     def _archive_frozen(self, key):
-        return any(key in row["value"].get("frozen", {}) for name, row in self.store.view().items()
-                   if name.startswith("archive/") and row["value"].get("state") in ("frozen", "exporting", "exported", "partial"))
+        return key in self._frozen_records(self.store.view())
 
     def archive(self, args, context):
         action = args.get("action", "freeze")
