@@ -126,14 +126,26 @@ async fn real_settings_theme_command_uses_sdk_attribution_and_default_undo_resto
     assert_eq!(picked["principal"],hello["principal"]);
 }
 
-struct TuiHarness { socket:PathBuf }
+struct TuiHarness { socket:PathBuf, server:Option<i32> }
 impl Drop for TuiHarness {
-    fn drop(&mut self) { let _=Command::new("/usr/bin/tmux").env_clear().args(["-N","-S"]).arg(&self.socket).arg("kill-server").output(); }
+    /// `kill-server` can fail under load (its reply lost, the socket busy) and leave this fixture's tmux server
+    /// behind; then SIGKILL the server this harness started (its recorded pid, still a tmux), and that pid only.
+    fn drop(&mut self) {
+        let asked=Command::new("/usr/bin/tmux").env_clear().args(["-N","-S"]).arg(&self.socket).arg("kill-server").output()
+            .map(|o|o.status.success()).unwrap_or(false);
+        let Some(pid)=self.server else { return };
+        let ours=||std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c|c.starts_with("tmux"));
+        if !asked && ours() { unsafe { libc::kill(pid,libc::SIGKILL); } }
+        // Either way, end only once it is gone: kill-server answers before the server exits.
+        let until=Instant::now()+Duration::from_secs(10);
+        while ours() && Instant::now()<until { std::thread::sleep(Duration::from_millis(10)); }
+        if ours() { unsafe { libc::kill(pid,libc::SIGKILL); } }
+    }
 }
 impl TuiHarness {
     fn start(fixture:&Fixture) -> Self {Self::start_as(fixture,"owner")}
     fn start_as(fixture:&Fixture,principal:&str) -> Self {
-        let harness=Self {socket:fixture.root.path().join("h")};
+        let mut harness=Self {socket:fixture.root.path().join("h"),server:None};
         let output=Command::new("/usr/bin/tmux").env_clear().env("HOME",fixture.root.path()).env("PATH","/usr/bin:/bin")
             .args(["-S"]).arg(&harness.socket).args(["-f","/dev/null","new-session","-d","-s","undo","-x","120","-y","32",
                 "/usr/bin/env","-i"])
@@ -147,6 +159,10 @@ impl TuiHarness {
             .args(["HC_SESSION=undo-fixture",r#"VQRO_HERDR=["/bin/false"]"#])
             .args([env!("CARGO_BIN_EXE_vqro"),"tui"]).output().unwrap();
         assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+        let pid=Command::new("/usr/bin/tmux").env_clear().args(["-N","-S"]).arg(&harness.socket)
+            .args(["display-message","-p","#{pid}"]).output().unwrap();
+        harness.server=String::from_utf8_lossy(&pid.stdout).trim().parse().ok();
+        assert!(harness.server.is_some(),"tmux server pid: {}",String::from_utf8_lossy(&pid.stderr));
         harness
     }
     fn ready(&self) -> bool {
@@ -364,4 +380,23 @@ async fn nested_invocation_retains_origin_and_is_revoked_when_parent_replies() {
     nested.await.unwrap().unwrap();
     let history=user.call("workspace.history",json!({})).await.unwrap();
     assert_eq!(history["txns"].as_array().unwrap().iter().find(|txn|txn["id"]==changed["txn"]).unwrap()["principal"],hello["principal"]);
+}
+
+#[test]
+#[ignore="requires private native tmux/pty; run --test undo_attribution -- --include-ignored"]
+fn harness_ends_its_tmux_server_even_when_kill_server_fails() {
+    // The undo_attribution leftover: under load `kill-server` failed and the drop ignored it. Here it fails for
+    // sure (the socket moved away); the harness still ends the server it started, and only that one.
+    let root=tempfile::Builder::new().prefix("pundo").tempdir_in("/tmp").unwrap();
+    let socket=root.path().join("h");
+    let started=Command::new("/usr/bin/tmux").env_clear().env("HOME",root.path()).env("PATH","/usr/bin:/bin")
+        .arg("-S").arg(&socket).args(["-f","/dev/null","new-session","-d","-s","undo","/bin/sleep","600"]).output().unwrap();
+    assert!(started.status.success(),"{}",String::from_utf8_lossy(&started.stderr));
+    let pid=Command::new("/usr/bin/tmux").env_clear().args(["-N","-S"]).arg(&socket).args(["display-message","-p","#{pid}"]).output().unwrap();
+    let pid:i32=String::from_utf8_lossy(&pid.stdout).trim().parse().unwrap();
+    std::fs::rename(&socket,root.path().join("moved")).unwrap();
+    drop(TuiHarness{socket:socket.clone(),server:Some(pid)});
+    let alive=std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c|c.starts_with("tmux"));
+    if alive { unsafe { libc::kill(pid,libc::SIGKILL); } }
+    assert!(!alive,"the fixture's tmux server {pid} outlived its harness");
 }
