@@ -79,3 +79,31 @@ cargo nextest run --locked modify_other_keys_query_tracks_mode_two
 cargo nextest run --locked host_report_all_supplies_printable_releases_for_event_type_only_panes
 python3 -m unittest scripts.test_vendor_libghostty_vt scripts.test_ui_hot_path_architecture
 ```
+
+## 0003 reload cell pointers when print grows a page (upstream backport)
+
+status: active
+
+patch: `vendor/patches/libghostty-vt/0003-reload-cell-pointers-when-print-grows-a-page.patch`
+
+vqro finding: ghostty-audit P0-2 (`qol/libghostty-audit-findings.md`). A 24-byte input (an OSC 8 hyperlink, then
+REP of the linked character) and fuzz seed 15851 segfault a ReleaseSafe build inside `Terminal.print`. Plain
+printing of about 26k hyperlinked characters does the same.
+
+upstream: Ghostty 33cda4dc5dbfd0478f6891fb4b53844a4fbee17c (2026-08-22). Only its code hunks are backported; its
+new Zig test did not apply to the base and is left out.
+
+vendored base: `c5a21edfcbc2d5b46540ad91b7980aca31f5f1f3`
+
+local files:
+
+- `vendor/libghostty-vt/src/terminal/Terminal.zig`
+
+reason: `Terminal.print` held raw cell pointers across operations that can replace the page (a hyperlink growing
+it), then wrote and asserted through freed memory.
+
+remove when: the vendored source contains upstream 33cda4dc (a pin bump past 2026-08-22).
+
+verification: `cargo test --lib engines_survive_known_crash_traces`, which replays
+`tests/fixtures/terminal/libghostty-replays/p0-2-*`. Built with `LIBGHOSTTY_VT_OPTIMIZE=ReleaseSafe`, it
+segfaults without this patch (check.sh step `libghostty-release-safe`).

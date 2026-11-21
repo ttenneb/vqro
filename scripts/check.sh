@@ -233,6 +233,13 @@ tui_scale_probe() {
   "${CLEAN[@]}" python3 tests/e2e_tui_scale.py "$TARGET" --receipt "$LOGS/tui-scale-receipt.json"
 }
 
+libghostty_release_safe() {  # the terminal engines with libghostty-vt's safety checks on (Zig ReleaseSafe): the
+  # known crash traces (P0-1, and P0-2 fixed by vendored patch 0003) and the short fuzz. Its own target directory,
+  # so the main build keeps its ReleaseFast library.
+  env -i HOME="$HOME" PATH="$PATH" CARGO_TARGET_DIR="$TARGET/release-safe" LIBGHOSTTY_VT_OPTIMIZE=ReleaseSafe \
+    cargo test --lib -- engines_survive tui::ghostty
+}
+
 opt_in() {  # opt_in SUITE: every test of an integration suite, including the ignored (private) ones
   "${CARGO[@]}" cargo test --test "$1" -- --include-ignored --test-threads=1
 }
@@ -286,6 +293,7 @@ if [ "$MODE" = full ]; then
     step "opt-in:$suite" opt_in "$suite"
   done
   step history-budget history_budget
+  step libghostty-release-safe libghostty_release_safe
   step e2e-providers "${CLEAN[@]}" python3 tests/e2e_providers.py "$TARGET"
   step e2e-coordination-review "${CLEAN[@]}" python3 tests/e2e_coordination_review.py --binary "$TARGET/debug/vqro"
   step e2e-tui-providers "${CLEAN[@]}" python3 tests/e2e_tui_providers.py "$TARGET"
