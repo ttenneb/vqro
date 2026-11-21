@@ -402,7 +402,7 @@ class WholeHandlerControls(unittest.TestCase):
             "NUL-joined old body against the new two-block complete body": (  # class 2: unambiguous fingerprint
                 lambda t: {("message", "m"): message(2, 1, t[:40000], t[40000:])},
                 {("message", "m"): message(1, 1, full[:40000] + "\x00" + full[40000:])}, True),
-            "marker only inside stripped OSC hyperlink metadata": (
+            "OSC hyperlink URI word inside the emitted body's own line is not a refusal marker": (
                 lambda t: {("message", "m"): message(1, 1, t[:1000] + "\x1b]8;;https://omitted.example/\x07link\x1b]8;;\x07")},
                 None, False),
             "whole text in one entity": (lambda t: {("message", "m"): message(1, 2, t)}, None, True),
