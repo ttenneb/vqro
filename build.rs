@@ -4,8 +4,10 @@
 //! The library is built out of tree (`OUT_DIR`), so the vendored source stays untouched. Environment:
 //! `ZIG` (the zig binary; else `zig` on PATH when it is the version the source needs, else a user-local
 //! `~/.local/zig-<version>/zig`; the pinned source needs Zig 0.17.1), `LIBGHOSTTY_VT_OPTIMIZE`
-//! (default `ReleaseFast`), `LIBGHOSTTY_VT_SIMD` (default on), `LIBGHOSTTY_VT_ZIG_SYSTEM_DIR` (a directory of
-//! Zig packages, to build offline). Pin and local patches: `vendor/libghostty-vt.vendor.json`,
+//! (default `ReleaseFast`), `LIBGHOSTTY_VT_SIMD` (default on), `LIBGHOSTTY_VT_ZIG_PKG_DIR` (where Zig keeps the
+//! packages it fetches; default `$XDG_CACHE_HOME/vqro/zig-pkg`, else `~/.cache/vqro/zig-pkg`: one fetch per
+//! machine, never inside the vendored tree). Offline builds work once that directory holds the packages the
+//! library needs (see `vendor/libghostty-vt.notices.md`). Pin and local patches: `vendor/libghostty-vt.vendor.json`,
 //! `vendor/libghostty-vt.patches.md`.
 use std::env;
 use std::fs;
@@ -59,13 +61,25 @@ fn find_zig(vendored: &std::path::Path) -> String {
     "zig".into()
 }
 
+/// Where Zig keeps fetched packages: `LIBGHOSTTY_VT_ZIG_PKG_DIR`, else the user's cache (`XDG_CACHE_HOME`, else
+/// `~/.cache`) under `vqro/zig-pkg`, else (no home) the build's own out dir.
+fn pkg_dir() -> PathBuf {
+    if let Ok(dir) = env::var("LIBGHOSTTY_VT_ZIG_PKG_DIR") { return dir.into(); }
+    let cache = env::var("XDG_CACHE_HOME").ok().filter(|d| !d.is_empty()).map(PathBuf::from)
+        .or_else(|| env::var("HOME").ok().map(|h| PathBuf::from(h).join(".cache")));
+    match cache {
+        Some(cache) => cache.join("vqro/zig-pkg"),
+        None => PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("zig-pkg"),
+    }
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt.vendor.json");
     for path in ["build.zig", "build.zig.zon", "include", "pkg", "src", "LIB_VERSION"] {
         println!("cargo:rerun-if-changed=vendor/libghostty-vt/{path}");
     }
-    for var in ["LIBGHOSTTY_VT_OPTIMIZE", "LIBGHOSTTY_VT_SIMD", "LIBGHOSTTY_VT_ZIG_SYSTEM_DIR", "ZIG"] {
+    for var in ["LIBGHOSTTY_VT_OPTIMIZE", "LIBGHOSTTY_VT_SIMD", "LIBGHOSTTY_VT_ZIG_PKG_DIR", "ZIG"] {
         println!("cargo:rerun-if-env-changed={var}");
     }
 
@@ -105,9 +119,11 @@ fn main() {
         .arg(&out)
         .arg("--cache-dir")
         .arg(out.join("zig-cache"));
-    if let Ok(system_dir) = env::var("LIBGHOSTTY_VT_ZIG_SYSTEM_DIR") {
-        command.arg("--system").arg(system_dir);
-    }
+    // Zig 0.17 puts fetched packages in the project (`zig-pkg/`, here the vendored tree) unless ZIG_LOCAL_PKG_DIR
+    // names another place. Packages are named by their content hash (build.zig.zon), so one shared directory per
+    // machine serves every checkout, worktree and target, and a fresh checkout needs no network once it is filled.
+    // (Zig 0.17.1's `--system` offline mode panics, so the package directory is the offline route.)
+    command.env("ZIG_LOCAL_PKG_DIR", pkg_dir());
     let status = command.current_dir(&vendored).status().unwrap_or_else(|e| {
         panic!("libghostty-vt needs Zig {} to build (set ZIG to its path): running `{zig}` failed: {e}", wanted_zig(&vendored))
     });

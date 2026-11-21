@@ -46,3 +46,18 @@ All of these are on vqro's licence allowlist (Apache-2.0, MIT, BSD-3-Clause, Uni
 lists them with their texts (kept in `vendor/notices/` where the vendored tree or Zig package doesn't ship them).
 `scripts/license_check.py` checks each licence against the allowlist and each text against its sha256, and renders
 them into `THIRD_PARTY_LICENSES.md`. Re-take the `ar t` inventory when the pin or Zig changes.
+
+**Zig packages and offline builds.** `build.rs` points Zig's package directory (`ZIG_LOCAL_PKG_DIR`) outside the
+vendored tree: `LIBGHOSTTY_VT_ZIG_PKG_DIR`, by default `$XDG_CACHE_HOME/vqro/zig-pkg` or `~/.cache/vqro/zig-pkg`.
+Packages are named by their content hash, so one directory serves every checkout and target.
+
+- **First build on a machine:** Zig fetches every package `build.zig.zon` lists, about 310 MB, from
+  `deps.files.ghostty.org`. Each is checked against its pinned hash.
+- **Offline builds:** these work from a package directory holding only the two packages the library links. Measured
+  2026-11-21 with no network (`unshare -rn`):
+  - `uucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv`;
+  - `N-V-__8AAGmZhABbsPJLfbqrh6JTHsXhY6qCaLAQyx25e0XE` (Highway's source).
+
+  Together they are 15 MB. Copy them from a filled directory to build on a machine without network. simdutf ships
+  inside the vendored tree (`pkg/simdutf`).
+- **Not supported:** Zig 0.17.1's `--system` offline flag panics, so it isn't offered.
