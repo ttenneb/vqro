@@ -230,11 +230,55 @@ def adapter_preserves_or_marks(stream_texts, emitted_bytes, emitted_sha256, mark
     return whole or marked
 
 
+O12_TEST = ("provider_client::items::tests::small_appends_past_the_record_bound_are_refused_atomically_for_bytes_and_text",
+            "src/provider_client/items.rs")
+
+
+def message_texts(reducer, needle):
+    """Text blocks of message entities that carry `needle`, in entity order."""
+    texts = []
+    for (kind, _), entity in sorted(reducer.entities.items(), key=lambda item: str(item[0])):
+        value = entity.get("value") or {}
+        if kind == "message" and isinstance(value.get("content"), list):
+            texts += [block["text"] for block in value["content"]
+                      if isinstance(block, dict) and isinstance(block.get("text"), str) and needle in block["text"]]
+    return texts
+
+
 @case("O12")
 async def producer_append_bounds(ctx):
     """A small append whose resulting whole snapshot put exceeds the record bound returns too_large with entity,
     revision and seq unchanged (text and decoded bytes); adapters record how they handle the refusal without
     silently losing content."""
-    raise HarnessGap("O12 needs (1) a pinned producer regression for text AND byte appends leaving entity, rev, seq "
-                     "and log unchanged (pending coordinator approval of a Rust test-only regression) and (2) a native "
-                     "ledger witness of the oversized emitted message (requested from the runtime fixture owner)")
+    from . import evidence
+    # Producer half: the exact regression, inherited from the pinned gate run (as O3/O10/O11).
+    if "O12" not in evidence.REGRESSIONS:
+        raise HarnessGap("O12 producer regression is not registered in evidence.REGRESSIONS (needs " + O12_TEST[0] +
+                         " in " + O12_TEST[1] + ")")
+    row, receipt, repo, producer = evidence.component(ctx, "O12")
+    evidence.regressions(row, receipt, repo, producer, "O12")
+    evidence.inherited(ctx, "O12", row, receipt)
+    # Adapter half: an oversized assistant message streamed through the actual bridge.
+    from .cases import fresh_view
+    view = await fresh_view(ctx)
+    mark = ctx.native.mark()
+    chunks = ["O12-" + "x" * 1020 for _ in range(70)]  # about 70 KiB of text_delta appends in one message
+    await ctx.native.call("turn", state="start")
+    await ctx.native.call("retain", count=1, chunks=chunks)
+    emitted = [row for row in ctx.native.records("native_emit", after=mark) if row.get("type") == "message_end"]
+    if not emitted or not isinstance(emitted[-1].get("text_bytes"), int) or not isinstance(emitted[-1].get("text_sha256"), str):
+        raise HarnessGap("O12 adapter half needs the native fixture's ledger witness of the emitted message "
+                         "(native_emit message_end with text_bytes and text_sha256)")
+    witness = emitted[-1]
+    def settled(reducer):
+        texts = message_texts(reducer, "O12-")
+        return texts and adapter_preserves_or_marks(texts, witness["text_bytes"], witness["text_sha256"])
+    try:
+        await ctx.wait_view(view, settled, timeout=15)
+    except Exception:
+        pass  # graded below from what the stream actually holds
+    texts = message_texts(view.reducer, "O12-")
+    ctx.evidence.append({"kind": "o12_adapter", "emitted": witness, "stream_text_bytes": [len(t.encode()) for t in texts]})
+    check(adapter_preserves_or_marks(texts, witness["text_bytes"], witness["text_sha256"]),
+          "after the producer refusal the adapter keeps the whole emitted text or visibly marks the refusal "
+          "(no silent loss)")
