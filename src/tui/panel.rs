@@ -539,7 +539,7 @@ fn child_tables(rows: &[Flat], width: u16, icons: &Icons) -> Vec<Flat> {
     }
     for (parent, group) in rows.iter().enumerate() {
         let table = &group.item["child_table"];
-        let Some(spec) = table["columns"].as_array().filter(|s| !s.is_empty()) else { continue };
+        let Some(spec) = table["columns"].as_array().filter(|s| !s.is_empty() && s.iter().all(Value::is_object)) else { continue };
         let width = table["max_width"].as_u64().filter(|w| *w > 0)
             .map(|w| w.min(u16::MAX as u64) as u16).unwrap_or(width).min(width);
         let Some(indices) = by_parent.get(&parent) else { continue };
@@ -942,6 +942,17 @@ mod tests {
         let hits = render(&mut buf, area, &Arc::new(v), &mut state, true, &Palette::default(), &icons, None);
         assert_eq!(hits.actions.len(), 2);
         assert!(hits.actions.iter().all(|(rect, _, _)| rect.right() <= 60));
+    }
+
+    #[test]
+    fn malformed_child_table_schema_preserves_readable_fallback() {
+        for schema in [json!([null]), json!([17]), json!([{"width": 8}, false]), json!([]), json!("columns")] {
+            let v = json!({"items":[{"text":"Group", "expanded":true,
+                "child_table":{"columns":schema,"max_width":40},
+                "children":[{"text":"readable fallback includes every cell", "columns":["read","target","done"]}]}]});
+            let screen = draw(&v, &Icons::default(), 100);
+            assert!(screen.iter().any(|l| l.contains("readable fallback includes every cell")), "{v}: {screen:?}");
+        }
     }
 
     #[test]
