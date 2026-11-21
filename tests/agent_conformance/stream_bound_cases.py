@@ -6,6 +6,7 @@ incompatibility report; a product that lacks them fails. O12's producer half is 
 adapter half observes a real bridge refusal; either missing is an honest harness gap, never a pass.
 """
 import asyncio
+from collections import deque
 import json
 import os
 from pathlib import Path
@@ -490,10 +491,60 @@ def shown_texts(value):
 NOTICES = ("__live_notices__",)  # baseline key for the stream's live notice records (op notice, no seq)
 
 
+class ReceivedNotices(deque):
+    """The reducer's bounded live-notice cache with receipt bookkeeping: `received` counts every notice ever
+    appended, so freshness is by receipt ordinal, never by value (a new notice identical to cached old ones, evicting
+    one of them, is still new). Client-side observer bookkeeping only; live notices carry no native seq."""
+    def __init__(self, items=(), maxlen=None):
+        super().__init__(items, maxlen)
+        self.received = len(self)
+
+    def append(self, item):
+        self.received += 1
+        super().append(item)
+
+    def extend(self, items):
+        for item in items:
+            self.append(item)
+
+
+def track_notices(reducer):
+    """Install receipt bookkeeping on this view's notice cache (same bound, same contents); returns the count received."""
+    notices = getattr(reducer, "notices", None)
+    if isinstance(notices, ReceivedNotices):
+        return notices.received
+    if isinstance(notices, deque):
+        reducer.notices = ReceivedNotices(notices, notices.maxlen)
+        return reducer.notices.received
+    return None  # no bounded cache to track (a plain list never evicts)
+
+
+def notice_value_text(row):
+    return display_text(row["text"]) if isinstance(row, dict) and isinstance(row.get("text"), str) else None
+
+
 def notice_texts(reducer):
     """Display text of the live notice records the item stream delivered (agent-v0: notice {value}, live only)."""
-    return [display_text(row["text"]) for row in list(getattr(reducer, "notices", []) or [])
-            if isinstance(row, dict) and isinstance(row.get("text"), str)]
+    return [text for text in map(notice_value_text, list(getattr(reducer, "notices", []) or [])) if text is not None]
+
+
+def fresh_notice_texts(reducer, before):
+    """Notices received since the baseline. With receipt bookkeeping: exactly the last (received now - received at
+    baseline) entries still held, by ordinal. Without it (a plain growing list): the value multiset difference."""
+    notices = getattr(reducer, "notices", None)
+    received_before = before.get("received") if isinstance(before, dict) else None
+    if isinstance(notices, ReceivedNotices) and type(received_before) is int:
+        new = notices.received - received_before
+        held = list(notices)[-new:] if new > 0 else []
+        return [text for text in map(notice_value_text, held) if text is not None]
+    old = list((before or {}).get("shown", []))
+    fresh = []
+    for text in notice_texts(reducer):
+        if text in old:
+            old.remove(text)
+        else:
+            fresh.append(text)
+    return fresh
 
 
 def body_texts(value):
@@ -552,7 +603,9 @@ def shown_baseline(reducer, emitted=None, needle="O12-"):
     baseline = {key: {"shown": marker_lines(shown_texts(entity.get("value") or {}), emitted, needle),
                       "body": body_fingerprint(entity.get("value") or {})}
                 for key, entity in reducer.entities.items()}
-    baseline[NOTICES] = {"shown": marker_lines(notice_texts(reducer), emitted, needle), "body": ""}
+    received = track_notices(reducer)
+    baseline[NOTICES] = {"shown": marker_lines(notice_texts(reducer), emitted, needle), "body": "",
+                         **({"received": received} if received is not None else {})}
     return baseline
 
 
@@ -587,7 +640,7 @@ def message_texts(reducer, needle, baseline=None, emitted=None):
         if any(needle in text for text in body) and (before is None or before["body"] != body_fingerprint(value)):
             bodies += body
         new_lines(marker_lines(shown_texts(value), emitted, needle), before["shown"] if before else [])
-    new_lines(marker_lines(notice_texts(reducer), emitted, needle), (baseline.get(NOTICES) or {"shown": []})["shown"])
+    fresh += marker_lines(fresh_notice_texts(reducer, baseline.get(NOTICES)), emitted, needle)  # by receipt, not value
     return bodies, fresh
 
 

@@ -316,7 +316,9 @@ class WholeHandlerControls(unittest.TestCase):
         from agent_conformance import evidence
         from agent_conformance.results import CheckFailed
         text = "0:" + "".join("O12-" + "x" * 1020 for _ in range(70))
-        reducer = SimpleNamespace(snapshots=1, entities=dict(old_entities or {}), notices=list(old_notices))
+        from collections import deque
+        # Faithful to wire.ItemReducer: live notices live in a bounded deque(maxlen=64).
+        reducer = SimpleNamespace(snapshots=1, entities=dict(old_entities or {}), notices=deque(old_notices, maxlen=64))
         class Native:
             def mark(self): return 0
             async def call(self, *args, **kw):
@@ -356,6 +358,17 @@ class WholeHandlerControls(unittest.TestCase):
         for name, (new, old, before, after, want) in cases.items():
             with self.subTest(name):
                 self.assertEqual(self.accepts(lambda: self.o12(new, old, before, after)), want)
+
+    def test_o12_live_notice_freshness_is_by_receipt_in_the_bounded_cache(self):
+        """prim-agent-ux HOLD on 4424b91b: with 64 identical old warnings cached, one new identical warning evicts one;
+        value multisets are unchanged, but the notice was received after the emission and is fresh."""
+        def message(rev, position, *blocks):
+            return {"rev": rev, "value": {"role": "assistant", "position": position, "content": list(blocks)}}
+        new = lambda t: {("message", "m"): message(1, 1, {"type": "text", "text": t[:60000]})}
+        warn = {"severity": "warn", "text": "assistant output truncated: too large"}
+        for old_count, new_notices, want in ((0, (warn,), True), (1, (warn,), True), (64, (warn,), True), (64, (), False)):
+            with self.subTest(old=old_count, new=len(new_notices)):
+                self.assertEqual(self.accepts(lambda: self.o12(new, {}, (warn,) * old_count, new_notices)), want)
 
     def test_o12_controls(self):
         def message(rev, position, *texts):
