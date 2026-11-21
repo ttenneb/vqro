@@ -1213,9 +1213,22 @@ impl App {
     fn toggle_watch(&mut self, key: &str, view: &str) -> Option<HashMap<String, bool>> {
         self.toggle_depth += 1;
         if self.toggle_depth > 1 { return None; }
+        Some(self.watched_rows(key, view).into_iter().filter(|r| r.item["on_toggle"].is_object() && r.has_children).map(|r| (r.id, r.expanded)).collect())
+    }
+
+    /// A panel's rows and, when a list row with a detail panel is selected, that detail's rows (ids prefixed with
+    /// `detail:`), for `toggle_watch`/`fire_toggles`: a lazy row may sit in either.
+    fn watched_rows(&self, key: &str, view: &str) -> Vec<panel::Flat> {
         let value = self.panel_value(view);
         let st = self.pstate.get(key).cloned().unwrap_or_default();
-        Some(panel::rows(&value, &st).into_iter().filter(|r| r.item["on_toggle"].is_object() && r.has_children).map(|r| (r.id, r.expanded)).collect())
+        let mut rows = panel::rows(&value, &st);
+        if let Some((id, detail)) = panel::selected_detail(&value, &st) {
+            let mut root = st.clone();
+            panel::sync_detail(&mut root, &id);
+            let dst = root.detail.as_deref().cloned().unwrap_or_default();
+            rows.extend(panel::rows(&Arc::new(detail), &dst).into_iter().map(|mut r| { r.id = format!("detail:{}", r.id); r }));
+        }
+        rows
     }
 
     /// Runs `on_toggle` for each watched row the user opened or closed, in the panel's context.
@@ -1223,12 +1236,10 @@ impl App {
         self.toggle_depth = self.toggle_depth.saturating_sub(1);
         let Some(before) = before else { return };
         if before.is_empty() { return; }
-        let value = self.panel_value(view);
-        let st = self.pstate.get(key).cloned().unwrap_or_default();
         let mut ctx = ctx;
         ctx["panel"] = json!(key);
         ctx["panel_view"] = json!(view);
-        for r in panel::rows(&value, &st) {
+        for r in self.watched_rows(key, view) {
             if before.get(&r.id).is_some_and(|was| *was != r.expanded) {
                 if let Some((command, args)) = panel::toggle_command(&r.item, r.expanded) { self.run_command(&command, args, ctx.clone(), None); }
             }
@@ -4386,6 +4397,23 @@ mod tests {
         // A row without on_toggle runs nothing.
         assert_eq!(panel::toggle_command(&json!({"text":"x"}), true), None);
         assert_eq!(panel::toggle_command(&lazy, false), Some(("x.toggle".into(), json!({"id":"ws:big","open":false}))));
+    }
+
+    #[tokio::test]
+    async fn a_lazy_row_in_a_detail_panel_reports_too() {
+        // vqro-lead-secondary (239): the watcher saw only the list's rows, not the selected detail's.
+        let (mut app, _) = app();
+        let lazy = json!({"id":"deep","text":"deep","has_children":true,"on_toggle":{"command":"x.detail","args":{}}});
+        app.ws.entries.insert("view/test".into(), json!({"kind":"panel","list_detail":{"requires":["list_detail"]},
+            "items":[{"id":"e","text":"Ext","detail_panel":{"items":[lazy]}}]}));
+        let key = |app: &mut App, code| app.panel_key("test", "test", KeyEvent::new(code, KeyModifiers::NONE), json!({}));
+        key(&mut app, KeyCode::Tab);
+        assert!(app.pstate["test"].detail_focus);
+        key(&mut app, KeyCode::Right);
+        assert_eq!(app.message, "running x.detail…");
+        app.message.clear();
+        key(&mut app, KeyCode::Left);
+        assert_eq!(app.message, "running x.detail…");
     }
 
     #[tokio::test]
