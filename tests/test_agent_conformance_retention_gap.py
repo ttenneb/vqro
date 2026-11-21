@@ -177,6 +177,7 @@ class PressureContext:
         self.gap = gap; self.settle = settle; self.target = None
         self.native_calls = []; self.paused = False; self.views = []; self.omit_run_fact = False
         self.omit_state_run = False; self.B_calls = 0; self.max_active = 0; self.viewer_limit = 4
+        self.provider = {'limits': {'max_item_streams': 4}}
 
     async def facts(self):
         value = {'run': self.run, 'completion': self.completion, 'state': 'idle' if not self.run else 'running',
@@ -326,6 +327,28 @@ class PressureControls(unittest.IsolatedAsyncioTestCase):
             with self.subTest(limit=limit), self.assertRaises(HarnessGap):
                 await probe.provider_retention(ctx, (await ctx.facts())['items'])
             self.assertEqual(ctx.native_calls, [])
+
+    async def test_codex_optional_resource_bound_absent_is_unknown_not_failure(self):
+        ctx = PressureContext(); original = ctx.facts
+        async def no_resource_bound():
+            facts = await original(); facts['caps']['items.stream'].pop('max_viewers'); return facts
+        ctx.facts = no_resource_bound
+        with patch.object(probe, 'process_rss', return_value=1000):
+            await probe.public_retention_bounds(ctx)
+        self.assertEqual(len(ctx.after), 2)
+        observations = next(row for row in ctx.evidence if row.get('kind') == 'o10_provider_observers')
+        self.assertTrue(observations['declared_budgets']['resource_bound_absent_is_unknown'])
+        self.assertEqual(observations['attached'], 4)
+
+    async def test_global_budget_is_not_exceeded_by_resource_cap(self):
+        ctx = PressureContext(); ctx.provider['limits']['max_item_streams'] = 2
+        await probe.provider_retention(ctx, (await ctx.facts())['items'])
+        self.assertLessEqual(ctx.max_active, 2)
+
+    async def test_no_declared_stream_budget_is_FAIL(self):
+        ctx = PressureContext(); ctx.provider = {}
+        facts = await ctx.facts(); facts['caps']['items.stream'].pop('max_viewers')
+        with self.assertRaises(HarnessGap): probe.viewer_budget(ctx, facts)
 
     async def test_B_needs_three_declared_viewers(self):
         ctx = PressureContext(); ctx.viewer_limit = 2

@@ -174,12 +174,34 @@ class MissingProviderGap(HarnessGap):
     """
 
 
+def viewer_budget(ctx, facts):
+    # max_viewers is optional (Pi declares it; Codex does not). Its absence is
+    # UNKNOWN, never zero or an invented mandatory field. Public registration
+    # exposes the provider's global max_item_streams (provider.rs:81-90).
+    cap = facts.get('caps', {}).get('items.stream', {})
+    global_limit = ctx.provider.get('limits', {}).get('max_item_streams')
+    bounds = []
+    if global_limit is not None:
+        if type(global_limit) is not int or global_limit < 1:
+            raise HarnessGap('O10 invalid declared provider max_item_streams')
+        bounds.append(global_limit)
+    if 'max_viewers' in cap:
+        resource_limit = cap['max_viewers']
+        if type(resource_limit) is not int or resource_limit < 1:
+            raise HarnessGap('O10 invalid declared resource max_viewers')
+        bounds.append(resource_limit)
+    if not bounds:
+        raise HarnessGap('O10 no public declared item-stream budget for bounded fanout')
+    # Global capacity is NOT a per-resource promise: actual public attach may
+    # refuse a narrower resource; that remains a fixture FAIL, never emulated.
+    return min(4, *bounds), {'provider_max_item_streams': global_limit,
+                            'resource_max_viewers': cap.get('max_viewers'),
+                            'resource_bound_absent_is_unknown': 'max_viewers' not in cap}
+
+
 async def provider_retention(ctx, declaration):
     facts = await ctx.facts()
-    maximum = facts.get('caps', {}).get('items.stream', {}).get('max_viewers')
-    if type(maximum) is not int or maximum < 1:
-        raise HarnessGap('O10 A needs a declared positive max_viewers for bounded public fanout')
-    count = min(4, maximum)
+    count, budget = viewer_budget(ctx, facts)
     run, epoch = await begin_native(ctx, 'O10-provider-pressure')
     views, released, replay = [], None, None
     try:
@@ -210,7 +232,7 @@ async def provider_retention(ctx, declaration):
             lambda view=view: view.closed is not None or has_message(view.reducer, '511:O10-gap-burst:'), timeout=5)
             for view in eligible), return_exceptions=True)
         ctx.evidence.append({'kind': 'o10_provider_observers', 'reader_workload': 'fast continuously draining',
-                             'declared_max_viewers': maximum, 'attached': count,
+                             'declared_budgets': budget, 'attached': count,
                              'requested_final_messages': 512, 'requested_chunks_per_message': 8,
                              'not_native_capability_or_wire_fidelity_claim': True,
                              'observations': [{'closed': view.closed, 'notice': deepcopy(view.close_notice),
@@ -245,9 +267,9 @@ async def provider_retention(ctx, declaration):
 async def slow_viewer_recovery(ctx):
     # K1 owns the shared O7 helper and its hook; no duplicated reader/relay.
     from .cases import stalled_viewer_isolation
-    maximum = (await ctx.facts()).get('caps', {}).get('items.stream', {}).get('max_viewers')
-    if type(maximum) is not int or maximum < 3:
-        raise HarnessGap('O10 B needs three declared public viewers for the existing O7 witness')
+    count, _ = viewer_budget(ctx, await ctx.facts())
+    if count < 3:
+        raise HarnessGap('O10 B needs a public declared budget admitting three viewers for the existing O7 witness')
     run, epoch = await begin_native(ctx, 'O10-slow-viewer')
     calls = 0
     async def before_recovery():
