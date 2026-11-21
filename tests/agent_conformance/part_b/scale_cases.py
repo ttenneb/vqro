@@ -15,6 +15,7 @@ from pathlib import Path
 from .cases import case, invocations, settled, ordinary
 from ..wire import RpcError
 from ..results import HarnessGap
+from .viewer_convergence import converge_s1_viewers
 
 
 def canonical(value):
@@ -548,7 +549,7 @@ class CoreSampler:
 
 async def stalled_viewer(ctx, agents):
     """A raw connection that attaches every agent's item stream and never reads."""
-    reader, writer = await asyncio.open_unix_connection(ctx.backend.env["VQRO_SOCKET"])
+    reader, writer = await asyncio.open_unix_connection(ctx.backend.env["VQRO_SOCKET"], limit=128 << 10)
     lines = [{"jsonrpc": "2.0", "id": 1, "method": "hello", "params": {"client": "s1-stalled", "identity": {"kind": "owner"}}}]
     lines += [{"jsonrpc": "2.0", "id": 2 + index, "method": "resource.attach", "params": {"resource": row["id"], "items": {}}}
               for index, row in enumerate(agents)]
@@ -665,14 +666,16 @@ async def combined_scale_gate(ctx):
         for index, peer in enumerate(viewers):
             await peer.close()
             viewers[index] = await ctx.connect("owner")
-        storm = []
+        storm, slots = [], []
         for peer in viewers:
             reopened, failures = await attach_all(peer)
             storm.append(len(reopened))
-            ctx.check(not failures, "every viewer reattaches after the reconnect storm", failures=failures[:4])
+            ctx.check(len(reopened) == 200 and not failures, "every viewer reattaches after the reconnect storm", failures=failures[:4])
+            slots.extend((row["id"], view) for row, view in zip(agents, reopened))
         await steady(10, 10)
-        # Healthy viewers: no reconstruction failure on any non-stalled stream after the storm.
-        fresh = [view for view in ctx.views.values() if view.peer in viewers]
+        # Own-budget closure may reattach per agent-v0 §4, but no loss of final
+        # state or missing stalled-viewer closure can be treated as convergence.
+        fresh = await converge_s1_viewers(ctx, slots, stalled)
         broken = [view.reducer.failure for view in fresh if view.reducer.failure]
         ctx.check(len(fresh) == 600 and not broken, "the stalled viewer harms no other viewer (600 live streams reconstruct)",
                   live=len(fresh), broken=broken[:4])
