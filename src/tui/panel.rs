@@ -533,15 +533,20 @@ fn column_layout(spec: &[Value], rows: &[Flat], width: u16, icons: &Icons) -> Co
 /// neighbouring conversation rows keep their own layout; every row retains its id/hit index.
 fn child_tables(rows: &[Flat], width: u16, icons: &Icons) -> Vec<Flat> {
     let mut out = rows.to_vec();
+    let mut by_parent = std::collections::HashMap::<usize, Vec<usize>>::new();
+    for (i, row) in rows.iter().enumerate().filter(|(_, r)| r.item["columns"].is_array()) {
+        if let Some(parent) = row.parent { by_parent.entry(parent).or_default().push(i); }
+    }
     for (parent, group) in rows.iter().enumerate() {
         let table = &group.item["child_table"];
         let Some(spec) = table["columns"].as_array().filter(|s| !s.is_empty()) else { continue };
         let width = table["max_width"].as_u64().filter(|w| *w > 0)
             .map(|w| w.min(u16::MAX as u64) as u16).unwrap_or(width).min(width);
-        let children: Vec<Flat> = rows.iter().filter(|r| r.parent == Some(parent) && r.item["columns"].is_array()).cloned().collect();
+        let Some(indices) = by_parent.get(&parent) else { continue };
+        let children: Vec<Flat> = indices.iter().map(|&i| rows[i].clone()).collect();
         let layout = column_layout(spec, &children, width, icons);
-        for (i, row) in rows.iter().enumerate().filter(|(_, r)| r.parent == Some(parent) && r.item["columns"].is_array()) {
-            out[i] = layout.apply(row, icons);
+        for &i in indices {
+            out[i] = layout.apply(&rows[i], icons);
             out[i].item["_child_table_width"] = Value::from(width);
         }
     }

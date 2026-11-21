@@ -35,6 +35,19 @@ test("panels", async () => {
   }
 });
 
+test("optional group-local tables retain readable tree fallback", () => {
+  const panel = {items: [
+    {type: "text", text: "Pi · 14:00"},
+    {text: "Activity · 1 tool", expanded: true,
+      child_table: {columns: [{width: 12}, {width: "fill"}], max_width: 80},
+      children: [{text: "✓ read   src/main.rs", columns: ["read", "src/main.rs"], copy: "result"}]},
+    {type: "text", text: "Done."}]};
+  expect(m.missingFor(panel, m.BASE_FEATURES)).toEqual([]);
+  const rows = m.rows(panel, 0, "", {}, m.BASE_FEATURES);
+  expect(rows.map(r => r.item.text)).toEqual(["Pi · 14:00", "Activity · 1 tool", "✓ read   src/main.rs", "Done."]);
+  expect(rows[2].item.copy).toBe("result");
+});
+
 test("views", async () => {
   const doc = await fixture("views.json");
   const entries = new Map(Object.entries(doc.entries)), live = new Map(Object.entries(doc.live));

@@ -27,6 +27,22 @@ PANEL = {"title": "Provides", "facets": [{"key": "kind", "label": "Show"}], "sor
 
 
 class TextPanels(unittest.TestCase):
+    def test_optional_child_table_keeps_readable_conversation_fallback(self):
+        c = client({"title": "Pi", "items": [
+            {"type": "text", "text": "Pi · 14:00"},
+            {"text": "Activity · 1 tool", "expanded": True,
+             "child_table": {"columns": [{"width": 12}, {"width": "fill"}], "max_width": 80},
+             "children": [{"text": "✓ read   src/main.rs", "columns": ["read", "src/main.rs"],
+                           "copy": "result", "menu": [{"label": "Copy output", "command": "client.copy"}]}]},
+            {"type": "text", "text": "Done."}]})
+        lines = "\n".join(c.handle("view p"))
+        self.assertIn("Pi · 14:00", lines)
+        self.assertIn("Activity · 1 tool", lines)
+        self.assertIn("✓ read   src/main.rs", lines)
+        self.assertIn("Done.", lines)
+        self.assertNotIn("cannot show", lines)
+        self.assertEqual(next(r for r in c.listed if r["item"].get("copy"))["item"]["copy"], "result")
+
     def test_facets_sort_and_columns(self):
         c = client(PANEL)
         lines = c.handle("view p")
