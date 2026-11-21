@@ -1795,4 +1795,4 @@ async def serialized_preflight(ctx):
 
 
 # Load row modules after the shared helpers; each imports this registry.
-from . import view_causality_cases, item_metadata_cases  # noqa: E402,F401
+from . import view_causality_cases, content_origin_cases, item_metadata_cases  # noqa: E402,F401
