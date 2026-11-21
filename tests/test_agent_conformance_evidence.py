@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from agent_conformance.evidence import CLOSURES, REGRESSIONS, connection_scale, host_generation_fence, producer_overflow, retained_memory_accounting
+from agent_conformance.evidence import CLOSURES, REGRESSIONS, component, connection_scale, host_generation_fence, producer_overflow, regressions, retained_memory_accounting
 from agent_conformance.results import CheckFailed, HarnessGap
 
 NAMES = {ident: {key: name for key, (name, _) in rows.items()} for ident, rows in REGRESSIONS.items()}
@@ -98,6 +98,20 @@ class ComponentEvidenceTests(unittest.TestCase):
         data = json.loads(Path(row["receipt"]["path"]).read_text())
         data.update(changes)
         row["receipt"] = self.put("receipt.json", data)
+
+    def test_o12_atomic_append_refusal_requires_exact_library_witness(self):
+        self.bundle("O12")
+        row, receipt, repo, producer = component(self.ctx, "O12")
+        regressions(row, receipt, repo, producer, "O12")
+        self.assertEqual(set(row["required_tests"]), {"append_refusal_atomic"})
+        self.assertEqual(row["source_files"], {"adapter": ["src/provider_client/items.rs"]})
+
+    def test_o12_other_passing_library_test_cannot_replace_atomic_refusal(self):
+        row = self.bundle("O12")
+        row["required_tests"]["append_refusal_atomic"] = NAMES["O10"]["journal_envelope_and_floor"]
+        with self.assertRaises(HarnessGap):
+            row, receipt, repo, producer = component(self.ctx, "O12")
+            regressions(row, receipt, repo, producer, "O12")
 
     def test_missing_component_evidence_is_harness_failure(self):
         with self.assertRaises(HarnessGap): producer_overflow(self.ctx)

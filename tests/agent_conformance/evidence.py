@@ -19,6 +19,9 @@ HARNESS_REPO = Path(__file__).resolve().parents[2]
 
 # Semantic regression identities are harness requirements, not caller-selected labels.
 REGRESSIONS = {
+    "O12": {
+        "append_refusal_atomic": ("provider_client::items::tests::small_appends_past_the_record_bound_are_refused_atomically_for_bytes_and_text", "src/provider_client/items.rs"),
+    },
     "O10": {
         "journal_envelope_and_floor": ("provider_client::items::tests::journal_accounting_obeys_retention_buffer_and_one_record_floor", "src/provider_client/items.rs"),
         "cut_versions_and_release": ("provider_client::items::tests::active_cut_accounting_releases_old_versions_on_close_gap_and_epoch_step", "src/provider_client/items.rs"),
@@ -40,6 +43,7 @@ REGRESSIONS = {
     },
 }
 CLOSURES = {
+    "O12": {"adapter": {"src/provider_client/items.rs"}},
     "O10": {"adapter": {"src/provider_client/items.rs"}},
     "O3": {"adapter": {"src/provider_client/items.rs"}},
     "L3": {"adapter": {"src/provider_client.rs"}, "core": {"src/provider.rs", "src/provider_wire.rs", "src/server.rs"}},
