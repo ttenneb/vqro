@@ -40,10 +40,13 @@ operator installs the new binaries/extensions and chooses any temporary endpoint
 
 ### New Codex agent
 
-Choose **New Codex agent** from commands (or the Codex tab-bar button). The bundled `codex` extension starts
-`vqro-bridge-codex` and `codex app-server --stdio` on the terminal host, creates one empty session, opens a new
-agent tab and records human request routing. Each launch gets its own `p:<uuid>` identity. No prompt is sent;
-Codex's native `admit` delivery remains an explicit choice, not a fabricated strict start mode.
+Choose **New Codex agent** from commands. The bundled `codex` extension starts `vqro-bridge-codex` and
+`codex app-server --stdio` on the terminal host. When the agent is observed within the launch window, it
+records the actual SDK caller's request-route default (human for human starts, coordinator preference for
+coordinator starts, with human fallback), creates one empty session and opens a new agent tab. Each launch
+gets its own `p:<uuid>` identity. No prompt is sent; Codex's native `admit` delivery remains an explicit choice,
+not a fabricated strict start mode. A late/unconfirmed agent instead leaves the observed terminal visible for
+manual recovery; no background retry promises later route/session setup.
 
 `codex.settings` / `doc/settings/codex` configure a list of literal `{name, argv, bridge_argv?, bridge_env?,
 codex_home?, home?}` runtimes. Optional profile paths resolve on the terminal host and become `CODEX_HOME` / `HOME`;

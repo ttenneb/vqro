@@ -3,6 +3,7 @@
 Runtime selection, authentication and request-routing defaults remain launcher policy.
 """
 import time
+import uuid
 
 from vqro_ext import VqroError
 from vqro_display import label
@@ -13,10 +14,10 @@ def valid_argv(argv):
         isinstance(arg, str) and arg and '\0' not in arg and len(arg.encode()) <= 32768 for arg in argv)
 
 
-def runtimes(value):
+def runtimes(value, *, brand='Agent'):
     rows = value.get('runtimes') if isinstance(value, dict) else None
     if not isinstance(rows, list) or not 1 <= len(rows) <= 32:
-        raise VqroError('Agent runtimes must be a nonempty list (at most 32)', 'invalid')
+        raise VqroError(brand + ' runtimes must be a nonempty list (at most 32)', 'invalid')
     seen = set()
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get('name'), str) or not row['name'].strip() \
@@ -46,6 +47,30 @@ def launch_cwd(ext, args):
         source = next((r for r in scoped.get('resources', []) if r.get('id') == source_id), {})
         cwd = source.get('cwd')
     return cwd or ext.layout_folder(args)
+
+
+def initialize_request_route(ext, agent, *, brand):
+    """Actual SDK caller chooses the AS10c default; never a claimed role or launcher type."""
+    try:
+        window = ext.invoke('coord.inbox.window', {})
+        if not isinstance(window, dict) or not isinstance(window.get('epoch'), str) or not window['epoch']:
+            raise VqroError('coordination window unavailable', 'unavailable')
+        initialized = ext.invoke('coord.request_route', {'op': window['epoch'] + ':' + brand.lower() + '-route:' + uuid.uuid4().hex,
+            'action': 'initialize', 'agent': agent, 'expect': 0})
+        if not isinstance(initialized, dict) or initialized.get('state') != 'accepted':
+            raise VqroError('request route initialization not confirmed', 'unavailable')
+        route = ext.invoke('coord.request_route', {'action': 'inspect', 'agent': agent})
+        if not isinstance(route, dict) or route.get('configured') not in ('human', 'coordinator', 'both') \
+                or route.get('route') not in ('human', 'coordinator', 'both'):
+            raise VqroError('request route inspection unavailable', 'unavailable')
+        if route.get('fallback_reason'):
+            ext.notify(brand + ' agent ' + agent + ': human request fallback (' + route['fallback_reason'] + ').', 'warn')
+        return {'configured': route['configured'], 'route': route['route'], 'confirmed': True,
+                **({'fallback_reason': route['fallback_reason']} if route.get('fallback_reason') else {})}
+    except VqroError as error:
+        ext.notify(brand + ' agent ' + agent + ' exists; request route initialization unconfirmed (' + error.kind
+                   + '); use human Control and do not replay the launch.', 'warn')
+        return {'confirmed': False}
 
 
 def terminal(ext, host):

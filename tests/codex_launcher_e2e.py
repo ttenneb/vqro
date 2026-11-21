@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import traceback
+import uuid
 
 from pi_provider_e2e import E2E, REPO, identity, live
 
@@ -45,7 +46,7 @@ class CodexLaunch(E2E):
                                          'note': 'Private fake native profile selection'})
             launched = self.call('command.invoke', {'name': 'codex.new', 'args': {'runtime': mode, 'cwd': str(self.root / 'work')}})
             assert launched.get('agent') and launched['outcome'] == 'observed', launched
-            assert launched['request_route'] == {'route': 'human', 'confirmed': True}, launched
+            assert launched['request_route'] == {'configured': 'human', 'route': 'human', 'confirmed': True}, launched
             assert launched['session'] == {'confirmed': True, 'created': True}, launched
             rid, host = launched['agent'], launched['host']
             resource = self.resource(rid)
@@ -72,8 +73,43 @@ class CodexLaunch(E2E):
             self.log.append({'codex_launch': mode, 'result': launched, 'resource': resource, 'route': route,
                              'native_environment': observed, 'startup_native_methods': [row.get('method') for row in messages]})
             created.append(launched)
-        assert len({row['principal'] for row in created}) == len({row['host'] for row in created}) == 2
-        assert len({row['agent'] for row in created}) == 2
+        # A real configured SDK caller mapped to the first native endpoint chooses
+        # coordinator initialization; role/title/body assertions are never supplied.
+        parent = created[0]
+        def coord(name, args):
+            window = self.call('command.invoke', {'name': 'coord.inbox.window', 'args': {}})
+            return self.call('command.invoke', {'name': 'coord.' + name,
+                'args': {'op': window['epoch'] + ':codex-test:' + uuid.uuid4().hex, **args}})
+        coord('membership.set', {'agent': parent['agent'], 'project': None, 'reports_to': None, 'expect': 0})
+        coord('grants', {'id': 'codex-test-launch-standing', 'expect': 0,
+            'value': {'who': parent['principal'], 'can': ['configure', 'membership', 'answer'], 'on': '*'}})
+        observation = self.root / 'coordinator-environment.json'; ledger = self.root / 'coordinator-native.jsonl'
+        native = ['/usr/bin/python3', '-I', str(REPO / 'tests/fixtures/codex_launcher_native.py'),
+                  '--observe', str(observation), '--ledger', str(ledger)]
+        self.call('workspace.apply', {'ops': [{'op': 'set', 'key': 'doc/settings/codex',
+            'value': {'runtimes': [{'name': 'child', 'argv': native}]}}], 'note': 'Private caller-driven child fixture'})
+        self.env['VQRO_PRINCIPAL'] = parent['principal']
+        try:
+            child = self.call('command.invoke', {'name': 'codex.new', 'args': {'runtime': 'child', 'cwd': str(self.root / 'work')}})
+        finally:
+            self.env['VQRO_PRINCIPAL'] = 'owner'
+        assert child.get('agent') and child['request_route'] == {'configured': 'coordinator', 'route': 'coordinator', 'confirmed': True}, child
+        inspected = self.call('command.invoke', {'name': 'coord.request_route', 'args': {'action': 'inspect', 'agent': child['agent']}})
+        assert inspected['coordinator'] == parent['agent'] and inspected['human'] is False, inspected
+        membership = self.snapshot()['entries']['doc/agents/members/' + child['agent']]['value']
+        assert membership['reports_to'] == parent['agent'], membership
+        resource = self.resource(child['agent']); observed = json.loads(observation.read_text())
+        assert resource['data']['agent']['principal'] == child['principal'] and resource['host'] == child['host'], resource
+        assert child['session']['confirmed'] is True and not observed['bridge_token_present'] and not observed['herdr_present'], child
+        messages = [json.loads(line) for line in ledger.read_text().splitlines()]
+        assert sum(row.get('method') == 'thread/start' for row in messages) == 1 and not any(row.get('method') == 'turn/start' for row in messages)
+        terminal = self.hc('get', self.resource(child['host'])['backend_ref'])
+        self.tracked.extend([identity(terminal['pid']), identity(observed['pid'])])
+        self.log.append({'codex_launch': 'coordinator-child', 'actual_caller': parent['principal'], 'result': child,
+                         'route': inspected, 'membership': membership, 'resource': resource, 'native_environment': observed})
+        created.append(child)
+        assert len({row['principal'] for row in created}) == len({row['host'] for row in created}) == 3
+        assert len({row['agent'] for row in created}) == 3
         layouts = [row['value'] for key, row in self.snapshot()['entries'].items() if key.startswith('layout/')]
         for row in created: assert json.dumps(layouts).count('agents-' + row['agent'] + '"') == 1, layouts
         assert {str(path): path.read_bytes() for path in sentinel.parent.iterdir()} == before

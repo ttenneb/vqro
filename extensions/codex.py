@@ -13,14 +13,14 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
-from agent_launch import launch, launch_cwd, runtimes as validate_runtimes
+from agent_launch import initialize_request_route, launch, launch_cwd, runtimes as validate_runtimes
 
 SETTINGS = 'doc/settings/codex'
 DEFAULTS = {'runtimes': [{'name': 'codex', 'argv': ['codex', 'app-server', '--stdio']}]}
 
 
 def runtimes(value):
-    rows = validate_runtimes(value)
+    rows = validate_runtimes(value, brand='Codex')
     for row in rows:
         for name in ('codex_home', 'home'):
             if name in row and (not isinstance(row[name], str) or not row[name].strip() or '\0' in row[name]):
@@ -39,7 +39,6 @@ class Codex:
                 ext.apply([{'op': 'set', 'key': SETTINGS, 'expect': 0, 'value': DEFAULTS}], 'codex: default runtimes')
         ext.retrying(initialize)
         ext.contribute({
-            'menu/codex.new': {'where': 'tabbar', 'label': 'Codex', 'command': 'codex.new', 'order': 6},
             'view/codex-runtimes': {'kind': 'panel', 'title': 'Codex runtimes', 'items': []},
             'view/codex-settings': {'kind': 'panel', 'title': 'Codex runtime settings', 'items': []},
         })
@@ -78,7 +77,7 @@ class Codex:
         if cwd: params['cwd'] = cwd
         session = {}
         def prepare(agent):
-            route = self.initialize_human_route(agent)
+            route = initialize_request_route(self.ext, agent, brand='Codex')
             session.update(self.initialize_session(agent, cwd))
             return route
         result = launch(self.ext, params, brand='Codex', initialize_route=prepare, expected_agents=1)
@@ -117,26 +116,6 @@ class Codex:
         except VqroError as error:
             self.ext.notify('Codex agent ' + agent + ' exists; native session setup unconfirmed (' + error.kind
                             + '). Do not replay this launch or session creation.', 'warn')
-            return {'confirmed': False}
-
-    def initialize_human_route(self, agent):
-        # Explicit human policy, even if the SDK caller is a coordinator. Use its
-        # real callback attribution/configure standing, never claimed role/body authority.
-        try:
-            window = self.ext.invoke('coord.inbox.window', {})
-            if not isinstance(window, dict) or not isinstance(window.get('epoch'), str):
-                raise VqroError('coordination window unavailable', 'unavailable')
-            changed = self.ext.invoke('coord.request_route', {'op': window['epoch'] + ':codex-route:' + uuid.uuid4().hex,
-                'action': 'set', 'agent': agent, 'route': 'human', 'expect': 0})
-            if not isinstance(changed, dict) or changed.get('state') != 'accepted':
-                raise VqroError('human request route not confirmed', 'unavailable')
-            route = self.ext.invoke('coord.request_route', {'action': 'inspect', 'agent': agent})
-            if not isinstance(route, dict) or route.get('configured') != 'human' or route.get('route') != 'human':
-                raise VqroError('human request route inspection not confirmed', 'unavailable')
-            return {'route': 'human', 'confirmed': True}
-        except VqroError as error:
-            self.ext.notify('Codex agent ' + agent + ' exists; human request route unconfirmed (' + error.kind
-                            + '); use human Control and do not replay the launch.', 'warn')
             return {'confirmed': False}
 
     def settings(self, args):

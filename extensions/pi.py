@@ -9,7 +9,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
-from agent_launch import launch, launch_cwd, runtimes, valid_argv
+from agent_launch import initialize_request_route, launch, launch_cwd, runtimes as validate_runtimes, valid_argv
 
 SETTINGS = "doc/settings/pi"
 LEGACY = "doc/settings/agents"
@@ -21,6 +21,10 @@ def default_bridge():
     # Resolved by the terminal host, never selected from the core host's OS.
     # Windows/other hosts configure their launcher explicitly (e.g. py -3).
     return ["python3", "-I", str(Path(EXTENSIONS) / "pi_bridge" / "launch.py")]
+
+
+def runtimes(value):
+    return validate_runtimes(value, brand="Pi")
 
 
 class Pi:
@@ -79,24 +83,8 @@ class Pi:
                       show_terminal=self.terminal)
 
     def initialize_request_route(self, agent):
-        # The coord callback sees the original SDK caller/proof, never a launch
-        # principal claimed in args. Configuration failure cannot replay spawn.
-        try:
-            window = self.ext.invoke('coord.inbox.window', {})
-            if not isinstance(window, dict) or not isinstance(window.get('epoch'), str):
-                raise VqroError('coordination window unavailable', 'unavailable')
-            initialized = self.ext.invoke('coord.request_route', {'op': window['epoch'] + ':pi-route:' + uuid.uuid4().hex,
-                            'action': 'initialize', 'agent': agent, 'expect': 0})
-            if not isinstance(initialized, dict) or initialized.get('state') != 'accepted':
-                raise VqroError('request route initialization not confirmed', 'unavailable')
-            route = self.ext.invoke('coord.request_route', {'action': 'inspect', 'agent': agent})
-            if not isinstance(route, dict):
-                raise VqroError('request route inspection unavailable', 'unavailable')
-            if route.get('fallback_reason'):
-                self.ext.notify('Pi agent ' + agent + ': human request fallback (' + route['fallback_reason'] + ').', 'warn')
-        except VqroError as error:
-            self.ext.notify('Pi agent ' + agent + ' exists; request route initialization unconfirmed (' + error.kind
-                            + '); use human Control and do not replay the launch.', 'warn')
+        # Preserve Pi's return shape while sharing the actual-caller default mechanism.
+        initialize_request_route(self.ext, agent, brand="Pi")
 
     def terminal(self, host):
         try:

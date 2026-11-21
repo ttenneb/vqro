@@ -109,7 +109,7 @@ class FakeCore:
             if args.get('action') == 'initialize':
                 self.entries[key] = {'version': 1, 'value': {'route': 'human'}}
                 return {'state': 'accepted'}
-            return {'route': 'human', 'human': True, 'fallback_reason': None}
+            return {'configured': self.value(key, {}).get('route'), 'route': 'human', 'human': True, 'fallback_reason': None}
         if name == "agents.show" and self.fail_agents or name == "tabs.show" and self.fail_tabs:
             raise VqroError("extension stopped", "unavailable")
         return {"ok": True}

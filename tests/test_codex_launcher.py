@@ -27,8 +27,12 @@ class Core(FakeCore):
         if name == 'coord.request_route':
             self.calls.append((name, copy.deepcopy(args)))
             key = 'doc/agents/request-routes/' + args['agent']
-            if args.get('action') == 'set':
-                self.apply([{'op': 'set', 'key': key, 'expect': args['expect'], 'value': {'route': args['route']}}], 'route mock')
+            if args.get('action') == 'initialize':
+                caller = self.caller_record.get('principal')
+                matched = [row for row in self.resources.values() if row.get('kind') == 'agent'
+                           and (row.get('data') or {}).get('agent', {}).get('principal') == caller]
+                route = 'coordinator' if len(matched) == 1 else 'human'
+                self.apply([{'op': 'set', 'key': key, 'expect': args['expect'], 'value': {'route': route}}], 'route mock')
                 return {'state': 'accepted'}
             return {'configured': self.value(key, {}).get('route'), 'route': self.value(key, {}).get('route')}
         return super().invoke(name, args)
@@ -52,7 +56,7 @@ class CodexLauncherTests(unittest.TestCase):
         self.assertRegex(result['principal'], r'^p:[0-9a-f]{32}$')
         self.assertEqual(spawn['env']['VQRO_PRINCIPAL'], result['principal'])
         self.assertTrue(spawn['bridge']); self.assertEqual(spawn['cwd'], '/project')
-        self.assertEqual(result['request_route'], {'route': 'human', 'confirmed': True})
+        self.assertEqual(result['request_route'], {'configured': 'human', 'route': 'human', 'confirmed': True})
         effects = [args for method, args in self.core.calls if method == 'resource.invoke']
         self.assertEqual(len(effects), 1)
         self.assertEqual((effects[0]['op'], effects[0]['args']['action']), ('agent.session', 'new'))
@@ -79,13 +83,16 @@ class CodexLauncherTests(unittest.TestCase):
         self.assertEqual(spawn['argv'][0], '/host/bridge')
         self.assertEqual(self.core.value(SETTINGS)['runtimes'][0]['codex_home'], '/test/profile/config')
 
-    def test_human_route_is_explicit_even_for_coordinator_caller(self):
+    def test_route_initialize_uses_sdk_caller_not_a_claimed_role(self):
         self.core.caller_record = {'principal': 'coordinator:one', 'actor': 'coordinator:one'}
-        self.new()
-        writes = [args for name, args in self.core.calls if name == 'coord.request_route' and args.get('action') == 'set']
-        self.assertEqual(len(writes), 1); self.assertEqual(writes[0]['route'], 'human')
+        self.core.resources['r77'] = {'id': 'r77', 'kind': 'agent', 'host': 'other',
+            'data': {'agent': {'principal': 'coordinator:one'}}}
+        result = self.new(role='human')
+        writes = [args for name, args in self.core.calls if name == 'coord.request_route' and args.get('action') == 'initialize']
+        self.assertEqual(len(writes), 1); self.assertNotIn('route', writes[0])
         self.assertEqual(writes[0]['expect'], 0)
-        self.assertFalse(any(name == 'coord.request_route' and args.get('action') == 'initialize' for name, args in self.core.calls))
+        self.assertEqual(result['request_route']['configured'], 'coordinator')
+        self.assertFalse(any(name == 'coord.request_route' and args.get('action') == 'set' for name, args in self.core.calls))
 
     def test_profile_and_runtime_validation_precedes_launch(self):
         for row in ({'name': 'x', 'argv': []}, {'name': 'x', 'argv': ['codex'], 'home': ''},
@@ -160,11 +167,11 @@ class CodexLauncherTests(unittest.TestCase):
         self.assertEqual((result['outcome'], result['agent']), ('observed', 'r2'))
         self.assertEqual(len(self.spawns()), 1)
 
-    def test_wrong_route_readback_is_not_confirmed(self):
+    def test_malformed_route_readback_is_not_confirmed(self):
         original = self.core.invoke
         def invoke(name, args=None):
             if name == 'coord.request_route' and args.get('action') == 'inspect':
-                return {'route': 'coordinator', 'configured': 'coordinator'}
+                return {'route': 'not-a-route', 'configured': None}
             return original(name, args)
         with patch.object(self.core, 'invoke', side_effect=invoke): self.assertFalse(self.new()['request_route']['confirmed'])
 

@@ -1,14 +1,14 @@
 {
   "name":"codex", "title":"Codex launcher", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"runtime",
   "summary":"Launch Codex app-server agents through the Rust A2 bridge.",
-  "description":"Adds New Codex agent and literal runtime/profile settings. Each launch gets a fresh principal, human request routing and a new agent tab. Execution stays in the backend-owned Rust bridge. No automatic prompt, credential lookup/copy or native profile write by vqro; Codex owns authentication. Disabling this extension leaves existing processes intact.",
+  "description":"Adds New Codex agent and literal runtime/profile settings. Each launch gets a fresh principal, caller-driven request routing (human for human starts, coordinator preference for coordinator starts) and a new agent tab. Execution stays in the backend-owned Rust bridge. No automatic prompt, credential lookup/copy or native profile write by vqro; Codex owns authentication. Disabling this extension leaves existing processes intact.",
   "requires":{"protocol":1,"client_features":["items","input","menu"]},
   "provides":["command/codex.new","command/codex.settings","command/codex.configure","view/codex-runtimes","view/codex-settings","doc/settings/codex","ability/vqro.agents","view/agent-*"],
   "needs":[{"cap":"ability/vqro.terminals","suggest":"herdr","why":"Codex runs in a backend-owned terminal through vqro-bridge-codex"}],
-  "works_with":[{"cap":"command/coord.request_route","suggest":"coord","without":"The created agent remains available through human Control; human route configuration is reported unconfirmed, never replayed"},
-                {"cap":"command/coord.inbox.window","suggest":"coord","without":"Human route initialization is unconfirmed; native spawn is never retried"},
+  "works_with":[{"cap":"command/coord.request_route","suggest":"coord","without":"The created agent remains available through human Control; request route configuration is reported unconfirmed, never replayed"},
+                {"cap":"command/coord.inbox.window","suggest":"coord","without":"Request route initialization is unconfirmed; native spawn is never retried"},
                 {"cap":"command/agents.show","suggest":"agents","without":"A created agent opens as its bridge terminal"},
                 {"cap":"command/tabs.show","suggest":"tabs","without":"The observed host remains reachable through the resource picker"}],
   "settings_command":"codex.settings",
-  "contributes":{"commands":["codex.new","codex.settings","codex.configure"],"menu_items":["New Codex agent"],"panels":["Codex runtimes"],"settings":["doc/settings/codex"]}
+  "contributes":{"commands":["codex.new","codex.settings","codex.configure"],"panels":["Codex runtimes"],"settings":["doc/settings/codex"]}
 }
