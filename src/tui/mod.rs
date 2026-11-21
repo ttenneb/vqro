@@ -4181,6 +4181,16 @@ mod tests {
         // Without `look`, today's framed block on the plain background.
         let f = at("┏━ framed");
         assert!(!bg[f] && !bg[f + 1], "{text:#?}");
+        // A nested card fills from its indent: the two indent columns keep the pane's background.
+        app.load(&json!({"epoch":"e","seq":2,"entries":{"view/p":{"value":{"kind":"panel","items":[
+            {"text":"group","expanded":true,"children":[{"type":"message","id":"n","text":"nested · 16:44","body":"inside","look":"card"}]}]}}}}));
+        let mut cells = Vec::new();
+        terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, 40, 20), false, &pal, &Icons::new(None, false));
+            let b = f.buffer_mut();
+            cells = (0..20).map(|y| ((0..40).map(|x| b[(x, y)].symbol().to_string()).collect::<String>(), (0..40).map(|x| b[(x, y)].bg == pal.card).collect::<Vec<_>>())).collect::<Vec<_>>(); }).unwrap();
+        let n = cells.iter().position(|(l, _)| l.contains("nested · 16:44")).unwrap_or_else(|| panic!("{cells:#?}"));
+        assert!(!cells[n].1[1] && !cells[n].1[2] && cells[n].1[3] && cells[n].1[38], "fill starts at the indent: {:?}", cells[n]);
+        assert!(cells[n].0.starts_with("│   nested"), "{:?}", cells[n].0);
     }
 
     #[tokio::test]

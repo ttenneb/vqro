@@ -1371,7 +1371,8 @@ Colours: a name (the 16 ANSI names such as `cyan`, `darkgray`, `lightblue`), `#R
 | `selection`, `selection_text` | the selected row; unset `selection` means reverse video | unset |
 | `badge`, `badge_text` | neutral badge and unchecked chip fill; text on any filled background | `darkgray`, `black` |
 | `surface` | fill of plain chips and inactive tab chips | `#282830` |
-| `card` | background of card blocks (`message` rows with `look: "card"`): a little lighter than the pane, below `surface`. A theme without `card` but with `surface` uses its `surface` | `#202026` |
+| `card` | background of card blocks (`message` rows with `look: "card"`): a little lighter than the pane, below `surface`; `default` means the terminal's own background. A theme without a readable `card` uses its `surface`; with neither, a card derived from its `background` (5% toward white on a dark background, toward black on a light one); else the client's default | `#202026` |
+| `background` | informational: the theme's base background (`#RRGGBB`). Clients don't paint it (the terminal's background stays); they derive `card` from it when a theme has neither `card` nor `surface` | unset |
 | `tab_active`, `tab_active_text` | the active tab (bold) | `blue`, `white` |
 | `tab_bar` | background of the whole tab bar row and the gaps between tab chips | `235` |
 

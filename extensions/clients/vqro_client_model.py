@@ -58,7 +58,9 @@ def normalize(name):
 # ---- panels -----------------------------------------------------------------------------------------------------
 
 def kind(item):
-    return item.get("type") or "item"
+    """A row's type; a missing or non-string `type` is a plain item (as in Rust and TypeScript)."""
+    t = item.get("type") if isinstance(item, dict) else None
+    return t if isinstance(t, str) else "item"
 
 
 def message_look(item, features):

@@ -98,9 +98,14 @@ impl Palette {
                 }
             }
         }
-        // A theme from before `card` (or one without it) gets its own raised surface for cards.
-        if !tokens.contains_key("card") && tokens.get("surface").and_then(parse_color).is_some() {
-            p.card = p.surface;
+        // A theme without `card` uses its own raised surface; failing that, a card derived from the base
+        // background it declares (`background`, informational); else the built-in card.
+        if tokens.get("card").and_then(parse_color).is_none() {
+            if tokens.get("surface").and_then(parse_color).is_some() {
+                p.card = p.surface;
+            } else if let Some(Color::Rgb(r, g, b)) = tokens.get("background").and_then(parse_color) {
+                p.card = card_from_background(r, g, b);
+            }
         }
         p
     }
@@ -172,6 +177,14 @@ impl Palette {
     }
 }
 
+/// A card for a theme that declares only its base background: 5% of the way toward white on a dark background,
+/// toward black on a light one (core-protocol.md, Themes).
+pub fn card_from_background(r: u8, g: u8, b: u8) -> Color {
+    let light = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32 >= 127.5;
+    let step = |c: u8| if light { (c as f32 * 0.95).round() as u8 } else { (c as f32 + (255.0 - c as f32) * 0.05).round() as u8 };
+    Color::Rgb(step(r), step(g), step(b))
+}
+
 /// A colour value: name, `#RRGGBB`, 256-colour index (number or numeric string), or `default`.
 pub fn parse_color(v: &Value) -> Option<Color> {
     if let Some(n) = v.as_u64() {
@@ -208,6 +221,17 @@ mod tests {
         assert_eq!(Palette::from_theme(Some(&json!({"palette": {"card": "#101010", "surface": "#202020"}}))).card, Color::Rgb(16, 16, 16));
         assert_eq!(Palette::from_theme(Some(&json!({"palette": {"surface": "#202020"}}))).card, Color::Rgb(32, 32, 32));
         assert_eq!(Palette::from_theme(Some(&json!({"palette": {"accent": "red"}}))).card, Palette::default().card);
+        // `default` is the terminal's own colour, for `card` and for a `surface` that cards follow.
+        assert_eq!(Palette::from_theme(Some(&json!({"palette": {"card": "default"}}))).card, Color::Reset);
+        assert_eq!(Palette::from_theme(Some(&json!({"palette": {"surface": "default"}}))).card, Color::Reset);
+        // An unreadable card counts as missing.
+        assert_eq!(Palette::from_theme(Some(&json!({"palette": {"card": "chartreuse", "surface": "#202020"}}))).card, Color::Rgb(32, 32, 32));
+        // Neither card nor surface: derived from a declared background (lighter on dark, darker on light), else built in.
+        assert_eq!(Palette::from_theme(Some(&json!({"palette": {"background": "#000000"}}))).card, Color::Rgb(13, 13, 13));
+        assert_eq!(Palette::from_theme(Some(&json!({"palette": {"background": "#ffffff"}}))).card, Color::Rgb(242, 242, 242));
+        assert_eq!(Palette::from_theme(Some(&json!({"palette": {"background": "default"}}))).card, Palette::default().card);
+        assert_eq!(Palette::from_theme(Some(&json!({"palette": {"background": "#000000", "surface": "#303030"}}))).card, Color::Rgb(48, 48, 48));
+        assert_eq!(card_from_background(0x1e, 0x1e, 0x2e), Color::Rgb(0x29, 0x29, 0x38), "the same as OpenTUI's cardcolor.test.ts");
     }
 
     #[test]

@@ -1416,7 +1416,7 @@ function drawRow(a: App, buf: OptimizedBuffer, r: Rect, row: m.Row, selected: bo
     const frame = p.color(it.style ?? "accent");
     const lines = messageLines(it, r.w - indent);
     const [first, last] = card ? [1, lines.length - 2] : [0, lines.length - 1];
-    const bg = card ? p.color("card") : undefined;
+    const bg = card ? p.background("card") : undefined;
     const w = r.w - indent - (card ? 2 : 0);
     const x0 = x + (card ? 1 : 0);
     lines.slice(0, r.h).forEach((l, j) => {

@@ -1,5 +1,6 @@
 // Semantic palette (D18): `doc/settings/theme.palette` tokens over a built-in default; safe mode ignores themes.
 import { RGBA, TextAttributes } from "@opentui/core";
+import { cardSource } from "./cardcolor";
 
 const ANSI: Record<string, number> = {
   black: 0, red: 1, green: 2, yellow: 3, blue: 4, magenta: 5, cyan: 6, gray: 7, grey: 7, darkgray: 8, darkgrey: 8,
@@ -26,6 +27,8 @@ const DEFAULTS: Record<string, any> = {
 
 export class Palette {
   private colors: Record<string, RGBA | null> = {};
+  /** Tokens whose colour is the terminal's own background (`default`); only `card` uses this today. */
+  private terminalBg = new Set<string>();
   readonly fg = RGBA.defaultForeground();
   readonly bg = RGBA.defaultBackground();
 
@@ -35,9 +38,15 @@ export class Palette {
       const mine = token in palette ? parseColor(palette[token]) : null;
       this.colors[token] = mine ?? (value === null ? null : parseColor(value));
     }
-    // A theme from before `card` (or one without it) gets its own raised surface for cards.
-    if (!("card" in palette) && parseColor(palette.surface)) this.colors.card = this.colors.surface;
+    // The card: the theme's own, its surface, one derived from its background, else built in (cardcolor.ts).
+    const card = cardSource(palette, (v) => parseColor(v) !== null);
+    if (card.kind === "default") this.terminalBg.add("card");
+    else if (card.kind === "token") this.colors.card = parseColor(palette[card.token]);
+    else if (card.kind === "derived") this.colors.card = parseColor(card.color);
   }
+
+  /** A background colour: the terminal's own for a token the theme set to `default`, else the token's colour. */
+  background(token: string): RGBA { return this.terminalBg.has(token) ? this.bg : this.color(token); }
 
   color(token: string): RGBA { return this.colors[token] ?? this.fg; }
   maybe(token: string): RGBA | null { return this.colors[token] ?? null; }

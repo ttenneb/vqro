@@ -5005,6 +5005,90 @@
         ]
       },
       "state": {}
+    },
+    {
+      "expect": {
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "0",
+            "pinned": false,
+            "selectable": true,
+            "text": "number type",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "1",
+            "pinned": false,
+            "selectable": true,
+            "text": "list type",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "2",
+            "pinned": false,
+            "selectable": true,
+            "text": "empty type",
+            "type": ""
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "3",
+            "pinned": false,
+            "selectable": true,
+            "text": "null type",
+            "type": "item"
+          }
+        ]
+      },
+      "name": "a non-string or empty type is a plain item in every model",
+      "panel": {
+        "items": [
+          {
+            "command": "x",
+            "text": "number type",
+            "type": 5
+          },
+          {
+            "command": "x",
+            "text": "list type",
+            "type": [
+              "text"
+            ]
+          },
+          {
+            "command": "x",
+            "text": "empty type",
+            "type": ""
+          },
+          {
+            "command": "x",
+            "text": "null type",
+            "type": null
+          }
+        ]
+      },
+      "state": {}
     }
   ]
 }

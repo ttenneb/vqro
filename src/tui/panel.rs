@@ -640,8 +640,8 @@ fn draw_block(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, i: usize, s
     let item = &r.item;
     let indent = (r.depth * 2) as u16;
     let message = kind(item) == "message";
-    // A card (feature `card`) fills the row's whole width with the palette's `card` and keeps one column clear
-    // on each side; its frame, if kept, is drawn inside.
+    // A card (feature `card`) fills the row's width from its indent with the palette's `card` and keeps one
+    // column clear on each side; its frame, if kept, is drawn inside.
     let (card, framed) = message_look(item, SUPPORTED);
     let pad = if card { 1 } else { 0 };
     let x0 = row.x + indent + pad;
@@ -653,7 +653,7 @@ fn draw_block(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, i: usize, s
     for (dy, (line, part)) in block_lines(item, row.width, r.depth, open).into_iter().skip(skip as usize).take(row.height as usize).enumerate() {
         let y = row.y + dy as u16;
         let mut x = x0;
-        if card { buf.set_style(Rect { x: row.x, y, width: row.width, height: 1 }, Style::new().bg(pal.card)); }
+        if card { buf.set_style(Rect { x: row.x + indent, y, width: row.width.saturating_sub(indent), height: 1 }, Style::new().bg(pal.card)); }
         let pre = |s: &str, x: &mut u16, buf: &mut Buffer| { buf.set_string(*x, y, s, frame); *x += icons::width(s); };
         match part {
             "pad" => continue,
