@@ -1052,6 +1052,35 @@ class AgentPane(unittest.TestCase):
         self.agents.flush_conversations()
         self.assertEqual(c.view.seq, 5, "the current stream still applies")
 
+    def test_a_late_attach_reply_is_closed_not_left_open(self):
+        """spike-panel-1 close-lock review P3: if the conversation moved on (its generation changed) while an attach
+        was in flight, the reply's stream is closed, outside the conversation lock, instead of being left open."""
+        c = self.agents.conversations["r2"]
+        original = self.core.attach_items
+        def attach_then_move_on(resource, sink, after=None):
+            reply = original(resource, sink, after)
+            with c.lock:
+                c.generation += 1  # e.g. the stream ended or the agent went away meanwhile
+            return reply
+        self.core.attach_items = attach_then_move_on
+        original_close, lock_free = self.core.close_stream, []
+        def close_checking_the_lock(stream):
+            free = c.lock.acquire(blocking=False)  # never called while the conversation lock is held
+            if free:
+                c.lock.release()
+            lock_free.append(free)
+            return original_close(stream)
+        self.core.close_stream = close_checking_the_lock
+        closes_before = [p for m, p in self.core.calls if m == "stream.close"]
+        c.stream = None
+        self.agents.wake("r2", reattach=True)
+        self.agents.flush_conversations()
+        late = self.core.next_stream
+        self.assertIsNone(c.stream, "not recorded")
+        self.assertIn(("stream.close", {"stream": late}), self.core.calls, "closed, so the core frees it")
+        self.assertEqual(len([p for m, p in self.core.calls if m == "stream.close"]), len(closes_before) + 1)
+        self.assertEqual(lock_free, [True], "closed outside the conversation lock")
+
     def test_one_pending_backoff_timer_however_many_wakes(self):
         """spike-panel-1 P3: wakes during a backoff never pile up timers."""
         self.feed(snapshot(CONVERSATION, seq=4))

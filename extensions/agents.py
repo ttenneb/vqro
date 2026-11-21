@@ -611,9 +611,14 @@ class Agents:
         except VqroError:
             self.later(1.0, rid)
             return
+        late = None
         with c.lock:
             if c.generation == generation and isinstance(reply.get("stream"), int):
                 c.stream = reply["stream"]
+            elif isinstance(reply.get("stream"), int):
+                late = reply["stream"]  # the conversation moved on while this attach was in flight: nobody reads it
+        if late is not None:
+            self.ext.close_stream(late)  # outside the lock (see above); otherwise the core keeps it open, using credit
 
     def flush_conversations(self):
         """One worker pass: (re)attach what needs it, then republish changed panes."""
