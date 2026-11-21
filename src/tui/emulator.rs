@@ -260,7 +260,14 @@ impl Engine for Vt100 {
         if self.alternate_screen() != was_alternate || self.scrollback_len() < kept { self.renumber_from(before); }
     }
     fn take_effects(&mut self) -> Vec<Effect> { std::mem::take(&mut self.parser.callbacks_mut().out) }
-    fn resize(&mut self, cols: u16, rows: u16) { self.parser.screen_mut().set_size(nz(rows), nz(cols)); }
+    fn resize(&mut self, cols: u16, rows: u16) {
+        // A resize can drop or move rows without counting them (shrinking with no history drops the top rows): as
+        // libghostty does, number the rows after it above every number in use before (row numbers hold between
+        // resizes).
+        let before = self.scrolled() + usize::from(self.rows());
+        self.parser.screen_mut().set_size(nz(rows), nz(cols));
+        self.renumber_from(before);
+    }
     fn rows(&self) -> u16 { self.parser.screen().size().0.get() }
     fn cols(&self) -> u16 { self.parser.screen().size().1.get() }
     fn application_cursor(&self) -> bool { self.parser.screen().application_cursor() }
@@ -588,6 +595,24 @@ mod fuzz {
             }
             let area = Rect::new(0, 0, e.cols(), rows);
             e.draw(&mut Buffer::empty(area), area);
+        }
+    }
+
+    /// vqro-lead-secondary: vt100 with no history, shrunk after four lines, named old row 0 with "C".
+    #[test]
+    fn a_resize_never_renames_a_row_on_any_engine() {
+        for kind in EngineKind::ALL {
+            for lines in [0, 1, 100] {
+                let mut e = Emulator::with_engine(kind, 40, 4, lines);
+                e.process(b"A\r\nB\r\nC\r\nD");
+                let before: Vec<_> = (0..e.scrolled() + 4).map(|r| e.row_text(r).map(|t| t.0)).collect();
+                e.resize(40, 2);
+                for (row, was) in before.iter().enumerate() {
+                    if let (Some(was), Some(now)) = (was, e.row_text(row).map(|t| t.0)) {
+                        assert_eq!(was, &now, "{} with {lines} lines: row {row} renamed by a resize", kind.name());
+                    }
+                }
+            }
         }
     }
 
