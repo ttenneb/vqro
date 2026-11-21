@@ -43,6 +43,57 @@ pub fn provider_capabilities() -> Map<String, Value> {
         .clone()
 }
 
+/// Bind the typed SDK effect's C2 identity before admission or any native write.
+/// Classification/sender remain claims, matching the Pi adapter's public-origin contract.
+pub fn bind_origin(
+    args: &Value,
+    attribution: &crate::principal::Attribution,
+) -> Result<Value, RpcError> {
+    let mut args = args.clone();
+    let origin = args
+        .get_mut("origin")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| rejected("invalid", "effective origin is required"))?;
+    for (field, recorded) in [
+        ("principal", attribution.principal.as_deref()),
+        ("actor", attribution.actor.as_deref()),
+    ] {
+        let actual = recorded.unwrap_or(crate::principal::UNDECLARED);
+        if let Some(supplied) = origin.get(field) {
+            let supplied = supplied
+                .as_str()
+                .ok_or_else(|| rejected("invalid", "origin identity must be a string"))?;
+            if supplied != actual {
+                return Err(rejected(
+                    "forbidden",
+                    "origin does not match the core-recorded caller",
+                ));
+            }
+        }
+        origin.insert(field.into(), json!(actual));
+    }
+    if let Some(supplied) = origin.get("initiator") {
+        let supplied = supplied
+            .as_str()
+            .ok_or_else(|| rejected("invalid", "origin initiator must be a string"))?;
+        if Some(supplied) != attribution.initiator.as_deref() {
+            return Err(rejected(
+                "forbidden",
+                "origin initiator does not match core attribution",
+            ));
+        }
+    }
+    if let Some(initiator) = &attribution.initiator {
+        origin.insert("initiator".into(), json!(initiator));
+    }
+    let claimed: Vec<_> = ["kind", "agent", "sender"]
+        .into_iter()
+        .filter(|field| origin.contains_key(*field))
+        .collect();
+    origin.insert("claimed".into(), json!(claimed));
+    Ok(args)
+}
+
 fn rejected(kind: &str, message: &str) -> RpcError {
     RpcError::new(kind, message)
 }

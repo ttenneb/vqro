@@ -291,7 +291,13 @@ async fn serve(
                         let runtime=runtime.clone();let connection=provider.clone();let publisher=publisher.clone();
                         tokio::spawn(async move {
                             if connection.is_closed(){request.respond(Err(ProviderError::new("unavailable","originating core connection closed; no native effect started")));return;}
-                            let result=runtime.invoke(request.r#ref.as_deref().unwrap_or(""),&request.incarnation,&request.op,request.args.clone(),request.deadline).await;
+                            let args=if request.op=="agent.send" {
+                                match vqro::codex::bind_origin(&request.args,&request.attribution) {
+                                    Ok(args)=>args,
+                                    Err(error)=>{request.respond(Ok(vqro::provider_client::Outcome::Rejected {kind:error.kind().into(),message:error.message}));return;}
+                                }
+                            } else {request.args.clone()};
+                            let result=runtime.invoke(request.r#ref.as_deref().unwrap_or(""),&request.incarnation,&request.op,args,request.deadline).await;
                             // An upsert notification can arrive before a response but commit after
                             // its audit. The public sync acknowledgement fences the current inventory
                             // before an observed session change; never repeat the native operation.

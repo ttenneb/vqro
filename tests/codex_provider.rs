@@ -160,6 +160,7 @@ impl Core {
     ) -> Value {
         let incarnation = self.facts.lock().unwrap()[reference]["incarnation"].clone();
         self.peer.call_with_timeout("effect.invoke",json!({"generation":self.generation,"effect":effect,
+            "author":"client:wire:99","actor":"actor:test","principal":"p:test","initiator":"caller:original",
             "ref":reference,"incarnation":incarnation,"op":op,"args":args,"deadline_ms":deadline_ms}),Duration::from_secs(5)).await.unwrap()
     }
 
@@ -216,6 +217,71 @@ async fn finish(mut child: Child) {
 
 fn send(delivery: &str) -> Value {
     json!({"v":0,"mode":"admit","delivery":delivery,"content":[{"type":"text","text":"literal /no-command\nline2"}],"origin":{"principal":"p:test","actor":"actor:test","kind":"agent","agent":"r7"}})
+}
+
+#[tokio::test]
+async fn provider_wire_binds_omitted_identity_and_rejects_spoofing_before_native_input() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = UnixListener::bind(root.path().join("core.sock")).unwrap();
+    let child = bridge(&root, 1, 0, &[]);
+    let mut core = Core::accept(&listener, 1, "bootstrap").await;
+    core.wait(|facts| facts.len() == 1).await;
+    core.effect(
+        "new",
+        "endpoint-1",
+        "agent.session",
+        json!({"v":0,"action":"new"}),
+        1000,
+    )
+    .await;
+    let native_before = std::fs::read_to_string(root.path().join("native.jsonl")).unwrap();
+    for (index, field) in ["principal", "actor", "initiator"].into_iter().enumerate() {
+        let mut args = send(&format!("forged-{index}"));
+        args["origin"][field] = json!("not-the-recorded-caller");
+        let result = core
+            .effect(
+                &format!("forged-{index}"),
+                "endpoint-1",
+                "agent.send",
+                args,
+                1000,
+            )
+            .await;
+        assert_eq!(result["outcome"], "rejected");
+        assert_eq!(result["error"]["kind"], "forbidden");
+    }
+    let before = std::fs::read_to_string(root.path().join("native.jsonl")).unwrap();
+    assert_eq!(
+        before, native_before,
+        "spoof refusals perform zero native calls"
+    );
+    assert!(!before
+        .lines()
+        .any(|line| serde_json::from_str::<Value>(line).unwrap()["method"] == "turn/start"));
+    let mut args = send("ui-kind-only");
+    args["origin"] = json!({"kind":"human"});
+    let result = core
+        .effect("ui-kind-only", "endpoint-1", "agent.send", args, 1000)
+        .await;
+    assert_eq!(result["outcome"], "accepted");
+    let ledger = std::fs::read_to_string(root.path().join("native.jsonl")).unwrap();
+    let calls: Vec<Value> = ledger
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|row: &Value| row["method"] == "turn/start")
+        .collect();
+    assert_eq!(calls.len(), 1);
+    let text = calls[0]["params"]["input"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("p:test") && text.contains("actor:test") && text.contains("caller:original")
+    );
+    assert!(
+        !text.contains("client:wire:99"),
+        "actual author is not substituted for principal or actor"
+    );
+    assert!(text.contains("claimed"));
+    finish(child).await;
+    core.close().await;
 }
 
 #[tokio::test]
