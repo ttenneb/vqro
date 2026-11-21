@@ -171,7 +171,7 @@ class ReplayControls(unittest.IsolatedAsyncioTestCase):
 class PressureContext:
     """Author-only modeled context; never an implementation descriptor/receipt."""
     def __init__(self, gap=True, settle=True):
-        self.evidence = []; self.metadata = {'adapter_image': {'pid': 123}}
+        self.evidence = []; self.metadata = {'adapter_image': {'pid': 123}}; self.manifest = {'wire': 'pi'}
         self.native = self; self.run = None; self.completion = None; self.number = 0
         self.phase = ''; self.text = 'before'; self.after = []; self.attaches = []
         self.gap = gap; self.settle = settle; self.target = None
@@ -196,8 +196,8 @@ class PressureContext:
                 self.number += 1; self.run = 'observed-run-' + str(self.number)
             elif self.settle:
                 self.completion = {'id': self.run}; self.run = None
-        elif kwargs.get('count') == 512:
-            self.text = '511:' + ''.join(kwargs['chunks'])
+        elif kwargs.get('count') in (256, 512):
+            self.text = str(kwargs.get('start_index', 0) + kwargs['count'] - 1) + ':' + ''.join(kwargs['chunks'])
             if self.gap:
                 self.target.closed = 'retention'; self.target.reducer.failure = 'retention'
                 self.target.close_notice = {'method': 'stream.gap', 'reason': {'reason': 'gap', 'gap': 'retention'},
@@ -250,16 +250,52 @@ class PressureControls(unittest.IsolatedAsyncioTestCase):
         with patch.object(probe, 'process_rss', return_value=1000):
             await probe.public_retention_bounds(ctx)
         retains = [kwargs for method, kwargs in ctx.native_calls if method == 'retain']
-        self.assertEqual(len(retains), 4 * 96 + 1)
-        self.assertEqual(retains[-1]['count'], 512)
+        self.assertEqual(len(retains), 4 * 96 + 2)
+        self.assertEqual([row['count'] for row in retains[-2:]], [256, 256])
+        self.assertEqual([row['start_index'] for row in retains[-2:]], [0, 256])
+        self.assertEqual([row['timeout'] for row in retains[-2:]], [5, 5])
+        self.assertEqual(retains[-2]['chunks'], retains[-1]['chunks'])
         self.assertEqual(len(retains[-1]['chunks']), 8)
         self.assertEqual(''.join(retains[-1]['chunks']), 'O10-gap-burst:' + 'y' * 8192)
-        self.assertTrue(all(len(kwargs['text'].split(':', 1)[1]) == 8192 for kwargs in retains[:-1]))
+        self.assertTrue(all(len(kwargs['text'].split(':', 1)[1]) == 8192 for kwargs in retains[:-2]))
         self.assertEqual(len(ctx.after), 1)
         self.assertTrue(ctx.assert_quiescent)
         self.assertFalse(ctx.paused)
         pressure = next(row for row in ctx.evidence if row['kind'] == 'retention_pressure')
         self.assertEqual(len(pressure['samples']), 4)
+
+    async def test_codex_keeps_original_single512_control(self):
+        ctx = PressureContext(); ctx.manifest['wire'] = 'codex'
+        with patch.object(probe, 'process_rss', return_value=1000):
+            await probe.public_retention_bounds(ctx)
+        bursts = [row for method, row in ctx.native_calls if method == 'retain' and 'chunks' in row]
+        self.assertEqual(len(bursts), 1)
+        self.assertEqual(bursts[0]['count'], 512)
+        self.assertNotIn('start_index', bursts[0])
+        self.assertEqual(len(ctx.after), 1)
+
+    async def test_whole_helper_unmarked_dead_gap_peer_never_replays(self):
+        ctx = PressureContext()
+        async def dead(method): raise ConnectionError('old gap-bearing peer is unresponsive')
+        with patch.object(probe, 'process_rss', return_value=1000), patch(__name__ + '.readonly_snapshot', dead):
+            with self.assertRaises(CheckFailed): await probe.public_retention_bounds(ctx)
+        self.assertIsNone(ctx.target.peer.failure)
+        self.assertEqual(ctx.after, [])
+        self.assertFalse(ctx.paused)
+
+    async def test_uncertain_second_segment_never_retries_or_recovers(self):
+        ctx = PressureContext(); original = ctx.call; attempts = []
+        async def uncertain(method, **kwargs):
+            if method == 'retain' and 'chunks' in kwargs:
+                attempts.append(kwargs['start_index'])
+                if kwargs['start_index'] == 256: raise asyncio.TimeoutError('uncertain fixture control')
+            return await original(method, **kwargs)
+        ctx.native = NS(call=uncertain)
+        with patch.object(probe, 'process_rss', return_value=1000), self.assertRaises(asyncio.TimeoutError):
+            await probe.public_retention_bounds(ctx)
+        self.assertEqual(attempts, [0, 256])
+        self.assertEqual(ctx.after, [])
+        self.assertFalse(ctx.paused)
 
     async def test_pi_absent_run_fact_uses_actual_public_state(self):
         ctx = PressureContext(); ctx.omit_run_fact = True

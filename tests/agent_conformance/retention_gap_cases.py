@@ -184,7 +184,14 @@ async def public_retention_bounds(ctx):
         # Same 512 final messages and final payload as the old burst. Native
         # deltas add legal journal pressure, not an invented gap/retention budget.
         chunks = ['O10-gap-burst:' + 'y' * 1024] + ['y' * 1024] * 7
-        await ctx.native.call('retain', count=512, chunks=chunks, timeout=5)
+        if ctx.manifest.get('wire', 'pi') == 'pi':
+            # Approved fixture-control segmentation, NOT a product-bound change:
+            # same ordered512 bodies/deltas, five seconds per256-message call.
+            # The midpoint ACK is not quiescence and cannot start recovery.
+            for start in (0, 256):
+                await ctx.native.call('retain', count=256, chunks=chunks, start_index=start, timeout=5)
+        else:
+            await ctx.native.call('retain', count=512, chunks=chunks, timeout=5)
         await settle_native(ctx, run, epoch, 'O10-gap-burst')
         check(not transport.is_reading(), 'O10 target remained stalled throughout native pressure', component='harness')
     finally:
@@ -199,6 +206,7 @@ async def public_retention_bounds(ctx):
     ctx.evidence.append({'kind': 'o10_public_gap_after_quiescence', 'notice': deepcopy(target.close_notice),
                          'observed_wire_bytes': target.reducer.offset - initial_bytes,
                          'burst_final_messages': 512, 'chunks_per_message_requested': 8,
+                         'native_control_segments_requested': [256, 256] if ctx.manifest.get('wire', 'pi') == 'pi' else [512],
                          'final_text_bytes_per_message_requested': sum(map(len, chunks)),
                          'request_note': 'requested native delta shape, not a claim that all wire bytes were observed'})
     await one_replay(ctx, target, declaration, needle)
