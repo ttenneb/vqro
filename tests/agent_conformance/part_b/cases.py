@@ -842,7 +842,8 @@ async def shared_host_native_tool_provenance(ctx):
             ctx.evidence.append({"subcase":"endpoint-env-tool","status":"not-applicable","declaration":{"path":path,"actual":value}})
         else:
             raise HarnessGap("declared tool_principal=env requires actual runtime-child tool-to-CLI fixture; asserted hello is not evidence")
-    raise HarnessGap("shared-host no-endpoint branch has no native runtime route; core-assigned host:<id> must not be asserted or faked")
+    from .host_tool_binding import shared_host_route
+    await shared_host_route(ctx)
 
 
 @case("T12")
