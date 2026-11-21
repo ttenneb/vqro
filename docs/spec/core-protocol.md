@@ -1342,11 +1342,14 @@ given rows in clients without the feature. Fixtures: `tests/fixtures/client/pane
   adjacent to a compact table in a wide pane; it is clamped to available width. Absent/invalid bounds use available
   width. Empty/invalid schemas are ignored; unknown fields are ignored. Headers are ordinary child rows with
   column cells (not automatically inserted), so they scroll and fold with their group. IDs and action semantics
-  are unchanged. Panels using this declare `child_table` in `requires` and retain readable row `text`.
-  **Client coverage:** Rust TUI renders it. Text and OpenTUI currently deliberately degrade to their ordinary tree
-  rows using the required readable `text`, with existing menu/copy/open mechanisms where supported; they do not
-  advertise `child_table` and report the unsupported requirement. They do not promise column alignment or bounded
-  action placement. This is a rendering-only extension, not a new conversation/tool-specific primitive.
+  are unchanged. This is an **optional rendering enhancement**: retain readable row `text`, and do not add it to
+  panel `requires` unless the panel genuinely cannot function without alignment. A panel whose table is essential
+  can declare `child_table` in `requires` using the usual required-feature guard.
+  **Client coverage:** Rust TUI renders it. Text and OpenTUI do not yet advertise `child_table` and ignore its
+  layout metadata, showing the ordinary readable tree rows and their existing menu/copy/open mechanisms where
+  supported. Conversation panels remain usable: no unsupported-panel notice just for an optional inline table.
+  Alignment and bounded action placement deliberately degrade in those clients. This is a rendering-only
+  extension, not a new conversation/tool-specific primitive.
 
 Illustrative panel:
 ```json
