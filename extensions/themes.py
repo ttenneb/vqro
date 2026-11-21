@@ -236,6 +236,30 @@ def write(name, accent=None):
     return {"theme": name, "accent": value.get("accent")}
 
 
+def refreshed(saved):
+    """The saved theme with the tokens its bundled theme has gained since it was applied (e.g. the meaning roles),
+    or None when nothing is missing. Applying a theme saves a copy of its palette, so a token added to the
+    bundled theme later would otherwise never reach a user who chose it earlier. Only bundled themes, and only
+    missing tokens: every saved token (the chosen accent, any edit by hand) stays as it is. A custom or unknown
+    theme is never touched."""
+    if not isinstance(saved, dict) or saved.get("name") not in BY_NAME or not isinstance(saved.get("palette"), dict):
+        return None
+    missing = {k: v for k, v in BY_NAME[saved["name"]]["palette"].items() if k not in saved["palette"]}
+    return dict(saved, palette={**saved["palette"], **missing}) if missing else None
+
+
+def refresh_saved():
+    """On start: bring a saved bundled theme up to date (`refreshed`), in one revertable transaction."""
+    def attempt():
+        value = refreshed(ext.value(ENTRY))
+        if value is None:
+            return None
+        added = sorted(value["palette"].keys() - ext.value(ENTRY)["palette"].keys())
+        return ext.apply([{"op": "set", "key": ENTRY, "value": value, "expect": ext.version(ENTRY)}],
+                         f"themes: {value['name']} gains {', '.join(added)}")
+    return ext.retrying(attempt)
+
+
 @ext.command("themes.apply", "Apply a theme (args: name, or value from a pick-one menu; accent?)")
 def apply(args):
     return write(args.get("name") or args.get("value"), args.get("accent"))
@@ -249,5 +273,6 @@ def accent(args):
     return write(name, args.get("value") or args.get("accent") or args.get("text"))
 
 
+refresh_saved()
 publish()
 ext.run()

@@ -63,6 +63,41 @@ class ThemeTests(unittest.TestCase):
         cls.module = load()
         cls.themes = cls.module["BY_NAME"]
 
+    def test_a_saved_bundled_theme_gains_new_tokens_and_keeps_its_own(self):
+        # vqro-lead (after install): a theme chosen before the meaning roles saved an 18-token copy, so the roles
+        # never reached that screen until it was applied again.
+        refreshed, frappe = self.module["refreshed"], self.themes["catppuccin-frappe"]
+        old = {k: v for k, v in frappe["palette"].items() if k not in ROLES}
+        old.update(accent=frappe["accents"]["peach"], border_focus=frappe["accents"]["peach"], muted="#123456")
+        saved = {"name": "catppuccin-frappe", "accent": "peach", "palette": old}
+        new = refreshed(saved)
+        self.assertEqual(new["accent"], "peach")
+        self.assertEqual({k: new["palette"][k] for k in old}, old, "every saved token kept: accent, hand edits")
+        self.assertEqual({k: new["palette"][k] for k in ROLES}, {k: frappe["palette"][k] for k in ROLES})
+        self.assertIsNone(refreshed(new), "up to date: nothing to write")
+        for other in [None, "x", {"name": "mine", "palette": {"accent": "red"}}, {"name": "nord", "palette": "bad"},
+                      {"name": "default", "palette": {}}]:
+            self.assertIsNone(refreshed(other), other)
+
+    def test_refresh_on_start_is_one_compare_and_set_write(self):
+        module = load()
+        ext = module["ext"]
+        saved = {"name": "nord", "palette": {k: v for k, v in self.themes["nord"]["palette"].items() if k not in ROLES}}
+        ext.value.side_effect = lambda key, default=None: saved if key == module["ENTRY"] else default
+        ext.version.side_effect = lambda key: 41
+        ext.retrying.side_effect = lambda fn, *a: fn()
+        ext.apply.reset_mock()
+        module["refresh_saved"]()
+        (ops, note), _ = ext.apply.call_args
+        self.assertEqual(len(ops), 1)
+        self.assertEqual((ops[0]["op"], ops[0]["key"], ops[0]["expect"]), ("set", module["ENTRY"], 41))
+        self.assertEqual(ops[0]["value"]["palette"], self.themes["nord"]["palette"])
+        self.assertIn("gains", note)
+        ext.apply.reset_mock()
+        saved = ops[0]["value"]
+        module["refresh_saved"]()
+        ext.apply.assert_not_called()
+
     def test_default_keeps_client_palette_and_preview(self):
         self.assertEqual(self.themes["default"]["palette"], {})
         self.assertTrue(set(self.module["PREVIEW"]) <= self.themes["default"]["preview"].keys())
