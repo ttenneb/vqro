@@ -18,12 +18,17 @@ def reducer(text='before', snapshots=1, epoch='items-e1'):
               cursor={'epoch': epoch, 'seq': snapshots}, failure=None, offset=100)
 
 
+async def readonly_snapshot(method):
+    if method != 'workspace.snapshot': raise AssertionError('not the bounded read-only probe')
+    return {'epoch': 'workspace-e1', 'seq': 7}
+
+
 def gap_view():
     value = reducer()
     value.failure = 'retention'
     return NS(closed='retention', close_notice={'method': 'stream.gap',
               'reason': {'reason': 'gap', 'gap': 'retention'}, 'last_good_cursor': deepcopy(value.cursor)},
-              reducer=value, peer=NS(failure=None))
+              reducer=value, peer=NS(failure=None, call=readonly_snapshot))
 
 
 class GapControls(unittest.TestCase):
@@ -100,6 +105,24 @@ class ReplayControls(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ctx.calls), 1)
         self.assertEqual(ctx.calls[0]['after'], old.reducer.cursor)
         self.assertEqual(ctx.evidence[-1]['attempts'], 1)
+
+    async def test_unmarked_dead_old_peer_cannot_hide_behind_new_peer(self):
+        ctx = ReplayContext(); old = gap_view()
+        async def dead(method): raise ConnectionError('old socket stopped serving RPC')
+        old.peer.call = dead
+        with self.assertRaises(CheckFailed):
+            await probe.one_replay(ctx, old, self.bounds, '511:O10-gap-burst:')
+        self.assertIsNone(old.peer.failure)
+        self.assertEqual(ctx.calls, [])
+
+    async def test_unmarked_hanging_old_peer_is_bounded_and_never_replays(self):
+        ctx = ReplayContext(); old = gap_view()
+        async def hangs(method): await asyncio.Future()
+        old.peer.call = hangs
+        with self.assertRaises(CheckFailed):
+            await probe.one_replay(ctx, old, self.bounds, '511:O10-gap-burst:')
+        self.assertIsNone(old.peer.failure)
+        self.assertEqual(ctx.calls, [])
 
     async def test_continue_or_unknown_cannot_substitute_for_reset(self):
         for initial in ('continue', 'surprise'):
@@ -194,7 +217,7 @@ class PressureContext:
         if not predicate(): raise asyncio.TimeoutError()
 
     async def viewer(self):
-        peer = NS(failure=None, close=self.close, wait=self.wait)
+        peer = NS(failure=None, close=self.close, wait=self.wait, call=readonly_snapshot)
         def pause():
             self.pause_reading()
             self.target = next(view for view in self.views if view.peer is peer)

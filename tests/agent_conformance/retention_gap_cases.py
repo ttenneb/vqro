@@ -110,6 +110,18 @@ async def sample_snapshot(ctx, needle, declaration):
 
 async def one_replay(ctx, view, declaration, needle):
     cursor, notice = actual_gap(view)
+    # An unset failure flag is not an observed RPC response. Read on THAT same
+    # gap-bearing connection, before a fresh peer could hide its failure.
+    try:
+        reply = await asyncio.wait_for(view.peer.call('workspace.snapshot'), timeout=2)
+    except Exception as error:
+        ctx.evidence.append({'kind': 'o10_gap_connection_rpc_failed', 'method': 'workspace.snapshot',
+                             'error': type(error).__name__, 'detail': str(error)})
+        raise CheckFailed('O10 gap-bearing connection did not serve its bounded read-only RPC') from error
+    check(isinstance(reply, dict) and cursor_valid({'epoch': reply.get('epoch'), 'seq': reply.get('seq')}),
+          'O10 same-connection read-only RPC returned an actual workspace snapshot envelope')
+    ctx.evidence.append({'kind': 'o10_gap_connection_rpc', 'method': 'workspace.snapshot',
+                         'on_gap_bearing_peer': True, 'reply_epoch': reply['epoch'], 'reply_seq': reply['seq']})
     seed = deepcopy(view.reducer)
     baseline = seed.snapshots
     # Exactly ONE after-cursor attachment. Never restart pressure/retry recovery.
