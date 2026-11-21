@@ -1,0 +1,15 @@
+{
+  "about": "Meaning roles (core-protocol.md, Themes): a theme's palette -> the resolved role colours. A role the theme leaves out (or gives an unreadable colour) follows the theme's own fallback role when the theme sets that readably; otherwise the client's built-in role. Rust: src/tui/theme.rs; OpenTUI: src/roles.ts.",
+  "roles": {"heading": "accent", "control": "accent", "link": "accent", "info": "accent", "you": "accent", "agent": "muted", "other_agent": "accent", "changed": "warn"},
+  "builtin": {"heading": "cyan", "control": "lightblue", "link": "lightblue", "info": "lightcyan", "you": "lightyellow", "agent": "lightmagenta", "other_agent": "lightgreen", "changed": "yellow"},
+  "cases": [
+    {"name": "no tokens: the built-in roles", "palette": {},
+     "expect": {"heading": "cyan", "control": "lightblue", "link": "lightblue", "info": "lightcyan", "you": "lightyellow", "agent": "lightmagenta", "other_agent": "lightgreen", "changed": "yellow"}},
+    {"name": "an older theme: every role follows its fallback", "palette": {"accent": "#ff0000", "muted": "#00ff00", "warn": "#0000ff"},
+     "expect": {"heading": "#ff0000", "control": "#ff0000", "link": "#ff0000", "info": "#ff0000", "you": "#ff0000", "agent": "#00ff00", "other_agent": "#ff0000", "changed": "#0000ff"}},
+    {"name": "a set role wins; an unset fallback keeps the built-in", "palette": {"accent": "#ff0000", "heading": "#123456"},
+     "expect": {"heading": "#123456", "control": "#ff0000", "agent": "lightmagenta", "changed": "yellow"}},
+    {"name": "unreadable colours count as missing", "palette": {"accent": "nonsense", "control": "#010203", "you": "chartreuse"},
+     "expect": {"heading": "cyan", "control": "#010203", "you": "lightyellow"}}
+  ]
+}

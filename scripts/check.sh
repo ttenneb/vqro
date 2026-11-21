@@ -283,9 +283,9 @@ step manifest-deps "${CLEAN[@]}" python3 scripts/check_manifest_deps.py
 step build-zero-warnings no_warnings
 step cargo-test "${CARGO[@]}" cargo test
 step python-unittest "${CLEAN[@]}" python3 -m unittest discover -s tests -p 'test_*.py'
-opentui_model() {  # the OpenTUI trial client's model against the shared fixtures, and its card colour; needs Bun, not its packages
+opentui_model() {  # the OpenTUI trial client's model against the shared fixtures, its card colour and roles; needs Bun, not its packages
   local bun; bun=$(command -v bun) || { echo "SKIP OpenTUI trial client model: bun not found"; return "$SKIP_EXIT"; }
-  (cd extensions/clients/opentui && env -i HOME="$HOME" PATH="$(dirname "$bun"):/usr/bin:/bin" "$bun" test src/conformance.test.ts src/cardcolor.test.ts)
+  (cd extensions/clients/opentui && env -i HOME="$HOME" PATH="$(dirname "$bun"):/usr/bin:/bin" "$bun" test src/conformance.test.ts src/cardcolor.test.ts src/roles.test.ts)
 }
 step opentui-model opentui_model
 if [ "$MODE" = full ]; then

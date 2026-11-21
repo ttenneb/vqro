@@ -256,7 +256,7 @@ pub fn render(buf: &mut Buffer, area: Rect, v: &Arc<Value>, st: &mut State, focu
             if let Some((id,value))=selected {
                 sync_detail(st,&id);
                 let title=value["title"].as_str().unwrap_or("Details");
-                buf.set_string(detail.x,detail.y,truncate(title,detail.width as usize),pal.style(Some("accent")).add_modifier(Modifier::BOLD));
+                buf.set_string(detail.x,detail.y,truncate(title,detail.width as usize),pal.style(Some("heading")).add_modifier(Modifier::BOLD));
                 let body=Rect{y:detail.y+1,height:detail.height-1,..detail};
                 let mut child=st.detail.take().unwrap_or_default();
                 hits.detail=Some(Box::new(render(buf,body,&Arc::new(value),&mut child,focused&&st.detail_focus,pal,icons,key_labels)));
@@ -375,7 +375,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
         if header_at(top).is_some() {
             let header_y=area.y;area.y+=1;area.height-=1;
             if st.sel>=pinned && st.sel<first_bottom && !st.manual_scroll {let s=st.sel-pinned;let start: u32=heights[..s].iter().sum();let end=start+heights[s];if end>top+area.height as u32{top=if heights[s]>area.height as u32{start}else{end.saturating_sub(area.height as u32)};}}
-            if let Some(header)=header_at(top){buf.set_string(area.x,header_y,truncate(header,area.width as usize),pal.style(Some("accent")).add_modifier(Modifier::BOLD));}
+            if let Some(header)=header_at(top){buf.set_string(area.x,header_y,truncate(header,area.width as usize),pal.style(Some("heading")).add_modifier(Modifier::BOLD));}
         }
     }
     st.top = top as usize;
@@ -405,7 +405,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
         let w = icons::width(hint);
         if body.width > w + 2 {
             let r = Rect { x: body.right() - w - 1, y: body.bottom() - 1, width: w, height: 1 };
-            buf.set_string(r.x, r.y, hint, pal.badge(Some("accent")));
+            buf.set_string(r.x, r.y, hint, pal.badge(Some("control")));
             hits.latest = Some(r);
         }
     }
@@ -466,7 +466,7 @@ fn facet_chips(v: &Value, st: &State, width: u16, pal: &Palette) -> Vec<LineChip
     }
     if let Some(label) = sort {
         put("Sort: ".into(), pal.style(Some("muted")), None, false, false, &mut out);
-        put(format!(" {label} ▾ "), Style::new().fg(pal.accent).bg(pal.surface), None, true, true, &mut out);
+        put(format!(" {label} ▾ "), Style::new().fg(pal.control).bg(pal.surface), None, true, true, &mut out);
     }
     out
 }
@@ -642,11 +642,11 @@ fn draw_composer(buf: &mut Buffer, row: Rect, item: &Value, selected: bool, chip
             }
         } else {
             let shown = ctl["options"].as_array().and_then(|o| o.iter().find(|x| x["value"] == value)).and_then(|x| x["label"].as_str()).map(String::from).or_else(|| value.as_str().map(String::from)).unwrap_or_default();
-            button(format!("{}: {shown} ▾", ctl["text"].as_str().unwrap_or(arg)), pal.style(Some("accent")), &mut x, buf, hits);
+            button(format!("{}: {shown} ▾", ctl["text"].as_str().unwrap_or(arg)), pal.style(Some("control")), &mut x, buf, hits);
         }
     }
     if item["send_button"] != false {
-        button("[Send]".into(), pal.style(Some("accent")).add_modifier(Modifier::BOLD), &mut x, buf, hits);
+        button("[Send]".into(), pal.style(Some("control")).add_modifier(Modifier::BOLD), &mut x, buf, hits);
     }
     let n = lines.len();
     // The new-line key that works here: Shift-Enter when the terminal reports it (keyboard enhancement), else Alt-Enter
@@ -676,7 +676,7 @@ fn draw_block(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, i: usize, s
     let x0 = row.x + indent + pad;
     let w = row.width.saturating_sub(indent + 2 * pad);
     let right = x0 + w;
-    let frame = if item["style"].is_string() { text_style(item, pal) } else { pal.style(Some("accent")) };
+    let frame = if item["style"].is_string() { text_style(item, pal) } else { pal.style(Some("heading")) };
     let base = if message || item["format"] == "markdown" { Style::new().fg(pal.text) } else if item["style"].is_string() { text_style(item, pal) } else { pal.style(Some("muted")) };
     if selectable(item) { hits.rows.push((row, i)); }
     for (dy, (line, part)) in block_lines(item, row.width, r.depth, open).into_iter().skip(skip as usize).take(row.height as usize).enumerate() {
@@ -708,14 +708,14 @@ fn draw_block(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, i: usize, s
             "fold" => {
                 if message && framed { pre("┃ ", &mut x, buf); }
                 let label = line.first().map(|s| s.0.as_str()).unwrap_or("");
-                buf.set_string(x, y, truncate(label, right.saturating_sub(x) as usize), pal.style(Some("accent")));
+                buf.set_string(x, y, truncate(label, right.saturating_sub(x) as usize), pal.style(Some("control")));
                 hits.expanders.push((Rect { x, y, width: icons::width(label).min(right.saturating_sub(x)), height: 1 }, i));
                 continue;
             }
             _ => {}
         }
         for (t, st) in line {
-            let style = match st { "h" => base.patch(pal.style(Some("accent"))).add_modifier(Modifier::BOLD), "b" => base.add_modifier(Modifier::BOLD), "c" | "pre" => base.patch(pal.style(Some("muted"))), _ => base };
+            let style = match st { "h" => base.patch(pal.style(Some("heading"))).add_modifier(Modifier::BOLD), "b" => base.add_modifier(Modifier::BOLD), "c" | "pre" => base.patch(pal.style(Some("muted"))), _ => base };
             let style = if selected && !message { style.patch(pal.selected()) } else { style };
             let room = right.saturating_sub(x) as usize;
             if room == 0 { break; }
@@ -748,7 +748,7 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
                 let style = match c["checked"].as_bool() {
                     Some(true) => pal.badge(Some("accent")),
                     Some(false) => Style::new().bg(pal.badge).fg(pal.muted),
-                    None => Style::new().fg(pal.accent).bg(pal.surface),
+                    None => Style::new().fg(pal.control).bg(pal.surface),
                 };
                 let style = if let Some(n) = c["style"].as_str() { style.patch(pal.style(Some(n))) } else { style };
                 let style = if c["disabled"]==true {style.patch(pal.style(Some("dim")))}else if selected && ci == chip { style.add_modifier(Modifier::REVERSED | Modifier::BOLD) } else { style };
@@ -774,11 +774,11 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
             let label = format!(" {text}: ");
             buf.set_string(row.x + indent, y, &label, ink(pal.style(Some("muted"))));
             let vx = row.x + indent + icons::width(&label);
-            buf.set_string(vx, y, truncate(&format!("{shown} ▾"), w.saturating_sub((vx - row.x) as usize)), ink(pal.style(Some("accent"))));
+            buf.set_string(vx, y, truncate(&format!("{shown} ▾"), w.saturating_sub((vx - row.x) as usize)), ink(pal.style(Some("control"))));
             hits.rows.push((row, i));
         }
         "separator" => buf.set_string(row.x, y, "─".repeat(w), pal.border(false)),
-        "header" => buf.set_string(row.x + indent, y, truncate(text, w.saturating_sub(indent as usize)), pal.style(Some("accent")).add_modifier(Modifier::BOLD)),
+        "header" => buf.set_string(row.x + indent, y, truncate(text, w.saturating_sub(indent as usize)), pal.style(Some("heading")).add_modifier(Modifier::BOLD)),
         "text" if item["format"]=="markdown" => {
             // Formatted text (feature markdown): the shared layout, styled through the palette.
             let base=if selected {pal.selected()}else if item["style"].is_string(){text_style(item,pal)}else{Style::new().fg(pal.text)};
@@ -787,7 +787,7 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
             for (dy,line) in lines.iter().skip(skip as usize).take(row.height as usize).enumerate(){
                 let mut x=row.x+indent;
                 for (t,st) in line {
-                    let style=match *st {"h"=>base.patch(pal.style(Some("accent"))).add_modifier(Modifier::BOLD),"b"=>base.add_modifier(Modifier::BOLD),"c"|"pre"=>base.patch(pal.style(Some("muted"))),_=>base};
+                    let style=match *st {"h"=>base.patch(pal.style(Some("heading"))).add_modifier(Modifier::BOLD),"b"=>base.add_modifier(Modifier::BOLD),"c"|"pre"=>base.patch(pal.style(Some("muted"))),_=>base};
                     let style=if selected {style.patch(pal.selected())}else{style};
                     let room=(row.right().saturating_sub(x)) as usize;
                     if room==0 {break;}
@@ -809,7 +809,7 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
             buf.set_string(row.x, y, " ".repeat(w), base);
             let mut x = row.x + indent;
             if r.has_children {
-                buf.set_string(x, y, if r.expanded { "▾ " } else { "▸ " }, ink(pal.style(Some("accent"))));
+                buf.set_string(x, y, if r.expanded { "▾ " } else { "▸ " }, ink(pal.style(Some("control"))));
                 hits.expanders.push((Rect { x, y, width: 2, height: 1 }, i));
             } else if r.depth > 0 {
                 buf.set_string(x, y, "  ", base);
@@ -839,7 +839,7 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
                 let aw = icons::width(&label);
                 if right < x + aw + 12 { break; }
                 right -= aw;
-                buf.set_string(right, y, &label, ink(pal.style(Some("accent"))));
+                buf.set_string(right, y, &label, ink(pal.style(Some("control"))));
                 hits.actions.push((Rect { x: right, y, width: aw, height: 1 }, i, ai));
                 right = right.saturating_sub(1);
             }
@@ -1025,7 +1025,7 @@ mod tests {
         let area=Rect::new(0,0,30,10);let mut buf=Buffer::empty(area);let mut st=State::default();let pal=Palette::default();
         render(&mut buf,area,&value,&mut st,false,&pal,&Icons::new(None,false),None);
         let line=|y:u16|(0..29).map(|x|buf[(x,y)].symbol()).collect::<String>().trim_end().to_string();  // column 29: scrollbar
-        assert_eq!(line(0),"Plan");assert_eq!(buf[(0,0)].fg,pal.accent);assert!(buf[(0,0)].modifier.contains(Modifier::BOLD));
+        assert_eq!(line(0),"Plan");assert_eq!(buf[(0,0)].fg,pal.heading);assert!(buf[(0,0)].modifier.contains(Modifier::BOLD));
         assert_eq!(line(2),"Run x and go");assert!(buf[(10,2)].modifier.contains(Modifier::BOLD));
         assert_eq!(line(3),"");assert_eq!(line(4),"• one");assert_eq!(line(5),"• two");
         assert_eq!(line(9).trim(),"Messages: 2 waiting","pinned at the bottom, never scrolled away");

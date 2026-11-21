@@ -23,7 +23,7 @@ pub struct Palette {
     pub muted: Color,
     /// Tertiary text: details, descriptions, disabled rows, hints; the `dim` style.
     pub dim: Color,
-    /// Highlights: headers, values, buttons, the scrollbar thumb, the `accent` style.
+    /// Focus and selection: the focused border, the active page or chip, the scrollbar thumb, the `accent` style.
     pub accent: Color,
     pub ok: Color,
     pub warn: Color,
@@ -52,7 +52,29 @@ pub struct Palette {
     pub tab_active_text: Color,
     /// Background of the whole tab bar row: a darker band that sets the tabs apart from panes.
     pub tab_bar: Color,
+    /// Meaning roles (core-protocol.md, Themes): one meaning each, named by extensions as styles. A theme that
+    /// leaves one out but sets its fallback role (`ROLES`) uses that; otherwise the built-in value below.
+    /// Structure: section headers, markdown headings, popup titles.
+    pub heading: Color,
+    /// You can act on it: buttons, chips, selects, ▸ expanders, row actions.
+    pub control: Color,
+    /// It opens something: paths, URLs; always drawn underlined.
+    pub link: Color,
+    /// In progress, neutral state: a working agent, a running tool.
+    pub info: Color,
+    /// Written by you.
+    pub you: Color,
+    /// The agent of this pane.
+    pub agent: Color,
+    /// Another agent.
+    pub other_agent: Color,
+    /// Uncommitted work (git).
+    pub changed: Color,
 }
+
+/// The meaning roles and the role each falls back to when a theme leaves it out.
+pub const ROLES: [(&str, &str); 8] = [("heading", "accent"), ("control", "accent"), ("link", "accent"), ("info", "accent"),
+    ("you", "accent"), ("agent", "muted"), ("other_agent", "accent"), ("changed", "warn")];
 
 impl Default for Palette {
     /// Today's look, in the 16 ANSI colours so it follows the terminal's own scheme.
@@ -77,6 +99,14 @@ impl Default for Palette {
             tab_active: Color::Blue,
             tab_active_text: Color::White,
             tab_bar: Color::Indexed(235),
+            heading: Color::Cyan,
+            control: Color::LightBlue,
+            link: Color::LightBlue,
+            info: Color::LightCyan,
+            you: Color::LightYellow,
+            agent: Color::LightMagenta,
+            other_agent: Color::LightGreen,
+            changed: Color::Yellow,
         }
     }
 }
@@ -96,6 +126,14 @@ impl Palette {
                         *slot = c;
                     }
                 }
+            }
+        }
+        // A meaning role the theme leaves out follows the theme's own fallback role when it sets that one, so a
+        // theme written before the roles (or one that only sets `accent`) stays one coherent palette.
+        for (role, fallback) in ROLES {
+            if tokens.get(role).and_then(parse_color).is_none() && tokens.get(fallback).and_then(parse_color).is_some() {
+                let c = *p.slot(fallback).expect("fallback is a palette token");
+                *p.slot(role).expect("role is a palette token") = c;
             }
         }
         // A theme without `card` uses its own raised surface; failing that, a card derived from the base
@@ -129,32 +167,54 @@ impl Palette {
             "tab_active" => &mut self.tab_active,
             "tab_active_text" => &mut self.tab_active_text,
             "tab_bar" => &mut self.tab_bar,
+            "heading" => &mut self.heading,
+            "control" => &mut self.control,
+            "link" => &mut self.link,
+            "info" => &mut self.info,
+            "you" => &mut self.you,
+            "agent" => &mut self.agent,
+            "other_agent" => &mut self.other_agent,
+            "changed" => &mut self.changed,
             _ => return None,
         })
     }
 
-    /// A text style by its semantic name, as extensions write it. Unknown names are plain text.
+    /// The colour of a semantic style name that has one (not `bold`, `plain` or an unknown name).
+    fn named(&self, name: &str) -> Option<Color> {
+        Some(match name {
+            "dim" => self.dim,
+            "muted" => self.muted,
+            "warn" => self.warn,
+            "error" => self.error,
+            "ok" => self.ok,
+            "accent" => self.accent,
+            "heading" => self.heading,
+            "control" => self.control,
+            "link" => self.link,
+            "info" => self.info,
+            "you" => self.you,
+            "agent" => self.agent,
+            "other_agent" => self.other_agent,
+            "changed" => self.changed,
+            _ => return None,
+        })
+    }
+
+    /// A text style by its semantic name, as extensions write it. Unknown names are plain text; `link` is also
+    /// underlined, so it reads as a link without colour.
     pub fn style(&self, name: Option<&str>) -> Style {
-        let fg = match name {
-            Some("dim") => self.dim,
-            Some("muted") => self.muted,
-            Some("warn") => self.warn,
-            Some("error") => self.error,
-            Some("ok") => self.ok,
-            Some("accent") => self.accent,
-            Some("bold") => return Style::new().fg(self.text).add_modifier(Modifier::BOLD),
-            _ => self.text,
-        };
-        Style::new().fg(fg)
+        match name {
+            Some("bold") => Style::new().fg(self.text).add_modifier(Modifier::BOLD),
+            Some("link") => Style::new().fg(self.link).add_modifier(Modifier::UNDERLINED),
+            Some(n) => Style::new().fg(self.named(n).unwrap_or(self.text)),
+            None => Style::new().fg(self.text),
+        }
     }
 
     /// A filled badge by semantic name; neutral when the name has no colour.
     pub fn badge(&self, name: Option<&str>) -> Style {
-        let bg = match name {
-            Some("warn") => self.warn,
-            Some("error") => self.error,
-            Some("ok") => self.ok,
-            Some("accent") => self.accent,
+        let bg = match name.and_then(|n| self.named(n)) {
+            Some(c) if !matches!(name, Some("dim" | "muted")) => c,
             _ => self.badge,
         };
         let s = Style::new().bg(bg).fg(self.badge_text);
@@ -267,12 +327,69 @@ mod tests {
 
     #[test]
     fn every_token_is_themable() {
-        let tokens = ["text", "muted", "dim", "accent", "ok", "warn", "error", "prompt", "border", "border_focus", "badge", "badge_text", "surface", "tab_active", "tab_active_text", "tab_bar"];
+        let tokens = ["text", "muted", "dim", "accent", "ok", "warn", "error", "prompt", "border", "border_focus", "badge", "badge_text", "surface", "tab_active", "tab_active_text", "tab_bar",
+            "heading", "control", "link", "info", "you", "agent", "other_agent", "changed"];
         let palette: serde_json::Map<String, Value> = tokens.iter().map(|t| (t.to_string(), json!(1))).collect();
         let mut p = Palette::from_theme(Some(&json!({"palette": palette})));
         for t in tokens {
             assert_eq!(*p.slot(t).unwrap(), Color::Indexed(1), "{t}");
         }
+    }
+
+    #[test]
+    fn meaning_roles_fall_back_to_the_themes_own_role_else_the_built_in() {
+        let d = Palette::default();
+        // An older theme (no roles) is one coherent palette: each role follows its fallback role.
+        let p = Palette::from_theme(Some(&json!({"palette": {"accent": "#ff0000", "muted": "#00ff00", "warn": "#0000ff"}})));
+        for (role, fallback) in ROLES {
+            let (mut q, mut r) = (p.clone(), p.clone());
+            assert_eq!(*q.slot(role).unwrap(), *r.slot(fallback).unwrap(), "{role} -> {fallback}");
+        }
+        // A role the theme sets wins; a fallback the theme leaves out keeps the built-in role.
+        let p = Palette::from_theme(Some(&json!({"palette": {"accent": "#ff0000", "heading": "#123456"}})));
+        assert_eq!(p.heading, Color::Rgb(0x12, 0x34, 0x56));
+        assert_eq!(p.control, Color::Rgb(255, 0, 0));
+        assert_eq!(p.agent, d.agent, "muted not set: built-in agent");
+        assert_eq!(p.changed, d.changed, "warn not set: built-in changed");
+        // An empty palette (the bundled `default` theme) is the built-in look, roles included.
+        assert_eq!(Palette::from_theme(Some(&json!({"name": "default", "palette": {}}))), d);
+        // The built-in roles are distinct where meaning depends on it.
+        let ids = [d.you, d.agent, d.other_agent, d.accent];
+        for (i, a) in ids.iter().enumerate() { for b in &ids[i + 1..] { assert_ne!(a, b); } }
+    }
+
+    #[test]
+    fn shared_role_cases() {
+        let f: Value = serde_json::from_str(include_str!("../../tests/fixtures/client/roles.json")).unwrap();
+        let roles: serde_json::Map<String, Value> = ROLES.iter().map(|(r, b)| (r.to_string(), json!(b))).collect();
+        assert_eq!(f["roles"], Value::Object(roles));
+        let mut d = Palette::default();
+        for (role, want) in f["builtin"].as_object().unwrap() {
+            assert_eq!(*d.slot(role).unwrap(), parse_color(want).unwrap(), "built-in {role}");
+        }
+        for case in f["cases"].as_array().unwrap() {
+            let mut p = Palette::from_theme(Some(&json!({"palette": case["palette"]})));
+            for (role, want) in case["expect"].as_object().unwrap() {
+                assert_eq!(*p.slot(role).unwrap(), parse_color(want).unwrap(), "{}: {role}", case["name"]);
+            }
+        }
+    }
+
+    #[test]
+    fn meaning_roles_are_style_and_badge_names_and_links_are_underlined() {
+        let d = Palette::default();
+        for (role, _) in ROLES {
+            let mut q = d.clone();
+            let c = *q.slot(role).unwrap();
+            assert_eq!(d.style(Some(role)).fg, Some(c), "{role}");
+            assert_eq!(d.badge(Some(role)).bg, Some(c), "{role}");
+        }
+        assert!(d.style(Some("link")).add_modifier.contains(Modifier::UNDERLINED));
+        assert!(!d.style(Some("control")).add_modifier.contains(Modifier::UNDERLINED));
+        // Unknown names stay plain; dim and muted badges stay neutral, as before.
+        assert_eq!(d.style(Some("sparkly")).fg, Some(d.text));
+        assert_eq!(d.badge(Some("dim")).bg, Some(d.badge));
+        assert_eq!(d.badge(Some("sparkly")).bg, Some(d.badge));
     }
 
     #[test]

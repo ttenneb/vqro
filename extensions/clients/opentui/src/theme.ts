@@ -1,11 +1,7 @@
 // Semantic palette (D18): `doc/settings/theme.palette` tokens over a built-in default; safe mode ignores themes.
 import { RGBA, TextAttributes } from "@opentui/core";
 import { cardSource } from "./cardcolor";
-
-const ANSI: Record<string, number> = {
-  black: 0, red: 1, green: 2, yellow: 3, blue: 4, magenta: 5, cyan: 6, gray: 7, grey: 7, darkgray: 8, darkgrey: 8,
-  lightred: 9, lightgreen: 10, lightyellow: 11, lightblue: 12, lightmagenta: 13, lightcyan: 14, white: 15,
-};
+import { ANSI, ROLES, roleValue } from "./roles";
 
 /** A theme colour value as RGBA: ANSI name, #RRGGBB, 256-colour index (number or numeric string), or `default`. */
 export function parseColor(v: any): RGBA | null {
@@ -38,6 +34,8 @@ export class Palette {
       const mine = token in palette ? parseColor(palette[token]) : null;
       this.colors[token] = mine ?? (value === null ? null : parseColor(value));
     }
+    // Meaning roles: the theme's own, its fallback role, else built in (roles.ts).
+    for (const role of Object.keys(ROLES)) this.colors[role] = parseColor(roleValue(palette, role, (v) => parseColor(v) !== null || v === "default"));
     // The card: the theme's own, its surface, one derived from its background, else built in (cardcolor.ts).
     const card = cardSource(palette, (v) => parseColor(v) !== null);
     if (card.kind === "default") this.terminalBg.add("card");
@@ -51,12 +49,14 @@ export class Palette {
   color(token: string): RGBA { return this.colors[token] ?? this.fg; }
   maybe(token: string): RGBA | null { return this.colors[token] ?? null; }
 
-  /** A semantic style name (`bold`, `dim`, `muted`, `warn`, `error`, `ok`, `accent`, `plain`): colour and attributes. */
+  /** A semantic style name (`bold`, `plain`, `dim`, `muted`, `warn`, `error`, `ok`, `accent`, or a meaning role such
+   * as `heading` or `link`): colour and attributes. `link` is underlined. Unknown names are plain text. */
   style(name: string | null | undefined): [RGBA, number] {
     switch (name) {
       case "bold": return [this.color("text"), TextAttributes.BOLD];
+      case "link": return [this.color("link"), TextAttributes.UNDERLINE];
       case "dim": case "muted": case "accent": case "ok": case "warn": case "error": return [this.color(name), TextAttributes.NONE];
-      default: return [this.color("text"), TextAttributes.NONE];
+      default: return name && name in ROLES ? [this.color(name), TextAttributes.NONE] : [this.color("text"), TextAttributes.NONE];
     }
   }
 }

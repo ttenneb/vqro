@@ -3453,10 +3453,10 @@ impl App {
             let (text, style) = match item.view.as_deref().and_then(|v| self.ws.live.get(v)) {
                 Some(l) => match l["label"].as_str().unwrap_or(&item.label) {
                     "" => continue,
-                    t => (icons.label(if l["icon"].is_null() { &item.icon } else { &l["icon"] }, t), pal.style(Some(l["style"].as_str().unwrap_or("accent")))),
+                    t => (icons.label(if l["icon"].is_null() { &item.icon } else { &l["icon"] }, t), pal.style(Some(l["style"].as_str().unwrap_or("info")))),
                 },
                 None if item.view.is_some() => continue,
-                None => (icons.item_label(&item.icon, &item.label, item.icon_after), pal.style(Some("accent"))),
+                None => (icons.item_label(&item.icon, &item.label, item.icon_after), pal.style(Some("control"))),
             };
             if text.is_empty() {
                 continue;
@@ -3487,7 +3487,7 @@ impl App {
         let rect = Rect { x: area.right().saturating_sub(w + 1), y: area.y + 1, width: w, height: 3 };
         let edge = match style.as_deref() {
             Some(s @ ("error" | "warn" | "ok")) => pal.style(Some(s)),
-            _ => pal.style(Some("accent")),
+            _ => pal.style(Some("info")),
         };
         f.render_widget(Clear, rect);
         let block = Block::bordered().border_type(ratatui::widgets::BorderType::Rounded).border_style(edge);
@@ -3552,7 +3552,7 @@ impl App {
             let title = v["title"].as_str().unwrap_or(&view).to_string();
             let block = Block::bordered()
                 .border_type(ratatui::widgets::BorderType::Rounded)
-                .title(Span::styled(format!(" {title} "), pal.style(Some("accent")).add_modifier(Modifier::BOLD)))
+                .title(Span::styled(format!(" {title} "), pal.style(Some("heading")).add_modifier(Modifier::BOLD)))
                 .title_bottom(Line::from(Span::styled(
                     self.key_labels(if panel::list_detail(&v,&st) {" ↑↓ list · Tab details · [ ] pages · / search · Esc close "}else if panel::page_titles(&v).is_empty() { " ↑↓ move · Enter select · / filter · Esc close " } else { " ↑↓ move · Tab page · Enter select · / filter · Esc close " }),
                     pal.style(Some("dim")),
@@ -3808,7 +3808,7 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
                 }
                 hit.buttons.push((Rect { x, y: bar.y, width: w, height: 1 }, item.clone(), json!({"tab_path": path.clone()})));
                 x += w;
-                spans.push(Span::styled(label, pal.style(Some("accent"))));
+                spans.push(Span::styled(label, pal.style(Some("control"))));
             }
         }
         // The whole row gets the tab-bar band, not just the labels.

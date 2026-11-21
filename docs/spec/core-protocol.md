@@ -1115,7 +1115,9 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
   selected row), `activate` (as Enter) and `next|prev` with `match: {field: value}` (the next/previous selectable
   row whose item has those fields, e.g. `{"role": "user"}` for "next message from a person"; no wrap). Panels list needed features in `requires`. Unknown types render as plain items, or as their `fallback` (Fallbacks). Selection, expansion, page, filter and scroll are client
   state. Styles are semantic names resolved through the theme (below): `bold`, `dim`, `muted`, `warn`, `error`, `ok`,
-  `accent`, `plain`; unknown names render plain. A badge may also carry `color` (a theme colour value) to show a
+  `accent`, `plain`, and the meaning roles `heading`, `control`, `link` (underlined), `info`, `you`, `agent`,
+  `other_agent`, `changed` (Themes, Meaning roles); unknown names render plain, so a client without a role shows
+  plain text and needs no `requires`. A badge may also carry `color` (a theme colour value) to show a
   colour as data, e.g. a swatch (feature `badge_color`; clients without it show a neutral badge). Use styles for
   everything else, so extensions follow the theme.
 - `ui.notify {text, style?}`: a transient message every client shows briefly (event `notify`). Not state.
@@ -1152,7 +1154,7 @@ New row types, components and view kinds are progressive enhancements: every cli
 
 - **`message` rows** (feature `message`): `{type: "message", text, title?, body?, format?: "markdown", style?, fold?,
   copy?}`. They show a framed block: a heavy rule with `title` (else `text`), then `body` (markdown or wrapped) on a
-  `┃` margin, then a closing rule. The frame is drawn in the row's `style`, default `accent`. Use it to set apart
+  `┃` margin, then a closing rule. The frame is drawn in the row's `style`, default `heading`. Use it to set apart
   messages from other senders; ordinary messages stay plain text rows. A message row is selectable; Enter folds or
   unfolds it, and `copy` is what `client.copy` takes. Clients without the feature show the row's `fallback` (give
   one: today's plain rows), else a plain item with `text`.
@@ -1214,7 +1216,7 @@ New row types, components and view kinds are progressive enhancements: every cli
   `` `inline code` `` and fenced code blocks; everything else is shown literally. Clients lay it out the same way
   (`tests/fixtures/client/markdown.json`: word wrap by display width, list markers `•`/`N.`, code lines indented two
   and cut with `…`, one empty line between blocks except items of one list) and style it through the palette
-  (headings `accent` bold, bold, code `muted`). A client without the feature ignores `format` and shows the raw text;
+  (headings `heading` bold, bold, code `muted`). A client without the feature ignores `format` and shows the raw text;
   add `wrap: true` so that fallback wraps. At most 64 KiB per row; split long transcripts into rows.
 - **`pin: "bottom"`** on a top-level row (feature `pin`): that row and its children are drawn below the scrolling
   list, in order, never scrolled away (at most half the panel) and never hidden by the filter; they stay selectable.
@@ -1389,7 +1391,7 @@ Colours: a name (the 16 ANSI names such as `cyan`, `darkgray`, `lightblue`), `#R
 | `text` | ordinary text; `plain` and `bold` | `default` |
 | `muted` | secondary text: inactive tabs and pages, labels, `text` rows, status message; `muted` style | `gray` |
 | `dim` | details, descriptions, disabled rows, hints; `dim` style | `darkgray` |
-| `accent` | headers, values, buttons, scrollbar thumb, open page; `accent` style | `cyan` |
+| `accent` | focus and selection: open page, checked chip, scrollbar thumb, vqro badge; `accent` style | `cyan` |
 | `ok`, `warn`, `error` | the matching styles, badges and toasts | `green`, `yellow`, `red` |
 | `prompt` | keyboard modes: prompt line, open vqro badge, filter | `magenta` |
 | `border` | unfocused borders, rules, separators, scrollbar track | `darkgray` |
@@ -1401,6 +1403,28 @@ Colours: a name (the 16 ANSI names such as `cyan`, `darkgray`, `lightblue`), `#R
 | `background` | informational: the theme's base background (`#RRGGBB`). Clients don't paint it (the terminal's background stays); they derive `card` from it when a theme has neither `card` nor `surface` | unset |
 | `tab_active`, `tab_active_text` | the active tab (bold) | `blue`, `white` |
 | `tab_bar` | background of the whole tab bar row and the gaps between tab chips | `235` |
+| `heading` … `changed` | the meaning roles below | below |
+
+### Meaning roles
+
+One meaning each, so colour says what a thing is (the human's choice, colour batch 3). Each is a palette token and a
+style name (text and badges). A theme that leaves a role out, or gives a colour the client can't read, uses its own
+fallback role when it sets that one readably, so a theme written before the roles stays one coherent palette;
+otherwise the client's built-in role (conformance: `tests/fixtures/client/roles.json`).
+
+| Role | Meaning | Used for | Fallback | TUI default |
+|---|---|---|---|---|
+| `heading` | structure | section headers, markdown headings, popup and detail titles, message frames | `accent` | `cyan` |
+| `control` | you can act on it | buttons, selects, plain chips, ▸/▾ expanders, folds, row actions, "Latest", status and tab-bar buttons | `accent` | `lightblue` |
+| `link` | it opens something | paths, URLs, [open]; always underlined | `accent` | `lightblue` |
+| `info` | in progress, neutral state | a working agent, a running tool, toasts, live status segments | `accent` | `lightcyan` |
+| `you` | written by you | your messages' labels and edges | `accent` | `lightyellow` |
+| `agent` | the agent of this pane | its messages' labels; agent rows | `muted` | `lightmagenta` |
+| `other_agent` | another agent | other agents' messages and rows | `accent` | `lightgreen` |
+| `changed` | uncommitted work | git ±N | `warn` | `yellow` |
+
+`ok` (done, succeeded), `warn` (blocked, needs you) and `error` (failed) keep their meaning; `accent` is for focus
+and selection only. A colour never carries meaning alone: keep the symbol or word (✓ ✗ ● ▸, "working").
 
 ### Tab bar
 

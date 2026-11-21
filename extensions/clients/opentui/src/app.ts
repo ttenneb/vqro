@@ -831,7 +831,7 @@ export class Screen extends Renderable {
         text(buf, x, r.y, fit(label, r.x + r.w - x), on ? a.pal.color("tab_active_text") : a.pal.color(ended ? "dim" : "muted"), bg,
           on ? (ended ? TextAttributes.DIM : TextAttributes.BOLD) : TextAttributes.NONE);
         if (glyph) {  // inside the chip after the name, in the mark's semantic colour
-          const color = a.pal.color(({ blocked: "warn", error: "error", done: "ok" } as Json)[mark!] ?? "accent");
+          const color = a.pal.color(({ blocked: "warn", error: "error", done: "ok" } as Json)[mark!] ?? "info");
           text(buf, x + width(label), r.y, fit(` ${glyph} `, r.x + r.w - x - width(label)), color, bg);
           label += ` ${glyph} `;
         }
@@ -851,7 +851,7 @@ export class Screen extends Renderable {
           const label = item.icon_after && glyph ? ` ${item.label ?? ""}${glyph} `  // compact "+◆" button
             : ` ${glyph}${item.label ? (glyph ? " " : "") + item.label : ""} `;
           if (x + width(label) > r.x + r.w) break;
-          text(buf, x, r.y, label, a.pal.color("accent"), a.pal.color("tab_bar"));
+          text(buf, x, r.y, label, a.pal.color("control"), a.pal.color("tab_bar"));
           const hit: any = { rect: { x, y: r.y, w: width(label), h: 1 }, act: () => a.activate(item, a.win.invocationContext(a.ws, { tab_path: path })), tabbar: true };
           a.hits.push(hit);
           x += width(label);
@@ -1135,7 +1135,7 @@ function drawValue(a: App, buf: OptimizedBuffer, area: Rect, key: string, value:
   if (detail.h < 2) return;
   const selected = a.selectedDetail(key, value);
   if (!selected) { st.detailFocus = false; a.listed.delete(`${key}#detail`); text(buf, detail.x, detail.y, "Select an item for details", p.color("dim")); return; }
-  text(buf, detail.x, detail.y, fit(clean(selected.value.title ?? "Details"), detail.w), p.color("accent"), undefined, TextAttributes.BOLD);
+  text(buf, detail.x, detail.y, fit(clean(selected.value.title ?? "Details"), detail.w), p.color("heading"), undefined, TextAttributes.BOLD);
   const dbody = { x: detail.x, y: detail.y + 1, w: detail.w, h: detail.h - 1 };
   drawValue(a, buf, dbody, `${key}#detail`, selected.value, focused && st.detailFocus);
   const dl = a.listed.get(`${key}#detail`);
@@ -1287,7 +1287,7 @@ function facetLine(a: App, buf: OptimizedBuffer | null, area: Rect, y0: number, 
     });
     put("  ", p.color("text"));
   }
-  if (label !== null) { put("Sort: ", p.color("muted")); put(` ${clean(label)} ▾ `, p.color("accent"), p.color("surface"), () => { st.sort = cycleSort(value, st); }); }
+  if (label !== null) { put("Sort: ", p.color("muted")); put(` ${clean(label)} ▾ `, p.color("control"), p.color("surface"), () => { st.sort = cycleSort(value, st); }); }
   return Math.min(y, limit - 1) - y0 + 1;
 }
 
@@ -1388,7 +1388,7 @@ function drawComposer(a: App, buf: OptimizedBuffer, r: Rect, it: Json, selected:
       : `${b.label}: ${ctl?.options?.find((o: Json) => o.value === sel)?.label ?? sel ?? ""} ▾`;
     if (x + width(label) > r.x + r.w) return;
     const on = selected && !editing && chipSel === j + 1;
-    text(buf, x, y, label, b.on(c.values) || b.send ? p.color("accent") : p.color("muted"), undefined, (on ? TextAttributes.INVERSE : 0) | (b.send ? TextAttributes.BOLD : 0));
+    text(buf, x, y, label, b.on(c.values) || b.send ? p.color("control") : p.color("muted"), undefined, (on ? TextAttributes.INVERSE : 0) | (b.send ? TextAttributes.BOLD : 0));
     hit(x, width(label), j + 1, y);
     x += width(label) + 1;
   });
@@ -1413,7 +1413,7 @@ function drawRow(a: App, buf: OptimizedBuffer, r: Rect, row: m.Row, selected: bo
     // (feature card) the whole width takes the palette's `card`, one column stays clear each side, and the frame
     // is drawn only with `frame: true`.
     const [card, framed] = m.messageLook(it, FEATURES);
-    const frame = p.color(it.style ?? "accent");
+    const frame = p.color(it.style ?? "heading");
     const lines = messageLines(it, r.w - indent);
     const [first, last] = card ? [1, lines.length - 2] : [0, lines.length - 1];
     const bg = card ? p.background("card") : undefined;
@@ -1441,7 +1441,7 @@ function drawRow(a: App, buf: OptimizedBuffer, r: Rect, row: m.Row, selected: bo
       if (selected) buf.fillRect(r.x, r.y + j, r.w, 1, p.maybe("selection") ?? p.bg);
       let xx = x;
       for (const [t, st] of l) {
-        const fg = st === "h" ? p.color("accent") : st === "c" || st === "pre" ? p.color("muted") : selected && !inverse ? p.maybe("selection_text") ?? base : base;
+        const fg = st === "h" ? p.color("heading") : st === "c" || st === "pre" ? p.color("muted") : selected && !inverse ? p.maybe("selection_text") ?? base : base;
         const attr = (st === "h" || st === "b" ? TextAttributes.BOLD : 0) | (inverse ? TextAttributes.INVERSE : 0);
         if (xx >= r.x + r.w) break;
         text(buf, xx, r.y + j, fit(t, r.x + r.w - xx), fg, undefined, attr);
@@ -1476,7 +1476,7 @@ function drawRow(a: App, buf: OptimizedBuffer, r: Rect, row: m.Row, selected: bo
     return 1;
   }
   let [fg, attr] = p.style(it.style ?? (it.disabled ? "dim" : k === "text" ? "muted" : null));
-  if (k === "header") { fg = p.color("accent"); attr = TextAttributes.BOLD; }
+  if (k === "header") { fg = p.color("heading"); attr = TextAttributes.BOLD; }
   let bg: RGBA | undefined;
   if (selected) {
     bg = p.maybe("selection") ?? undefined;
