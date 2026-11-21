@@ -144,12 +144,17 @@ class Context:
         if expected["principal"] != "fixture-owner":
             sender = origin.get("sender", {}).get("principal", expected["principal"])
             label = " (sender asserted by extension)" if "sender" in origin and self.fault not in ("sender_unlabeled", "sender_assertion_decoy") else ""
+            if "sender" in origin and self.fault == "sender_wrong_subject":
+                label = " (asserted sender: someone-else)"
             claims = []
             for field in ("kind", "agent"):
                 if field not in args["origin"] or self.fault == "model_agent_missing" and field == "agent":
                     continue
                 qualifier = "" if self.fault == "model_kind_unasserted" and field == "kind" else "asserted "
                 claims.append(f"{qualifier}{field}: {args['origin'][field]}")
+            if (self.fault == "model_unqualified_invented_agent" and "agent" not in args["origin"]
+                    or self.fault == "model_extra_unqualified_agent"):
+                claims.append("agent: invented-endpoint")
             actor = expected["actor"]
             if self.fault == "model_actor_suffix" or self.fault == "model_undeclared_actor_suffix" and actor == "undeclared":
                 actor += "-wrong"
@@ -302,6 +307,27 @@ class ContentChecks(unittest.TestCase):
             with self.subTest(header=header):
                 self.assertFalse(subject.framed_origin(header, principal, actor))
 
+    def test_unqualified_agent_cannot_be_invented_or_promoted(self):
+        for annotation in ("agent: invented-endpoint", "Agent: invented-endpoint", "asserted agent: invented-endpoint",
+                           "agent: invented-endpoint (claimed)"):
+            header = "asserted kind: agent\n" + annotation + "\nfrom P via extension:coord"
+            with self.subTest(annotation=annotation), self.assertRaisesRegex(CheckFailed, "invented agent"):
+                subject.model_claims(header, {"kind": "agent"})
+        with self.assertRaises(CheckFailed):
+            subject.model_claims("asserted kind: agent; asserted agent: A1; agent: invented-endpoint", {"kind": "agent", "agent": "A1"})
+        # A principal's opaque prefix is not a field declaration.
+        subject.model_claims("asserted kind: agent\nfrom agent:D17-principal via extension:coord", {"kind": "agent"})
+
+    def test_sender_qualification_names_this_identity_not_a_neighbor(self):
+        sender = {"principal": "actual-sender"}
+        for note in ("asserted sender: actual-sender", "sender asserted by extension", "sender claimed, not core-attested"):
+            with self.subTest(note=note):
+                self.assertTrue(subject.sender_assertion("from actual-sender via extension:coord (" + note + ")", sender))
+        for note in ("asserted sender: someone-else", "sender assertion: someone-else", "sender asserted: someone-else",
+                     "asserted sender: actual-sender-wrong", "sender asserted by core", "not asserted sender: actual-sender"):
+            with self.subTest(note=note):
+                self.assertFalse(subject.sender_assertion("from actual-sender via extension:coord (" + note + ")", sender))
+
     def test_body_claim_labels_do_not_rescue_missing_model_frame(self):
         expected = {"principal": "P", "actor": "extension:coord"}
         message = {"role": "user", "content": [{"type": "text", "text":
@@ -386,6 +412,23 @@ class HandlerChecks(unittest.IsolatedAsyncioTestCase):
             if fault == "model_undeclared_actor_suffix":
                 text = json.dumps(ctx.native.messages[-1])
                 self.assertIn("from undeclared via undeclared-wrong", text)
+
+    async def test_d17_complete_handler_rejects_wrong_sender_subject_in_same_clause(self):
+        ctx = Context(fault="sender_wrong_subject")
+        with patch.object(subject, "public_origin_route", route), self.assertRaisesRegex(CheckFailed, "this sender's extension assertion"):
+            await subject.core_bound_origin(ctx)
+        text = json.dumps(ctx.native.messages[-1])
+        self.assertIn("from D17-original-inbox-sender via extension:coord (asserted sender: someone-else)", text)
+
+    async def test_d17_complete_handler_rejects_unqualified_agent_invention(self):
+        ctx = Context(fault="model_unqualified_invented_agent")
+        with patch.object(subject, "public_origin_route", route), self.assertRaisesRegex(CheckFailed, "invented agent"):
+            await subject.core_bound_origin(ctx)
+        self.assertIn("agent: invented-endpoint", json.dumps(ctx.native.messages[-1]))
+
+    async def test_d17_complete_handler_rejects_extra_unqualified_agent_with_good_claim(self):
+        with patch.object(subject, "public_origin_route", route), self.assertRaisesRegex(CheckFailed, "unqualified/changed agent"):
+            await subject.core_bound_origin(Context(fault="model_extra_unqualified_agent"))
 
     async def test_d17_complete_handler_rejects_unasserted_native_kind(self):
         with patch.object(subject, "public_origin_route", route), self.assertRaisesRegex(CheckFailed, "asserted kind claim"):

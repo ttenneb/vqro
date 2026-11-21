@@ -258,25 +258,48 @@ def model_claims(header, supplied):
     for field in ("kind", "agent"):
         label = rf"(?i:{field})"
         qualifier = r"(?i:asserted|claimed)"
+        # Inventory field annotations, including UNQUALIFIED ones. Anchor the
+        # label to a framing boundary: `from agent:opaque-id via ...` is an
+        # identity, not an agent annotation. A comma separates annotations only
+        # with whitespace, which cannot occur inside these principal IDs.
+        annotations = list(re.finditer(
+            rf"(?:^|[\r\n;(\[]|,[ \t]+)[ \t]*(?P<annotation>(?:{qualifier}\s+)?{label}\s*[:=])", header))
         if field not in supplied:
-            check(not re.search(rf"\b(?:{qualifier}\s+{label}\s*[:=]|{label}\s*[:=][^\r\n;]*\(\s*{qualifier}\b)", header),
-                  "model invented an asserted " + field + " from identity spelling")
+            check(not annotations, "model invented " + field + " absent from the supplied origin")
             continue
         value = re.escape(supplied[field])
         before = rf"\b{qualifier}\s+{label}\s*[:=]\s*{value}(?=$|[\s;,)\]])"
         after = rf"\b{label}\s*[:=]\s*{value}\s*\(\s*{qualifier}\b[^()\r\n;]*\)"
         check(affirmative(before) or affirmative(after),
               "model envelope omitted/changed the asserted " + field + " claim")
+        for annotation in annotations:
+            tail = header[annotation.start('annotation'):]
+            check(re.match(before, tail) is not None or re.match(after, tail) is not None,
+                  "model added an unqualified/changed " + field + " annotation")
 
 
 def sender_assertion(header, sender):
-    """An assertion must qualify this sender in its own framing clause."""
-    qualifier = r"(?i:\b(?:asserted|claimed)\s+sender(?:\s+provenance)?\b|\bsender(?:\s+provenance)?\s+(?:(?:is\s+)?(?:asserted|claimed)|assertion)\b)"
-    negated = r"(?i:\b(?:not|never|no)(?:\s+the)?\s+(?:asserted|claimed|assertion)\b)"
-    identity = rf"(?:^|[\s(]){re.escape(sender['principal'])}(?=$|[\s),\]])"
-    return any(re.search(identity, clause) is not None and re.search(qualifier, clause) is not None
-               and re.search(negated, clause) is None
-               for clause in re.split(r"[\r\n;]+", header))
+    """Bind an explicit value, or a local valueless note, to THIS sender.
+
+    Merely sharing a clause with `asserted sender: someone-else` is not proof.
+    A valueless `(sender asserted by extension)` note belongs to its enclosing
+    exact from/via frame; a note naming a sender must name the supplied identity.
+    """
+    identity = re.escape(sender['principal'])
+    actor = r"[^\s()]+"
+    label = r"(?i:(?:asserted|claimed)\s+sender(?:\s+provenance)?|sender(?:\s+provenance)?\s+(?:assertion|(?:is\s+)?(?:asserted|claimed)))"
+    explicit = rf"{label}\s*[:=]\s*{identity}(?:\s+(?i:via)\s+{actor})?"
+    local_note = r"(?i:sender(?:\s+provenance)?\s+(?:is\s+)?(?:asserted|claimed)(?:\s+by\s+(?:the\s+)?extension)?(?:,\s*not\s+core-(?:proven|attested))?)"
+    for clause in re.split(r"[\r\n;]+", header):
+        clause = clause.strip()
+        if re.fullmatch(explicit, clause):
+            return True
+        frame = re.fullmatch(rf"(?i:from)\s+{identity}\s+(?i:via)\s+{actor}\s+\((?P<note>[^()]*)\)", clause)
+        if frame:
+            note = frame['note'].strip()
+            if re.fullmatch(explicit, note) or re.fullmatch(local_note, note):
+                return True
+    return False
 
 
 def framed_origin(header, principal, actor):
