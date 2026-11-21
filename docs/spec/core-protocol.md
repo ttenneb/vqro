@@ -1167,7 +1167,8 @@ New row types, components and view kinds are progressive enhancements: every cli
 ### Toolbar parts, frame status, inline buttons, the way back to the latest (D29)
 
 - **Available, not used by bundled extensions yet** (kept as generic; reconsidered at the next cleanup pass if
-  still unused): chips `align` and `short` below, panel `title_actions` and `requires_absent` (Fallbacks).
+  still unused): chips `align` and `short` below and panel `title_actions`. (`requires_absent`, under Fallbacks, is
+  used: the agent pane's ⚙ stand-in for clients without `composer_buttons`.)
 - **Chips `align: "right"`**: in a chips row (a toolbar's, typically), these chips sit at the right end of the
   line when all fit on one; otherwise every chip wraps in order. Buttons go left and filters right, on one line.
 - **Chip `short`**: a short label (an icon, "/") used when the row's chips don't fit on one line.
