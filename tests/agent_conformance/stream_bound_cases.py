@@ -935,8 +935,6 @@ async def o12_snapshot_once(ctx, old, baseline, expected, needle, witness, first
         # Keep ORIGINAL pre-emission entity/body/revision baselines. All notices on this new,
         # unseeded stream arrived after the emission; their receipt numbering starts at zero.
         recovered_baseline = dict(baseline)
-        recovery["notice_window"].update(received=view.reducer.notices.received,
-                                          recorded=len(view.reducer.notices.since), lost=view.reducer.notices.lost)
         recovered_baseline[NOTICES] = {"shown": [], "body": "", "received": 0}
         recovered_baseline[OBSERVATION] = {**baseline[OBSERVATION], "applied_flags": recorder, "applied_received": 0}
         recovery["snapshot_installed"] = True
@@ -945,6 +943,8 @@ async def o12_snapshot_once(ctx, old, baseline, expected, needle, witness, first
                                 "snapshot_records": [deepcopy(row) for row in view.reducer.trace if row.get("op") == "snapshot"]}
         record = await o12_capture(ctx, view, recorder, recovered_baseline, expected, needle, witness,
                                    recovered=True, phase=trigger + "_snapshot", deadline=deadline)
+        recovery["notice_window"].update(received=view.reducer.notices.received,
+                                          recorded=len(view.reducer.notices.since), lost=view.reducer.notices.lost)
         record["notice_evidence_lost"] = record["notice_evidence_lost"] or first["notice_evidence_lost"]
         terminal = record["observation"].get("terminal") or {}
         if terminal.get("method") == "stream.gap":
