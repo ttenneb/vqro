@@ -176,11 +176,12 @@ class PressureContext:
         self.phase = ''; self.text = 'before'; self.after = []; self.attaches = []
         self.gap = gap; self.settle = settle; self.target = None
         self.native_calls = []; self.paused = False; self.views = []; self.omit_run_fact = False
-        self.omit_state_run = False
+        self.omit_state_run = False; self.B_calls = 0; self.max_active = 0; self.viewer_limit = 4
 
     async def facts(self):
         value = {'run': self.run, 'completion': self.completion, 'state': 'idle' if not self.run else 'running',
-                 'epoch': 'agent-e1', 'items': {'entities': 512, 'entity_bytes': 524288, 'retain_bytes': 131072}}
+                 'epoch': 'agent-e1', 'caps': {'items.stream': {'max_viewers': self.viewer_limit}},
+                 'items': {'entities': 512, 'entity_bytes': 524288, 'retain_bytes': 131072}}
         if self.omit_run_fact: value.pop('run')
         return value
 
@@ -193,11 +194,14 @@ class PressureContext:
         self.native_calls.append((method, deepcopy(kwargs)))
         if method == 'turn':
             if kwargs['state'] == 'start':
-                self.number += 1; self.run = 'observed-run-' + str(self.number)
+                self.number += 1; self.run = 'observed-run-' + str(self.number); self.target = None
             elif self.settle:
                 self.completion = {'id': self.run}; self.run = None
         elif kwargs.get('count') in (256, 512):
+            live = [view for view in self.views if not view.peer.closed and view.closed is None]
+            if self.target is None: self.target = live[0]
             self.text = str(kwargs.get('start_index', 0) + kwargs['count'] - 1) + ':' + ''.join(kwargs['chunks'])
+            for view in live: view.reducer.entities.update(reducer(self.text).entities)
             if self.gap:
                 self.target.closed = 'retention'; self.target.reducer.failure = 'retention'
                 self.target.close_notice = {'method': 'stream.gap', 'reason': {'reason': 'gap', 'gap': 'retention'},
@@ -217,7 +221,9 @@ class PressureContext:
         if not predicate(): raise asyncio.TimeoutError()
 
     async def viewer(self):
-        peer = NS(failure=None, close=self.close, wait=self.wait, call=readonly_snapshot)
+        peer = NS(failure=None, closed=False, wait=self.wait, call=readonly_snapshot)
+        async def close(): peer.closed = True
+        peer.close = close
         def pause():
             self.pause_reading()
             self.target = next(view for view in self.views if view.peer is peer)
@@ -237,6 +243,7 @@ class PressureContext:
             value.cursor['seq'] = kwargs['after']['seq'] + 1
         view = NS(initial='reset', reducer=value, epoch='items-e1', peer=kwargs['peer'], closed=None, close_notice=None)
         self.views.append(view)
+        self.max_active = max(self.max_active, len([v for v in self.views if not v.peer.closed and v.closed is None]))
         return view
 
     async def wait_view(self, view, predicate, **kwargs):
@@ -244,27 +251,167 @@ class PressureContext:
         return view
 
 
+async def modeled_shared_B(ctx, *, before_recovery=None):
+    """Author model of the K1 hook contract, NOT execution of actual shared O7."""
+    ctx.B_calls += 1
+    views = []
+    try:
+        for _ in range(3): views.append(await ctx.attach(peer=await ctx.viewer()))
+        old = views[-1]
+        old.peer.writer.transport.pause_reading()
+        try:
+            for batch in range(52): await probe.flood_retained(ctx, 'O7-stall-' + str(batch), count=8)
+        finally:
+            old.peer.writer.transport.resume_reading()
+        old.closed = old.reducer.failure = 'slow_consumer'
+        old.close_notice = {'method': 'stream.closed', 'reason': {'reason': 'slow_consumer'},
+                            'last_good_cursor': deepcopy(old.reducer.cursor)}
+        if before_recovery is not None: await before_recovery()
+        await old.peer.call('workspace.snapshot')
+        await ctx.attach(peer=old.peer, after=old.reducer.cursor, seed=deepcopy(old.reducer))
+        ctx.evidence.append({'kind': 'stalled_attachment_recovery', 'stream_reason': 'slow_consumer',
+                             'close_notice': old.close_notice, 'native_records_requested': 416, 'fast_viewers': 2,
+                             'rpc_socket_alive': True, 'exact_fast_viewer_reconstruction': True})
+    finally:
+        for view in views: await view.peer.close()
+
+
 class PressureControls(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        shared = patch('agent_conformance.cases.stalled_viewer_isolation', modeled_shared_B)
+        shared.start(); self.addCleanup(shared.stop)
     async def test_full_workload_and_quiescent_exactly_one_replay(self):
         ctx = PressureContext()
         with patch.object(probe, 'process_rss', return_value=1000):
             await probe.public_retention_bounds(ctx)
         retains = [kwargs for method, kwargs in ctx.native_calls if method == 'retain']
-        self.assertEqual(len(retains), 4 * 96 + 2)
-        self.assertEqual([row['count'] for row in retains[-2:]], [256, 256])
-        self.assertEqual([row['start_index'] for row in retains[-2:]], [0, 256])
-        self.assertEqual([row['timeout'] for row in retains[-2:]], [5, 5])
-        self.assertEqual(retains[-2]['chunks'], retains[-1]['chunks'])
-        self.assertEqual(len(retains[-1]['chunks']), 8)
-        self.assertEqual(''.join(retains[-1]['chunks']), 'O10-gap-burst:' + 'y' * 8192)
-        self.assertTrue(all(len(kwargs['text'].split(':', 1)[1]) == 8192 for kwargs in retains[:-2]))
-        self.assertEqual(len(ctx.after), 1)
+        self.assertEqual(len(retains), 4 * 96 + 2 + 416)
+        bursts = [row for row in retains if 'chunks' in row]
+        self.assertEqual([row['count'] for row in bursts], [256, 256])
+        self.assertEqual([row['start_index'] for row in bursts], [0, 256])
+        self.assertEqual([row['timeout'] for row in bursts], [5, 5])
+        self.assertEqual(bursts[0]['chunks'], bursts[1]['chunks'])
+        self.assertEqual(len(bursts[-1]['chunks']), 8)
+        self.assertEqual(''.join(bursts[-1]['chunks']), 'O10-gap-burst:' + 'y' * 8192)
+        self.assertTrue(all(len(row['text'].split(':', 1)[1]) == 8192 for row in retains if 'text' in row))
+        self.assertEqual(sum(row.get('count', 1) for row in retains), 1312)
+        self.assertEqual(len(ctx.after), 2)
+        self.assertLessEqual(ctx.max_active, 4)
         self.assertTrue(ctx.assert_quiescent)
         self.assertFalse(ctx.paused)
         pressure = next(row for row in ctx.evidence if row['kind'] == 'retention_pressure')
         self.assertEqual(len(pressure['samples']), 4)
         witness = next(row for row in ctx.evidence if row['kind'] == 'o10_public_gap_after_quiescence')
-        self.assertEqual(witness['witness_label'], 'stalled reader, provider-cursor retention')
+        self.assertEqual(witness['witness_label'], 'fast public observers, provider-cursor retention')
+
+    async def test_native_uncertainty_never_starts_independent_B(self):
+        ctx = PressureContext(); original = ctx.call
+        async def uncertain(method, **kwargs):
+            if method == 'retain' and 'chunks' in kwargs: raise asyncio.TimeoutError('uncertain first control')
+            return await original(method, **kwargs)
+        ctx.native = NS(call=uncertain)
+        with patch.object(probe, 'process_rss', return_value=1000), self.assertRaises(asyncio.TimeoutError):
+            await probe.public_retention_bounds(ctx)
+        self.assertEqual((ctx.B_calls, len(ctx.after)), (0, 0))
+
+    async def test_fanout_respects_declared_limit(self):
+        ctx = PressureContext(); ctx.viewer_limit = 2
+        await probe.provider_retention(ctx, (await ctx.facts())['items'])
+        self.assertLessEqual(ctx.max_active, 2)
+        self.assertEqual(len(ctx.after), 1)
+
+    async def test_invalid_or_missing_fanout_is_FAIL_not_NA(self):
+        for limit in (None, True, 0, -1, '4'):
+            ctx = PressureContext(); ctx.viewer_limit = limit
+            with self.subTest(limit=limit), self.assertRaises(HarnessGap):
+                await probe.provider_retention(ctx, (await ctx.facts())['items'])
+            self.assertEqual(ctx.native_calls, [])
+
+    async def test_B_needs_three_declared_viewers(self):
+        ctx = PressureContext(); ctx.viewer_limit = 2
+        with self.assertRaises(HarnessGap): await probe.slow_viewer_recovery(ctx)
+        self.assertEqual(ctx.native_calls, [])
+
+    async def test_missing_A_is_known_quiescent_and_zero_recovery(self):
+        ctx = PressureContext(gap=False)
+        with self.assertRaises(probe.MissingProviderGap):
+            await probe.provider_retention(ctx, (await ctx.facts())['items'])
+        self.assertIsNone(ctx.run)
+        self.assertEqual(ctx.after, [])
+        self.assertEqual(ctx.B_calls, 0)
+
+    async def test_multiple_provider_gaps_still_one_A_recovery(self):
+        ctx = PressureContext(); original = ctx.call
+        async def all_gaps(method, **kwargs):
+            result = await original(method, **kwargs)
+            if method == 'retain' and 'chunks' in kwargs:
+                for view in ctx.views:
+                    if not view.peer.closed:
+                        view.closed = view.reducer.failure = 'retention'
+                        view.close_notice = {'method': 'stream.gap', 'reason': {'reason': 'gap', 'gap': 'retention'},
+                                             'last_good_cursor': deepcopy(view.reducer.cursor)}
+            return result
+        ctx.native = NS(call=all_gaps)
+        await probe.provider_retention(ctx, (await ctx.facts())['items'])
+        self.assertEqual(len(ctx.after), 1)
+        self.assertLessEqual(ctx.max_active, 4)
+
+    async def test_A_corruption_cannot_become_missing_gap_then_B_pass(self):
+        ctx = PressureContext(); original = ctx.call
+        async def corrupt(method, **kwargs):
+            result = await original(method, **kwargs)
+            if method == 'retain' and 'chunks' in kwargs: ctx.target.reducer.failure = 'bad_append_base'
+            return result
+        ctx.native = NS(call=corrupt)
+        with patch.object(probe, 'process_rss', return_value=1000), self.assertRaises(CheckFailed):
+            await probe.public_retention_bounds(ctx)
+        self.assertEqual(ctx.B_calls, 0)
+
+    async def test_failed_A_recovery_does_not_start_B(self):
+        ctx = PressureContext(); original = ctx.attach
+        async def wrong_mode(**kwargs):
+            view = await original(**kwargs)
+            if kwargs.get('after') is not None: view.initial = 'continue'
+            return view
+        ctx.attach = wrong_mode
+        with patch.object(probe, 'process_rss', return_value=1000), self.assertRaises(CheckFailed):
+            await probe.public_retention_bounds(ctx)
+        self.assertEqual((ctx.B_calls, len(ctx.after)), (0, 1))
+
+    async def test_B_missing_quiescence_hook_cannot_pass(self):
+        ctx = PressureContext()
+        async def no_hook(ctx, **kwargs): return None
+        with patch('agent_conformance.cases.stalled_viewer_isolation', no_hook), self.assertRaises(CheckFailed):
+            await probe.slow_viewer_recovery(ctx)
+        self.assertEqual(ctx.after, [])
+
+    async def test_B_duplicate_hook_stops_before_second_native_end(self):
+        ctx = PressureContext()
+        async def twice(ctx, *, before_recovery):
+            await before_recovery(); await before_recovery()
+        with patch('agent_conformance.cases.stalled_viewer_isolation', twice), self.assertRaises(CheckFailed):
+            await probe.slow_viewer_recovery(ctx)
+        ends = [row for method, row in ctx.native_calls if method == 'turn' and row['state'] == 'settled']
+        self.assertEqual(len(ends), 1)
+        self.assertEqual(ctx.after, [])
+
+    async def test_B_retention_does_not_substitute_for_slow_consumer(self):
+        ctx = PressureContext()
+        async def wrong(ctx, *, before_recovery):
+            await modeled_shared_B(ctx, before_recovery=before_recovery)
+            ctx.evidence[-1]['stream_reason'] = 'retention'
+        with patch('agent_conformance.cases.stalled_viewer_isolation', wrong), self.assertRaises(CheckFailed):
+            await probe.slow_viewer_recovery(ctx)
+        self.assertEqual(len(ctx.after), 1)
+
+    async def test_B_failed_fence_never_recovers(self):
+        ctx = PressureContext(); original = ctx.call
+        async def no_end(method, **kwargs):
+            if method == 'turn' and kwargs['state'] == 'settled': return {}
+            return await original(method, **kwargs)
+        ctx.native = NS(call=no_end)
+        with self.assertRaises(HarnessGap): await probe.slow_viewer_recovery(ctx)
+        self.assertEqual(ctx.after, [])
 
     async def test_codex_keeps_original_single512_control(self):
         ctx = PressureContext(); ctx.manifest['wire'] = 'codex'
@@ -274,7 +421,7 @@ class PressureControls(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(bursts), 1)
         self.assertEqual(bursts[0]['count'], 512)
         self.assertNotIn('start_index', bursts[0])
-        self.assertEqual(len(ctx.after), 1)
+        self.assertEqual(len(ctx.after), 2)
 
     async def test_whole_helper_unmarked_dead_gap_peer_never_replays(self):
         ctx = PressureContext()
@@ -311,15 +458,16 @@ class PressureControls(unittest.IsolatedAsyncioTestCase):
         ctx.native = NS(call=slow)
         with patch.object(probe, 'process_rss', return_value=1000), self.assertRaises(HarnessGap):
             await probe.public_retention_bounds(ctx)
-        observation = next(row for row in ctx.evidence if row['kind'] == 'o10_target_terminal_observation')
-        self.assertEqual(observation['notice']['reason'], {'reason': 'slow_consumer'})
-        self.assertEqual(ctx.after, [])
+        observations = next(row for row in ctx.evidence if row['kind'] == 'o10_provider_observers')['observations']
+        self.assertTrue(any(row['notice'] and row['notice']['reason'] == {'reason': 'slow_consumer'} for row in observations))
+        self.assertEqual(len(ctx.after), 1)  # B only, never a substitute A replay.
+        self.assertEqual(ctx.B_calls, 1)
 
     async def test_pi_absent_run_fact_uses_actual_public_state(self):
         ctx = PressureContext(); ctx.omit_run_fact = True
         with patch.object(probe, 'process_rss', return_value=1000):
             await probe.public_retention_bounds(ctx)
-        self.assertEqual(len(ctx.after), 1)
+        self.assertEqual(len(ctx.after), 2)
         starts = [row for row in ctx.evidence if row['kind'] == 'o10_native_started']
         self.assertTrue(all('run' not in row['public_facts'] for row in starts))
         self.assertTrue(all(row['public_state_item']['run'] for row in starts))
@@ -333,7 +481,10 @@ class PressureControls(unittest.IsolatedAsyncioTestCase):
         ctx = PressureContext(gap=False)
         with patch.object(probe, 'process_rss', return_value=1000), self.assertRaises(HarnessGap):
             await probe.public_retention_bounds(ctx)
-        self.assertEqual(ctx.after, [])
+        self.assertEqual(len(ctx.after), 1)
+        self.assertEqual(ctx.B_calls, 1)
+        subcases = [row for row in ctx.evidence if row.get('kind') == 'subcase']
+        self.assertEqual([row['status'] for row in subcases], ['fail', 'pass'])
         self.assertFalse(ctx.paused)
 
     async def test_control_ack_without_public_ended_boundary_fails(self):

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Bennett Garcia
-"""O10 public subprobe: real retention gap, public quiescence, ONE cursor replay.
+"""O10: independent provider retention and downstream slow-viewer recovery.
 
 K1 owns the O10 wrapper/accounting validator and delegates here; no @case override.
 Uncursored capacity snapshots are samples, never substitutes for gap/replay proof.
@@ -147,11 +147,7 @@ async def one_replay(ctx, view, declaration, needle):
     return replay
 
 
-async def public_retention_bounds(ctx):
-    declaration = (await ctx.facts()).get('items', {})
-    for field in ('entities', 'entity_bytes', 'retain_bytes'):
-        check(type(declaration.get(field)) is int and declaration[field] > 0,
-              'missing numeric item bound: ' + field)
+async def capacity_samples(ctx, declaration):
     pid = ctx.metadata.get('adapter_image', {}).get('pid')
     if not pid: raise FixtureFailed('owned adapter PID missing from execution provenance')
     samples = []
@@ -168,56 +164,138 @@ async def public_retention_bounds(ctx):
         samples.append(sample)
     ctx.evidence.append({'kind': 'retention_pressure', 'declared': declaration, 'samples': samples,
                          'native_payload_bytes': 4 * 96 * 8192, 'rss_is_measurement_not_cross_runtime_slo': True})
-    # Establish a live committed target cursor BEFORE the final burst. Stall
-    # only this reader; facts/control use separate connections. Section4 gives
-    # slow viewers slow_consumer. ONLY an actual PROVIDER-cursor retention gap
-    # qualifies here; this fixture remains FAIL when the provider keeps up.
-    peer = await ctx.viewer()
-    target = await ctx.attach(peer=peer)
-    check(target.initial == 'reset', 'O10 live target begins at a fresh committed snapshot')
-    await ctx.wait_view(target, lambda reducer: reducer.snapshots > 0)
-    check(cursor_valid(target.reducer.cursor) and target.reducer.epoch == target.epoch,
-          'O10 live gap target has an installed public cursor')
-    initial_bytes = target.reducer.offset
-    transport = peer.writer.transport
-    run, epoch = await begin_native(ctx, 'O10-gap-burst')
-    transport.pause_reading()
+
+
+class MissingProviderGap(HarnessGap):
+    """Normal missing witness AFTER known native quiescence, with zero recovery.
+
+    Only this condition permits the independent B workload to proceed. Control
+    uncertainty, failed fencing, corruption or failed recovery abort the case.
+    """
+
+
+async def provider_retention(ctx, declaration):
+    facts = await ctx.facts()
+    maximum = facts.get('caps', {}).get('items.stream', {}).get('max_viewers')
+    if type(maximum) is not int or maximum < 1:
+        raise HarnessGap('O10 A needs a declared positive max_viewers for bounded public fanout')
+    count = min(4, maximum)
+    run, epoch = await begin_native(ctx, 'O10-provider-pressure')
+    views, released, replay = [], None, None
     try:
-        # Same 512 final messages and final payload as the old burst. Native
-        # deltas add legal journal pressure, not an invented gap/retention budget.
+        for _ in range(count):
+            view = await ctx.attach(peer=await ctx.viewer())
+            views.append(view)
+            check(view.initial == 'reset', 'O10 A fast observer installs a real initial snapshot')
+            await ctx.wait_view(view, lambda reducer: reducer.snapshots > 0 and reducer.staged is None and not reducer.pending)
+            check(cursor_valid(view.reducer.cursor) and view.reducer.epoch == view.epoch,
+                  'O10 A observer has a completed public cursor at its actual epoch')
+        # No intentional downstream stall. This pressure may NOT outrun the
+        # provider cursor; absence is FAIL, never a request to tune quotas/rates.
         chunks = ['O10-gap-burst:' + 'y' * 1024] + ['y' * 1024] * 7
         if ctx.manifest.get('wire', 'pi') == 'pi':
-            # Approved fixture-control segmentation, NOT a product-bound change:
-            # same ordered512 bodies/deltas, five seconds per256-message call.
-            # The midpoint ACK is not quiescence and cannot start recovery.
             for start in (0, 256):
                 await ctx.native.call('retain', count=256, chunks=chunks, start_index=start, timeout=5)
         else:
             await ctx.native.call('retain', count=512, chunks=chunks, timeout=5)
-        await settle_native(ctx, run, epoch, 'O10-gap-burst')
-        check(not transport.is_reading(), 'O10 target remained stalled throughout native pressure', component='harness')
+        # Leave one stream slot for the public boundary snapshot. Prefer an
+        # unneeded healthy observer; retain any already observed gap peer for
+        # its actual old-connection RPC/recovery proof. No pressure restart.
+        released = next((view for view in reversed(views) if view.closed is None), None)
+        if released is not None:
+            await released.peer.close()
+        await settle_native(ctx, run, epoch, 'O10-provider-pressure')
+        eligible = [view for view in views if view is not released]
+        outcomes = await asyncio.gather(*(view.peer.wait(
+            lambda view=view: view.closed is not None or has_message(view.reducer, '511:O10-gap-burst:'), timeout=5)
+            for view in eligible), return_exceptions=True)
+        ctx.evidence.append({'kind': 'o10_provider_observers', 'reader_workload': 'fast continuously draining',
+                             'declared_max_viewers': maximum, 'attached': count,
+                             'requested_final_messages': 512, 'requested_chunks_per_message': 8,
+                             'not_native_capability_or_wire_fidelity_claim': True,
+                             'observations': [{'closed': view.closed, 'notice': deepcopy(view.close_notice),
+                                 'failure': view.reducer.failure, 'cursor': deepcopy(view.reducer.cursor),
+                                 'released_for_boundary_slot': view is released,
+                                 'wire_bytes': view.reducer.offset} for view in views],
+                             'wait_errors': [type(value).__name__ for value in outcomes if isinstance(value, BaseException)]})
+        for view in eligible:
+            check(view.reducer.failure in (None, 'retention', 'slow_consumer'),
+                  'O10 A cannot mask item corruption as a missing provider gap')
+        candidates = [view for view in eligible if view.closed == 'retention']
+        if not candidates:
+            raise MissingProviderGap('O10 A no actual provider-cursor retention gap under the approved fast-viewer pressure')
+        target = candidates[0]
+        actual_gap(target)
+        ctx.evidence.append({'kind': 'o10_public_gap_after_quiescence', 'notice': deepcopy(target.close_notice),
+                             'witness_label': 'fast public observers, provider-cursor retention'})
+        replay = await one_replay(ctx, target, declaration, '511:O10-gap-burst:')
     finally:
-        transport.resume_reading()
-    needle = '511:O10-gap-burst:'
+        # Preserve raw counterexamples even when control/fencing throws. No
+        # additional native input or after-cursor attach in this cleanup path.
+        ctx.evidence.append({'kind': 'o10_provider_final_observations',
+                             'observations': [{'closed': view.closed, 'notice': deepcopy(view.close_notice),
+                                 'failure': view.reducer.failure, 'cursor': deepcopy(view.reducer.cursor),
+                                 'released_for_boundary_slot': view is released} for view in views]})
+        for view in views:
+            await view.peer.close()
+        if replay is not None:
+            await replay.peer.close()
+
+
+async def slow_viewer_recovery(ctx):
+    # K1 owns the shared O7 helper and its hook; no duplicated reader/relay.
+    from .cases import stalled_viewer_isolation
+    maximum = (await ctx.facts()).get('caps', {}).get('items.stream', {}).get('max_viewers')
+    if type(maximum) is not int or maximum < 3:
+        raise HarnessGap('O10 B needs three declared public viewers for the existing O7 witness')
+    run, epoch = await begin_native(ctx, 'O10-slow-viewer')
+    calls = 0
+    async def before_recovery():
+        nonlocal calls
+        calls += 1
+        check(calls == 1, 'O10 B quiescence hook runs exactly once')
+        await settle_native(ctx, run, epoch, 'O10-slow-viewer')
+    baseline = len(ctx.evidence)
+    await stalled_viewer_isolation(ctx, before_recovery=before_recovery)
+    check(calls == 1, 'O10 B cannot recover without the public quiescence hook')
+    receipts = [row for row in ctx.evidence[baseline:] if row.get('kind') == 'stalled_attachment_recovery']
+    check(len(receipts) == 1, 'O10 B requires one actual shared-helper recovery receipt')
+    receipt = receipts[0]
+    check(receipt.get('stream_reason') == 'slow_consumer'
+          and receipt.get('close_notice', {}).get('method') == 'stream.closed',
+          'O10 B retention/EOF is not the required slow_consumer stream retirement')
+    check(receipt.get('native_records_requested') == 416 and receipt.get('fast_viewers') == 2
+          and receipt.get('rpc_socket_alive') is True and receipt.get('exact_fast_viewer_reconstruction') is True,
+          'O10 B preserves shared O7 workload, actual same-peer RPC and exact recovered state')
+
+
+async def public_retention_bounds(ctx):
+    declaration = (await ctx.facts()).get('items', {})
+    for field in ('entities', 'entity_bytes', 'retain_bytes'):
+        check(type(declaration.get(field)) is int and declaration[field] > 0,
+              'missing numeric item bound: ' + field)
+    await capacity_samples(ctx, declaration)
+    missing = None
     try:
-        await peer.wait(lambda: target.closed is not None or has_message(target.reducer, needle), timeout=5)
-    except asyncio.TimeoutError as error:
-        raise HarnessGap('O10 public pressure produced no completed retention-gap witness') from error
-    finally:
-        # Retain counterexamples BEFORE any failing assertion. A raw
-        # slow_consumer/unknown/EOF notice is evidence, never a retention pass.
-        ctx.evidence.append({'kind': 'o10_target_terminal_observation', 'closed': target.closed,
-                             'notice': deepcopy(target.close_notice), 'failure': target.reducer.failure,
-                             'cursor': deepcopy(target.reducer.cursor),
-                             'reader_workload': 'stalled',
-                             'witness_scope': 'provider-cursor retention, not downstream slow-viewer policy'})
-    # No reset-only, slow_consumer, EOF or corrupted-record substitute qualifies.
-    actual_gap(target)
-    ctx.evidence.append({'kind': 'o10_public_gap_after_quiescence', 'notice': deepcopy(target.close_notice),
-                         'witness_label': 'stalled reader, provider-cursor retention',
-                         'observed_wire_bytes': target.reducer.offset - initial_bytes,
-                         'burst_final_messages': 512, 'chunks_per_message_requested': 8,
-                         'native_control_segments_requested': [256, 256] if ctx.manifest.get('wire', 'pi') == 'pi' else [512],
-                         'final_text_bytes_per_message_requested': sum(map(len, chunks)),
-                         'request_note': 'requested native delta shape, not a claim that all wire bytes were observed'})
-    await one_replay(ctx, target, declaration, needle)
+        await provider_retention(ctx, declaration)
+    except MissingProviderGap as error:
+        # Known completed native pressure and NO recovery attempt. B is a
+        # different mechanism, not an A retry or substitute for the failed A.
+        missing = error
+        ctx.evidence.append({'kind': 'subcase', 'case': 'O10.A.provider_retention', 'status': 'fail', 'detail': str(error)})
+    except Exception as error:
+        ctx.evidence.append({'kind': 'subcase', 'case': 'O10.A.provider_retention', 'status': 'fail', 'detail': str(error)})
+        raise
+    else:
+        ctx.evidence.append({'kind': 'subcase', 'case': 'O10.A.provider_retention', 'status': 'pass'})
+    try:
+        await slow_viewer_recovery(ctx)
+    except Exception as error:
+        ctx.evidence.append({'kind': 'subcase', 'case': 'O10.B.slow_viewer', 'status': 'fail', 'detail': str(error)})
+        raise
+    ctx.evidence.append({'kind': 'subcase', 'case': 'O10.B.slow_viewer', 'status': 'pass'})
+    ctx.evidence.append({'kind': 'o10_composed_workload', 'capacity_messages': 384, 'provider_messages': 512,
+                         'slow_viewer_messages': 416, 'total_messages_requested': 1312,
+                         'maximum_recoveries_per_mechanism': 1, 'maximum_recoveries_total': 2})
+    if missing is not None:
+        raise missing
