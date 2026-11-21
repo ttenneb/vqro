@@ -42,7 +42,8 @@ async def c6_non_confirm(ctx, declaration):
             _, request = await make_request(ctx, method, **options)
         except CheckFailed as error:
             # Only "never became observable" can be the adapter's budget refusal; anything else is a real failure.
-            if "did not reach the required state" not in str(error):
+            # HarnessGap/FixtureFailed subclasses and any other assertion are never budget pressure.
+            if type(error) is not CheckFailed or "did not reach the required state" not in str(error):
                 raise
             issued = [row.get("request") for row in ctx.native.records("request", after=attempt)]
             if len(issued) != 1:
@@ -113,8 +114,8 @@ async def r6_background_foreground(ctx, declaration):
     """background_requests: true. A background (session) request and a foreground run-blocking permission are both
     pending; an interrupt makes the runtime stop waiting only on the foreground one."""
     from .cases import make_request, answer, valid_response
-    if "permission" not in declaration.get("methods", []):
-        raise HarnessGap("R6 needs a foreground permission request fixture")
+    if not {"permission", "form"} <= set(declaration.get("methods", [])):
+        raise HarnessGap("R6 background/foreground fixture needs declared permission (foreground) and form (background) methods")
     scopes = set(declaration.get("scopes", []))
     if not {"session", "run"} <= scopes:
         raise HarnessGap("R6 background/foreground scenario needs declared session and run scopes")

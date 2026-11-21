@@ -74,6 +74,9 @@ class Fake:
         if len([e for e in self.requests.values() if e["status"] == "pending"]) >= self.BUDGET:
             if self.fault == "overflow_other_error":
                 raise CheckFailed("request method changed during normalization")
+            if self.fault == "overflow_harness_gap":
+                from agent_conformance.results import HarnessGap
+                raise HarnessGap("public agent facts did not reach the required state (missing fixture mechanism)")
             if self.fault != "silent_overflow":
                 target = "native-elsewhere" if self.fault == "overflow_wrong_cancel" else native_id
                 self.native.add("answer", request=target, normalized_response={"action": "cancel"})
@@ -153,7 +156,8 @@ class RequestFixtureNegatives(unittest.TestCase):
 
     def test_each_broken_rule_fails(self):
         for branch, faults in ((branches.c6_non_confirm, ("oversized_facts", "silent_title_cut", "summary_omits_title", "detail_lost",
-                                                          "silent_overflow", "overflow_other_error", "overflow_wrong_cancel")),
+                                                          "silent_overflow", "overflow_other_error", "overflow_wrong_cancel",
+                                                          "overflow_harness_gap")),
                                (branches.r2_native_withdrawal, ("ignore_native_resolution", "answer_withdrawn")),
                                (branches.r6_background_foreground, ("interrupt_withdraws_all", "background_bound_to_foreground",
                                                                     "answer_wrong_native", "stale_indeterminate", "stale_writes"))):
