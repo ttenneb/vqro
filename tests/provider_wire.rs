@@ -322,6 +322,30 @@ async fn vqro_tmux_extension_interoperates_with_core_wire() {
     until(|| e.core.lock().unwrap().exts.values().all(|e| e.pid.is_none())).await;
 }
 
+/// e2e-tui-keys flake (vqro-lead): vqro-tmux with an open stream reports the killed pane gone around the kill
+/// reply; the core called the successful kill indeterminate ("provider changed while effect was in flight").
+#[tokio::test(flavor="multi_thread", worker_threads=2)]
+async fn a_kill_whose_gone_overtakes_its_reply_is_observed_and_stays_gone() {
+    let e = env().await;
+    let (viewer, _output) = peer(&e).await;
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_provider.py");
+    viewer.call("workspace.apply", json!({"ops":[{"op":"set","key":"extension/wire-fixture","value":{"argv":["python3",fixture,"--name","sdk-fake","--socket",e.socket,"--instance","sdk-instance"]}}]})).await.unwrap();
+    until(|| e.core.lock().unwrap().providers.get("sdk-fake").is_some_and(|p| p.synced)).await;
+    for _ in 0..3 {
+        let spawn = viewer.call("resource.spawn", json!({"provider":"sdk-fake","argv":["--gone-on-kill"]})).await.unwrap();
+        let id = spawn["resource"]["id"].as_str().unwrap().to_string();
+        let reference = e.core.lock().unwrap().resource(&id).map(|r| r.facts.backend_ref.clone()).unwrap();
+        let killed = viewer.call("resource.kill", json!({"resource":id})).await.unwrap();
+        assert_eq!(killed["outcome"], "observed", "{killed}");
+        // The gone report stands, whichever lands first: the kill's facts don't bring the terminal back.
+        until(|| e.core.lock().unwrap().resources.values().all(|r| !(r.available && r.facts.backend_ref == reference))).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(e.core.lock().unwrap().resources.values().all(|r| !(r.available && r.facts.backend_ref == reference)), "revived");
+    }
+    viewer.call("workspace.apply", json!({"ops":[{"op":"delete","key":"extension/wire-fixture"}]})).await.unwrap();
+    until(|| e.core.lock().unwrap().providers["sdk-fake"].health.borrow().connected == false).await;
+}
+
 #[tokio::test(flavor="multi_thread", worker_threads=2)]
 async fn external_sdk_fake_as_extension_spawns_echoes_kills_and_disconnects() {
     let e = env().await;

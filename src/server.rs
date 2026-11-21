@@ -659,17 +659,23 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, mut p: Value) -
         }
         "resource.kill" => {
             let id = p.get("resource").and_then(|r| r.as_str()).ok_or_else(|| RpcError::invalid("needs `resource`"))?;
-            let (route, reference) = {
+            let (mut route, reference) = {
                 let c = core.lock().unwrap();
                 (c.resource_route(id, "terminal.kill")?, c.resource(id)?.facts.backend_ref.clone())
             };
+            // Ending the resource is this effect's purpose (as for resource.forget): a `resource.gone` that overtakes
+            // the reply, or lands just after it, must not turn a successful kill into an indeterminate outcome.
+            // Provider generation fencing still applies. The provider's gone report is the newer fact, so the kill's
+            // own facts don't bring back a resource it already reported gone.
+            let life = route.resource.take();
             let (handle, operation, c) = (route.handle.clone(), route.clone(), core.clone());
             let deadline = provider::deadline(p.get("deadline_ms").map(|v| v.as_u64().ok_or_else(|| RpcError::invalid("deadline_ms must be an unsigned integer"))).transpose()?)?;
             let (effect, mut result) = effect(core, caller.clone(), context.attribution, route, "resource.kill", json!({"resource":id,"op":"terminal.kill"}), deadline, |value: &crate::adapter::EffectResult| value.outcome, move |context| async move {
                 let mut result = handle.for_effect(context).kill(reference).await.map_err(|e| e.rpc())?;
                 let mut c=c.lock().unwrap();
                 if !operation.valid() { return Err(provider::indeterminate("provider changed before kill result was recorded")); }
-                if let Some(facts) = result.facts.take() { c.upsert_resource(&operation.handle.name, facts)?; }
+                let gone = life.as_ref().is_some_and(|l| !*l.borrow());
+                if let Some(facts) = result.facts.take().filter(|_| !gone) { c.upsert_resource(&operation.handle.name, facts)?; }
                 Ok(result)
             }).await?;
             Ok(json!({"outcome": result.outcome, "effect": effect, "backend": result.data.take()}))

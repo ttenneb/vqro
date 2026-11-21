@@ -83,6 +83,9 @@ class Fake:
         for stream in list(term["streams"]):
             await stream.close({"reason": "killed"})
         term["streams"].clear()
+        if "--gone-on-kill" in term["facts"]["argv"]:
+            # Like a provider whose pane watcher reports the end before the kill reply (vqro-tmux with an open stream).
+            await self.provider.gone(effect.ref, "", {"reason": "killed"})
         return {"outcome": "observed", "data": {"facts": deepcopy(term["facts"])}}
 
     async def open(self, stream):
