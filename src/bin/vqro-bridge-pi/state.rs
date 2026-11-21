@@ -8,6 +8,7 @@ use super::native::{Event,Exit};
 
 pub const ENTITY_BYTES:usize=60*1024; // Room for the whole snapshot/put envelope within64KiB.
 pub const ENTITY_COUNT:usize=512;
+const OPEN_MESSAGES:usize=8; // concurrently open native messages tracked; Pi streams one at a time
 pub const ENTITY_TOTAL:usize=512*1024;
 fn project_content(content:&Value)->Value{
     if let Some(text)=content.as_str(){return json!([{"type":"text","text":text}]);}
@@ -59,7 +60,9 @@ pub struct Agent {
     receipt_order:VecDeque<String>,
     history:VecDeque<(String,String)>,
     tools:HashMap<String,String>,
-    current_message:Option<String>,
+    // Open message entities by native identity (role, creation timestamp), oldest first, bounded: a record for one
+    // message never writes into another's entity, and an interleaved stray record does not lose an open message.
+    open:Vec<(Value,Value,String)>,starting:bool,
     position:u64,serial:u64,epoch_number:u64,instance:String,boot:String,
     pub session:Option<Value>,pub session_pending:bool,pub run:Option<String>,pub completion:Option<Value>,
     reason:String,error:Option<String>,exit:Option<Exit>,caps:Value,
@@ -71,7 +74,7 @@ impl Agent {
         let boot=bytes.iter().map(|byte|format!("{byte:02x}")).collect::<String>();
         let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entities:ENTITY_COUNT,max_entity_bytes:ENTITY_TOTAL,snapshot_buffer_bytes:1024*1024,..Default::default()});
         journal.set_coverage(Coverage::Tail);
-        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,tool_principal_env:false,view:None,view_error:None,configuration:Default::default(),commands:Default::default(),origins:Default::default(),start_origin:None,current_origin:None,requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
+        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,tool_principal_env:false,view:None,view_error:None,configuration:Default::default(),commands:Default::default(),origins:Default::default(),start_origin:None,current_origin:None,requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),open:Vec::new(),starting:false,
             position:0,serial:0,epoch_number:1,instance,boot,session:None,session_pending:false,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null,launch_cwd:None,usage:None,usage_revision:0};
         agent.refresh();agent
     }
@@ -151,7 +154,7 @@ impl Agent {
     }
     pub fn new_session_epoch(&mut self){
         self.invalidate_usage();
-        self.cancel_requests("epoch_changed");self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.current_message=None;self.origins.reset();self.start_origin=None;self.current_origin=None;self.run=None;self.completion=None;
+        self.cancel_requests("epoch_changed");self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.open.clear();self.origins.reset();self.start_origin=None;self.current_origin=None;self.run=None;self.completion=None;
     }
     pub fn ensure_session_epoch(&mut self,prior:&str){if self.epoch()==prior{self.new_session_epoch();if let Some(session)=self.session.clone(){self.store("session","current",session,false);}self.refresh();}}
     pub fn configuration_pending(&mut self,pending:bool){if pending{self.invalidate_usage();}self.configuration.pending=pending;if !pending{self.session_pending=false;}self.configuration.rebuild(&self.signals.current().metadata);self.refresh();}
@@ -240,7 +243,7 @@ impl Agent {
         let count=self.history.len();
         for _ in 0..count {
             let Some((kind,id))=self.history.pop_front() else {break;};
-            let active=self.current_message.as_deref()==Some(&id) || (except.0!="request" && self.tools.values().any(|tool|tool==&id))
+            let active=self.open.iter().any(|(_,_,open)|*open==id) || (except.0!="request" && self.tools.values().any(|tool|tool==&id))
                 || (kind=="receipt" && self.receipts.get(&id).is_some_and(|receipt|receipt["stage"]=="dispatched"));
             if (kind.as_str(),id.as_str())==except || active {self.history.push_back((kind,id));continue;}
             if self.journal.entity(&kind,&id).is_some() {let _=self.journal.remove(&kind,&id);self.journal.set_coverage(Coverage::Tail);return true;}
@@ -280,8 +283,16 @@ impl Agent {
     fn message(&mut self,record:&Value,final_value:bool) {
         let message=&record["message"];
         if message["role"]=="toolResult" {return;}
-        let id=if let Some(id)=&self.current_message {id.clone()}else{
-            self.position+=1;let id=self.next("m");self.current_message=Some(id.clone());
+        // Pi keeps a message's role and creation timestamp from start to end: an update/end continues the open entity
+        // with that identity (the latest one, if timestamps are missing and only the role can tell). A start, or a
+        // record matching no open message, gets a new entity; nothing is ever written into another message's entity.
+        let identity=(message["role"].clone(),message["timestamp"].clone());
+        let starting=std::mem::take(&mut self.starting);
+        let found=if starting {None} else {self.open.iter().rposition(|(role,timestamp,_)|*role==identity.0
+            && (*timestamp==identity.1 || count(timestamp).is_none() || count(&identity.1).is_none()))};
+        let id=if let Some(index)=found {self.open[index].2.clone()}else{
+            self.position+=1;let id=self.next("m");
+            self.open.push((identity.0.clone(),identity.1.clone(),id.clone()));if self.open.len()>OPEN_MESSAGES{self.open.remove(0);}
             // Only the entity a correlated user message_start creates gets that origin; any other new entity gets none.
             self.current_origin=self.start_origin.take().filter(|_|message["role"]=="user" && count(&message["timestamp"]).is_some()).map(|entry|(id.clone(),entry,message["timestamp"].clone()));id
         };
@@ -310,7 +321,7 @@ impl Agent {
                 self.reason=match message["stopReason"].as_str().unwrap_or("unknown") {"stop"=>"end_turn","length"=>"max_tokens","aborted"=>"cancelled",other=>other}.into();
                 self.error=message["errorMessage"].as_str().map(|s|s.chars().take(1024).collect());
             }
-            self.current_message=None;
+            self.open.retain(|(_,_,open)|*open!=id);
             if self.current_origin.as_ref().is_some_and(|(bound,_,_)|*bound==id){self.current_origin=None;}
         }
     }
@@ -379,7 +390,7 @@ impl Agent {
                     if let Some(run)=self.run.take(){let reason=if record["aborted"]==true{"cancelled"}else{&self.reason};self.completion=Some(json!({"id":run,"reason":reason,"error":self.error.as_ref().map(|message|json!({"message":message}))}));}
                 }
                 Some("message_start")=>{
-                    self.current_message=None;
+                    self.starting=true;
                     // Only a user message the bridge sent, under the evidence rules in origins.rs; never inferred.
                     self.start_origin=if record["message"]["role"]=="user"{self.origins.user_message(&record["message"])}else{None};
                     self.message(record,false);

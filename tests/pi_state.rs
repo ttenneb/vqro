@@ -62,14 +62,16 @@ fn content_merged_into_an_open_correlated_message_drops_its_origin() {
     assert!(value.get("origin").is_none() && value.get("delivery").is_none(),"{value}");
     event(&mut a,json!({"type":"message_start","message":{"role":"user","content":"owned A","timestamp":1000}}));
     assert!(entities(&a,"message").iter().all(|row|row["value"].get("origin").is_none()),"the binding is gone");
-    // Byte-identical text from another message (its own timestamp) merged into the open A: also no origin.
+    // Byte-identical text from another message (its own timestamp): its own entity, without origin; A keeps A's.
     let mut a=make();
     a.origins.arm(origins::Entry::new("d-origin",&origin,&json!({"message":"ok"})));
     event(&mut a,json!({"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}));
     event(&mut a,json!({"type":"message_start","message":{"role":"user","content":"ok","timestamp":1000}}));
     assert_eq!(entities(&a,"message")[0]["value"]["origin"],origin);
     event(&mut a,json!({"type":"message_end","message":{"role":"user","content":"ok","timestamp":2000}}));
-    assert!(entities(&a,"message")[0]["value"].get("origin").is_none(),"identical text, another message");
+    let rows=entities(&a,"message");assert_eq!(rows.len(),2,"another message, another entity: {rows:?}");
+    assert_eq!(rows[0]["value"]["origin"],origin,"A keeps its origin");
+    assert!(rows[1]["value"].get("origin").is_none(),"identical text, another message");
     // The same message ending (same timestamp) keeps it.
     let mut a=make();
     a.origins.arm(origins::Entry::new("d-origin",&origin,&json!({"message":"ok"})));
@@ -111,9 +113,10 @@ fn uncertain_update_cannot_keep_origin_via_text_append() {
     event(&mut a, json!({"type":"message_start","message":{"role":"user",
                         "content":[{"type":"text","text":"hello"}],"timestamp":1000}}));
     assert_eq!(entities(&a,"message")[0]["value"]["origin"], origin);
-    // A legal assistant-delta shape, but uncertain merge into the still-open user entity.
-    event(&mut a, json!({"type":"message_update","message":{"role":"assistant",
-                        "content":[{"type":"text","text":"hello world"}],"timestamp":2000},
+    // A delta with no timestamp cannot be told apart from A, so it merges into the open entity (role alone matches):
+    // the binding drops (no valid timestamp) and the entity must be re-put, not appended with A's provenance kept.
+    event(&mut a, json!({"type":"message_update","message":{"role":"user",
+                        "content":[{"type":"text","text":"hello world"}]},
                         "assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" world"}}));
     let rows = entities(&a,"message");
     assert_eq!(rows.len(),1);
@@ -135,6 +138,48 @@ fn missing_timestamp_is_not_same_message_identity() {
     let rows = entities(&a,"message");
     assert!(rows[0]["value"].get("origin").is_none() && rows[0]["value"].get("delivery").is_none(),
             "missing==missing must not qualify continuation identity: {}", rows[0]["value"]);
+}
+
+/// A stray update/end for another message (any role) never writes into the open entity: it gets its own.
+#[test]
+fn a_record_for_another_message_never_writes_into_the_open_one() {
+    let text=|v:&Value|v["value"]["content"][0]["text"].as_str().unwrap_or("").to_string();
+    for (b_role,b_time,b_text) in [("user",2000,"user B"),("assistant",2000,"assistant B"),("assistant",1000,"assistant B same time")] {
+        for final_b in [false,true] {
+            let mut a=make();
+            event(&mut a,json!({"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"A"}],"timestamp":1000}}));
+            let b=json!({"role":b_role,"content":[{"type":"text","text":b_text}],"timestamp":b_time});
+            if final_b {event(&mut a,json!({"type":"message_end","message":b}));}
+            else {event(&mut a,json!({"type":"message_update","message":b,"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":b_text}}));}
+            let rows=entities(&a,"message");
+            let a_row=rows.iter().find(|r|r["id"]=="m1").unwrap();
+            assert_eq!((text(a_row),&a_row["value"]["role"]),("A".to_string(),&json!("user")),"{b_role}/{b_time}/final={final_b}: A untouched: {rows:?}");
+            if b_role=="user" && b_time==1000 {continue;}
+            assert!(rows.iter().any(|r|r["id"]!="m1" && text(r)==b_text && r["value"]["role"]==b_role),"{b_role}/{b_time}: B has its own entity: {rows:?}");
+        }
+    }
+    // The same message's own update/end (same role and timestamp) still writes into its entity.
+    let mut a=make();
+    event(&mut a,json!({"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"he"}],"timestamp":1000}}));
+    event(&mut a,json!({"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"hello"}],"timestamp":1000},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"llo"}}));
+    event(&mut a,json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"hello"}],"timestamp":1000,"stopReason":"stop"}}));
+    let rows=entities(&a,"message");assert_eq!(rows.len(),1);assert_eq!(text(&rows[0]),"hello");
+}
+
+/// as-reviewer's control on 44a8d0ec: a stray record between A's start and A's end does not lose A: A's later
+/// update/end continue A's entity, and B stays its own.
+#[test]
+fn an_interleaved_stray_record_does_not_lose_the_open_message() {
+    let mut a=make();
+    event(&mut a,json!({"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"he"}],"timestamp":1000}}));
+    event(&mut a,json!({"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"B"}],"timestamp":2000}}));
+    event(&mut a,json!({"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"hello"}],"timestamp":1000},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"llo"}}));
+    event(&mut a,json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"hello"}],"timestamp":1000,"stopReason":"stop"}}));
+    let rows=entities(&a,"message");
+    assert_eq!(rows.len(),2,"{rows:?}");
+    let m1=rows.iter().find(|r|r["id"]=="m1").unwrap();
+    assert_eq!((&m1["value"]["content"][0]["text"],&m1["value"]["final"],&m1["value"]["role"]),(&json!("hello"),&json!(true),&json!("assistant")),"{rows:?}");
+    assert!(rows.iter().any(|r|r["id"]!="m1" && r["value"]["content"][0]["text"]=="B" && r["value"]["role"]=="user"));
 }
 
 #[test]
