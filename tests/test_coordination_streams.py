@@ -40,7 +40,8 @@ class StreamGlueTests(unittest.TestCase):
                     raise StoreError("unsupported", "not supported")
                 self.next_stream += 1
                 # Frames arrive before the attach reply. The glue must retain them.
-                self.viewer.handle("stream.data", {"stream": self.next_stream, "data": base64.b64encode(self.data).decode()})
+                for data in (self.data if isinstance(self.data, list) else [self.data]):
+                    self.viewer.handle("stream.data", {"stream": self.next_stream, "data": base64.b64encode(data).decode()})
                 return {"outcome": "accepted", "stream": self.next_stream, "initial": "reset", "epoch": "epoch1"}
             return {}
         def apply(agent, incarnation, events):
@@ -76,6 +77,37 @@ class StreamGlueTests(unittest.TestCase):
         attaches = [params for method, params in self.calls if method == "resource.attach"]
         self.assertEqual(attaches[-1]["items"], {})
         self.assertEqual(len(self.applied), 1)
+
+    def test_a_repeated_rejection_backs_off_instead_of_retrying_every_second(self):
+        """A record the collector rejects repeats after every fresh snapshot. Re-installing the same cut is not
+        progress, so the backoff grows (1, 2, 4, 8, 16 s ...) instead of restarting at 1 s forever (the O14 storm seen
+        beside the agents viewer: one reattach per second)."""
+        self.data = [snapshot(seq=3), b"[1]\n"]  # a good cut, then (next frame) a record rejected every time
+        attach_times = []
+        for step in range(60):  # one minute
+            self.now = float(step)
+            before = len([c for c in self.calls if c[0] == "resource.attach"])
+            self.viewer.pump()
+            self.viewer.pump()
+            if len([c for c in self.calls if c[0] == "resource.attach"]) > before:
+                attach_times.append(self.now)
+        self.assertLessEqual(len(attach_times), 8, f"bounded, not once a second: {attach_times}")
+        gaps = [b - a for a, b in zip(attach_times, attach_times[1:])]
+        self.assertEqual(gaps, sorted(gaps), "the waits only grow while nothing progresses")
+        self.assertTrue(self.applied, "the good cut before the rejection still applies")
+
+    def test_progress_past_the_failed_position_resets_the_backoff(self):
+        self.data = [snapshot(seq=3), b"[1]\n"]
+        for step in range(8):
+            self.now = float(step)
+            self.viewer.pump()
+            self.viewer.pump()
+        self.assertGreater(self.viewer.slots["r1"]["failures"], 1)
+        self.data = snapshot(seq=9)  # the producer moved past the rejected record
+        self.now = 1000.0
+        self.viewer.pump()
+        self.viewer.pump()
+        self.assertEqual(self.viewer.slots["r1"]["failures"], 0, "a cursor past the failed position is progress")
 
     def test_gap_never_applies_missing_history_or_relabels_known_receipts(self):
         self.viewer.pump()

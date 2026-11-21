@@ -28,6 +28,14 @@ class ItemReceiptSink:
         self.viewer.handle("stream." + kind, {"stream": self.stream, "reason": reason})
 
 
+def past(cursor, failed_at):
+    """A cursor beyond the position a stream last failed at: a later seq in the same epoch, or another epoch."""
+    if not isinstance(failed_at, dict):
+        return True
+    return cursor.get("epoch") != failed_at.get("epoch") or (type(cursor.get("seq")) is int and type(failed_at.get("seq")) is int
+                                                             and cursor["seq"] > failed_at["seq"])
+
+
 class ItemReceiptStreams:
     def __init__(self, call, apply, *, wake=None, clock=None, limit=256):
         self.call, self.apply = call, apply
@@ -116,6 +124,9 @@ class ItemReceiptStreams:
         slot["stream"] = None
         if slot.get("collector"):
             slot["collector"].discard_partial()
+        # The last applied cursor when this failure happened: only a cursor past it is progress (agent-v0 section 4:
+        # a fresh snapshot back at the same cut, before the same rejection, is not).
+        slot["failed_at"] = slot["cursor"] if slot.get("cursor") is not None else slot.get("failed_at")
         if reset:
             slot.update(collector=None, cursor=None, reset=True)
         slot["failures"] += 1
@@ -161,8 +172,9 @@ class ItemReceiptStreams:
                 # A cursor is applied evidence, not just received bytes. On any
                 # persistence failure reset; never resume after unpersisted events.
                 cursor = slot["collector"].cursor
-                if cursor is not None and cursor != slot["cursor"]:
-                    slot["failures"] = 0
+                if cursor is not None and cursor != slot["cursor"] and past(cursor, slot.get("failed_at")):
+                    slot["failures"] = 0  # real progress, not a reset snapshot re-installing the same cut
+                    slot["failed_at"] = None
                     self.issues.pop(agent, None)
                 slot["cursor"] = cursor
                 slot["reset"] = False
