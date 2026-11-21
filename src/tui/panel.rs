@@ -552,7 +552,7 @@ fn composer_of<'a>(st: &'a State, r: &Flat, focused: bool) -> Option<(&'a crate:
 
 /// A composer: the draft (or placeholder) with a `▌` margin and the cursor, then controls, Send and a key hint.
 #[allow(clippy::too_many_arguments)]
-fn draw_composer(buf: &mut Buffer, row: Rect, item: &Value, selected: bool, chip: usize, i: usize, hits: &mut Hits, pal: &Palette, comp: Option<(&crate::ui_model::composer::Composer, bool)>) {
+fn draw_composer(buf: &mut Buffer, row: Rect, item: &Value, selected: bool, chip: usize, i: usize, hits: &mut Hits, pal: &Palette, icons: &Icons, comp: Option<(&crate::ui_model::composer::Composer, bool)>) {
     use crate::ui_model::composer;
     let fresh;
     let (c, editing) = match comp { Some(c) => c, None => { fresh = composer::Composer::new(item); (&fresh, false) } };
@@ -595,7 +595,11 @@ fn draw_composer(buf: &mut Buffer, row: Rect, item: &Value, selected: bool, chip
     for ctl in &controls {
         let arg = ctl["arg"].as_str().unwrap_or("");
         let value = c.values.get(arg).cloned().unwrap_or(Value::Null);
-        if ctl["type"] == "chips" {
+        if ctl["type"] == "button" {
+            // A command button (feature `composer_buttons`): its icon (from the icon set) and text.
+            let label = icons.label(&ctl["icon"], ctl["text"].as_str().unwrap_or(""));
+            button(format!("[{}]", if label.is_empty() { "?".into() } else { label }), pal.style(Some(ctl["style"].as_str().unwrap_or("accent"))), &mut x, buf, hits);
+        } else if ctl["type"] == "chips" {
             if let Some(label) = ctl["text"].as_str() { let l = format!("{label}:"); buf.set_string(x, y, &l, pal.style(Some("muted"))); x += icons::width(&l) + 1; }
             for chipv in ctl["chips"].as_array().into_iter().flatten() {
                 let on = chipv["value"] == value;
@@ -674,7 +678,7 @@ fn draw_block(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, i: usize, s
 
 #[allow(clippy::too_many_arguments)]
 fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, i: usize, skip:u16, hits: &mut Hits, pal: &Palette, icons: &Icons, comp: Option<(&crate::ui_model::composer::Composer, bool)>, open: bool) {
-    if kind(&r.item) == "composer" { return draw_composer(buf, row, &r.item, selected, chip, i, hits, pal, comp); }
+    if kind(&r.item) == "composer" { return draw_composer(buf, row, &r.item, selected, chip, i, hits, pal, icons, comp); }
     if kind(&r.item) == "message" || fold(&r.item).is_some() { return draw_block(buf, row, r, selected, i, skip, hits, pal, open); }
     let item = &r.item;
     let w = row.width as usize;

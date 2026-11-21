@@ -132,22 +132,41 @@ impl Composer {
     }
 }
 
-/// A composer row's controls: `select` and `chips` rows with an `arg`.
+/// A composer row's controls: `select` and `chips` rows with an `arg`, and `button`s with a `command` (feature
+/// `composer_buttons`). Others are skipped.
 pub fn controls(row: &Value) -> Vec<&Value> {
-    row["controls"].as_array().into_iter().flatten().filter(|c| c["arg"].is_string() && matches!(c["type"].as_str(), Some("select" | "chips"))).collect()
+    row["controls"].as_array().into_iter().flatten().filter(|c| match c["type"].as_str() {
+        Some("select" | "chips") => c["arg"].is_string(),
+        Some("button") => c["command"].is_string(),
+        _ => false,
+    }).collect()
 }
 
-/// The buttons on a composer's control line, in order: each control's choices (a select is one button opening its
-/// options; a chips row is one button per chip), then Send. `(arg, value)`; Send is `("", Null)`.
-pub fn buttons(row: &Value) -> Vec<(String, Option<Value>)> {
+/// One button on a composer's control line.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Button {
+    /// A chip of a chips control: choose `value` for `arg`.
+    Choice(String, Value),
+    /// A select control: open its options for `arg`.
+    Select(String),
+    /// A `button` control: run its command (`{command, args?, input?}`) in the panel's context.
+    Command(Value),
+    Send,
+}
+
+/// The buttons on a composer's control line, in order: each control's (a select is one button opening its options;
+/// a chips row is one button per chip; a button is one), then Send unless the row hides it.
+pub fn buttons(row: &Value) -> Vec<Button> {
     let mut out = Vec::new();
     for c in controls(row) {
         let arg = c["arg"].as_str().unwrap_or("").to_string();
-        if c["type"] == "chips" {
-            for chip in c["chips"].as_array().into_iter().flatten() { out.push((arg.clone(), Some(chip["value"].clone()))); }
-        } else { out.push((arg, None)); }
+        match c["type"].as_str() {
+            Some("chips") => for chip in c["chips"].as_array().into_iter().flatten() { out.push(Button::Choice(arg.clone(), chip["value"].clone())); },
+            Some("button") => out.push(Button::Command(c.clone())),
+            _ => out.push(Button::Select(arg)),
+        }
     }
     // Send, unless the row hides it (`send_button: false`: Enter still sends).
-    if row["send_button"] != false { out.push((String::new(), None)); }
+    if row["send_button"] != false { out.push(Button::Send); }
     out
 }

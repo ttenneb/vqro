@@ -1288,24 +1288,36 @@ impl App {
                 KeyCode::Right => st.chip = (st.chip + 1).min(buttons.len()),
                 KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('i') if st.chip == 0 => { st.editing = Some(id.clone()); }
                 KeyCode::Enter | KeyCode::Char(' ') => {
-                    let (arg, value) = buttons.get(st.chip - 1).cloned().unwrap_or_default();
+                    use crate::ui_model::composer::Button;
+                    let Some(pressed) = buttons.get(st.chip - 1).cloned() else { return true };
                     let pos = self.row_position(key, st.sel);
                     let comp = st.composers.get_mut(&id).unwrap();
-                    if arg.is_empty() {
+                    match pressed {
+                    Button::Send => {
                         let args = comp.submit_args(&item);
                         let empty = comp.editor.string().trim().is_empty();
                         self.pstate.insert(key.to_string(), save(container, st));
                         if empty { self.message = "nothing to send".into(); } else { self.send_composer(key, &id, &item, args, ctx); }
                         return true;
-                    } else if let Some(v) = value {
-                        comp.values.insert(arg, v);
-                    } else if let Some(ctl) = crate::ui_model::composer::controls(&item).into_iter().find(|c| c["arg"] == arg.as_str()) {
+                    }
+                    Button::Command(b) => {
+                        // Runs in the panel's context, like a row's action; the draft stays.
+                        self.pstate.insert(key.to_string(), save(container, st));
+                        let mut ctx = ctx;
+                        ctx["panel"] = json!(key);
+                        ctx["panel_view"] = json!(view);
+                        self.activate_item(Item::from_entry(&b), ctx, pos);
+                        return true;
+                    }
+                    Button::Choice(arg, v) => { comp.values.insert(arg, v); }
+                    Button::Select(arg) => if let Some(ctl) = crate::ui_model::composer::controls(&item).into_iter().find(|c| c["arg"] == arg.as_str()) {
                         // A select control: pick a value for this composer only (client-local until Send).
                         let menu = json!({"command": "client.composer", "args": {"action": "set", "panel": key, "row": id, "arg": arg},
                             "value": comp.values.get(&arg).cloned().unwrap_or(Value::Null), "options": ctl["options"].clone()});
                         self.pstate.insert(key.to_string(), save(container, st));
                         self.options_menu(&menu, ctx, pos);
                         return true;
+                    }
                     }
                 }
                 _ => handled = false,
@@ -4221,6 +4233,47 @@ mod tests {
         app.panel_key("p", "p", KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), json!({}));
         app.panel_key("p", "p", KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), json!({}));
         assert!(matches!(app.overlay, Some(Overlay::Menu { .. })), "the select's options open");
+    }
+
+    #[tokio::test]
+    async fn a_composer_button_runs_its_command_by_key_or_click_and_keeps_the_draft() {
+        let (mut app, _) = app();
+        let menu = json!([{"label":"Stop","command":"agents.stop"}]);
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","items":[
+            {"text":"first"},{"text":"second"},
+            {"type":"composer","id":"c","text":"Message","command":"x","send_button":false,"pin":"bottom",
+             "controls":[{"type":"select","arg":"mode","text":"Input","value":"auto","options":[{"label":"auto","value":"auto"}]},
+                         {"type":"button","icon":{"name":"settings","text":"⚙"},"command":"client.panel","args":{"action":"first"}},
+                         {"type":"button","text":"Pane","menu":menu},
+                         {"type":"x.future","text":"unknown control"}]}]}}}}));
+        app.leaves = vec!["p".into()];
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 8)).unwrap();
+        let mut draw = |app: &mut App| -> Vec<String> {
+            let mut out = Vec::new();
+            terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, 70, 8), true, &Palette::default(), &Icons::new(None, false));
+                let b = f.buffer_mut(); out = (0..8).map(|y| (0..70).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect(); }).unwrap();
+            out
+        };
+        let screen = draw(&mut app);
+        let line = screen.iter().find(|l| l.contains("Input: auto ▾")).expect("the control line").clone();
+        assert!(line.contains("Input: auto ▾ [⚙]") && !line.contains("Pane") && !line.contains("unknown"),
+            "the select, then the icon button; a button without a command and unknown controls are skipped: {line}");
+        // By key: Right past the select reaches the button; Enter runs its command in the panel's context.
+        app.pstate.get_mut("p").unwrap().sel = 2;
+        for _ in 0..2 { app.panel_key("p", "p", KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), json!({})); }
+        app.panel_key("p", "p", KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), json!({}));
+        assert_eq!(app.pstate["p"].sel, 0, "client.panel first ran on this panel");
+        // By click while typing a draft: it runs, the draft stays and typing goes on.
+        let st = app.pstate.get_mut("p").unwrap();
+        st.sel = 2; st.chip = 0; st.editing = Some("c".into());
+        st.composers.get_mut("c").unwrap().editor = crate::ui_model::composer::Editor::new("draft", None, None);
+        let screen = draw(&mut app);
+        let y = screen.iter().position(|l| l.contains("[⚙]")).unwrap();
+        let x = screen[y].find("[⚙]").map(|i| screen[y][..i].chars().count() as u16).unwrap();
+        app.panel_click("p", "p", Position { x: x + 1, y: y as u16 }, MouseButton::Left, json!({}));
+        assert_eq!(app.pstate["p"].sel, 0);
+        assert_eq!(app.pstate["p"].editing.as_deref(), Some("c"), "typing goes on");
+        assert_eq!(app.pstate["p"].composers["c"].editor.string(), "draft");
     }
 
     #[tokio::test]
