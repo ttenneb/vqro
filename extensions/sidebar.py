@@ -14,7 +14,8 @@ are listed under "Layouts" like workspaces. Status badges come from each termina
 Every level can be shown or hidden (`doc/settings/sidebar` `show`: workspaces, worktrees, tabs, panes,
 stray); a hidden level's rows are replaced by their children, so any combination works: panes straight
 under workspaces (tabs hidden), tabs without panes, or a flat list (workspaces hidden). Worktree options
-(`worktrees`: limit per workspace with a "+N more" row, only with changes, hide detached) narrow which
+(`worktrees`: limit per workspace, default 10 with changed ones first, and a "+N more" row; only with changes;
+hide detached) narrow which
 worktrees are listed. The same rows appear in the Show popup (`sidebar.view`, from the toolbar's
 `Show: <preset> ▾` chip) and as this extension's Settings page (live `settings.page.sidebar`): one state.
 
@@ -64,7 +65,10 @@ PRESETS = {
 # Short names for the toolbar chip, so the current choice fits a ~24-column sidebar on one line.
 SHORT = {"everything": "all", "panes under workspaces": "no tabs", "tabs only": "tabs",
          "workspaces and worktrees": "trees", "terminals only": "terminals"}
-WORKTREES_DEFAULT = {"limit": 0, "changed_only": False, "hide_detached": False}  # 0: no limit
+# A workspace lists its first 10 worktrees (changed ones first) and a "+N more" row that opens the rest by hand: a
+# repository with 185 worktrees (each a ~460-byte row) otherwise fills two sidebar pages that a collapsed ▸ only hides
+# (collapse is the window's own; the published tree still holds them). 0 means no limit.
+WORKTREES_DEFAULT = {"limit": 10, "changed_only": False, "hide_detached": False}
 LIMITS = [0, 3, 5, 10, 20]
 expanded_worktrees = set()  # workspaces whose "+N more" was clicked this run (derived view state, not history)
 STATUS = {"working": "accent", "blocked": "warn", "error": "error", "done": "ok"}
@@ -409,6 +413,9 @@ def visible_worktrees(w, prefs):
            and not (prefs["changed_only"] and not (t.get("dirty") or t.get("ahead")))]
     limit = prefs["limit"]
     if type(limit) is int and limit > 0 and w["path"] not in expanded_worktrees and len(wts) > limit:
+        # Cut to the ones with changes (uncommitted or unpushed) first, the rest in their own order.
+        changed = [t for t in wts if t.get("dirty") or t.get("ahead")]
+        wts = changed + [t for t in wts if not (t.get("dirty") or t.get("ahead"))]
         return wts[:limit], len(wts) - limit
     return wts, 0
 
@@ -695,7 +702,26 @@ def settings_page():
     return {"title": "Sidebar", "items": option_rows()}
 
 
+publish_lock = threading.Lock()  # one publication at a time: each publishes what it built just before
+
+
+def refresh_now():
+    """A user's own action (a page, expand, collapse, "+N more", an ended fold) publishes at once, in the command's
+    thread: the worker's coalescing wait (PUBLISH_INTERVAL) is for status bursts, and made the pager lag."""
+    refresh_pending.clear()
+    try:
+        refresh()
+    except Exception as error:
+        ext.log("sidebar publication failed:", error)
+        refresh_pending.set()  # the worker tries again
+
+
 def refresh(*_):
+    with publish_lock:
+        publish_snapshot()
+
+
+def publish_snapshot():
     # The worker reads a coherent cache, but never holds its lock across RPC/publication.
     with ext.cache_lock:
         all_items = build()
@@ -830,7 +856,7 @@ def page_cmd(args):
         except (ValueError, TypeError):
             raise VqroError("enter a sidebar page number", "invalid")
         page_state[0] = max(0, min(selected, page_state[1]-1))
-    refresh_pending.set()
+    refresh_now()
 
 
 @ext.command("sidebar.show", "Show a resource in a tab (args: resource, or picked)")
@@ -881,7 +907,7 @@ def worktrees_cmd(args):
 def worktrees_more(args):
     with ext.cache_lock:
         expanded_worktrees.add(args.get("path"))
-    refresh_pending.set()
+    refresh_now()
 
 
 @ext.command("sidebar.expand", "Show a collapsed workspace's contents in the sidebar (args: id)")
@@ -889,14 +915,14 @@ def expand_cmd(args):
     with ext.cache_lock:
         expanded_places.add(args.get("id"))
         collapsed_places.discard(args.get("id"))
-    refresh_pending.set()
+    refresh_now()
 
 
 @ext.command("sidebar.ended", "Show or hide the ended terminals folded in an \"N ended\" row (args: id)")
 def ended_cmd(args):
     with ext.cache_lock:
         expanded_ended.symmetric_difference_update({args.get("id")})
-    refresh_pending.set()
+    refresh_now()
 
 
 @ext.command("sidebar.collapse", "Show a workspace as one row in a large sidebar (args: id)")
@@ -904,7 +930,7 @@ def collapse_cmd(args):
     with ext.cache_lock:
         expanded_places.discard(args.get("id"))
         collapsed_places.add(args.get("id"))
-    refresh_pending.set()
+    refresh_now()
 
 
 SEARCH_LIMIT = 64

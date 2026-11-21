@@ -162,8 +162,9 @@ try:
     invoke("sidebar.worktrees", {"key": "limit", "value": 2})
     two = wait(lambda: "+2 more worktrees" in sidebar_text() and "Not in a tab" not in sidebar_text() and "● build" not in sidebar_text())
     text = save("2-panes-under-workspaces")
-    # The first two in git's order are kept: wt-ahead, wt-clean.
-    check("tabs hidden: panes move up, worktrees limited to 2 (+2 more)", bool(two) and "loose" in text and "wt-ahead" in text and "wt-fix" not in text, text)
+    # A cut keeps the changed ones first: wt-fix (dirty) and wt-ahead (ahead); wt-clean goes into "+2 more".
+    check("tabs hidden: panes move up, worktrees limited to 2 (+2 more)",
+          bool(two) and "loose" in text and "wt-ahead" in text and "wt-fix" in text and "wt-clean" not in text, text)
     keys("C-g", ","); wait(lambda: "Settings" in screen() and "Extensions" in screen(), 10)
     for _ in range(8):
         if "Per workspace" in screen():

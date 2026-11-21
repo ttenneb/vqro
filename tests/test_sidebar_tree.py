@@ -152,7 +152,7 @@ class SidebarTree(unittest.TestCase):
         def worktrees():
             return [row["id"] for row in find(self.build(), "ws:" + WS)["children"] if row["id"].startswith(("wt:", "more:"))]
         self.module["worktrees_cmd"]({"key": "limit", "value": 2})
-        self.assertEqual(worktrees(), ["wt:/w/wt-dirty", "wt:/w/wt-detached", "more:" + WS])
+        self.assertEqual(worktrees(), ["wt:/w/wt-dirty", "wt:/w/wt-ahead", "more:" + WS], "a cut lists changed ones first")
         self.assertEqual(find(self.build(), "more:" + WS)["text"], "+2 more worktrees")
         self.module["worktrees_more"]({"path": WS})
         self.assertEqual(len(worktrees()), 4, "+N more lists them all for this session")
@@ -239,6 +239,33 @@ class SidebarTree(unittest.TestCase):
         self.assertEqual(opened["menu"][0]["label"], "Hide them")
         found, _ = self.module["search_rows"]("target-63")
         self.assertTrue(found, "ended terminals stay searchable while folded")
+
+    def test_a_workspace_with_185_worktrees_needs_no_pager_and_a_page_click_publishes_at_once(self):
+        """The human's sidebar (feedback batch 1): vqro has 185 git worktrees. Each was a ~460-byte row, so the
+        published tree filled pages 1/3 and 2/3 behind a collapsed "▸ vqro" (the ▸ is the window's own: the
+        published tree still held them). Now a workspace lists 10 (changed first) and "+175 more"."""
+        self.ext.entries["workspace/active"] = {"value": {"layout": "ws-a"}, "version": 1}
+        w = self.ext.live["workspaces"]["data"][0]
+        w["worktrees"] = [{"path": f"/w/wt{i}", "branch": f"b{i}", "dirty": 3 if i in (150, 160) else 0, "layout": f"wt-{i}"}
+                          for i in range(185)]
+        self.module["refresh"]()
+        content = dict(self.ext.published)["sidebar"]
+        self.assertEqual(content["page"]["count"], 1)
+        self.assertEqual(len(content["toolbar"]), 1, "no pager chips")
+        ws = find(content["items"], "ws:" + WS)
+        wts = [r["id"] for r in ws["children"] if r["id"].startswith("wt:")]
+        self.assertEqual(wts[:2], ["wt:/w/wt150", "wt:/w/wt160"], "the changed worktrees come first")
+        self.assertEqual(len(wts), 10)
+        self.assertEqual(find(content["items"], "more:" + WS)["text"], "+175 more worktrees")
+        # "+N more" opens the rest (a tree this large pages again until collapse reaches the extension); a page
+        # click publishes in its own call, not after the worker's coalescing wait.
+        self.module["worktrees_more"]({"path": WS})
+        content = self.ext.published[-1][1]
+        self.assertGreater(content["page"]["count"], 1)
+        before = len(self.ext.published)
+        self.module["page_cmd"]({"delta": 1})
+        self.assertGreater(len(self.ext.published), before, "published at once")
+        self.assertEqual(self.ext.published[-1][1]["page"]["number"], 2)
 
     def test_a_tree_between_a_page_and_the_whole_budget_is_still_one_page(self):
         g = self.module["build"].__globals__
