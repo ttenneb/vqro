@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 from agent_conformance.part_b.viewer_convergence import converge_s1_viewers, same_state, stalled_closure
 from agent_conformance.results import CheckFailed
+from agent_conformance.core import PublicImplementation
 from agent_conformance.wire import ItemReducer
 
 
@@ -18,7 +19,7 @@ def view(peer=None):
     reducer.accept({'op': 'put', 'kind': 'message', 'id': 'm1', 'rev': 1, 'value': {'text': 'final'}})
     reducer.accept({'op': 'snapshot', 'phase': 'end', 'seq': 1})
     return SimpleNamespace(peer=peer or SimpleNamespace(failure=None), stream=1, reducer=reducer,
-                           closed=None, close_notice=None, initial='continue')
+                           closed=None, close_notice=None, initial='reset', epoch='e1')
 
 
 def slow(value):
@@ -40,7 +41,12 @@ def reader(reason='slow_consumer', stream=19, method='stream.closed'):
 class Context:
     def __init__(self):
         self.evidence = []
-        self.attach = AsyncMock(side_effect=lambda **kw: view(kw['peer']))
+        async def attach(**kw):
+            recovered = view(kw['peer'])
+            if kw.get('seed') is not None:
+                recovered.initial = 'continue'
+            return recovered
+        self.attach = AsyncMock(side_effect=attach)
     def check(self, value, detail, **extra):
         if not value: raise CheckFailed(detail)
     async def wait(self, predicate, *, label):
@@ -139,6 +145,37 @@ class ViewerConvergenceTests(unittest.IsolatedAsyncioTestCase):
                                        ('slow_consumer', 19.0, 'stream.closed'), ('slow_consumer', 19, 'stream.gap')):
             with self.subTest(reason=reason, stream=stream, method=method):
                 with self.assertRaises(ValueError): await stalled_closure(reader(reason, stream, method))
+
+    async def test_actual_attach_helper_requires_valid_initial_epoch_and_new_reset_snapshot(self):
+        for initial, epoch, expected in (('continue', 'e1', True), ('reset', 'e2', False),
+                                          ('reset', 'e1', False), ('continue', 'e2', False),
+                                          ('unknown', 'e1', False)):
+            with self.subTest(initial=initial, epoch=epoch):
+                ctx, slots, stalled = self.setup_case()
+                old = slow(slots[0][1])
+                # Real attach clones committed seed state and clears failure;
+                # no invented snapshot/data is delivered in these counterexamples.
+                shell = SimpleNamespace(views={}, early={}, early_bytes=0, early_records=0)
+                old.peer.call = AsyncMock(return_value={'stream': 99, 'initial': initial, 'epoch': epoch})
+                async def actual(**kw):
+                    return await PublicImplementation.attach(shell, **kw)
+                ctx.attach = AsyncMock(side_effect=actual)
+                if expected:
+                    await converge_s1_viewers(ctx, slots, stalled)
+                else:
+                    with self.assertRaises(CheckFailed):
+                        await converge_s1_viewers(ctx, slots, stalled)
+                ctx.attach.assert_awaited_once()
+
+    async def test_reset_with_completed_new_snapshot_converges(self):
+        ctx, slots, stalled = self.setup_case(); slow(slots[0][1])
+        async def completed(**kw):
+            recovered = view(kw['peer'])
+            recovered.reducer.snapshots = kw['seed'].snapshots + 1
+            return recovered
+        ctx.attach.side_effect = completed
+        await converge_s1_viewers(ctx, slots, stalled)
+        self.assertGreater(slots[0][1].reducer.snapshots, 1)
 
     def test_state_equality_includes_cursor_session_coverage(self):
         for attribute, value in (('sequence', 0), ('session', 'other'), ('coverage', 'state_only')):

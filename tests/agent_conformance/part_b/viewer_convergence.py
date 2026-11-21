@@ -37,14 +37,28 @@ async def stalled_closure(reader, *, attaches=100):
                     'reason': reason, 'bytes_observed_after_load': size}
 
 
-def same_state(views):
+def initialized(view, baseline, seeded):
+    reducer = view.reducer
+    if (not isinstance(view.epoch, str) or not view.epoch or reducer.epoch != view.epoch
+            or reducer.cursor is None):
+        return False
+    if view.initial == 'reset':
+        return reducer.snapshots > baseline  # old seed state is not a new installed reset
+    if view.initial == 'continue':
+        return seeded
+    return False
+
+
+def same_state(views, fences=None):
     first = views[0].reducer
+    fences = fences if fences is not None else [(0, False)] * len(views)
     return (first.cursor is not None and all(
-        view.closed is None and view.peer.failure is None and view.reducer.failure is None
+        initialized(view, *fence)
+        and view.closed is None and view.peer.failure is None and view.reducer.failure is None
         and view.reducer.staged is None and not view.reducer.pending
         and view.reducer.cursor == first.cursor and view.reducer.entities == first.entities
         and view.reducer.session == first.session and view.reducer.coverage == first.coverage
-        for view in views))
+        for view, fence in zip(views, fences)))
 
 
 async def converge_s1_viewers(ctx, slots, stalled):
@@ -59,6 +73,9 @@ async def converge_s1_viewers(ctx, slots, stalled):
               and all(len(v) == 3 for v in groups.values()),
               'S1 retains exactly three healthy viewers for each of 200 agents')
     retired = set()
+    fences = [(0, False)] * len(slots)  # the storm's fresh attaches have no seed
+    def group_ready(indices):
+        return same_state([slots[i][1] for i in indices], [fences[i] for i in indices])
     closures = [asyncio.create_task(stalled_closure(reader)) for reader, _ in stalled]
     try:
         async def ready():
@@ -79,16 +96,17 @@ async def converge_s1_viewers(ctx, slots, stalled):
                 recovered = await ctx.attach(rid=rid, peer=view.peer, after=cursor, seed=seed)
                 retired.add(index)
                 slots[index] = (rid, recovered)
+                fences[index] = (seed.snapshots if seed is not None else 0, seed is not None)
                 ctx.evidence.append({'kind': 's1_healthy_reattach', 'resource': rid,
                     'old_stream': view.stream, 'new_stream': recovered.stream,
                     'reason': view.closed, 'last_good_cursor': cursor, 'initial': recovered.initial})
             for task in closures:
                 if task.done(): task.result()  # a wrong/missing stalled witness must not be ignored
             return (all(task.done() for task in closures)
-                    and all(same_state([slots[i][1] for i in indices]) for indices in groups.values()))
+                    and all(group_ready(indices) for indices in groups.values()))
         await ctx.wait(ready, label='all 600 S1 healthy streams converge and stalled viewers close slow_consumer')
         ctx.evidence.extend(task.result() for task in closures)
-        ctx.check(all(same_state([slots[i][1] for i in indices]) for indices in groups.values()),
+        ctx.check(all(group_ready(indices) for indices in groups.values()),
                   'all 600 healthy streams converge to their exact healthy reference state', recovered=len(retired))
         return [view for _, view in slots]
     finally:
