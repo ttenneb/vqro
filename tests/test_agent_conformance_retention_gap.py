@@ -197,6 +197,8 @@ class PressureContext:
             elif self.settle:
                 self.completion = {'id': self.run}; self.run = None
         elif kwargs.get('count') in (256, 512):
+            if isinstance(self.target.peer.reader, probe.SteadyReader):
+                await self.target.peer.reader.readline()  # Modeled read turn, not an actual native receipt.
             self.text = str(kwargs.get('start_index', 0) + kwargs['count'] - 1) + ':' + ''.join(kwargs['chunks'])
             if self.gap:
                 self.target.closed = 'retention'; self.target.reducer.failure = 'retention'
@@ -217,7 +219,8 @@ class PressureContext:
         if not predicate(): raise asyncio.TimeoutError()
 
     async def viewer(self):
-        peer = NS(failure=None, close=self.close, wait=self.wait, call=readonly_snapshot)
+        async def line(): return b'{"jsonrpc":"2.0","method":"stream.data","params":{}}\n'
+        peer = NS(failure=None, close=self.close, wait=self.wait, call=readonly_snapshot, reader=NS(readline=line))
         def pause():
             self.pause_reading()
             self.target = next(view for view in self.views if view.peer is peer)
@@ -297,6 +300,22 @@ class PressureControls(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.after, [])
         self.assertFalse(ctx.paused)
 
+    async def test_raw_slow_consumer_counterexample_precedes_failed_assertion(self):
+        ctx = PressureContext(); original = ctx.call
+        async def slow(method, **kwargs):
+            result = await original(method, **kwargs)
+            if method == 'retain' and 'chunks' in kwargs:
+                ctx.target.closed = 'slow_consumer'; ctx.target.reducer.failure = 'slow_consumer'
+                ctx.target.close_notice = {'method': 'stream.closed', 'reason': {'reason': 'slow_consumer'},
+                                           'last_good_cursor': deepcopy(ctx.target.reducer.cursor)}
+            return result
+        ctx.native = NS(call=slow)
+        with patch.object(probe, 'process_rss', return_value=1000), self.assertRaises(HarnessGap):
+            await probe.public_retention_bounds(ctx)
+        observation = next(row for row in ctx.evidence if row['kind'] == 'o10_target_terminal_observation')
+        self.assertEqual(observation['notice']['reason'], {'reason': 'slow_consumer'})
+        self.assertEqual(ctx.after, [])
+
     async def test_pi_absent_run_fact_uses_actual_public_state(self):
         ctx = PressureContext(); ctx.omit_run_fact = True
         with patch.object(probe, 'process_rss', return_value=1000):
@@ -349,6 +368,45 @@ class PressureControls(unittest.IsolatedAsyncioTestCase):
         ctx = PressureContext(); ctx.run = 'observed-run-1'
         with self.assertRaises(CheckFailed):
             await probe.settle_native(ctx, 'observed-run-1', 'different-agent-e0', 'test')
+
+
+class SteadyReaderControls(unittest.IsolatedAsyncioTestCase):
+    def peer(self, line):
+        events = []
+        transport = NS(pause_reading=lambda: events.append('pause'), resume_reading=lambda: events.append('resume'))
+        return NS(reader=NS(readline=line), writer=NS(transport=transport)), events
+
+    async def test_one_line_per_turn_and_restores_owned_reader(self):
+        async def line(): return b'{"method":"stream.data"}\n'
+        peer, events = self.peer(line); original = peer.reader
+        gate = probe.SteadyReader(peer, cadence=0); gate.start()
+        await gate.readline()
+        self.assertEqual(events, ['pause', 'resume', 'pause'])
+        self.assertEqual((gate.lines, gate.data_lines), (1, 1))
+        gate.stop()
+        self.assertIs(peer.reader, original)
+        self.assertEqual(events[-1], 'resume')
+
+    async def test_error_still_pauses_then_stop_restores(self):
+        async def line(): raise ConnectionError('broken reader')
+        peer, events = self.peer(line); original = peer.reader
+        gate = probe.SteadyReader(peer, cadence=0); gate.start()
+        with self.assertRaises(ConnectionError): await gate.readline()
+        self.assertEqual(events[-1], 'pause')
+        gate.stop(); self.assertIs(peer.reader, original)
+
+    async def test_stop_during_read_does_not_repause_or_spawn_timer_task(self):
+        entered = asyncio.Event(); future = asyncio.get_running_loop().create_future()
+        async def line():
+            entered.set(); return await future
+        peer, events = self.peer(line); original = peer.reader
+        gate = probe.SteadyReader(peer, cadence=0); gate.start()
+        task = asyncio.create_task(gate.readline()); await entered.wait()
+        gate.stop(); count = len(events)
+        future.set_result(b'{"method":"stream.data"}\n'); await task
+        self.assertEqual(len(events), count)
+        self.assertIs(peer.reader, original)
+        self.assertFalse(gate.enabled)
 
 
 if __name__ == '__main__': unittest.main()
