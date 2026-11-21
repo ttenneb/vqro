@@ -1,13 +1,13 @@
 //! Provider-facing orchestration. Native event draining and controls never wait on an admission.
 //! The shared SDK item producer is supplied as a callback; no second item reducer lives here.
-use super::{provider_capabilities, Change, Endpoint};
+use super::{Change, Endpoint, SendContext, provider_capabilities};
 use crate::provider_client::{Outcome, ProviderError};
 use crate::rpc::{Incoming, Peer, RpcError};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{oneshot, watch, Mutex as AsyncMutex, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, oneshot, watch};
 use tokio::time::Instant;
 
 pub type Observer = Arc<dyn Fn(usize, &str, Vec<Change>, bool) + Send + Sync>;
@@ -313,6 +313,27 @@ impl Runtime {
         args: Value,
         deadline: Instant,
     ) -> Result<Outcome, ProviderError> {
+        self.invoke_with_context(
+            reference,
+            incarnation,
+            op,
+            args,
+            deadline,
+            SendContext::default(),
+        )
+        .await
+    }
+
+    /// Trusted adapter evidence is separate from the caller's wire arguments.
+    pub async fn invoke_with_context(
+        self: &Arc<Self>,
+        reference: &str,
+        incarnation: &str,
+        op: &str,
+        args: Value,
+        deadline: Instant,
+        context: SendContext,
+    ) -> Result<Outcome, ProviderError> {
         let Some(index) = self.index(reference) else {
             return Ok(Outcome::Rejected {
                 kind: "not_found".into(),
@@ -331,7 +352,7 @@ impl Runtime {
                 message: "deadline expired before native dispatch".into(),
             });
         }
-        let result = self.operation(index, op, args, deadline).await;
+        let result = self.operation(index, op, args, deadline, context).await;
         match result {
             Ok(outcome) => Ok(outcome),
             Err(Fault::Reject(error)) => Ok(Outcome::Rejected {
@@ -354,6 +375,7 @@ impl Runtime {
         op: &str,
         args: Value,
         deadline: Instant,
+        context: SendContext,
     ) -> Result<Outcome, Fault> {
         self.slots[index]
             .endpoint
@@ -362,7 +384,7 @@ impl Runtime {
             .validate(&args)
             .map_err(Fault::Reject)?;
         match op {
-            "agent.send" => self.send(index, args, deadline).await,
+            "agent.send" => self.send(index, args, deadline, context).await,
             "agent.receipt" => {
                 let delivery = super::id(&args, "delivery").map_err(Fault::Reject)?;
                 Ok(Outcome::Observed(Some(
@@ -415,6 +437,7 @@ impl Runtime {
         index: usize,
         args: Value,
         deadline: Instant,
+        context: SendContext,
     ) -> Result<Outcome, Fault> {
         let gate = self.slots[index]
             .admission
@@ -440,7 +463,7 @@ impl Runtime {
             .endpoint
             .lock()
             .unwrap()
-            .prepare_send(&args)
+            .prepare_send_with_context(&args, context)
             .map_err(Fault::Reject)?;
         if Instant::now() >= deadline {
             return Err(Fault::Reject(RpcError::new(

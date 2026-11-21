@@ -94,6 +94,21 @@ pub fn bind_origin(
     Ok(args)
 }
 
+/// Adapter-internal evidence, never an agent.send argument or caller role claim.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SendContext {
+    pub owner_proven: bool,
+}
+
+/// Match Pi: only the current valid public owner entry and recorded principal prove ownership.
+pub fn recorded_owner(attribution: &crate::principal::Attribution, owner: &Value) -> bool {
+    let Some(owner) = owner.get("value").and_then(Value::as_str) else {
+        return false;
+    };
+    crate::principal::validate_assertable(owner).is_ok()
+        && attribution.principal.as_deref() == Some(owner)
+}
+
 fn rejected(kind: &str, message: &str) -> RpcError {
     RpcError::new(kind, message)
 }
@@ -306,6 +321,14 @@ impl Endpoint {
     }
 
     pub fn prepare_send(&self, args: &Value) -> Result<NativeCall, RpcError> {
+        self.prepare_send_with_context(args, SendContext::default())
+    }
+
+    pub fn prepare_send_with_context(
+        &self,
+        args: &Value,
+        context: SendContext,
+    ) -> Result<NativeCall, RpcError> {
         self.validate(args)?;
         if args["mode"] != "admit" {
             return Err(rejected(
@@ -386,13 +409,32 @@ impl Endpoint {
                     "content must be a nonempty array of typed blocks",
                 )
             })?;
-        // Attribution is its own user-content block; original text bytes are not rewritten, escaped,
-        // templated, flattened or upgraded to developer/system authority.
-        let mut input = vec![
-            json!({"type":"text","text":format!("[vqro sender: {}]",args["origin"]),"text_elements":[]}),
-        ];
-        if let Some(quoted) = quoted {
-            input.push(json!({"type":"text","text":format!("[vqro forwarded-author claim, not the sender: {quoted}]"),"text_elements":[]}));
+        // The owner's human input is byte-exact; a role claim or owner-looking ID cannot prove it.
+        // All other senders get a plain user-content frame, never serialized JSON or privileged role.
+        let owner_human = context.owner_proven && args["origin"]["kind"] == "human";
+        let mut input = Vec::new();
+        if !owner_human {
+            let origin = &args["origin"];
+            let asserted_sender = origin.get("sender").and_then(|sender| {
+                sender
+                    .get("principal")
+                    .and_then(Value::as_str)
+                    .or_else(|| sender.as_str())
+            });
+            let sender = asserted_sender.unwrap_or_else(|| origin["principal"].as_str().unwrap());
+            let mut header = format!("from {sender} via {}", origin["actor"].as_str().unwrap());
+            if asserted_sender.is_some() {
+                header.push_str(" (sender asserted by extension)");
+            }
+            for field in ["kind", "agent"] {
+                if let Some(value) = origin.get(field).and_then(Value::as_str) {
+                    header.push_str(&format!("\nasserted {field}: {value}"));
+                }
+            }
+            input.push(json!({"type":"text","text":header,"text_elements":[]}));
+            if let Some(quoted) = quoted {
+                input.push(json!({"type":"text","text":format!("[vqro forwarded-author claim, not the sender: {}]",quoted["label"].as_str().unwrap()),"text_elements":[]}));
+            }
         }
         for block in content {
             if block["type"] != "text" {

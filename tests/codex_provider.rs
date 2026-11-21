@@ -23,6 +23,7 @@ struct Core {
     events: Arc<Mutex<Vec<Value>>>,
     auto_credit: Arc<Mutex<BTreeSet<u64>>>,
     reject_syncs: Arc<std::sync::atomic::AtomicBool>,
+    owner: Arc<Mutex<Value>>,
     changed: watch::Receiver<u64>,
     reader: tokio::task::JoinHandle<()>,
 }
@@ -43,6 +44,8 @@ impl Core {
         let credited = auto_credit.clone();
         let reject_syncs = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reject = reject_syncs.clone();
+        let owner = Arc::new(Mutex::new(Value::Null));
+        let owner_read = owner.clone();
         let (changed, changed_rx) = watch::channel(0);
         let server = peer.clone();
         let expected_token = expected_token.to_string();
@@ -66,6 +69,25 @@ impl Core {
                                 assert!(params["capabilities"]["items.stream"].is_object());
                                 json!({"provider":params["name"],"generation":generation,"resume_token":"resume-native",
                                     "limits":{"stream_window_bytes":262144,"max_record_bytes":1048576}})
+                            }
+                            "workspace.get" => {
+                                assert_eq!(params["key"], vqro::principal::OWNER_KEY);
+                                recorded
+                                    .lock()
+                                    .unwrap()
+                                    .push(json!({"method":"workspace.get","params":params}));
+                                let owner = owner_read.lock().unwrap().clone();
+                                if owner["fixture_error"] == true {
+                                    server.respond(
+                                        id,
+                                        Err(vqro::rpc::RpcError::new(
+                                            "unavailable",
+                                            "fixture owner unavailable",
+                                        )),
+                                    );
+                                    continue;
+                                }
+                                owner
                             }
                             "provider.sync" => {
                                 recorded
@@ -132,6 +154,7 @@ impl Core {
             events,
             auto_credit,
             reject_syncs,
+            owner,
             changed: changed_rx,
             reader,
         }
@@ -220,6 +243,89 @@ fn send(delivery: &str) -> Value {
 }
 
 #[tokio::test]
+async fn owner_human_is_literal_only_after_valid_current_public_owner_read() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = UnixListener::bind(root.path().join("core.sock")).unwrap();
+    let child = bridge(&root, 1, 0, &[]);
+    let mut core = Core::accept(&listener, 1, "bootstrap").await;
+    core.wait(|facts| facts.len() == 1).await;
+    core.effect(
+        "new",
+        "endpoint-1",
+        "agent.session",
+        json!({"v":0,"action":"new"}),
+        1000,
+    )
+    .await;
+    for (index, owner) in [
+        json!({"value":"p:test"}),
+        Value::Null,
+        json!({"value":"owner-unset"}),
+        json!({"value":"different-person"}),
+        json!({"fixture_error":true}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        *core.owner.lock().unwrap() = owner;
+        let mut args = send(&format!("owner-{index}"));
+        args["origin"] = json!({"kind":"human","owner_proven":true}); // This caller claim proves nothing.
+        args["quoted"] = json!({"label":"untrusted quote"});
+        let result = core
+            .effect(
+                &format!("owner-{index}"),
+                "endpoint-1",
+                "agent.send",
+                args.clone(),
+                1000,
+            )
+            .await;
+        assert_eq!(result["outcome"], "accepted");
+        assert_eq!(result["data"]["receipt"]["origin"]["principal"], "p:test");
+        let rows: Vec<Value> = std::fs::read_to_string(root.path().join("native.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let native = &rows
+            .iter()
+            .filter(|row| row["method"] == "turn/start")
+            .last()
+            .unwrap()["params"]["input"];
+        let native = native.as_array().unwrap();
+        assert_eq!(native.last().unwrap()["text"], args["content"][0]["text"]);
+        if index == 0 {
+            assert_eq!(
+                native.len(),
+                1,
+                "proved owner-human gets no sender/quoted metadata block"
+            );
+        } else {
+            assert_eq!(
+                native.len(),
+                3,
+                "unknown/invalid/unavailable owner remains attributed"
+            );
+            assert_eq!(
+                native[0]["text"],
+                "from p:test via actor:test\nasserted kind: human"
+            );
+        }
+    }
+    assert_eq!(
+        core.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| row["method"] == "workspace.get")
+            .count(),
+        5
+    );
+    finish(child).await;
+    core.close().await;
+}
+
+#[tokio::test]
 async fn provider_wire_binds_omitted_identity_and_rejects_spoofing_before_native_input() {
     let root = tempfile::tempdir().unwrap();
     let listener = UnixListener::bind(root.path().join("core.sock")).unwrap();
@@ -279,14 +385,12 @@ async fn provider_wire_binds_omitted_identity_and_rejects_spoofing_before_native
         .collect();
     assert_eq!(calls.len(), 1);
     let text = calls[0]["params"]["input"][0]["text"].as_str().unwrap();
-    assert!(
-        text.contains("p:test") && text.contains("actor:test") && text.contains("caller:original")
-    );
+    assert_eq!(text, "from p:test via actor:test\nasserted kind: human");
     assert!(
         !text.contains("client:wire:99"),
         "actual author is not substituted for principal or actor"
     );
-    assert!(text.contains("claimed"));
+    assert!(text.contains("asserted kind: human"));
     finish(child).await;
     core.close().await;
 }

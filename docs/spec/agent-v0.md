@@ -272,10 +272,13 @@ concatenated.
   the original sender in v0; never invent retained callback proofs or implicit delegation to conceal that gap.
   `quoted? {label, principal?, kind?}` is separately asserted provenance (a forwarded message's original author)
   and is rendered as a claim, never as core identity.
-  Pi keeps this structured provenance in receipt metadata, never serialized JSON in a model prompt. For a
-  core-recorded current owner with claimed kind `human`, its native message is exactly the typed text (including
-  on the default attributed route: no redundant sender or quoted-provenance prefix). Other Pi sends use the short
-  plain-text `from <sender> via <actor>` header; any quoted label is plain text explicitly marked asserted.
+  Pi and Codex retain the core-bound origin in receipt metadata, never as serialized JSON metadata in model input.
+  For a core-recorded current owner with claimed kind `human`, its native content is exactly the typed content
+  (including on the default attributed route: no sender or quoted-provenance metadata block). Ownership requires
+  the current valid public owner entry to match the recorded principal; unknown/unprovable ownership stays framed.
+  Every other sender uses the short plain-text `from <sender> via <actor>` header with labelled asserted `kind`
+  and supplied `agent` claims, and a supplied inbox sender is explicitly extension-asserted. Any quoted label is
+  plain text explicitly marked asserted. These labels do not upgrade the native user role or confer authority.
 - **Rendering** is declared per runtime, each with its native role and resulting authority:
   `"origin": [{"as": "user", "role": "user"}, {"as": "attributed_user", "role": "user", "frame": "sender_header"},
   {"as": "participant", "role": "<native>"}, {"as": "context", "role": "system_reminder", "authority":

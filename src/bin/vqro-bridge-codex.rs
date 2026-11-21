@@ -297,7 +297,16 @@ async fn serve(
                                     Err(error)=>{request.respond(Ok(vqro::provider_client::Outcome::Rejected {kind:error.kind().into(),message:error.message}));return;}
                                 }
                             } else {request.args.clone()};
-                            let result=runtime.invoke(request.r#ref.as_deref().unwrap_or(""),&request.incarnation,&request.op,args,request.deadline).await;
+                            let mut context=vqro::codex::SendContext::default();
+                            if request.op=="agent.send" && args["origin"]["kind"]=="human" {
+                                // Same public owner proof as Pi; unknown/unavailable ownership stays framed.
+                                context.owner_proven=match tokio::time::timeout_at(request.deadline,
+                                    connection.call("workspace.get",json!({"key":vqro::principal::OWNER_KEY}))).await {
+                                    Ok(Ok(owner))=>vqro::codex::recorded_owner(&request.attribution,&owner),_=>false,
+                                };
+                            }
+                            if connection.is_closed(){request.respond(Err(ProviderError::new("unavailable","originating core connection closed; no native effect started")));return;}
+                            let result=runtime.invoke_with_context(request.r#ref.as_deref().unwrap_or(""),&request.incarnation,&request.op,args,request.deadline,context).await;
                             // An upsert notification can arrive before a response but commit after
                             // its audit. The public sync acknowledgement fences the current inventory
                             // before an observed session change; never repeat the native operation.

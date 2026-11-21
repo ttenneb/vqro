@@ -90,6 +90,70 @@ fn actor_and_cause_qualification_are_not_invented() {
 }
 
 #[test]
+fn d17_plain_frame_keeps_claims_asserted_and_proved_owner_body_byte_exact() {
+    let attribution = serde_json::from_value(
+        json!({"principal":"human:D17-principal","actor":"extension:coord","initiator":"p:worker"}),
+    )
+    .unwrap();
+    let mut args = send();
+    args["origin"] = json!({"kind":"agent","agent":"D17-asserted-agent","sender":{"principal":"p:inbox-original","provenance":"inbox-record"}});
+    let bound = vqro::codex::bind_origin(&args, &attribution).unwrap();
+    let call = endpoint().prepare_send(&bound).unwrap();
+    assert_eq!(
+        call.params["input"][0]["text"],
+        "from p:inbox-original via extension:coord (sender asserted by extension)\nasserted kind: agent\nasserted agent: D17-asserted-agent"
+    );
+    assert_eq!(call.params["input"][1]["text"], "first");
+    assert_eq!(call.params["input"][2]["text"], "second");
+    let owner = json!({"value":"human:D17-principal"});
+    assert!(vqro::codex::recorded_owner(&attribution, &owner));
+    for invalid in [
+        Value::Null,
+        json!({}),
+        json!({"value":17}),
+        json!({"value":"owner-unset"}),
+        json!({"value":"other"}),
+    ] {
+        assert!(!vqro::codex::recorded_owner(&attribution, &invalid));
+    }
+    assert!(!vqro::codex::recorded_owner(&Default::default(), &owner));
+    for text in [
+        "Hello?",
+        "  /literal\n\nunchanged \t\n",
+        "{\"typed\":\"JSON stays literal\"}",
+        "",
+    ] {
+        args["origin"] = json!({"kind":"human","owner_proven":true});
+        args["quoted"] = json!({"label":"asserted quote"});
+        args["content"] = json!([{"type":"text","text":text}]);
+        let bound = vqro::codex::bind_origin(&args, &attribution).unwrap();
+        let call = endpoint()
+            .prepare_send_with_context(&bound, vqro::codex::SendContext { owner_proven: true })
+            .unwrap();
+        let input = call.params["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1);
+        assert_eq!(
+            input[0]["text"].as_str().unwrap().as_bytes(),
+            text.as_bytes()
+        );
+        let unproved = endpoint().prepare_send(&bound).unwrap();
+        assert_eq!(
+            unproved.params["input"][0]["text"],
+            "from human:D17-principal via extension:coord\nasserted kind: human"
+        );
+    }
+    args["origin"] = json!({"kind":"agent"});
+    let bound = vqro::codex::bind_origin(&args, &attribution).unwrap();
+    let claimed_agent = endpoint()
+        .prepare_send_with_context(&bound, vqro::codex::SendContext { owner_proven: true })
+        .unwrap();
+    assert_eq!(
+        claimed_agent.params["input"][0]["text"],
+        "from human:D17-principal via extension:coord\nasserted kind: agent"
+    );
+}
+
+#[test]
 fn d17_bound_origin_survives_every_receipt_stage_and_lookup_without_invention() {
     let attribution = serde_json::from_value(
         json!({"principal":"human:D17-principal","actor":"extension:coord","initiator":"p:worker"}),
