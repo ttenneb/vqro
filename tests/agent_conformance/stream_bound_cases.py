@@ -495,12 +495,24 @@ class ReceivedNotices(deque):
     """The reducer's bounded live-notice cache with receipt bookkeeping: `received` counts every notice ever
     appended, so freshness is by receipt ordinal, never by value (a new notice identical to cached old ones, evicting
     one of them, is still new). Client-side observer bookkeeping only; live notices carry no native seq."""
+    RECORD = 4096  # notices recorded since the baseline mark, independent of the reducer's 64-entry cache
+
     def __init__(self, items=(), maxlen=None):
         super().__init__(items, maxlen)
         self.received = len(self)
+        self.since, self.lost = None, False  # recording starts at mark(); lost: the recorder itself overflowed
+
+    def mark(self):
+        self.since, self.lost = [], False
+        return self.received
 
     def append(self, item):
         self.received += 1
+        if self.since is not None:
+            if len(self.since) < self.RECORD:
+                self.since.append(item)  # evidence survives the cache evicting it
+            else:
+                self.lost = True
         super().append(item)
 
     def extend(self, items):
@@ -511,11 +523,10 @@ class ReceivedNotices(deque):
 def track_notices(reducer):
     """Install receipt bookkeeping on this view's notice cache (same bound, same contents); returns the count received."""
     notices = getattr(reducer, "notices", None)
+    if isinstance(notices, deque) and not isinstance(notices, ReceivedNotices):
+        reducer.notices = notices = ReceivedNotices(notices, notices.maxlen)
     if isinstance(notices, ReceivedNotices):
-        return notices.received
-    if isinstance(notices, deque):
-        reducer.notices = ReceivedNotices(notices, notices.maxlen)
-        return reducer.notices.received
+        return notices.mark()
     return None  # no bounded cache to track (a plain list never evicts)
 
 
@@ -533,10 +544,9 @@ def fresh_notice_texts(reducer, before):
     baseline) entries still held, by ordinal. Without it (a plain growing list): the value multiset difference."""
     notices = getattr(reducer, "notices", None)
     received_before = before.get("received") if isinstance(before, dict) else None
-    if isinstance(notices, ReceivedNotices) and type(received_before) is int:
-        new = notices.received - received_before
-        held = list(notices)[-new:] if new > 0 else []
-        return [text for text in map(notice_value_text, held) if text is not None]
+    if isinstance(notices, ReceivedNotices) and type(received_before) is int and notices.since is not None:
+        # Every notice received since the baseline, recorded on arrival: an evicted one is still evidence.
+        return [text for text in map(notice_value_text, notices.since) if text is not None]
     old = list((before or {}).get("shown", []))
     fresh = []
     for text in notice_texts(reducer):
@@ -683,6 +693,10 @@ async def producer_append_bounds(ctx):
     texts, others = message_texts(view.reducer, "O12-", baseline, expected)
     ctx.evidence.append({"kind": "o12_adapter", "emitted": witness, "stream_text_bytes": [len(t.encode()) for t in texts],
                          "other_new_entity_strings": [t[:200] for t in others][:16]})
-    check(adapter_preserves_or_marks(texts, witness["text_bytes"], witness["text_sha256"], other_texts=others),
+    verdict = adapter_preserves_or_marks(texts, witness["text_bytes"], witness["text_sha256"], other_texts=others)
+    if not verdict and getattr(view.reducer.notices, "lost", False):
+        raise HarnessGap("O12 notice observation gap: more live notices arrived since the baseline than the recorder "
+                         "keeps, so a refusal marker may have been received and cannot be excluded")
+    check(verdict,
           "after the producer refusal the adapter keeps the whole emitted text or visibly marks the refusal "
           "(no silent loss)")

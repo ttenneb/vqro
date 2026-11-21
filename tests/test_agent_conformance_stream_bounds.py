@@ -370,6 +370,33 @@ class WholeHandlerControls(unittest.TestCase):
             with self.subTest(old=old_count, new=len(new_notices)):
                 self.assertEqual(self.accepts(lambda: self.o12(new, {}, (warn,) * old_count, new_notices)), want)
 
+    def test_o12_current_window_notices_survive_the_cache_evicting_them(self):
+        """prim-agent-ux HOLD on 4d35be48 (28 probes): a fresh warning FIRST, then enough benign notices to evict it from
+        the 64-entry cache, is still evidence: notices are recorded on receipt since the baseline."""
+        def message(rev, position, *blocks):
+            return {"rev": rev, "value": {"role": "assistant", "position": position, "content": list(blocks)}}
+        new = lambda t: {("message", "m"): message(1, 1, {"type": "text", "text": t[:60000]})}
+        warn = {"severity": "warn", "text": "assistant output omitted: too large"}
+        info = {"severity": "info", "text": "progress update"}
+        cases = [(0, [warn], True), (1, [warn], True), (64, [warn], True), (64, [], False)]
+        for old in (0, 64):
+            for n in (63, 64, 65, 128):
+                cases += [(old, [warn] + [info] * (n - 1), True), (old, [info] * (n - 1) + [warn], True), (old, [info] * n, False)]
+        self.assertEqual(len(cases), 28)
+        for old, received, want in cases:
+            with self.subTest(old=old, received=len(received), warn_first=bool(received) and received[0] is warn):
+                self.assertEqual(self.accepts(lambda: self.o12(new, {}, [dict(warn) for _ in range(old)],
+                                                              [dict(x) for x in received])), want)
+
+    def test_o12_recorder_overflow_is_a_named_gap_never_a_fail(self):
+        from agent_conformance.results import HarnessGap
+        def message(rev, position, *blocks):
+            return {"rev": rev, "value": {"role": "assistant", "position": position, "content": list(blocks)}}
+        new = lambda t: {("message", "m"): message(1, 1, {"type": "text", "text": t[:60000]})}
+        info = {"severity": "info", "text": "progress update"}
+        with self.assertRaises(HarnessGap):
+            self.o12(new, {}, [], [dict(info) for _ in range(m.ReceivedNotices.RECORD + 1)])
+
     def test_o12_controls(self):
         def message(rev, position, *texts):
             return {"rev": rev, "value": {"role": "assistant", "position": position,
