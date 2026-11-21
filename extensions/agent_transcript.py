@@ -501,7 +501,8 @@ def group_row(steps, cwd=None):
         kept.insert(0, {"type": "text", "style": "dim",
                         "text": f"… {left} earlier {'step' if left == 1 else 'steps'} not shown here (pane limit)"})
     children = [{"id": "gh:" + tools[0][0], "text": "Tool · Target · Status · Time · Output · Actions",
-                 "columns": ["Tool", "Target", "Status", "Time", "Output"], "detail": "Actions",
+                 "columns": ["Tool", "Target", "Status", "Time", "Output"],
+                 "detail": "Actions" + " " * len("[copy]"),  # align with the start of [open] [copy], not its end
                  "style": "bold", "focusable": False}] + kept
     starts = [v.get("started_ms") for _, v in tools if type(v.get("started_ms")) is int]
     ends = [v.get("ended_ms") for _, v in tools if type(v.get("ended_ms")) is int]
@@ -523,8 +524,8 @@ def group_row(steps, cwd=None):
 
 
 ACTIVITY_COLUMNS = [{"width": 12}, {"width": "fill", "min_width": 16},
-                    {"width": 12, "priority": 3}, {"width": 7, "priority": 1},
-                    {"width": 9, "priority": 2}]
+                    {"width": 12, "priority": 3}, {"width": 7, "align": "right", "priority": 1},
+                    {"width": 9, "align": "right", "priority": 2}]
 
 # The conversation panel's column layout: only rows carrying `columns` (tool lines) use it; no header (no labels).
 TOOL_COLUMNS = [{"width": 12}, {"width": "fill"}]
