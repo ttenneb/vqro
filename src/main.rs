@@ -182,11 +182,12 @@ async fn serve(safe: bool, fake: bool) -> Result<()> {
     eprintln!("vqro {} listening on {}{}", env!("CARGO_PKG_VERSION"), socket.display(), if safe { " (safe mode)" } else { "" });
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let lifetime = core.lock().unwrap().shutdown.clone();
-    tokio::select! {
-        r = tokio::signal::ctrl_c() => r?,
-        _ = term.recv() => {},
-        _ = lifetime.stopped() => {},
-    }
+    let reason = tokio::select! {
+        r = tokio::signal::ctrl_c() => { r?; "interrupt signal" },
+        signal = term.recv() => if signal.is_some() { "terminate signal" } else { "terminate signal stream closed" },
+        _ = lifetime.stopped() => "protocol/listener shutdown",
+    };
+    eprintln!("vqro: stopping core ({reason})");
     server::shutdown(&core).await;
     // The server owns socket unlink. Do not remove a replacement core's fresh pidfile.
     if std::fs::read_to_string(&pidfile).ok().as_deref() == Some(&std::process::id().to_string()) { let _ = std::fs::remove_file(&pidfile); }

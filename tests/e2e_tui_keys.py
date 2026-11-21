@@ -13,7 +13,7 @@ prints the bytes of each key it receives. Checks, on a private herdr-core and th
 Usage: tests/e2e_tui_keys.py TARGET_DIR   (debug binaries in TARGET_DIR/debug)
 Private /tmp root; nothing live is touched. Stops only what it started.
 """
-import json, os, shutil, socket, subprocess, sys, tempfile, time
+import glob, json, os, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
 VQRO, PHERDR, PTMUX = (os.path.join(TARGET, "debug", b) for b in ("vqro", "vqro-herdr", "vqro-tmux"))
@@ -21,6 +21,7 @@ HC = os.path.expanduser("~/.local/bin/herdr-core")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KEYECHO = os.path.join(REPO, "tests", "fixtures", "keyecho.py")
 R = tempfile.mkdtemp(prefix="pke", dir="/tmp")
+print(f"root {R}", flush=True)  # Exceptions must not hide the only path to the core/provider evidence.
 for d in ("home", "st", "xst", "run", "cfg", "ext", "bin"):
     os.makedirs(os.path.join(R, d))
 os.chmod(os.path.join(R, "run"), 0o700)
@@ -35,11 +36,49 @@ ENV = {"HOME": f"{R}/home", "PATH": f"{R}/bin", "TERM": "xterm-256color", "SHELL
        "LANG": "C.UTF-8"}
 HARNESS = ["/usr/bin/tmux", "-S", f"{R}/harness.sock", "-f", "/dev/null"]
 results = []
+core_ready = False
+core_stopping = False
+core_log = None
+
+
+class CoreLost(RuntimeError):
+    pass
+
+
+def check_core():
+    if core is not None and not core_stopping:
+        status = core.poll()
+        if status is not None or (core_ready and not os.path.exists(ENV["VQRO_SOCKET"])):
+            raise CoreLost(f"core lost: pid={core.pid} exit={status} socket={os.path.exists(ENV['VQRO_SOCKET'])}; root {R}")
+
+
+def diagnostics():
+    print(f"DIAGNOSTICS root={R} core_pid={core.pid if core else None} "
+          f"core_exit={core.poll() if core else None} socket={os.path.exists(ENV['VQRO_SOCKET'])} "
+          f"root_exists={os.path.isdir(R)} state_exists={os.path.isdir(R + '/st')} "
+          f"harness_socket={os.path.exists(R + '/harness.sock')}", flush=True)
+    if core_log is not None:
+        try:
+            fd = core_log.fileno()
+            size = os.fstat(fd).st_size
+            # Keep the original inode readable even if another actor unlinks its path/root.
+            # pread does not move the offset shared with the child's stdout/stderr.
+            print(f"LOG original core fd\n{os.pread(fd, 4000, max(0, size - 4000)).decode(errors='replace')}", flush=True)
+        except OSError as error:
+            print(f"LOG original core fd: {error}", flush=True)
+    for path in [f"{R}/serve.log", *sorted(glob.glob(f"{R}/st/ext-*.log*"))]:
+        try:
+            with open(path, errors="replace") as f:
+                print(f"LOG {path}\n{f.read()[-4000:]}", flush=True)
+        except OSError as error:
+            print(f"LOG {path}: {error}", flush=True)
 
 
 def check(name, ok, detail=""):
     results.append(ok)
     print(("PASS " if ok else "FAIL ") + name + (f"\n{detail}" if detail and not ok else ""), flush=True)
+    if not ok:
+        diagnostics()
 
 
 CALL_TIMEOUT = 10  # seconds for one call (hello and reply) to the core: a silent core fails the call, not the run
@@ -49,6 +88,7 @@ def call(method, params=None):
     """One request on its own connection, bounded in total by CALL_TIMEOUT: the deadline is checked while each reply
     line is framed, so neither silence nor a reply dripped past it can hold the run (TimeoutError; inside wait() it
     counts as "not yet"). Nothing is retried here."""
+    check_core()
     deadline = time.monotonic() + CALL_TIMEOUT
     with socket.socket(socket.AF_UNIX) as s:
         s.settimeout(CALL_TIMEOUT)
@@ -79,13 +119,17 @@ def call(method, params=None):
 def wait(pred, timeout=20):
     end = time.time() + timeout
     while time.time() < end:
+        check_core()  # Do not misreport a dead core as a slow label/render/activation assertion.
         try:
             v = pred()
             if v:
                 return v
+        except CoreLost:
+            raise
         except Exception:
             pass
         time.sleep(0.25)
+    check_core()
     return None
 
 
@@ -135,8 +179,10 @@ CSI_U = {"S-Enter": "\x1b[13;2u", "C-Enter": "\x1b[13;5u"}
 LEGACY = [("C-Left", "1b5b313b3544"), ("S-Up", "1b5b313b3241"), ("C-F5", "1b5b31353b357e"), ("M-x", "1b78"), ("S-Enter", "0d")]
 core = None
 try:
-    core = subprocess.Popen([VQRO, "serve", "--fake"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
-    wait(lambda: os.path.exists(ENV["VQRO_SOCKET"]), 10)
+    core_log = open(f"{R}/serve.log", "w+b")
+    core = subprocess.Popen([VQRO, "serve", "--fake"], env=ENV, stdout=core_log, stderr=subprocess.STDOUT)
+    assert wait(lambda: os.path.exists(ENV["VQRO_SOCKET"]), 10), "core socket never appeared"
+    core_ready = True
     call("workspace.apply", {"note": "providers", "ops": [
         {"op": "set", "key": "extension/herdr", "value": {"argv": ["/usr/bin/env", "PATH=", PHERDR, "--hc", HC, "--name", "herdr"], "kind": "provider", "default": True}},
         {"op": "set", "key": "extension/tmux", "value": {"argv": ["/usr/bin/env", "PATH=", PTMUX, "--tmux", "/usr/bin/tmux", "--name", "tmux"], "kind": "provider"}}]})
@@ -196,6 +242,9 @@ try:
     keys("C-g"); time.sleep(0.4); keys("q")
     check("TUI quits", bool(wait(lambda: subprocess.run([*HARNESS, "list-sessions"], capture_output=True).returncode != 0, 10)))
 finally:
+    if sys.exc_info()[0] is not None:
+        diagnostics()  # Capture exit status/logs before our own TERM and backend cleanup.
+    core_stopping = True
     subprocess.run([*HARNESS, "kill-server"], capture_output=True)
     if core:
         core.terminate()
@@ -203,6 +252,7 @@ finally:
             core.wait(10)
         except subprocess.TimeoutExpired:
             core.kill()
+            core.wait()
     subprocess.run([HC, "server", "stop"], env={**ENV, "PATH": ""}, capture_output=True)
     subprocess.run(["/usr/bin/tmux", "-N", "-S", f"{R}/st/tmux.sock", "kill-server"],
                    env={"HOME": f"{R}/home", "PATH": "/usr/bin:/bin"}, capture_output=True)
@@ -218,7 +268,11 @@ finally:
         return found
     left = wait(lambda: not leftovers() and [True], 10)
     check("nothing left running", bool(left), " ".join(leftovers()))
-    if left:
+    if left and results and all(results) and sys.exc_info()[0] is None:
         shutil.rmtree(R, ignore_errors=True)
+    else:
+        print(f"retained failed root {R}", flush=True)
+    if core_log is not None:
+        core_log.close()
 print(f"root {R}; passed {sum(results)} failed {len(results) - sum(results)}")
 sys.exit(0 if results and all(results) else 1)
