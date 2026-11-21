@@ -320,10 +320,11 @@ class Conversation:
     def data(self, data):
         with self.lock:
             now, epoch = int(time.time() * 1000), self.view.epoch
-            received = self.view.feed(data)
+            received = self.view.feed(data, epochs=True)
             if self.view.epoch != epoch:  # a new epoch or session: earlier live notices are about something else
                 self.notices.clear()
-            self.notices.extend((now, n) for n in received)
+            # Only notices of the epoch now installed, judged per record, so chunk boundaries never matter (#97).
+            self.notices.extend((now, n) for at, n in received if at == self.view.epoch)
             broken = self.view.broken
             if broken and self.view.errors["over_bound"]:
                 self.too_big = True

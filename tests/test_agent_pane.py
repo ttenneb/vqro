@@ -594,6 +594,30 @@ class AgentPane(unittest.TestCase):
         self.feed(snapshot(CONVERSATION).replace(b'"epoch": "e1"', b'"epoch": "e2"'))
         self.assertFalse(any(t and "rate limited" in t for t in self.texts()), "a new epoch clears earlier live notices")
 
+    def test_live_notices_follow_record_order_not_byte_chunks(self):
+        """#97 fix-forward (vqro-lead-secondary, notices-97-epoch-finding.md): an old notice, a complete new-epoch
+        snapshot and a new notice kept the old notice when they arrived in one chunk, but not when split."""
+        from agents import Conversation
+
+        def epoch_snapshot(epoch):
+            return line({"op": "snapshot", "phase": "begin", "epoch": epoch, "coverage": "all_retained"}) + \
+                line({"op": "snapshot", "phase": "end", "seq": 0})
+        old, new = (line({"op": "notice", "value": {"text": t}}) for t in ("old-session-only", "new-session-only"))
+
+        def observe(parts):
+            c = Conversation("r2", lambda *a, **k: None, {})
+            c.data(epoch_snapshot("e1"))
+            for part in parts:
+                c.data(part)
+            return c.view.epoch, [v["text"] for _, v in c.notices]
+        stream = old + epoch_snapshot("e2") + new
+        split = observe([old, epoch_snapshot("e2"), new])
+        self.assertEqual(split, ("e2", ["new-session-only"]))
+        self.assertEqual(observe([stream]), split, "the same records in one chunk")
+        self.assertEqual(observe([stream[:7], stream[7:40], stream[40:]]), split, "or cut anywhere")
+        self.assertEqual(observe([old + epoch_snapshot("e2")]), ("e2", []), "an old notice never outlives the new cut")
+        self.assertEqual(observe([old, new]), ("e1", ["old-session-only", "new-session-only"]), "same epoch: all kept")
+
     def test_the_waiting_line_and_the_runtimes_queue_are_pinned(self):
         items = self.make_v0(requests=[{"request": "q1", "revision": 1, "method": "confirm", "title": "Run git push?", "params": {}}],
                              queue=[{"mode": "settle", "preview": "bump the lockfile"}])

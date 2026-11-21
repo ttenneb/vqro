@@ -89,8 +89,10 @@ class ItemView:
         self._overflow = False
         self.broken = False
 
-    def feed(self, data):
-        """Feed stream bytes; returns the notices received, in order."""
+    def feed(self, data, epochs=False):
+        """Feed stream bytes; returns the notices received, in order. With `epochs`, each comes as (epoch, value): the
+        epoch installed when that notice record was applied, so a caller can drop a notice from before a new snapshot
+        whatever the byte chunking (a notice inside an unfinished snapshot still counts for the installed epoch)."""
         self._buf.extend(data)
         notices = []
         while True:
@@ -122,7 +124,7 @@ class ItemView:
             lossy = sum(self.errors[e] for e in LOSSY)
             notice = self._apply(record) if isinstance(record, dict) else self._error("bad_record")
             if notice is not None:
-                notices.append(notice)
+                notices.append((self.epoch, notice) if epochs else notice)
             if sum(self.errors[e] for e in LOSSY) != lossy:
                 self.broken = True
         return notices
