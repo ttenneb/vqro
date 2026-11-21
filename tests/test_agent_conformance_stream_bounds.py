@@ -66,6 +66,52 @@ class AdapterPreservesOrMarks(unittest.TestCase):
         self.assertFalse(m.adapter_preserves_or_marks([], self.bytes, self.sha), "nothing at all")
 
 
+class ReviewCounterexamples(unittest.TestCase):
+    """prim-agent-ux HOLD on dff775ae: each false green / false red is now rejected / accepted."""
+
+    def test_over_bound_rejected_cut_is_atomic(self):
+        grade = m.SCENARIO_GRADES["o14-over-bound"]
+        # A viewer that installs the rejected snapshot's first entity and then continues after seq 1.
+        pane = {"items": [{"type": "text", "text": "O14-REJECTED-CUT-SIBLING"}]}
+        self.assertFalse(m.no_partial_cut(pane, grade["forbidden"]), "sibling of the rejected cut installed")
+        self.assertFalse(m.cursor_never_advanced([None, {"epoch": "o14-e1", "seq": 1}], grade["last_good_seq"], "o14-e1"),
+                         "continued past a snapshot that was never committed")
+        self.assertTrue(m.cursor_never_advanced([None, None], grade["last_good_seq"], "o14-e1"))
+        sibling = [r for r in m.O14_SCENARIOS["o14-over-bound"]["snapshot"] if r["id"] == "m1"][0]
+        self.assertIn("O14-REJECTED-CUT-SIBLING", sibling["value"]["content"][0]["text"], "every rejected record is forbidden")
+
+    def test_hidden_diagnostic_is_not_a_visible_report(self):
+        hidden = {"items": [{"type": "text", "text": "Loading conversation",
+                             "hidden_diagnostic": "incompatible bad_record unknown entity larger than 3000"}],
+                  "copy": "incompatible"}
+        for grade in m.SCENARIO_GRADES.values():
+            self.assertFalse(m.incompatibility_reported(hidden, grade["cause"], grade["limit"]))
+        shown = {"items": [{"type": "text", "style": "warn",
+                            "text": "Incompatible stream: an entity is larger than 3000 bytes"}]}
+        g = m.SCENARIO_GRADES["o14-over-bound"]
+        self.assertTrue(m.incompatibility_reported(shown, g["cause"], g["limit"]))
+
+    def test_o12_separate_marker_block_and_omission_entity_pass(self):
+        from types import SimpleNamespace
+        import hashlib
+        text = "0:" + "O12-" + "x" * 70000
+        n, sha = len(text.encode()), hashlib.sha256(text.encode()).hexdigest()
+        def reducer(entities): return SimpleNamespace(entities=entities)
+        body = {"role": "assistant", "content": [{"type": "text", "text": text[:60000]},
+                                                 {"type": "text", "text": "[message truncated: too large]"}]}
+        texts, others = m.message_texts(reducer({("message", "a"): {"rev": 1, "value": body}}), "O12-", {})
+        self.assertTrue(m.adapter_preserves_or_marks(texts, n, sha, other_texts=others), "truncated body + marker block")
+        omitted = {("message", "a"): {"rev": 1, "value": {"content": [{"type": "text", "text": text[:60000]}]}},
+                   ("notice", "n"): {"rev": 1, "value": {"text": "assistant output omitted: too large"}},
+                   ("message", "old"): {"rev": 1, "value": {"content": [{"type": "text", "text": "too large earlier"}]}}}
+        texts, others = m.message_texts(reducer(omitted), "O12-", {("message", "old"): 1})
+        self.assertTrue(m.adapter_preserves_or_marks(texts, n, sha, other_texts=others), "omission-only entity")
+        silent = {("message", "a"): {"rev": 1, "value": {"content": [{"type": "text", "text": text[:60000]}]}},
+                  ("message", "old"): {"rev": 1, "value": {"content": [{"type": "text", "text": "too large earlier"}]}}}
+        texts, others = m.message_texts(reducer(silent), "O12-", {("message", "old"): 1})
+        self.assertFalse(m.adapter_preserves_or_marks(texts, n, sha, other_texts=others), "old marker is not this refusal")
+
+
 class ViewerPin(unittest.TestCase):
     """Only a kit-pinned viewer is conformance authority: missing or mismatched hashes refuse before any copy."""
 

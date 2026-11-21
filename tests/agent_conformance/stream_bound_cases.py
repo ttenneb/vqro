@@ -32,10 +32,13 @@ def no_reattach_loop(opens, window=BACKOFF_WINDOW_S, max_opens=MAX_OPENS_IN_WIND
 
 def cursor_never_advanced(afters, last_good_seq, epoch):
     """O14: every reopen continues from at most the last good record of the same epoch, or asks for a reset (null);
-    it never skips the incompatible record by advancing past `last_good_seq`."""
+    it never skips the incompatible record by advancing past `last_good_seq`. A `last_good_seq` of None means no
+    snapshot was ever committed (the only one offered was rejected), so every reopen must be a reset."""
     for after in afters:
         if after is None:
             continue
+        if last_good_seq is None:
+            return False
         if not isinstance(after, dict) or after.get("epoch") != epoch or not isinstance(after.get("seq"), int):
             return False
         if after["seq"] > last_good_seq:
@@ -43,17 +46,39 @@ def cursor_never_advanced(afters, last_good_seq, epoch):
     return True
 
 
+VISIBLE_KEYS = ("title", "title_right", "text", "description", "label")
+NESTED_KEYS = ("items", "children", "chips", "badges")
+
+
+def visible_text(content):
+    """The text a published pane actually shows (core-protocol view content: title, title_right and each row's
+    text/description/label, recursing into rows, children, chips and badges). Hidden metadata such as copy payloads,
+    ids, args or extension-specific fields is not visible and never counts as a report."""
+    out = []
+    def walk(node):
+        if isinstance(node, list):
+            for child in node: walk(child)
+        elif isinstance(node, dict):
+            out.extend(node[key] for key in VISIBLE_KEYS if isinstance(node.get(key), str))
+            for key in NESTED_KEYS:
+                if isinstance(node.get(key), list):
+                    for child in node[key]: walk(child)
+    walk(content)
+    return "\n".join(out)
+
+
 def incompatibility_reported(content, cause_words, limit_words=()):
     """O14: the viewer's visible output names an incompatible stream with its cause (and the limit, when a bound was
-    exceeded). Searches the published pane content as text."""
-    text = json.dumps(content, ensure_ascii=False).lower()
+    exceeded). Only visible pane text counts (visible_text)."""
+    text = visible_text(content).lower()
     return any(word in text for word in ("incompatib", "can't read", "cannot read", "stopped updating")) \
         and all(any(alt in text for alt in word.split("|")) for word in cause_words) \
         and all(any(alt in text for alt in word.split("|")) for word in limit_words)
 
 
 def no_partial_cut(content, forbidden_markers):
-    """O14: nothing from an over-bound or rejected snapshot was installed (its marker text never appears)."""
+    """O14: nothing from an over-bound or rejected snapshot was installed: no text of ANY record of the rejected cut
+    appears anywhere in the published pane (visible or not)."""
     text = json.dumps(content, ensure_ascii=False)
     return not any(marker in text for marker in forbidden_markers)
 
@@ -157,7 +182,9 @@ O14_SCENARIOS = {
     "o14-bad-record": {"snapshot": [O14_GOOD], "live": [{"op": "put", "seq": 2, "kind": "message"}], "entity_bytes": O14_ENTITY_BYTES, "end_seq": 1},
     "o14-unknown-op": {"snapshot": [O14_GOOD], "entity_bytes": O14_ENTITY_BYTES, "end_seq": 1,
                        "live": [{"op": "o14-future-op", "seq": 2, "kind": "message", "id": "m2", "rev": 2}]},
-    "o14-over-bound": {"entity_bytes": O14_ENTITY_BYTES, "end_seq": 1, "snapshot": [O14_GOOD, {
+    "o14-over-bound": {"entity_bytes": O14_ENTITY_BYTES, "end_seq": 1, "snapshot": [{
+        "op": "put", "kind": "message", "id": "m1", "rev": 1, "value": {"role": "assistant", "position": 1, "final": True,
+        "content": [{"type": "text", "text": "O14-REJECTED-CUT-SIBLING"}]}}, {
         "op": "put", "kind": "message", "id": "huge", "rev": 1,
         "value": {"role": "assistant", "content": [{"type": "text", "text": "O14-PARTIAL-CUT-" + "x" * 9000}]}}]},
 }
@@ -167,10 +194,14 @@ async def start_scripted_provider(ctx, sdk_dir):
     return await start_item_provider(ctx, sdk_dir, "o14-scripted", O14_SCENARIOS, epoch="o14-e1")
 
 
+# Per scenario: visible cause/limit words, the last committed seq a reopen may continue from (None: the only snapshot
+# offered is the rejected one, so only resets are allowed), and text from records that must never be installed.
 SCENARIO_GRADES = {
-    "o14-bad-record": {"cause": ["bad_record|malformed|invalid record|unreadable|can't read"], "limit": []},
-    "o14-unknown-op": {"cause": ["unknown|newer|unsupported"], "limit": []},
-    "o14-over-bound": {"cause": ["larger|over_bound|too large|exceed"], "limit": ["3000"]},
+    "o14-bad-record": {"cause": ["bad_record|malformed|invalid record|unreadable|can't read"], "limit": [],
+                       "last_good_seq": 1, "forbidden": []},
+    "o14-unknown-op": {"cause": ["unknown|newer|unsupported"], "limit": [], "last_good_seq": 1, "forbidden": []},
+    "o14-over-bound": {"cause": ["larger|over_bound|too large|exceed"], "limit": ["3000"], "last_good_seq": None,
+                       "forbidden": ["O14-REJECTED-CUT-SIBLING", "O14-PARTIAL-CUT-"]},
 }
 
 
@@ -241,9 +272,10 @@ async def incompatible_viewers(ctx):
             results[ref] = {
                 "opened": bool(opens),
                 "no_loop": no_reattach_loop([row["t"] for row in opens]),
-                "cursor_kept": cursor_never_advanced([row.get("after") for row in opens], 1, "o14-e1"),
+                "cursor_kept": cursor_never_advanced([row.get("after") for row in opens], grade["last_good_seq"], "o14-e1"),
                 "reported": incompatibility_reported(content, grade["cause"], grade["limit"]),
-                "no_partial_cut": no_partial_cut(content, ["O14-PARTIAL-CUT-"]),
+                "no_partial_cut": no_partial_cut(content, grade["forbidden"]),
+                "visible": visible_text(content)[:2000],
                 "opens_in_window": len([r for r in opens if r["t"] - opens[0]["t"] <= BACKOFF_WINDOW_S]) if opens else 0,
                 "pane": content,
             }
@@ -266,16 +298,17 @@ async def incompatible_viewers(ctx):
 # ---------------------------------------------------------------------------------------------------------------------
 # O12 adapter-side checker (unit-tested with negatives)
 
-def adapter_preserves_or_marks(stream_texts, emitted_bytes, emitted_sha256, marker_words=("truncated", "omitted", "too large", "too_large")):
+def adapter_preserves_or_marks(stream_texts, emitted_bytes, emitted_sha256, marker_words=("truncated", "omitted", "too large", "too_large"), other_texts=()):
     """O12: after a producer too_large refusal, the adapter's item stream either still carries the whole emitted text
-    (some message entity's text has exactly the native ledger's length and sha256, possibly split across entities in
-    order) or visibly marks the refusal; a shorter text with no marker is silent loss."""
+    (some text has exactly the native ledger's length and sha256, or the body texts joined in order do) or marks the
+    refusal; a shorter text with no marker is silent loss. `stream_texts` are the text blocks of the correlated message
+    entities (body and any separate marker block); `other_texts` are texts of other entities the message produced
+    (an omission-only entity), searched for the marker only."""
     import hashlib
-    joined = "".join(stream_texts)
-    whole = any(len(text.encode()) == emitted_bytes and hashlib.sha256(text.encode()).hexdigest() == emitted_sha256
-                for text in stream_texts) or (len(joined.encode()) == emitted_bytes
-                                              and hashlib.sha256(joined.encode()).hexdigest() == emitted_sha256)
-    marked = any(word in text.lower() for text in stream_texts for word in marker_words)
+    def same(text): return len(text.encode()) == emitted_bytes and hashlib.sha256(text.encode()).hexdigest() == emitted_sha256
+    body = [text for text in stream_texts if not any(word in text.lower() for word in marker_words)]
+    whole = any(same(text) for text in stream_texts) or same("".join(body)) or same("".join(stream_texts))
+    marked = any(word in text.lower() for text in list(stream_texts) + list(other_texts) for word in marker_words)
     return whole or marked
 
 
@@ -283,15 +316,28 @@ O12_TEST = ("provider_client::items::tests::small_appends_past_the_record_bound_
             "src/provider_client/items.rs")
 
 
-def message_texts(reducer, needle):
-    """Text blocks of message entities that carry `needle`, in entity order."""
-    texts = []
-    for (kind, _), entity in sorted(reducer.entities.items(), key=lambda item: str(item[0])):
-        value = entity.get("value") or {}
-        if kind == "message" and isinstance(value.get("content"), list):
-            texts += [block["text"] for block in value["content"]
-                      if isinstance(block, dict) and isinstance(block.get("text"), str) and needle in block["text"]]
-    return texts
+def strings(value):
+    """Every string inside an entity value (for marker search in entities that are not messages)."""
+    if isinstance(value, str): return [value]
+    if isinstance(value, dict): return [s for v in value.values() for s in strings(v)]
+    if isinstance(value, list): return [s for v in value for s in strings(v)]
+    return []
+
+
+def message_texts(reducer, needle, baseline=None):
+    """Correlate the emitted message once: (texts, other_texts). `texts` are ALL text blocks (body and any marker
+    block) of every message entity carrying `needle` in some block, in entity order; `other_texts` are the strings of
+    every other entity new or changed since `baseline` (a {key: rev} map), e.g. an omission-only notice."""
+    texts, others = [], []
+    for key, entity in sorted(reducer.entities.items(), key=lambda item: str(item[0])):
+        kind, value = key[0], entity.get("value") or {}
+        blocks = [block["text"] for block in value.get("content", []) if isinstance(block, dict)
+                  and isinstance(block.get("text"), str)] if kind == "message" and isinstance(value.get("content"), list) else []
+        if any(needle in text for text in blocks):
+            texts += blocks
+        elif (baseline or {}).get(key) != entity.get("rev"):
+            others += strings(value)
+    return texts, others
 
 
 @case("O12")
@@ -310,6 +356,7 @@ async def producer_append_bounds(ctx):
     # Adapter half: an oversized assistant message streamed through the actual bridge.
     from .cases import fresh_view
     view = await fresh_view(ctx)
+    baseline = {key: entity.get("rev") for key, entity in view.reducer.entities.items()}
     mark = ctx.native.mark()
     chunks = ["O12-" + "x" * 1020 for _ in range(70)]  # about 70 KiB of text_delta appends in one message
     # Fixture seam 5d9b0590 (prim-final-review): retain with chunks emits one assistant message as len(chunks)
@@ -322,14 +369,15 @@ async def producer_append_bounds(ctx):
                          "(native_emit message_end with text_bytes and text_sha256)")
     witness = emitted[-1]
     def settled(reducer):
-        texts = message_texts(reducer, "O12-")
-        return texts and adapter_preserves_or_marks(texts, witness["text_bytes"], witness["text_sha256"])
+        texts, others = message_texts(reducer, "O12-", baseline)
+        return texts and adapter_preserves_or_marks(texts, witness["text_bytes"], witness["text_sha256"], other_texts=others)
     try:
         await ctx.wait_view(view, settled, timeout=15)
     except Exception:
         pass  # graded below from what the stream actually holds
-    texts = message_texts(view.reducer, "O12-")
-    ctx.evidence.append({"kind": "o12_adapter", "emitted": witness, "stream_text_bytes": [len(t.encode()) for t in texts]})
-    check(adapter_preserves_or_marks(texts, witness["text_bytes"], witness["text_sha256"]),
+    texts, others = message_texts(view.reducer, "O12-", baseline)
+    ctx.evidence.append({"kind": "o12_adapter", "emitted": witness, "stream_text_bytes": [len(t.encode()) for t in texts],
+                         "other_new_entity_strings": [t[:200] for t in others][:16]})
+    check(adapter_preserves_or_marks(texts, witness["text_bytes"], witness["text_sha256"], other_texts=others),
           "after the producer refusal the adapter keeps the whole emitted text or visibly marks the refusal "
           "(no silent loss)")
