@@ -309,17 +309,19 @@ class WholeHandlerControls(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(self.accepts(lambda: self.o14(rows, pane)), want)
 
-    def o12(self, new_entities, old_entities=None):
+    def o12(self, new_entities, old_entities=None, old_notices=(), new_notices=()):
         import asyncio, hashlib
         from types import SimpleNamespace
         from unittest.mock import AsyncMock, patch
         from agent_conformance import evidence
         from agent_conformance.results import CheckFailed
         text = "0:" + "".join("O12-" + "x" * 1020 for _ in range(70))
-        reducer = SimpleNamespace(snapshots=1, entities=dict(old_entities or {}))
+        reducer = SimpleNamespace(snapshots=1, entities=dict(old_entities or {}), notices=list(old_notices))
         class Native:
             def mark(self): return 0
-            async def call(self, *args, **kw): reducer.entities.update(new_entities(text))
+            async def call(self, *args, **kw):
+                reducer.entities.update(new_entities(text))
+                reducer.notices.extend(new_notices)
             def records(self, *args, **kw):
                 return [{"type": "message_end", "role": "assistant", "text_bytes": len(text.encode()),
                          "text_sha256": hashlib.sha256(text.encode()).hexdigest()}]
@@ -331,6 +333,29 @@ class WholeHandlerControls(unittest.TestCase):
         with patch.dict(evidence.REGRESSIONS, {"O12": {}}), patch.object(evidence, "component", lambda *a: ({}, None, None, None)), \
              patch.object(evidence, "regressions", lambda *a: None), patch.object(evidence, "inherited", lambda *a: None):
             asyncio.run(m.producer_append_bounds(ctx))
+
+    def test_o12_item_stream_ruling(self):
+        """vqro-lead ruling: O12 is graded on the PUBLIC ITEM STREAM's display content, not on what the bundled pane
+        renders (the pane not showing notices is a separate K3 bug)."""
+        def message(rev, position, *blocks):
+            return {"rev": rev, "value": {"role": "assistant", "position": position, "content": list(blocks)}}
+        body = lambda t: {"type": "text", "text": t[:60000]}
+        notice = {"severity": "warn", "text": "assistant output truncated: too large"}
+        cases = {
+            "live notice record with the marker (the pane shows none of it)": (lambda t: {("message", "m"): message(1, 1, body(t))}, {}, (), (notice,), True),
+            "system message with the marker": (lambda t: {("message", "m"): message(1, 1, body(t)),
+                ("message", "s"): {"rev": 1, "value": {"role": "system", "position": 2, "content": [{"type": "text", "text": "[output omitted: too large]"}]}}}, {}, (), (), True),
+            "resource text block with the marker": (lambda t: {("message", "m"): message(1, 1, body(t), {"type": "resource", "uri": "x:", "text": "truncated: too large"})}, {}, (), (), True),
+            "the same live notice delivered before the emission, nothing new": (lambda t: {("message", "m"): message(1, 1, body(t))}, {}, (notice,), (), False),
+            "marker only in a resource_link name": (lambda t: {("message", "m"): message(1, 1, body(t), {"type": "resource_link", "uri": "x:", "name": "truncated"})}, {}, (), (), False),
+            "marker only in OSC hyperlink metadata of a separate block": (lambda t: {("message", "m"): message(1, 1, body(t), {"type": "text",
+                "text": "\x1b]8;;https://truncated.example/\x07link\x1b]8;;\x07"})}, {}, (), (), False),
+            "marker only in an image block's extra text": (lambda t: {("message", "m"): message(1, 1, body(t), {"type": "image", "mime": "image/png",
+                "data": "AA==", "text": "[output truncated: too large]"})}, {}, (), (), False),
+        }
+        for name, (new, old, before, after, want) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.accepts(lambda: self.o12(new, old, before, after)), want)
 
     def test_o12_controls(self):
         def message(rev, position, *texts):

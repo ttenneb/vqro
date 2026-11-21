@@ -466,15 +466,34 @@ O12_TEST = ("provider_client::items::tests::small_appends_past_the_record_bound_
             "src/provider_client/items.rs")
 
 
+def display_text(text):
+    """Display text of a published string: terminal escape metadata removed (OSC sequences such as hyperlink URIs,
+    CSI sequences, other C0 controls except newline and tab). Metadata is never display content."""
+    import re
+    text = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", text)
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    return "".join(c for c in text if c in "\n\t" or not (ord(c) < 32 or ord(c) == 127))
+
+
 def shown_texts(value):
-    """What the production agents pane shows for an item entity's content: the row texts of
-    agent_transcript.content_rows (text blocks as their lines; an image or audio block only as "[image: mime]", never
-    any extra field it carries). A top-level field or nested native/other metadata is never shown."""
+    """O12 marker evidence is graded on the adapter's PUBLIC ITEM STREAM (vqro-lead ruling), not on what a bundled
+    pane renders: the display content of an entity's agent-v0 content blocks (section 3.2): `text {text}` and
+    `resource {text}` as display text; `image`, `audio` and `resource_link` carry no marker text, and no extra field
+    of any block, top-level field or `native` metadata ever counts."""
     content = value.get("content") if isinstance(value, dict) else None
     if not isinstance(content, list):
         return []
-    rows = production("agent_transcript").content_rows(content)
-    return [row["text"] for row in rows if isinstance(row, dict) and isinstance(row.get("text"), str)]
+    return [display_text(block["text"]) for block in content if isinstance(block, dict)
+            and block.get("type") in ("text", "resource") and isinstance(block.get("text"), str)]
+
+
+NOTICES = ("__live_notices__",)  # baseline key for the stream's live notice records (op notice, no seq)
+
+
+def notice_texts(reducer):
+    """Display text of the live notice records the item stream delivered (agent-v0: notice {value}, live only)."""
+    return [display_text(row["text"]) for row in list(getattr(reducer, "notices", []) or [])
+            if isinstance(row, dict) and isinstance(row.get("text"), str)]
 
 
 def body_texts(value):
@@ -493,9 +512,12 @@ def body_fingerprint(value):
 
 
 def shown_baseline(reducer):
-    """Every entity before the native emission: {key: {"shown": [shown rows], "body": raw body fingerprint}}."""
-    return {key: {"shown": shown_texts(entity.get("value") or {}), "body": body_fingerprint(entity.get("value") or {})}
-            for key, entity in reducer.entities.items()}
+    """The item stream before the native emission: {key: {"shown": [display texts], "body": raw body fingerprint}} per
+    entity, plus the live notices already delivered under NOTICES."""
+    baseline = {key: {"shown": shown_texts(entity.get("value") or {}), "body": body_fingerprint(entity.get("value") or {})}
+                for key, entity in reducer.entities.items()}
+    baseline[NOTICES] = {"shown": notice_texts(reducer), "body": ""}
+    return baseline
 
 
 def message_texts(reducer, needle, baseline=None):
@@ -503,9 +525,9 @@ def message_texts(reducer, needle, baseline=None):
     Returns (body_texts, fresh_shown):
     - body_texts: the raw text blocks of every message entity whose raw body carries `needle` and changed since the
       baseline (new entity or new body fingerprint), in timeline (position) order: whole-text preservation only;
-    - fresh_shown: every shown row (production content_rows) new since the baseline, from any entity, EXCEPT the rows
-      the emitted body text (its blocks carrying `needle`) itself renders to: marker only. A refusal marker is shown apart from the body; a word
-      inside a body line (an escaped URL, a clipped tail) is body content, not a marker.
+    - fresh_shown: every item-stream display text (shown_texts; live notices) new since the baseline, from any
+      entity, EXCEPT the emitted body's own blocks (those carrying `needle`): marker only. A refusal marker is published
+      apart from the body; a word inside the body text (an escaped URL, a tail) is body content, not a marker.
     A revision bump that changes neither the raw body nor the shown rows is history and contributes nothing."""
     baseline = baseline or {}
     if any(not isinstance(row, dict) or not isinstance(row.get("shown"), list) or not isinstance(row.get("body"), str)
@@ -522,7 +544,7 @@ def message_texts(reducer, needle, baseline=None):
         emitted = any(needle in text for text in body) and (before is None or before["body"] != body_fingerprint(value))
         if emitted:
             bodies += body
-        # Rows that are the body itself (the emitted text blocks as production renders them) are never markers.
+        # The body's own blocks (the emitted text) are never markers.
         body_rows = shown_texts({"content": [{"type": "text", "text": text} for text in body if needle in text]}) if emitted else []
         shown_before = list(before["shown"]) if before else []
         for text in shown_texts(value):  # shown rows not already shown before (multiset difference)
@@ -532,6 +554,12 @@ def message_texts(reducer, needle, baseline=None):
                 body_rows.remove(text)
             else:
                 fresh_shown.append(text)
+    notices_before = list((baseline.get(NOTICES) or {"shown": []})["shown"])
+    for text in notice_texts(reducer):  # live notices delivered since the baseline
+        if text in notices_before:
+            notices_before.remove(text)
+        else:
+            fresh_shown.append(text)
     return bodies, fresh_shown
 
 
