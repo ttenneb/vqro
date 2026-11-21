@@ -68,6 +68,9 @@ def grade_host_route(ctx, value):
     for field in ('wrong_token', 'raw_host', 'no_grant'):
         ctx.check(isinstance(value.get(field), str) and value[field] in {'invalid', 'forbidden', 'no_grant', 'stale_generation'},
                   'wrong token/raw assertion/delegation cannot acquire host or endpoint authority', refused=field)
+    denied_entry = value.get('no_grant_entry')
+    ctx.check('no_grant_entry' in value and (denied_entry is None or isinstance(denied_entry, dict) and denied_entry.get('value') is None),
+              'denied endpoint delegation created no workspace entry')
     ctx.check(value.get('human_spawn') == {'context_present': False, 'principal': 'undeclared'},
               'ordinary native shell spawn does not receive host credential or inherited owner')
     ctx.check(value.get('public_secrets_absent') is True, 'private registration credentials are absent from public snapshot/history')
@@ -87,6 +90,8 @@ async def shared_host_route(ctx):
     if not isinstance(revision, str) or not re.fullmatch(r'[0-9a-f]{40}', revision) or revision != ctx.manifest.get('coord_revision'):
         raise FixtureFailed('G11 exact full target/binding revision mismatch')
     script, test, cli = (pin(config.get(key)) for key in ('archive_script', 'archive_test', 'cli'))
+    if test != script.parent / 'g11-host-tool-cli-test' or cli != script.parent / 'vqro':
+        raise FixtureFailed('G11 archive descriptor must name the exact script-used test and CLI')
     if hashlib.sha256(ctx.vqro.read_bytes()).hexdigest() != config['cli']['sha256']:
         raise FixtureFailed('G11 running core/CLI differs from accepted kit')
     probe = Path(__file__).with_name('host_tool_probe.py')

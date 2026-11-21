@@ -44,6 +44,12 @@ async def run(args):
         except RpcError as error: return error.kind
         return None
 
+    async def refused_hello(value):
+        # A fresh connection distinguishes invalid/stale proof from immutable-identity
+        # refusal on an already-bound ordinary connection.
+        peer = await Peer.connect(socket); peers.append(peer)
+        return await refused(peer, 'hello', value)
+
     async def cli(env, key):
         # Actual SDK map replaces an inherited owner; tool children ONLY.
         child_env = {**os.environ, 'VQRO_PRINCIPAL': 'owner', **env}
@@ -74,8 +80,8 @@ async def run(args):
         token = env['VQRO_HOST_CONTEXT']
         bound, bound_hello = await hello(token)
         ordinary, ordinary_hello = await hello()
-        wrong = await refused(ordinary, 'hello', {'host_context': 'not-a-valid-host-context'})
-        raw = await refused(ordinary, 'hello', {'identity': {'kind': 'principal', 'principal': registration['actor']}})
+        wrong = await refused_hello({'host_context': 'not-a-valid-host-context'})
+        raw = await refused_hello({'identity': {'kind': 'principal', 'principal': registration['actor']}})
         inventory = await control.call('resource.list', {'provider': runtime.name})
         writes = [await cli(env, 'doc/g11/' + fact['ref']) for fact in facts]
         history = await control.call('workspace.history', {'limit': 20})
@@ -92,7 +98,7 @@ async def run(args):
                 await asyncio.sleep(.01)
         await asyncio.wait_for(disconnected(), 8)
         stale_bound = await refused(bound, 'workspace.apply', {'ops': [{'op': 'set', 'key': 'doc/g11/stale-bound', 'value': 1}]})
-        stale_hello = await refused(ordinary, 'hello', {'host_context': token})
+        stale_hello = await refused_hello({'host_context': token})
         stale_cli = await cli(env, 'doc/g11/stale-cli')
         missing = [await control.call('workspace.get', {'key': key}) for key in ('doc/g11/stale-bound', 'doc/g11/stale-cli')]
         result = {'host': hosted['resource']['id'], 'registration': {key: registration.get(key) for key in ('host', 'actor', 'generation')},
@@ -101,6 +107,7 @@ async def run(args):
             'sdk_env': {key: env.get(key) for key in ('VQRO_SOCKET', 'VQRO_SOCKET_SOURCE', 'VQRO_PRINCIPAL')},
             'resources': inventory['resources'], 'cli': writes, 'history': history,
             'ordinary': ordinary_hello, 'wrong_token': wrong, 'raw_host': raw, 'no_grant': denied,
+            'no_grant_entry': await control.call('workspace.get', {'key': 'doc/g11/no-grant'}),
             'human_spawn': spawns[-1], 'public_secrets_absent': absent,
             'stale': {'bound': stale_bound, 'hello': stale_hello, 'cli_exit': stale_cli['exit'], 'entries': missing}}
     finally:

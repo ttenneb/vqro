@@ -18,7 +18,7 @@ def positive():
         'cli': [{'key': 'doc/g11/' + ref, 'exit': 0, 'reply': {'txn': txn}} for ref, txn in (('endpoint-a', 10), ('endpoint-b', 11))],
         'history': {'txns': [{'id': txn, 'actor': 'host:r3', 'principal': 'host:r3', 'author': author,
                     'changes': [{'key': 'doc/g11/' + ref}]} for txn, author, ref in ((10, 'client:one', 'endpoint-a'), (11, 'client:two', 'endpoint-b'))]},
-        'ordinary': {'actor': 'undeclared'}, 'wrong_token': 'forbidden', 'raw_host': 'invalid', 'no_grant': 'forbidden',
+        'ordinary': {'actor': 'undeclared'}, 'wrong_token': 'forbidden', 'raw_host': 'invalid', 'no_grant': 'forbidden', 'no_grant_entry': None,
         'human_spawn': {'context_present': False, 'principal': 'undeclared'}, 'public_secrets_absent': True,
         'stale': {'bound': 'stale_generation', 'hello': 'forbidden', 'cli_exit': 1, 'entries': [None, None]}}
 
@@ -49,7 +49,7 @@ class HostToolChecks(unittest.TestCase):
             (['history', 'txns', 1, 'author'], 'client:one'), (['history', 'txns', 1, 'changes'], [{'key': 'doc/unrelated'}]),
             (['ordinary', 'actor'], 'host:r3'), (['wrong_token'], None), (['raw_host'], None), (['no_grant'], None),
             (['human_spawn', 'context_present'], True), (['human_spawn', 'principal'], 'owner'),
-            (['public_secrets_absent'], False), (['stale', 'bound'], None), (['stale', 'hello'], None),
+            (['public_secrets_absent'], False), (['no_grant_entry'], {'value': 1}), (['stale', 'bound'], None), (['stale', 'hello'], None),
             (['stale', 'cli_exit'], 0), (['stale', 'entries'], [{'value': 1}, None])]
         for path, replacement in cases:
             with self.subTest(path=path, value=replacement):
