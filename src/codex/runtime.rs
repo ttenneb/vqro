@@ -27,6 +27,7 @@ pub struct Runtime {
     changed: watch::Sender<u64>,
     observer: Option<Observer>,
     incarnation: String,
+    launcher_principal: Option<String>,
 }
 
 enum Fault {
@@ -68,7 +69,34 @@ impl Runtime {
         instance: String,
         observer: Option<Observer>,
     ) -> Arc<Self> {
+        Self::with_host_principal(
+            native,
+            count,
+            incarnation,
+            provider,
+            instance,
+            observer,
+            None,
+        )
+    }
+
+    /// An explicit single-slot launcher identity, not a host tag or tool-env capability.
+    /// The executable checks that its opt-in matches the configured provider identity.
+    pub fn with_host_principal(
+        native: Peer,
+        count: usize,
+        incarnation: String,
+        provider: String,
+        instance: String,
+        observer: Option<Observer>,
+        launcher_principal: Option<String>,
+    ) -> Arc<Self> {
         assert!((1..=200).contains(&count));
+        let launcher_principal = launcher_principal.filter(|principal| {
+            count == 1
+                && principal != crate::principal::UNDECLARED
+                && crate::principal::validate_assertable(principal).is_ok()
+        });
         let (changed, _) = watch::channel(0);
         let host = format!("codex:{incarnation}");
         let runtime = Arc::new(Self {
@@ -95,6 +123,7 @@ impl Runtime {
             changed,
             observer,
             incarnation,
+            launcher_principal,
         });
         for (index, slot) in runtime.slots.iter().enumerate() {
             let endpoint = slot.endpoint.lock().unwrap();
@@ -153,6 +182,9 @@ impl Runtime {
     }
 
     fn published_facts(&self, mut facts: Value) -> Value {
+        if let Some(principal) = &self.launcher_principal {
+            facts["data"]["agent"]["principal"] = json!(principal);
+        }
         if self.observer.is_none() {
             facts["data"]["agent"]["caps"]
                 .as_object_mut()

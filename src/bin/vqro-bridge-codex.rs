@@ -22,6 +22,10 @@ struct Args {
     /// Stable human-readable provider label, not the native execution incarnation.
     #[arg(long)]
     instance: Option<String>,
+    /// Explicit launcher tag for one endpoint; must match configured VQRO_PRINCIPAL.
+    /// Never inferred from a host or exported as a native tool-env capability.
+    #[arg(long)]
+    endpoint_principal: Option<String>,
     #[arg(last = true, required = true)]
     native: Vec<String>,
 }
@@ -48,6 +52,22 @@ async fn run(args: Args) -> Result<(), String> {
         .map_err(|_| "VQRO_SOCKET is required; launch through resource.spawn bridge:true")?;
     let token = std::env::var("VQRO_BRIDGE_TOKEN")
         .map_err(|_| "VQRO_BRIDGE_TOKEN is required; ordinary shells are not runtime providers")?;
+    let endpoint_principal = if let Some(principal) = args.endpoint_principal {
+        if args.slots != 1 {
+            return Err("--endpoint-principal requires exactly one endpoint (--slots 1)".into());
+        }
+        if std::env::var("VQRO_PRINCIPAL").ok().as_deref() != Some(principal.as_str())
+            || principal == vqro::principal::UNDECLARED
+            || vqro::principal::validate_assertable(&principal).is_err()
+        {
+            return Err(
+                "--endpoint-principal must match an explicit assertable VQRO_PRINCIPAL".into(),
+            );
+        }
+        Some(principal)
+    } else {
+        None
+    };
     let incarnation = nonce()?;
     let label = args.instance.unwrap_or_else(|| incarnation.clone());
     if label.is_empty()
@@ -94,13 +114,14 @@ async fn run(args: Args) -> Result<(), String> {
     let provider_name = format!("codex-{label}");
     let provider_instance = format!("{label}:{incarnation}");
     let observation = Observation::new(args.slots, incarnation.clone());
-    let runtime = Runtime::with_host(
+    let runtime = Runtime::with_host_principal(
         native.clone(),
         args.slots,
         incarnation.clone(),
         provider_name.clone(),
         provider_instance.clone(),
         Some(observation.observer()),
+        endpoint_principal,
     );
     let model = runtime.clone();
     let child_native = native.clone();
