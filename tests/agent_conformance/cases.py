@@ -246,7 +246,8 @@ async def bounded_fact_summaries(ctx):
           "initial agent facts exceed64KiB")
     respond = facts["caps"].get("agent.respond", {})
     if "confirm" not in respond.get("methods", []):
-        raise HarnessGap("C6 non-confirm native facts-pressure fixture branch not yet implemented")
+        from .request_fixture_cases import c6_non_confirm
+        return await c6_non_confirm(ctx, respond)
     native_message = "C6-required-request-detail:" + "x" * 3072
     _, request = await make_request(ctx, "confirm", message=native_message)
     check(request.get("params", {}).get("message") == native_message,
@@ -1304,11 +1305,15 @@ async def first_valid_answer(ctx):
     if declaration.get("native_timeout") == "unrepresentable_positive":
         ctx.evidence.append({"kind": "subcase", "case": "R2.expiry", "status": "not-applicable",
                              "exclusion": {"path": "agent.respond.native_timeout", "actual": "unrepresentable_positive"}})
+        expiry_gap = None
     else:
-        raise HarnessGap("R2 declared expiry behavior needs a native expiry fixture")
+        from .request_fixture_cases import r2_native_withdrawal
+        expiry_gap = await r2_native_withdrawal(ctx, declaration)
     _, dead = await make_request(ctx)
     await reject_answer_after_native_end(ctx, dead)
     ctx.evidence.append({"kind": "first_valid_answer", "native_responses": 1, "dead_scope_rejected": True})
+    if expiry_gap:
+        raise HarnessGap("R2 expiry: " + expiry_gap)
 
 
 @case("R3")
@@ -1389,7 +1394,10 @@ async def request_scope_withdrawal(ctx):
     declaration = await caps(ctx, "agent.respond")
     if not declaration.get("background_requests") and set(declaration.get("scopes", [])) <= {"operation"}:
         raise NotApplicable("agent.respond", declaration)
-    raise HarnessGap("R6 declared session/run/background withdrawal fixture branches not yet implemented")
+    if declaration.get("background_requests"):
+        from .request_fixture_cases import r6_background_foreground
+        return await r6_background_foreground(ctx, declaration)
+    raise HarnessGap("R6 declared session/run withdrawal without background requests: fixture branch not yet implemented")
 
 
 async def reject_answer_after_native_end(ctx, request):

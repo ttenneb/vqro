@@ -361,6 +361,14 @@ class CodexMixin:
                     flags = ["waitingOnApproval"] if method == "permission" else ["waitingOnUserInput"]
                     thread["meta"]["status"] = {"type": "active", "activeFlags": flags}
                     await self.event("thread/status/changed", {"threadId": session, "status": thread["meta"]["status"]})
+            elif verb == "resolve_request":
+                # R2 (test-only): the runtime itself stops waiting on one pending request (src/codex.rs:698).
+                key = json.dumps(row.get("request"), sort_keys=True)
+                request = self.requests.pop(key, None)
+                if request is None:
+                    raise ValueError("resolve_request names no pending native request")
+                self.record("request_resolved", request=request["id"], session=request["session"], run=request["run"])
+                await self.event("serverRequest/resolved", {"threadId": request["session"], "requestId": request["id"]})
             elif verb == "tool_call":
                 await self.barrier("tool")
                 ident, state = row.get("id_ref", "tool-1"), row["state"]
