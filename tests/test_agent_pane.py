@@ -746,13 +746,66 @@ class AgentPane(unittest.TestCase):
         self.agents.flush_conversations()
         self.assertIn("3000 bytes", agents_module.incompatible_note(c))
 
-    def test_a_change_in_the_declared_bounds_retries_a_stopped_conversation(self):
-        self.bad_record_storm({"op": "put", "seq": 5, "kind": "message"}, rounds=6)
+    def test_a_change_in_the_declared_bounds_retries_a_stopped_conversation_with_the_new_limits(self):
+        """spike-panel-1 P2-2: the retry after a compatibility change runs with the NEW declaration, so the snapshot
+        that was over the old limits now installs."""
+        self.core.providers["items"]["capabilities"]["items.stream"] = {"entities": 64, "entity_bytes": 3000}
+        self.core.resources["r4"] = dict(self.core.resources["r2"], id="r4")
+        self.agents.event("resource", {"id": "r4"})
+        self.agents.flush_conversations()
+        big = snapshot({("message", "huge"): {"position": 1, "role": "assistant", "content": text("x" * 9000), "final": True}})
+        for _ in range(3):
+            c = self.agents.conversations["r4"]
+            self.core.sinks[c.stream].data(big)
+            self.agents.flush_conversations()
+            self.elapse()
+        self.assertTrue(self.agents.conversations["r4"].incompatible)
         attaches = len(self.attaches())
         self.core.providers["items"]["capabilities"]["items.stream"] = {"entities": 128, "entity_bytes": 65536}
-        self.agents.event("resource", {"id": "r2"})
+        self.agents.event("resource", {"id": "r4"})
         self.agents.flush_conversations()
+        c = self.agents.conversations["r4"]
         self.assertEqual(len(self.attaches()), attaches + 1, "a compatibility change retries")
+        self.assertEqual((c.view.max_entities, c.view.max_entity_bytes), (128, 65536), "with the new declaration")
+        self.core.sinks[c.stream].data(big)
+        self.agents.flush_conversations()
+        self.assertEqual((c.view.snapshots, c.incompatible, c.rejections), (1, None, 0), "the snapshot now installs")
+
+    def test_show_again_uses_the_current_declaration(self):
+        self.bad_record_storm({"op": "put", "seq": 5, "kind": "message"}, rounds=6)
+        self.core.providers["items"]["capabilities"]["items.stream"] = {"entities": 99, "entity_bytes": 77777}
+        self.core.handlers["agents.show"]({"resource": "r2"})
+        c = self.agents.conversations["r2"]
+        self.assertEqual((c.view.max_entities, c.view.max_entity_bytes, c.incompatible), (99, 77777, None))
+
+    def test_the_warning_clears_once_the_stream_moves_past_the_rejection(self):
+        """spike-panel-1 P2-1: one rejection, then real progress: no stale 'Incompatible stream' over a healthy pane."""
+        self.feed(snapshot(CONVERSATION, seq=4))
+        self.feed(line({"op": "put", "seq": 5, "kind": "message"}))
+        self.assertIn("Incompatible stream", " ".join(self.texts()))
+        self.elapse()
+        self.feed(line({"op": "append", "seq": 5, "kind": "message", "id": "m5", "base": 1, "rev": 2,
+                        "field": "/content/0/text", "text": " on"}))  # the producer moved on
+        self.assertNotIn("Incompatible stream", " ".join(self.texts()))
+        self.assertEqual(self.agents.conversations["r2"].rejections, 0)
+
+    def test_a_reset_snapshot_at_the_same_cut_is_not_progress(self):
+        self.feed(snapshot(CONVERSATION, seq=4))
+        self.feed(line({"op": "put", "seq": 5, "kind": "message"}))
+        self.elapse()
+        self.feed(snapshot(CONVERSATION, seq=4))  # back at the same cut, not past it
+        self.assertEqual(self.agents.conversations["r2"].rejections, 1, "still counting")
+        self.feed(line({"op": "put", "seq": 5, "kind": "message"}))
+        self.assertEqual(self.agents.conversations["r2"].rejections, 2)
+
+    def test_one_pending_backoff_timer_however_many_wakes(self):
+        """spike-panel-1 P3: wakes during a backoff never pile up timers."""
+        self.feed(snapshot(CONVERSATION, seq=4))
+        self.feed(line({"op": "put", "seq": 5, "kind": "message"}))
+        for _ in range(20):
+            self.agents.wake("r2", reattach=True)
+            self.agents.flush_conversations()
+        self.assertEqual(len(self.timers), 1)
 
     def test_pane_keys_copy_fields_and_search(self):
         """S3/S4: keys without the prefix (scoped to agent panes), copy fields, search over collapsed rows."""

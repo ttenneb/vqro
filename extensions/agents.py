@@ -342,7 +342,15 @@ class Conversation:
             rejection = self.view.rejection if broken and self.view.rejection is not rejected_before else None
             if rejection is not None:
                 self.rejected(rejection)
+            elif not broken and self.rejections and not self.incompatible and self.passed_rejection():
+                self.rejections, self.rejected_at = 0, None  # real progress: the warning no longer applies
         self.wake(self.rid, reattach=broken)
+
+    def passed_rejection(self):
+        """The view moved past the rejected position: a new epoch, or a record applied beyond it. A reset snapshot back
+        at the same cut is not progress (the same rejection then still counts)."""
+        _, _, epoch, seq = self.rejected_at or (None, None, None, None)
+        return self.view.epoch is not None and (self.view.epoch != epoch or self.view.seq > seq)
 
     def rejected(self, rejection):
         """Count an incompatible rejection (under the lock). The same cause at the same position again is not
@@ -377,8 +385,11 @@ def incompatible_note(c):
     limits, kind = r.get("limits") or {}, r.get("kind")
     at = f" at seq {r['seq']}" if type(r.get("seq")) is int else ""
     if kind == "over_bound":
+        declared = c.declared or {}
         cause = (f"its history is larger than this view's limit ({limits.get('entities')} items, "
-                 f"{limits.get('entity_bytes')} bytes)" + ("; this pane keeps less than the agent declares" if c.clamped else ""))
+                 f"{limits.get('entity_bytes')} bytes)" + (
+                     f"; the agent declares {declared.get('max_entities')} items, {declared.get('max_entity_bytes')} bytes"
+                     if c.clamped else ""))
     elif kind == "oversize":
         cause = f"it sent a record larger than this view's limit of {limits.get('record_bytes')} bytes"
     elif r.get("unknown_op"):
@@ -387,7 +398,7 @@ def incompatible_note(c):
         cause = f"it sent a record this view can't read (bad_record{', op ' + label(str(r['op']), 64) if r.get('op') else ''}){at}"
     if c.incompatible:
         tail = (f" The conversation stopped updating after {c.incompatible.get('attempts')} identical attempts. "
-                "Show the agent again (Agents, or its pane menu) to retry.")
+                "Show the agent again from the Agents list to retry.")
     else:
         tail = f" Retrying after a pause (attempt {c.rejections} of {INCOMPATIBLE_STOP})."
     return "Incompatible stream: " + cause + "." + tail
@@ -457,6 +468,21 @@ class Agents:
         timer.daemon = True
         timer.start()
 
+    def fresh_view(self, rid):
+        """An ItemView built from the provider's CURRENT items declaration, clamped to this viewer's own ceiling:
+        (view, clamped, declared). Used when a conversation starts, is shown again, or its declaration changes."""
+        r = self.ext.resources.get(rid)
+        bounds = (self.provider_caps(r).get("items.stream") if r is not None else None) or {}
+        declared = {k: bounds[f] for k, f in (("max_entities", "entities"), ("max_entity_bytes", "entity_bytes"))
+                    if type(bounds.get(f)) is int and bounds[f] > 0}
+        kept = {k: min(v, VIEW_MAX_ENTITIES if k == "max_entities" else VIEW_MAX_ENTITY_BYTES) for k, v in declared.items()}
+        return ItemView(**kept), kept != declared, declared
+
+    def renew(self, c, rid):
+        """Allow attaching again with a view built from the current declaration (under c.lock)."""
+        c.compatible_again()
+        c.view, c.clamped, c.declared = self.fresh_view(rid)
+
     def items_bounds(self, rid):
         r = self.ext.resources.get(rid)
         caps = self.provider_caps(r).get("items.stream") if r is not None else None
@@ -476,17 +502,14 @@ class Agents:
             if self.streams_items(r):
                 bounds = self.provider_caps(r)["items.stream"]
                 if r["id"] not in self.conversations:
-                    declared = {k: bounds[f] for k, f in (("max_entities", "entities"), ("max_entity_bytes", "entity_bytes"))
-                                if type(bounds.get(f)) is int and bounds[f] > 0}
-                    kept = {k: min(v, VIEW_MAX_ENTITIES if k == "max_entities" else VIEW_MAX_ENTITY_BYTES) for k, v in declared.items()}
-                    c = self.conversations[r["id"]] = Conversation(r["id"], self.wake, kept)
-                    c.clamped = kept != declared
+                    c = self.conversations[r["id"]] = Conversation(r["id"], self.wake, {})
+                    c.view, c.clamped, c.declared = self.fresh_view(r["id"])
                     self.wake(r["id"], reattach=True)
                 elif self.conversations[r["id"]].stream is None:
                     c = self.conversations[r["id"]]
                     if c.incompatible and c.compat is not None and c.compat != self.items_bounds(r["id"]):
-                        with c.lock:  # a compatibility change (the producer's declared bounds) retries
-                            c.compatible_again()
+                        with c.lock:  # a compatibility change (the producer's declared bounds) retries, with them
+                            self.renew(c, r["id"])
                     self.wake(r["id"], reattach=True)
         for rid, c in list(self.conversations.items()):
             r = self.ext.resources.get(rid)
@@ -514,9 +537,11 @@ class Agents:
                     self.ext.close_stream(old)
                 if c.incompatible:
                     c.compat = c.compat or self.items_bounds(rid)
-                elif waiting > 0:  # back off: one delayed reattach, never a tight loop
+                elif waiting > 0 and not c.retry_scheduled:  # back off: one delayed reattach, never a tight loop
+                    c.retry_scheduled = True
                     self.later(waiting, rid)
                 return
+            c.retry_scheduled = False
             old, c.stream = c.stream, None
             # After lost records, start over from a fresh snapshot: simple, bounded, and right whatever the loss was
             # (vqro_items keeps after() at the last record applied, but a snapshot also repairs an over-bound view).
@@ -855,8 +880,7 @@ class Agents:
         c = self.conversations.get(r["id"])
         if c is not None and c.incompatible:  # showing the agent again retries an incompatible conversation
             with c.lock:
-                c.compatible_again()
-                c.view = ItemView(max_entities=c.view.max_entities, max_entity_bytes=c.view.max_entity_bytes)
+                self.renew(c, r["id"])
             self.wake(r["id"], reattach=True)
         self.ext.contribute(self.declarations([r]))
         self.publish_panel(r)
