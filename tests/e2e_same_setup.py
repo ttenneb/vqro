@@ -173,6 +173,9 @@ def scenario(root):
         return "the program titles titled and solo were never reported"
     if not root.wait(lambda: len((snap().get("live", {}).get("sidebar") or {}).get("items", [])) > 0, 15):
         return "the sidebar never published rows"
+    # Both roots run the vqro-owned tmux server; its extension declares this view on its next poll (every 5 s).
+    if not root.wait(lambda: "view/tmux-server" in snap()["entries"], 15):
+        return "the tmux-server extension never declared its view"
     if not root.wait(lambda: any((((r.get("data") or {}).get("agent") or {}).get("caps")) for r in snap()["resources"] if r["kind"] == "agent"), 20):
         return "the agent never declared its capabilities"
     time.sleep(2)  # nothing to observe: let late facts (titles, cwd, agent metadata) land before the capture
