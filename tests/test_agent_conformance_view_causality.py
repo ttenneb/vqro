@@ -168,7 +168,14 @@ class C11Fake:
         self.manifest = {"wire": "pi"}
         self.report, self.native_cwd, self.model = None, None, "fixture-small"
         self.native = self
+        self.rows = []
         self.agents = [{"id": "r1"}]
+
+    def mark(self):
+        return len(self.rows)
+
+    def writes(self, mark):
+        return self.rows[mark:]
 
     # native fixture control
     async def call(self, verb, **params):
@@ -208,7 +215,8 @@ class C11Fake:
         model = {"id": "guessed-model" if self.fault == "guessed_model" else self.model, "effort": "off"}
         return {"state": "idle", "session": {"id": "s1", "cwd": cwd, "model": model}, "usage": self._usage(),
                 "caps": {"rev": 1, "agent.send": {"modes": {"start": {}}}, "agent.configure": {}},
-                "config": [{"id": "model", "type": "select", "rev": 1, "value": "a", "choices": [{"value": "a"}, {"value": "b"}]}]}
+                "config": [{"id": "model", "category": "model", "type": "select", "rev": 1, "value": "a",
+                            "choices": [{"value": "a"}, {"value": "b"}]}]}
 
     async def ensure_session(self):
         return await self.facts()
@@ -220,6 +228,9 @@ class C11Fake:
         return facts
 
     async def invoke(self, op, args, **root):
+        if op == "agent.configure" and self.fault != "configure_without_native":
+            self.rows.append({"kind": "command", "effectful": True, "command": "set_model"})
+            self.model = "fixture-large"
         return {"outcome": "observed"}
 
     async def send(self, text, **kwargs):
@@ -247,6 +258,6 @@ class C11Negatives(unittest.TestCase):
 
     def test_each_broken_rule_fails(self):
         for fault in ("used_from_last_turn", "zero_tokens", "priced_cost", "late_priced_cost", "bridge_cwd", "guessed_model",
-                      "apportioned_message"):
+                      "apportioned_message", "configure_without_native"):
             with self.subTest(fault=fault), self.assertRaises(CheckFailed):
                 run11(fault)

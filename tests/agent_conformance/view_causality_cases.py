@@ -369,10 +369,40 @@ async def observe_native_state(ctx):
     alternate = next((row["value"] for row in option["choices"] if row["value"] != option.get("value")), None)
     if alternate is None:
         raise HarnessGap("C11 configuration option has no alternate value")
+    before = await ctx.native.call("state")
+    mark = ctx.native.mark()
     result = await ctx.invoke("agent.configure", {"id": option["id"], "value": alternate, "rev": option["rev"]})
     check(result.get("outcome") in ("observed", "accepted", "dispatched"), f"C11: declared configuration change failed: {result}")
     ctx.evidence.append({"kind": "c11_state_observation", "option": option["id"], "category": option.get("category"),
                          "value": alternate, "outcome": result.get("outcome")})
+    return option, before, mark
+
+
+async def model_route_witness(ctx, observed=None):
+    """Model changes go through the advertised model-category config option: one native mutation recorded by the
+    fixture, then session.model follows the runtime's own report. Absent such an option the route is undeclared and
+    this clause is recorded as unexercised (no facts-write substitute is attempted)."""
+    if observed is None:
+        facts = await ctx.facts()
+        if "agent.configure" not in facts.get("caps", {}) or not any(
+                row.get("category") == "model" for row in facts.get("config", [])):
+            ctx.evidence.append({"kind": "c11_model_route", "declared": False,
+                                 "note": "no advertised model-category config option; clause unexercised, not passed"})
+            return
+        observed = await observe_native_state(ctx)
+    option, before, mark = observed
+    if option.get("category") != "model":
+        ctx.evidence.append({"kind": "c11_model_route", "declared": False, "observation_option": option["id"],
+                             "note": "no advertised model-category config option; clause unexercised, not passed"})
+        return
+    writes = ctx.native.writes(mark)
+    check(len(writes) >= 1, "C11: the model-category configuration change reached no native mutation")
+    after = await ctx.native.call("state")
+    check(after.get("model") != before.get("model"), f"C11: the native model did not change ({before.get('model')!r})")
+    facts = await ctx.wait_facts(lambda f: ((f.get("session") or {}).get("model") or {}).get("id") == after["model"], timeout=5)
+    ctx.evidence.append({"kind": "c11_model_route", "declared": True, "option": option["id"],
+                         "native_before": before.get("model"), "native_after": after["model"],
+                         "native_writes": [row.get("command") for row in writes], "facts_model": facts["session"]["model"]})
 
 
 @case("C11")
@@ -390,9 +420,9 @@ async def optional_view_facts(ctx):
         reported_cwd = "/c11-native-reported-cwd"
         await ctx.native.call("native_cwd", cwd=reported_cwd)
         # A declared configuration change is confirmed by re-reading native state; that read carries the cwd.
-        await observe_native_state(ctx)
+        observed = await observe_native_state(ctx)
     else:
-        reported_cwd = native["cwd"]
+        reported_cwd, observed = native["cwd"], None
     try:
         facts = await ctx.wait_facts(lambda f: (f.get("session") or {}).get("cwd") == reported_cwd, timeout=5)
     except CheckFailed:
@@ -409,6 +439,7 @@ async def optional_view_facts(ctx):
         check(model.get("effort") == native["effort"], f"C11: effort {model.get('effort')!r} != native {native['effort']!r}")
     ctx.evidence.append({"kind": "c11_session", "native": {"cwd": reported_cwd, "model": native.get("model"), "effort": native.get("effort")},
                          "facts": {"cwd": facts["session"].get("cwd"), "model": model}})
+    await model_route_witness(ctx, observed)
 
     # 1. A full native report: window, occupancy (where the runtime reports it), token and cache totals, bare cost.
     report, expected = native_report(wire, window=200000, used=4321, tokens=(1100, 220, 33, 4), cost=0.75)
