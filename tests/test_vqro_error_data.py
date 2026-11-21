@@ -191,5 +191,73 @@ class OutboundErrorDataTests(unittest.TestCase):
         self.assertEqual(self.dispatch_error(RuntimeError('plain'))['data'], {'kind': 'extension'})
 
 
+class ResultReplyWriteTests(unittest.TestCase):
+    def client(self, result, *, fail_write=False):
+        client = object.__new__(sdk.Vqro)
+        client.lock = threading.Lock()
+        client._command_context = threading.local()
+        client._command_context.invocation = 'old-proof'
+        client._command_context.layout = 'old-layout'
+        client._command_context.caller = {'principal': 'old-caller'}
+        handlers, writes = [], []
+        def handler(*_):
+            handlers.append(True)
+            return result
+        class Socket:
+            def sendall(self, wire):
+                writes.append(wire)
+                if fail_write and len(writes) == 1:
+                    raise OSError('simulated uncertain result write')
+        client.handler, client.sock = handler, Socket()
+        return client, handlers, writes
+
+    def dispatch(self, client):
+        return client._dispatch({'id': 7, 'method': 'command.invoke',
+                                 'params': {'invocation': 'new-proof', 'args': {'context': {'layout': 'new-layout'}}}})
+
+    def assert_context_restored(self, client):
+        self.assertEqual(client._command_context.invocation, 'old-proof')
+        self.assertEqual(client._command_context.layout, 'old-layout')
+        self.assertEqual(client._command_context.caller, {'principal': 'old-caller'})
+
+    def test_uncertain_success_write_never_attempts_an_error_reply(self):
+        client, handlers, writes = self.client({'completed': True}, fail_write=True)
+        error = None
+        try:
+            self.dispatch(client)
+        except OSError as failure:
+            error = failure
+        self.assertEqual(len(handlers), 1)
+        self.assertEqual(len(writes), 1, 'a result write failure must not cause a second reply')
+        self.assertIsInstance(error, OSError)
+        self.assertIn('result', sdk.json.loads(writes[0]))
+        self.assert_context_restored(client)
+
+    def test_unserialisable_success_still_falls_back_before_any_write(self):
+        client, handlers, writes = self.client({'bad': {1}})
+        self.assertFalse(self.dispatch(client))
+        self.assertEqual(len(handlers), 1)
+        self.assertEqual(len(writes), 1)
+        self.assertIn('error', sdk.json.loads(writes[0]))
+        self.assert_context_restored(client)
+
+    def test_oversized_success_still_falls_back_before_any_write(self):
+        client, handlers, writes = self.client({'huge': 'x' * 1024})
+        with patch.object(sdk, 'MAX_RECORD_BYTES', 256):
+            self.assertFalse(self.dispatch(client))
+        self.assertEqual(len(handlers), 1)
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(sdk.json.loads(writes[0])['error']['data']['kind'], 'too_large')
+        self.assert_context_restored(client)
+
+    def test_valid_success_has_one_result_and_restores_context(self):
+        client, handlers, writes = self.client({'text': 'normal ✓'})
+        self.assertTrue(self.dispatch(client))
+        self.assertEqual(len(handlers), 1)
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(sdk.json.loads(writes[0])['result'], {'text': 'normal ✓'})
+        self.assert_context_restored(client)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -367,37 +367,43 @@ class Vqro:
         ctx = ((params.get("args") or {}) if command and isinstance(params.get("args"), dict) else {}).get("context")
         context.layout = ctx.get("layout") if isinstance(ctx, dict) and isinstance(ctx.get("layout"), str) else None
         try:
-            result = self.handler(msg["method"], msg.get("params") or {})
-            if "id" in msg:
-                self._send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
-            return True
-        except Exception as e:  # report, don't crash
-            if "id" in msg:
-                fallback = "extension failed; error details unavailable"
-                try:
-                    kind = getattr(e, "kind", None) or "extension"
-                    metadata = getattr(e, "data", None)
-                    data = dict(metadata) if isinstance(metadata, dict) else {}
-                    data["kind"] = kind  # exception classification is authoritative
-                    message = str(e)  # render once, still before any transport I/O
-                except Exception:
-                    kind, message = "extension", fallback
-                    data = {"kind": kind, "incomplete": True}
-                error = {"code": -32000, "message": message, "data": data}
-                reply = {"jsonrpc": "2.0", "id": msg["id"], "error": error}
-                for message, details in ((message, data), (message, {"kind": kind}),
-                                         (fallback, {"kind": "extension", "incomplete": True})):
-                    error.update(message=message, data=details)
+            try:
+                result = self.handler(msg["method"], msg.get("params") or {})
+                if "id" in msg:
+                    reply = {"jsonrpc": "2.0", "id": msg["id"], "result": result}
+                    # Preserve result serialization/size fallback, before I/O.
+                    if len((json.dumps(reply) + "\n").encode()) > MAX_RECORD_BYTES:
+                        raise VqroError("reply exceeds recovery envelope; handler may have already run", "too_large")
+                handled = True
+            except Exception as e:  # handler or pre-I/O formatting failure only
+                handled = False
+                if "id" in msg:
+                    fallback = "extension failed; error details unavailable"
                     try:
-                        # Validate BEFORE transport I/O. Never retry a partly
-                        # written reply just because its socket send failed.
-                        json.dumps(reply, ensure_ascii=False, allow_nan=False).encode("utf-8")
-                        if len((json.dumps(reply) + "\n").encode()) <= MAX_RECORD_BYTES:
-                            break
-                    except (TypeError, ValueError, OverflowError, RecursionError, UnicodeError):
-                        pass
+                        kind = getattr(e, "kind", None) or "extension"
+                        metadata = getattr(e, "data", None)
+                        data = dict(metadata) if isinstance(metadata, dict) else {}
+                        data["kind"] = kind  # exception classification is authoritative
+                        message = str(e)  # render once, still before any transport I/O
+                    except Exception:
+                        kind, message = "extension", fallback
+                        data = {"kind": kind, "incomplete": True}
+                    error = {"code": -32000, "message": message, "data": data}
+                    reply = {"jsonrpc": "2.0", "id": msg["id"], "error": error}
+                    for message, details in ((message, data), (message, {"kind": kind}),
+                                             (fallback, {"kind": "extension", "incomplete": True})):
+                        error.update(message=message, data=details)
+                        try:
+                            json.dumps(reply, ensure_ascii=False, allow_nan=False).encode("utf-8")
+                            if len((json.dumps(reply) + "\n").encode()) <= MAX_RECORD_BYTES:
+                                break
+                        except (TypeError, ValueError, OverflowError, RecursionError, UnicodeError):
+                            pass
+            if "id" in msg:
+                # A failed/uncertain write is never a handler error and must not
+                # trigger another reply, for success and error envelopes alike.
                 self._send(reply)
-            return False
+            return handled
         finally:
             context.invocation = previous
             context.layout = previous_layout
