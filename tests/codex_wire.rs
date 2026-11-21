@@ -359,6 +359,12 @@ async fn model_configuration_is_native_per_thread_and_used_by_future_turns() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
+    let discovery: Vec<_> = rows
+        .iter()
+        .filter(|row| row["method"] == "model/list")
+        .collect();
+    assert_eq!(discovery.len(), 1);
+    assert_eq!(discovery[0]["params"]["includeHidden"], false);
     let configured: Vec<_> = rows
         .iter()
         .filter(|row| row["method"] == "thread/resume")

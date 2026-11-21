@@ -292,7 +292,7 @@ impl Endpoint {
     }
 
     pub fn model_option(&self) -> Value {
-        json!({"id":"model","label":"Model","description":"Native thread model; change while idle","category":"model",
+        json!({"id":"model","label":"Model","description":"Native model for this thread and future new/resumed threads; change while idle","category":"model",
             "type":"select","value":if self.config_pending || self.config_uncertain {Value::Null}else{self.model.as_ref().map(|model|model["id"].clone()).unwrap_or(Value::Null)},
             "choices":self.model_choices,"rev":self.config_rev})
     }

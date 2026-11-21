@@ -382,7 +382,7 @@ impl Runtime {
                 .native
                 .call_with_timeout(
                     "model/list",
-                    json!({"limit":64,"cursor":cursor,"includeHidden":true}),
+                    json!({"limit":64,"cursor":cursor,"includeHidden":false}),
                     remaining(deadline),
                 )
                 .await
