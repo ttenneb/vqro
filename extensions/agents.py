@@ -731,7 +731,7 @@ class Agents:
         """The ⚙ popup (the human, relay-11: everything but the conversation and the message box lives here): the view
         filters, then this agent's settings, its bridge terminal and Stop (also in the pane menu, D15)."""
         rid = r["id"]
-        items = [{"type": "header", "text": "View"}]
+        items = [{"type": "header", "text": "View", "style": "heading"}]
         c = self.conversations.get(rid)
         if c is not None:
             with c.lock:
@@ -739,7 +739,7 @@ class Agents:
             items += self.view_rows(rid, self.view_of(rid), seen)
         else:
             items.append({"type": "text", "style": "dim", "text": "This agent doesn't stream its conversation."})
-        items.append({"type": "header", "text": "Agent"})
+        items.append({"type": "header", "text": "Agent", "style": "heading"})
         if self.has_settings(r) and r.get("available"):
             items.append({"text": "Agent settings…", "command": "agents.config", "args": {"resource": rid}})
         host = self.ext.resources.get(r.get("host"))
@@ -814,7 +814,7 @@ class Agents:
         folder = agent_transcript.home_short(folder) if folder else None
         state = status(r)
         waiting = state == "blocked" or bool(self.requests_v0(r) if self.v0(r, "respond") else None)
-        style = "warn" if waiting or ended(r) or agent_facts(r).get("lifecycle") not in (None, "live") else "ok" if state == "idle" else "accent"
+        style = "warn" if waiting or ended(r) or agent_facts(r).get("lifecycle") not in (None, "live") else "ok" if state == "idle" else "info"
         return {"title": " · ".join([name] + ([head(plain(folder), 80)] if folder else [])),
                 "title_right": "● " + state, "title_right_style": style}
 
@@ -1500,7 +1500,7 @@ class Agents:
         config = advertised(r, "config") if self.supported(r, "configure") else []
         commands = advertised(r, "commands") if self.supported(r, "command") else []
         if config:
-            items.append({"type": "header", "text": "Settings"})
+            items.append({"type": "header", "text": "Settings", "style": "heading"})
         for entry in config:
             if entry.get("type") == "boolean":
                 options = [{"label": "On", "value": True}, {"label": "Off", "value": False}]
@@ -1513,7 +1513,7 @@ class Agents:
                           "args": {"resource": rid, "id": entry["id"], **({"rev": entry["rev"]} if "rev" in entry else {})},
                           "description": label(entry.get("description") or self.shown_value(entry), 300)})
         if commands:
-            items.append({"type": "header", "text": "Commands"})
+            items.append({"type": "header", "text": "Commands", "style": "heading"})
         for entry in commands:
             row = {"text": label("/"+entry["name"] if not entry.get("label") else entry["label"], 80), "command": "agents.command",
                    "args": {"resource": rid, "name": entry["name"]}}

@@ -137,7 +137,7 @@ def content_rows(content, style=None, limit=None):
         elif kind in ("image", "audio"):
             rows.append({"type": "text", "style": "dim", "text": f"[{kind}: {plain(str(block.get('mime') or '?'))}]"})
         elif kind in ("resource_link", "resource"):
-            rows.append({"type": "text", "style": "dim", "text": "[" + clip(plain(str(block.get("name") or block.get("uri") or kind)), 512) + "]"})
+            rows.append({"type": "text", "style": "link" if kind == "resource_link" else "dim", "text": "[" + clip(plain(str(block.get("name") or block.get("uri") or kind)), 512) + "]"})
         else:
             rows.append({"type": "text", "style": "dim", "text": f"[{plain(str(kind))} content]"})
     return rows
@@ -214,24 +214,24 @@ class Names:
         """(label, style, key): the key names the sender for filtering (you, agent, agent:rN, human:p, user)."""
         role = value.get("role")
         if role == "assistant":
-            return self.agent_name(self.agent), None, "agent"
+            return self.agent_name(self.agent), "agent", "agent"
         if role in ROLE_LABEL:
             return ROLE_LABEL[role], "dim" if role in ("thought", "system") else None, role
         origin = value.get("origin") if isinstance(value.get("origin"), dict) else {}
         principal = origin.get("principal")
         known = isinstance(principal, str) and principal != "undeclared"
         if known and self.owner is not None and principal == self.owner:
-            return "You", "bold", "you"  # the workspace owner's principal, as the core recorded it
+            return "You", "you", "you"  # the workspace owner's principal, as the core recorded it
         holder = self.by_principal(principal) if known else None
         if holder is not None:  # the core-recorded sender is a resource the launcher tagged with that principal
             rid, r = holder
             what = f" (agent {plain(rid)})" if r.get("kind") == "agent" else ""
-            return f"Message from {self.agent_name(rid)}{what}", "accent", "principal:" + principal
+            return f"Message from {self.agent_name(rid)}{what}", "other_agent" if r.get("kind") == "agent" else "plain", "principal:" + principal
         if origin.get("kind") == "agent" or origin.get("agent"):  # only claimed: say so
             rid = origin.get("agent")
             name = self.agent_name(rid) if isinstance(rid, str) else plain(str(principal or "an agent"))
             claim = f" (claimed agent {plain(rid)})" if isinstance(rid, str) else " (claimed agent)"
-            return (f"Message from {name}{claim}", "accent",
+            return (f"Message from {name}{claim}", "other_agent",
                     "agent:" + (rid if isinstance(rid, str) else str(principal)))
         if origin.get("kind") == "human" and not known:
             # As recorded, never inferred to be the viewer: an undeclared human, and the actor that sent it.
@@ -239,7 +239,7 @@ class Names:
             via = f"via {ACTORS.get(actor, plain(str(actor)))}, " if isinstance(actor, str) and actor else ""
             return f"Human ({via}undeclared)", "bold", "human:undeclared"
         if known:
-            return "Message from " + plain(principal), "accent", "human:" + principal
+            return "Message from " + plain(principal), "plain", "human:" + principal
         return "User", "bold", "user"  # no recorded origin: nothing assumed
 
     def sender_name(self, key):
@@ -430,7 +430,7 @@ def tool_row(eid, value, cwd=None):
     for loc in value.get("locations") if isinstance(value.get("locations"), list) else []:
         if isinstance(loc, dict) and isinstance(loc.get("path"), str):
             line = f":{loc['line']}" if type(loc.get("line")) is int else ""
-            places.append({"type": "text", "style": "accent", "text": clip(plain(loc["path"] + line), 1024)})
+            places.append({"type": "text", "style": "link", "text": clip(plain(loc["path"] + line), 1024)})
     # Locations too get a bounded share before the output (24 long ones used to push it out: vqro-lead-secondary).
     children += bounded_children(places, LOCATION_BYTES, "locations")
     if output:
@@ -452,7 +452,8 @@ def tool_row(eid, value, cwd=None):
     return {"id": "t:" + eid, **({"menu": menu} if menu else {}), **({"actions": actions} if actions else {}), "text": f"{TOOL_ICON.get(status, '?')} {clip(name, 40)}" + (f"   {main}" if main else ""),
             # Aligned cells (feature columns, the panel's TOOL_COLUMNS); `text` is what other clients show.
             "columns": [f"{TOOL_ICON.get(status, '?')} {clip(name, 40)}", main],
-            "style": "error" if status == "failed" else None, **({"copy": copy} if copy else {}),
+            "style": "error" if status == "failed" else "ok" if status == "completed" else "info" if status == "running" else None,
+            **({"copy": copy} if copy else {}),
             **({"badges": [{"text": b, "style": "dim"} for b in badges]} if badges else {}),
             # A failed call says why on its line (the first line of what it returned), else just "failed".
             **({"description": clip(plain(next((l.strip() for l in ANSI.sub("", output).split("\n") if l.strip()), "failed")), 200)}
@@ -503,7 +504,7 @@ def group_row(steps, cwd=None):
     children = [{"id": "gh:" + tools[0][0], "text": "Tool · Target · Status · Time · Output · Actions",
                  "columns": ["Tool", "Target", "Status", "Time", "Output"],
                  "detail": "Actions" + " " * len("[copy]"),  # align with the start of [open] [copy], not its end
-                 "style": "bold", "focusable": False}] + kept
+                 "style": "heading", "focusable": False}] + kept
     starts = [v.get("started_ms") for _, v in tools if type(v.get("started_ms")) is int]
     ends = [v.get("ended_ms") for _, v in tools if type(v.get("ended_ms")) is int]
     took = duration(min(starts), max(ends)) if starts and ends else None
@@ -513,7 +514,7 @@ def group_row(steps, cwd=None):
     for _, value in tools:
         key = (TOOL_ICON.get(value.get("status"), "?"), plain(str(value.get("title") or "tool"))[:20])
         tally[key] = tally.get(key, 0) + 1
-    badges = [{"text": f"{icon} {name}" + (f" ×{n}" if n > 1 else ""), "style": "error" if icon == "✗" else "dim"}
+    badges = [{"text": f"{icon} {name}" + (f" ×{n}" if n > 1 else ""), "style": "error" if icon == "✗" else "ok" if icon == "✓" else "info" if icon == "…" else "dim"}
               for (icon, name), n in list(tally.items())[:6]]
     run = tools[0][0]
     table = [{"text": "Table", "command": "agents.tools", "args": {"run": run}}]  # this turn's tools as a table
@@ -887,7 +888,7 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
             add("system", [{"type": "text", "style": "dim", "text": "· System · context compacted"}], "System · context compacted", [value], eid)
         elif kind == "plan":  # shown whole, generically
             flush_hidden()
-            blocks.append([{"type": "header", "text": "Plan"}] + lines(json.dumps(value.get("entries", value), ensure_ascii=False, indent=1), "muted", 40))
+            blocks.append([{"type": "header", "text": "Plan", "style": "heading"}] + lines(json.dumps(value.get("entries", value), ensure_ascii=False, indent=1), "muted", 40))
         else:
             other_kind(kind, eid, value)
     end_tools()

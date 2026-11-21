@@ -227,6 +227,21 @@ class TranscriptRows(unittest.TestCase):
                                     "origin": {"kind": "human", "principal": "alice"}}}
         self.assertEqual(self.rows(other)[0]["text"], "Message from alice")
 
+    def test_semantic_styles_keep_sender_and_tool_state_meanings(self):
+        names = agent_transcript.Names({"r2": {"name": "Pi", "kind": "agent"},
+                                        "r3": {"name": "Peer", "kind": "agent", "principal": "p:peer"}},
+                                       "r2", owner="owner")
+        self.assertEqual(names.sender({"role": "assistant"})[1], "agent")
+        self.assertEqual(names.sender({"role": "user", "origin": {"principal": "owner"}})[1], "you")
+        self.assertEqual(names.sender({"role": "user", "origin": {"principal": "p:peer"}})[1], "other_agent")
+        self.assertEqual(names.sender({"role": "user", "origin": {"principal": "alice"}})[1], "plain")
+        self.assertNotEqual(names.sender({"role": "user"})[1], "you", "no origin is not proof it was you")
+        for status, style in (("completed", "ok"), ("failed", "error"), ("running", "info")):
+            row = agent_transcript.tool_row("t", {"title": "read", "status": status,
+                                                   "locations": [{"path": "/work/a.rs"}]})
+            self.assertEqual(row["style"], style)
+            self.assertEqual(row["children"][0]["style"], "link")
+
     def test_tool_calls_are_one_line_each_under_one_collapsed_activity_line(self):
         """Redesign (mockup rev 3, reply-13): Activity collapsed, one line per tool, readable arguments, output cut."""
         group = next(r for r in self.rows() if r.get("text", "").startswith("Activity"))
