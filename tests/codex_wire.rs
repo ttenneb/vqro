@@ -279,6 +279,86 @@ async fn provider_deadline_dispatches_once_then_native_receipt_arrives_later() {
 }
 
 #[tokio::test]
+async fn generic_causality_is_checked_before_native_write_and_echoed_without_upgrade() {
+    use vqro::provider_client::Outcome;
+    let (root, child, peer, incoming) = fixture(false).await;
+    let (runtime, drain) = open_runtime(peer.clone(), incoming, 1).await;
+    runtime
+        .invoke(
+            "endpoint-1",
+            "inc",
+            "agent.session",
+            json!({"v":0,"action":"new"}),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    let ledger = root.path().join("ledger.jsonl");
+    let before = std::fs::read_to_string(&ledger).unwrap();
+    let mut args = json!({"v":0,"mode":"admit","delivery":"causal-delivery","origin":{"principal":"p:test","actor":"actor:test","kind":"tool"},
+        "content":[{"type":"text","text":"literal input"}],"correlation":"c".repeat(256)});
+    for cause in [
+        json!(null),
+        json!({"kind":"effect","id":"id","provenance":"native"}),
+        json!({"kind":"future","id":"id","provenance":"future","extra":"x".repeat(4096)}),
+    ] {
+        args["cause"] = cause;
+        let result = runtime
+            .invoke("endpoint-1", "inc", "agent.send", args.clone(), deadline())
+            .await
+            .unwrap();
+        assert!(matches!(result, Outcome::Rejected { ref kind, .. } if kind == "invalid"));
+        assert_eq!(
+            std::fs::read_to_string(&ledger).unwrap(),
+            before,
+            "invalid cause must not reach native IPC"
+        );
+    }
+    let mut cause = json!({"kind":"future","id":"id","provenance":"native","extra":""});
+    let overhead = vqro::limits::encoded_bytes(&cause);
+    cause["extra"] = json!("x".repeat(4096 - overhead));
+    assert_eq!(vqro::limits::encoded_bytes(&cause), 4096);
+    args["cause"] = cause.clone();
+    let accepted = runtime
+        .invoke("endpoint-1", "inc", "agent.send", args.clone(), deadline())
+        .await
+        .unwrap();
+    assert!(matches!(accepted, Outcome::Accepted(_)));
+    let receipt = runtime
+        .invoke(
+            "endpoint-1",
+            "inc",
+            "agent.receipt",
+            json!({"v":0,"delivery":"causal-delivery"}),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    let Outcome::Observed(Some(receipt)) = receipt else {
+        panic!("expected actual receipt");
+    };
+    assert_eq!(
+        receipt["cause"], cause,
+        "caller provenance is echoed, not promoted or rewritten"
+    );
+    assert_eq!(receipt["correlation"], args["correlation"]);
+    let requests: Vec<Value> = std::fs::read_to_string(&ledger)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|row| row["method"] == "turn/start")
+            .count(),
+        1
+    );
+    cleanup(child, peer).await;
+    drain.await.unwrap();
+}
+
+#[tokio::test]
 async fn two_concurrent_valid_answers_write_exactly_one_native_response() {
     use vqro::provider_client::Outcome;
     let (root, child, peer, incoming) = fixture(false).await;

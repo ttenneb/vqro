@@ -430,6 +430,13 @@ subject?}` or `{operation}` (e.g. authentication before any session); it is inde
 
 - Declared: `agent.respond {methods: [...], scopes: [session | run | operation ...], background_requests: true |
   false}`; `background_requests: true` means requests outside the foreground run can be pending at the same time.
+- Optional `agent.respond.native_timeout` describes the native request-expiry capability:
+  - `"none"`: the runtime does not expire these requests natively (Codex). Scope/lifecycle invalidation still
+    applies; this is not a promise that a request survives its session or run.
+  - `"unrepresentable_positive"`: positive native timeouts exist, but their deadline cannot be represented
+    faithfully as `expires_at_ms` (Pi's relative UI timers below). Such timed requests are cancelled once and
+    reported unrepresentable, never assigned an invented deadline; untimed requests remain answerable.
+  - An absent or unknown value means unknown, not `"none"`; clients must degrade gracefully.
 - `agent.respond {v, epoch, request, revision, response}`. The adapter validates epoch, revision, `pending` status,
   expiry, that the scope is still live and that the response itself is valid (choice, schema, enum, range), and only
   then claims the revision: the **first valid answer wins**; anything else is `rejected` (`stale` or `invalid`) before

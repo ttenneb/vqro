@@ -6,7 +6,7 @@ pub mod observation;
 pub mod runtime;
 
 use crate::rpc::{RpcError, RpcResult};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, VecDeque};
 
 pub const RECEIPTS: usize = 256;
@@ -299,27 +299,9 @@ impl Endpoint {
                 }
             }
         }
-        optional_id(args, "correlation")?;
-        if let Some(cause) = args.get("cause").filter(|v| !v.is_null()) {
-            if !cause.is_object() || !small(cause, 1024) {
-                return Err(rejected("invalid", "cause must be a bounded object"));
-            }
-            let kind = id(cause, "kind")?;
-            id(cause, "id")?;
-            if cause["provenance"] != "asserted" {
-                return Err(rejected(
-                    "unsupported",
-                    "caller causality must remain asserted; native evidence is not inferred",
-                ));
-            }
-            if matches!(kind.as_str(), "entity" | "request") {
-                id(cause, "endpoint")?;
-                id(cause, "epoch")?;
-            }
-            if kind == "effect" {
-                id(cause, "boot")?;
-            }
-        }
+        // Use the generic wire bounds and preserve open provenance as caller data.
+        // Accepting a label does not upgrade it to adapter-proved/native evidence.
+        crate::causality::Causality::parse(args)?;
         Ok(())
     }
 

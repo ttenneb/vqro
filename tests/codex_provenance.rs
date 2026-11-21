@@ -28,6 +28,8 @@ fn declared_topology_request_scopes_and_ordered_content_select_the_right_cases()
     assert_eq!(c["host"], json!({"kind":"server","endpoints":"many"}));
     assert_eq!(c["agent.respond"]["scopes"], json!(["session", "run"]));
     assert_eq!(c["agent.respond"]["background_requests"], true);
+    assert_eq!(c["agent.respond"]["native_timeout"], "none");
+    assert_eq!(provider["agent.respond"]["native_timeout"], json!(["none"]));
     assert_eq!(
         c["agent.send"]["content"],
         json!({"types":["text"],"shape":"ordered"})
@@ -78,9 +80,10 @@ fn actor_and_cause_qualification_are_not_invented() {
     args["cause"] = json!({"kind":"entity","id":"x","provenance":"asserted"});
     assert_eq!(e.prepare_send(&args).unwrap_err().kind(), "invalid");
     args["cause"] = json!({"kind":"effect","id":"effect-1","boot":"boot-1","provenance":"native"});
-    assert_eq!(e.prepare_send(&args).unwrap_err().kind(), "unsupported");
-    args["cause"]["provenance"] = json!("asserted");
-    assert!(e.prepare_send(&args).is_ok());
+    assert!(
+        e.prepare_send(&args).is_ok(),
+        "open caller provenance remains data"
+    );
     let mut e = endpoint();
     let receipt = e.record_receipt("d", "admitted", None, &args);
     assert_eq!(receipt.value["cause"], args["cause"]);
