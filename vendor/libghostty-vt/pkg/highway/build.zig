@@ -18,17 +18,21 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = b.path("src/detect.zig"),
             .target = target,
             .optimize = optimize,
+            // Our highway package is free of libc at runtime (uses no symbols)
+            // but does require libc headers at compile time.
+            .link_libc = true,
         }),
         .linkage = .static,
+
+        // Zig's own x86_64 code generator, which Debug builds use, ignores
+        // symbol visibility. Without LLVM, shared libraries that include
+        // this would export ghostty_hwy_detect_targets.
+        .use_llvm = true,
     });
 
-    // Our highway package is free of libc at runtime (uses no symbols)
-    // but does require libc headers at compile time.
-    lib.linkLibC();
-
-    lib.addIncludePath(b.path("src/cpp"));
+    lib.root_module.addIncludePath(b.path("src/cpp"));
     if (upstream_) |upstream| {
-        lib.addIncludePath(upstream.path(""));
+        lib.root_module.addIncludePath(upstream.path(""));
         module.addIncludePath(upstream.path(""));
     }
 
@@ -50,6 +54,9 @@ pub fn build(b: *std.Build) !void {
         // Highway can avoid libc++ entirely as long as all users compile
         // against the headers with the same define.
         "-DHWY_NO_LIBCXX",
+
+        // Only linked statically into libghostty-vt and the app: export nothing.
+        "-fvisibility=hidden",
 
         // Avoid changing binaries based on the current time and date.
         "-Wno-builtin-macro-redefined",
@@ -100,9 +107,21 @@ pub fn build(b: *std.Build) !void {
             "-fmath-errno",
             "-fno-exceptions",
         });
+    } else if (target.result.abi == .msvc) {
+        try flags.appendSlice(b.allocator, &.{
+            // -fno-autolink also drops UCRT's /alternatename fallback.
+            "-D_Avx2WmemEnabledWeakValue=_Avx2WmemEnabled",
+            "-fno-autolink",
+            "-fno-stack-protector",
+        });
+
+        // When the C stack protector is disabled we must also disable stack
+        // protection for the Zig code, since otherwise Zig will link to
+        // undefined security cookie symbols.
+        lib.root_module.stack_protector = false;
     }
 
-    lib.addCSourceFiles(.{ .flags = flags.items, .files = &.{
+    lib.root_module.addCSourceFiles(.{ .flags = flags.items, .files = &.{
         "src/cpp/abort.cc",
         "src/cpp/per_target.cc",
         "src/cpp/targets.cpp",
@@ -127,7 +146,7 @@ pub fn build(b: *std.Build) !void {
                 .optimize = optimize,
             }),
         });
-        test_exe.linkLibrary(lib);
+        test_exe.root_module.linkLibrary(lib);
 
         var it = module.import_table.iterator();
         while (it.next()) |entry| test_exe.root_module.addImport(entry.key_ptr.*, entry.value_ptr.*);

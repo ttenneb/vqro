@@ -30,15 +30,28 @@ const Collection = font.Collection;
 const Face = font.Face;
 const Glyph = font.Glyph;
 const Library = font.Library;
+const DeferredFace = font.DeferredFace;
 const Metrics = font.Metrics;
 const Presentation = font.Presentation;
 const Style = font.Style;
 const RenderOptions = font.Glyph.RenderOptions;
+const global = @import("../global.zig");
 
 const log = std.log.scoped(.font_shared_grid);
 
+/// Source of the unique `id` assigned to each grid in `init`. This is a
+/// usize rather than a u64 because not all targets support 64-bit atomics.
+var next_id: std.atomic.Value(usize) = .init(1);
+
+/// Identifies this grid instance. It is taken from a process-wide counter
+/// (starting at 1) each time a grid is created, so a grid created later at the
+/// same memory address as a freed one gets a different value. That makes it
+/// usable to decide whether a cache built from one grid is still valid for
+/// another. It does not change after `init`.
+id: usize,
+
 /// Cache for codepoints to font indexes in a group.
-codepoints: std.AutoHashMapUnmanaged(CodepointKey, ?Collection.Index) = .{},
+codepoints: std.HashMapUnmanaged(CodepointKey, ?Collection.Index, CodepointKey.Context, 80) = .{},
 
 /// Cache for glyph renders into the atlas.
 glyphs: std.HashMapUnmanaged(GlyphKey, Render, GlyphKey.Context, 80) = .{},
@@ -60,13 +73,15 @@ metrics: Metrics,
 /// this directly if they need to i.e. access the atlas directly. Because
 /// callers can use this lock directly, maintainers need to be extra careful
 /// to review call sites to ensure they are using the lock correctly.
-lock: std.Thread.RwLock,
+lock: std.Io.RwLock,
 
 pub const init_tw = tripwire.module(enum {
     codepoints_capacity,
     glyphs_capacity,
     reload_metrics,
 }, init);
+
+pub const InitError = std.mem.Allocator.Error || Collection.UpdateMetricsError;
 
 /// Initialize the grid.
 ///
@@ -80,7 +95,7 @@ pub const init_tw = tripwire.module(enum {
 pub fn init(
     alloc: Allocator,
     resolver: CodepointResolver,
-) !SharedGrid {
+) InitError!SharedGrid {
     const tw = init_tw;
 
     // We need to support loading options since we use the size data
@@ -92,10 +107,11 @@ pub fn init(
     errdefer atlas_color.deinit(alloc);
 
     var result: SharedGrid = .{
+        .id = next_id.fetchAdd(1, .monotonic),
         .resolver = resolver,
         .atlas_grayscale = atlas_grayscale,
         .atlas_color = atlas_color,
-        .lock = .{},
+        .lock = .init,
         .metrics = undefined, // Loaded below
     };
 
@@ -157,19 +173,19 @@ pub fn getIndex(
     style: Style,
     p: ?Presentation,
 ) !?Collection.Index {
-    const key: CodepointKey = .{ .style = style, .codepoint = cp, .presentation = p };
+    const key = CodepointKey.from(.{ .style = style, .codepoint = cp, .presentation = p });
 
     // Fast path: the cache has the value. This is almost always true and
     // only requires a read lock.
     {
-        self.lock.lockShared();
-        defer self.lock.unlockShared();
+        self.lock.lockSharedUncancelable(global.io());
+        defer self.lock.unlockShared(global.io());
         if (self.codepoints.get(key)) |v| return v;
     }
 
     // Slow path: we need to search this codepoint
-    self.lock.lock();
-    defer self.lock.unlock();
+    self.lock.lockUncancelable(global.io());
+    defer self.lock.unlock(global.io());
 
     // Try to get it, if it is now in the cache another thread beat us to it.
     const gop = try self.codepoints.getOrPut(alloc, key);
@@ -185,10 +201,38 @@ pub fn getIndex(
         // because getFace doesn't work with special fonts.
         if (idx.special() != null) break :preload;
 
-        // Load the face in case its deferred. If this fails then we would've
-        // failed to load it in the future anyways so we want to undo all
-        // the caching we did.
-        _ = try self.resolver.collection.getFace(idx);
+        // Load the face in case its deferred. The errors listed below
+        // mean the face has no file we can open or read, so it never will
+        // load: treat the codepoint as having no font and cache that.
+        // Returning the error would make the caller drop everything around
+        // this codepoint (the renderer clears the whole row) and retry the
+        // same failing load on every frame. Anything else, running out of
+        // memory included, is returned and the errdefer above forgets this
+        // lookup.
+        //
+        // The switch is over anyerror because the error set depends on the
+        // font backend: the fontconfig errors exist only with fontconfig,
+        // FontHasNoFile and FontPathCantDecode only with CoreText, and a
+        // prong naming an error outside the set does not compile.
+        _ = self.resolver.collection.getFace(idx) catch |err| switch (@as(anyerror, err)) {
+            error.FontconfigNoMatch,
+            error.FontconfigTypeMismatch,
+            error.FontconfigNoId,
+            error.FontHasNoFile,
+            error.FontPathCantDecode,
+            error.CannotOpenResource,
+            error.UnknownFileFormat,
+            error.InvalidFileFormat,
+            => {
+                log.warn(
+                    "unable to load face for codepoint={X} err={}",
+                    .{ cp, err },
+                );
+                gop.value_ptr.* = null;
+                return null;
+            },
+            else => return err,
+        };
     }
 
     return value;
@@ -201,8 +245,8 @@ pub fn hasCodepoint(
     cp: u32,
     p: ?Presentation,
 ) bool {
-    self.lock.lockShared();
-    defer self.lock.unlockShared();
+    self.lock.lockSharedUncancelable(global.io());
+    defer self.lock.unlockShared(global.io());
     return self.resolver.collection.hasCodepoint(
         idx,
         cp,
@@ -236,8 +280,8 @@ pub fn renderCodepoint(
 
     // Get the glyph for the font
     const glyph_index = glyph_index: {
-        self.lock.lockShared();
-        defer self.lock.unlockShared();
+        self.lock.lockSharedUncancelable(global.io());
+        defer self.lock.unlockShared(global.io());
         const face = try self.resolver.collection.getFace(index);
         break :glyph_index face.glyphIndex(cp) orelse return null;
     };
@@ -250,6 +294,127 @@ pub const renderGlyph_tw = tripwire.module(enum {
     get_presentation,
 }, renderGlyph);
 
+// FIXME: This gets a massive manual error set for now because there is an
+// equally massive call stack in the get_presentation tracepoint. This should
+// be consolidated into something better ASAP.
+pub const RenderGlyphError = error{
+    ArrayTooLarge,
+    AtlasFull,
+    BadArgument,
+    BbxTooBig,
+    BitmapHandlingError,
+    CMapTableMissing,
+    CannotOpenResource,
+    CannotOpenStream,
+    CannotRenderGlyph,
+    CodeOverflow,
+    CorruptedFontGlyphs,
+    CorruptedFontHeader,
+    CouldNotFindContext,
+    DebugOpCode,
+    DeferredLoadingUnavailable,
+    DivideByZero,
+    ENDFInExecStream,
+    ExecutionTooLong,
+    FontHasNoFile,
+    FontPathCantDecode,
+    FontconfigFailed,
+    FontconfigNoId,
+    FontconfigNoMatch,
+    FontconfigTypeMismatch,
+    GlyphResizeFailed,
+    HarfbuzzFailed,
+    HmtxTableMissing,
+    HorizHeaderMissing,
+    Ignore,
+    IndexOutOfBounds,
+    InvalidArgument,
+    InvalidAtlasFormat,
+    InvalidCacheHandle,
+    InvalidCharMapFormat,
+    InvalidCharMapHandle,
+    InvalidCharacterCode,
+    InvalidCodeRange,
+    InvalidComposite,
+    InvalidDriverHandle,
+    InvalidFaceHandle,
+    InvalidFileFormat,
+    InvalidFrameOperation,
+    InvalidFrameRead,
+    InvalidGlyphFormat,
+    InvalidGlyphIndex,
+    InvalidHandle,
+    InvalidHeight,
+    InvalidHorizMetrics,
+    InvalidLibraryHandle,
+    InvalidMatrix,
+    InvalidOffset,
+    InvalidOpcode,
+    InvalidOutline,
+    InvalidPPem,
+    InvalidPixelSize,
+    InvalidPostTable,
+    InvalidPostTableFormat,
+    InvalidReference,
+    InvalidSVGTable,
+    InvalidSizeHandle,
+    InvalidSlotHandle,
+    InvalidState,
+    InvalidStreamHandle,
+    InvalidStreamOperation,
+    InvalidStreamRead,
+    InvalidStreamSeek,
+    InvalidStreamSkip,
+    InvalidTable,
+    InvalidVersion,
+    InvalidVertMetrics,
+    InvalidWidth,
+    LocationsMissing,
+    LowerModuleVersion,
+    MathError,
+    MissingBbxField,
+    MissingCharsField,
+    MissingEncodingField,
+    MissingFontField,
+    MissingFontboundingboxField,
+    MissingModule,
+    MissingProperty,
+    MissingSizeField,
+    MissingStartcharField,
+    MissingStartfontField,
+    NameTableMissing,
+    NestedDEFS,
+    NestedFrameAccess,
+    NoCurrentPoint,
+    NoUnicodeGlyphName,
+    OutOfMemory,
+    PathNotClosed,
+    PixelSourceNotPreMultiplied,
+    PostTableMissing,
+    RasterCorrupted,
+    RasterNegativeHeight,
+    RasterOverflow,
+    RasterUninitialized,
+    SpecialHasNoFace,
+    StackOverflow,
+    StackUnderflow,
+    Syntax,
+    TableMissing,
+    TooFewArguments,
+    TooManyCaches,
+    TooManyDrivers,
+    TooManyExtensions,
+    TooManyFunctionDefs,
+    TooManyHints,
+    TooManyInstructionDefs,
+    UnimplementedFeature,
+    UnknownFileFormat,
+    UnknownFreetypeError,
+    UnlistedObject,
+    UnsupportedGlyphFormat,
+    WrongAtlas,
+};
+
 /// Render a glyph index. This automatically determines the correct texture
 /// atlas to use and caches the result.
 pub fn renderGlyph(
@@ -258,22 +423,22 @@ pub fn renderGlyph(
     index: Collection.Index,
     glyph_index: u32,
     opts: RenderOptions,
-) !Render {
+) RenderGlyphError!Render {
     const tw = renderGlyph_tw;
 
-    const key: GlyphKey = .{ .index = index, .glyph = glyph_index, .opts = opts };
+    const key = GlyphKey.from(.{ .index = index, .glyph = glyph_index, .opts = opts });
 
     // Fast path: the cache has the value. This is almost always true and
     // only requires a read lock.
     {
-        self.lock.lockShared();
-        defer self.lock.unlockShared();
+        self.lock.lockSharedUncancelable(global.io());
+        defer self.lock.unlockShared(global.io());
         if (self.glyphs.get(key)) |v| return v;
     }
 
     // Slow path: we need to search this codepoint
-    self.lock.lock();
-    defer self.lock.unlock();
+    self.lock.lockUncancelable(global.io());
+    defer self.lock.unlock(global.io());
 
     const gop = try self.glyphs.getOrPut(alloc, key);
     if (gop.found_existing) return gop.value_ptr.*;
@@ -339,56 +504,79 @@ pub fn renderGlyph(
     return gop.value_ptr.*;
 }
 
-const CodepointKey = struct {
-    style: Style,
+const CodepointKey = packed struct(u64) {
     codepoint: u32,
-    presentation: ?Presentation,
+    style: Style,
+    has_presentation: bool,
+    presentation: Presentation,
+    _padding: u27 = 0,
+
+    const Context = struct {
+        pub fn hash(_: Context, key: CodepointKey) u64 {
+            const x: u64 = @bitCast(key);
+            return x ^ (x >> 32);
+        }
+
+        pub fn eql(_: Context, a: CodepointKey, b: CodepointKey) bool {
+            return @as(u64, @bitCast(a)) == @as(u64, @bitCast(b));
+        }
+    };
+
+    inline fn from(k: struct {
+        style: Style,
+        codepoint: u32,
+        presentation: ?Presentation,
+    }) CodepointKey {
+        return .{
+            .codepoint = k.codepoint,
+            .style = k.style,
+            .has_presentation = k.presentation != null,
+            .presentation = k.presentation orelse .text,
+        };
+    }
 };
 
-const GlyphKey = struct {
-    index: Collection.Index,
+/// Cache key for rendered glyphs. Packed to 8 bytes so HashMap stores
+/// and compares a u64 instead of a full RenderOptions (metrics,
+/// nerd-font constraint, etc. are not part of the identity).
+const GlyphKey = packed struct(u64) {
     glyph: u32,
-    opts: RenderOptions,
+    index: Collection.Index,
+    opts: packed struct(u16) {
+        cell_width: u2,
+        thicken: bool,
+        thicken_strength: u8,
+        constraint_width: u2,
+        _padding: u3 = 0,
+    },
 
     const Context = struct {
         pub fn hash(_: Context, key: GlyphKey) u64 {
-            // Packed is a u64 but std.hash.int improves uniformity and
-            // avoids collisions in our hashmap.
-            const packed_key = Packed.from(key);
-            return std.hash.int(@as(u64, @bitCast(packed_key)));
+            const x: u64 = @bitCast(key);
+            return x ^ (x >> 32);
         }
 
         pub fn eql(_: Context, a: GlyphKey, b: GlyphKey) bool {
-            // Packed checks glyphs but in most cases the glyphs are NOT
-            // equal so the first check leads to increased throughput.
-            return a.glyph == b.glyph and Packed.from(a) == Packed.from(b);
+            return @as(u64, @bitCast(a)) == @as(u64, @bitCast(b));
         }
     };
 
-    const Packed = packed struct(u64) {
+    inline fn from(k: struct {
         index: Collection.Index,
         glyph: u32,
-        opts: packed struct(u16) {
-            cell_width: u2,
-            thicken: bool,
-            thicken_strength: u8,
-            constraint_width: u2,
-            _padding: u3 = 0,
-        },
-
-        inline fn from(key: GlyphKey) Packed {
-            return .{
-                .index = key.index,
-                .glyph = key.glyph,
-                .opts = .{
-                    .cell_width = key.opts.cell_width orelse 0,
-                    .thicken = key.opts.thicken,
-                    .thicken_strength = key.opts.thicken_strength,
-                    .constraint_width = key.opts.constraint_width,
-                },
-            };
-        }
-    };
+        opts: RenderOptions,
+    }) GlyphKey {
+        return .{
+            .glyph = k.glyph,
+            .index = k.index,
+            .opts = .{
+                .cell_width = k.opts.cell_width orelse 0,
+                .thicken = k.opts.thicken,
+                .thicken_strength = k.opts.thicken_strength,
+                .constraint_width = k.opts.constraint_width,
+            },
+        };
+    }
 };
 
 const TestMode = enum { normal };
@@ -449,6 +637,58 @@ test getIndex {
     }
 }
 
+test "getIndex: face that fails to load is treated as no font" {
+    // Fontconfig can hand back a match whose charset claims a codepoint but
+    // which has no file to load. Choosing that face for the codepoint must
+    // not turn into an error: the renderer would drop the whole row and
+    // retry the load on every frame.
+    if (comptime font.options.backend != .fontconfig_freetype) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const fontconfig = @import("fontconfig");
+
+    var lib = try Library.init(alloc);
+    defer lib.deinit();
+
+    var grid = try testGrid(.normal, alloc, lib);
+    defer grid.deinit(alloc);
+
+    // U+1F17C NEGATIVE SQUARED LATIN CAPITAL LETTER M, which the primary
+    // font does not have.
+    const cp = 0x1F17C;
+
+    const pat = fontconfig.Pattern.create();
+    {
+        const cs = fontconfig.CharSet.create();
+        defer cs.destroy();
+        try testing.expect(cs.addChar(cp));
+        try testing.expect(pat.add(.charset, .{ .char_set = cs }, false));
+    }
+    try testing.expect(pat.add(.lang, .{ .string = "en" }, false));
+    var deferred: DeferredFace = .{ .fc = .{
+        .pattern = pat,
+        .charset = (try pat.get(.charset, 0)).char_set,
+        .langset = try pat.get(.lang, 0),
+        .variations = &.{},
+    } };
+    _ = grid.resolver.collection.addDeferred(alloc, deferred, .{
+        .style = .regular,
+        .fallback = true,
+        .size_adjustment = .none,
+    }) catch |err| {
+        deferred.deinit();
+        return err;
+    };
+
+    try testing.expectEqual(null, try grid.getIndex(alloc, cp, .regular, null));
+
+    // The miss is cached rather than retried.
+    const key = CodepointKey.from(.{ .style = .regular, .codepoint = cp, .presentation = null });
+    try testing.expectEqual(@as(??Collection.Index, @as(?Collection.Index, null)), grid.codepoints.get(key));
+    try testing.expectEqual(null, try grid.getIndex(alloc, cp, .regular, null));
+}
+
 test "renderGlyph error after cache insert rolls back cache entry" {
     // This test verifies that when renderGlyph fails after inserting a cache
     // entry (via getOrPut), the errdefer properly removes the entry, preventing
@@ -468,14 +708,14 @@ test "renderGlyph error after cache insert rolls back cache entry" {
 
     // Get the glyph index for 'A'
     const glyph_index = glyph_index: {
-        grid.lock.lockShared();
-        defer grid.lock.unlockShared();
+        grid.lock.lockSharedUncancelable(testing.io);
+        defer grid.lock.unlockShared(testing.io);
         const face = try grid.resolver.collection.getFace(idx);
         break :glyph_index face.glyphIndex('A').?;
     };
 
     const render_opts: RenderOptions = .{ .grid_metrics = grid.metrics };
-    const key: GlyphKey = .{ .index = idx, .glyph = glyph_index, .opts = render_opts };
+    const key = GlyphKey.from(.{ .index = idx, .glyph = glyph_index, .opts = render_opts });
 
     // Verify the cache is empty for this glyph
     try testing.expect(grid.glyphs.get(key) == null);

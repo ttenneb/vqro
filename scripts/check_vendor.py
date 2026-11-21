@@ -14,7 +14,7 @@ MANIFEST = ROOT / "vendor/libghostty-vt.sha256"
 PATCHES = ROOT / "vendor/patches/libghostty-vt"
 INDEX = ROOT / "vendor/libghostty-vt.patches.md"
 REQUIRED = ["vendor/libghostty-vt.vendor.json", "vendor/libghostty-vt.notices.md", "vendor/libghostty-vt/LICENSE",
-            "vendor/libghostty-vt/VERSION", "vendor/libghostty-vt/build.zig", "vendor/libghostty-vt/include/ghostty/vt.h"]
+            "vendor/libghostty-vt/LIB_VERSION", "vendor/libghostty-vt/build.zig", "vendor/libghostty-vt/include/ghostty/vt.h"]
 # Build output that zig may leave if someone builds in place; never part of the vendored source.
 IGNORED = ("zig-out/", ".zig-cache/", "zig-cache/", "zig-pkg/")
 
@@ -50,8 +50,8 @@ def main():
         if r.returncode:
             problems.append(f"patch not applied to the vendored tree: {p}: {r.stderr.strip()}")
     meta = json.loads((ROOT / "vendor/libghostty-vt.vendor.json").read_text())
-    if not str(meta.get("source_commit", "")).startswith("c5a21edf"):
-        problems.append(f"unexpected pin {meta.get('source_commit')} (bumping needs a new Zig; see the plan)")
+    if not str(meta.get("source_commit", "")).startswith("9ad3c422"):
+        problems.append(f"unexpected pin {meta.get('source_commit')} (a pin bump updates this check, the notices and the bindings check)")
     for p in problems:
         print("vendor:", p)
     print(f"vendor: {len(current)} files, {len(present)} patches: {'FAIL' if problems else 'ok'}")

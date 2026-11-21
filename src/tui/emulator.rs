@@ -660,7 +660,9 @@ mod fuzz {
 
     /// Crashes found before (ghostty-audit's minimal logs), replayed on every engine: `<name>.<lines>.log` in
     /// tests/fixtures/terminal/libghostty-replays. P0-1: a resize while scrolled back left libghostty-vt's
-    /// viewport pin on a freed page; the next read segfaulted.
+    /// viewport pin on a freed page; the next read segfaulted. P0-2: hyperlinks with REP, resizes, scroll regions or
+    /// inserted blanks hit stale pointers and failed assertions inside the library at pin c5a21edf (fixed upstream
+    /// by 9ad3c422). They fail under ReleaseSafe (check.sh step libghostty-release-safe) if that comes back.
     #[test]
     fn engines_survive_known_crash_traces() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/terminal/libghostty-replays");

@@ -1,19 +1,19 @@
 //! libghostty-vt (Ghostty's terminal emulation library, MIT) as the TUI's `libghostty` terminal engine.
 //!
-//! The FFI declarations (`bindings`) and the patterns below start from herdr's `src/ghostty/` (Apache-2.0) as an
-//! unvetted baseline: tested here, audited before relying on it (libghostty plan G8). Only the narrow API the
-//! engine needs is wrapped. Rules for every FFI call:
+//! The patterns below started from herdr's `src/ghostty/` (Apache-2.0); the FFI declarations (`bindings`) are
+//! written by hand against the vendored headers and checked by the C compiler (`bindings_check.c`). Only the
+//! narrow API the engine needs is wrapped. Rules for every FFI call:
 //! - a handle is used only while its owner is alive, and is freed once (`Drop`);
 //! - out-pointers point at storage of the documented type, and sized structs carry their `size`;
 //! - callbacks never unwind into C (`catch_unwind`), never call back into the terminal, and bound what they keep;
 //! - input reaches the library only through `ghostty_terminal_vt_write`, which takes any bytes.
 //!
 //! Query replies (DA, DSR, XTVERSION, size reports) are not wired (`WRITE_PTY` stays unset): the backend already
-//! answers them. libghostty has no notification callback (it reads OSC 9 as a working directory), so OSC 9 and
-//! OSC 777 notifications are found by `Notifications`, a small scanner over the program's bytes.
+//! answers them. OSC 9 and OSC 777 notifications are found by `Notifications`, a small scanner over the program's
+//! bytes, the same rule for every engine (the library's own notification callback stays unset).
 #![allow(dead_code)]
 
-#[allow(dead_code, non_camel_case_types, non_snake_case, non_upper_case_globals, clippy::all, rustdoc::all, unsafe_op_in_unsafe_fn)]
+#[allow(dead_code, non_camel_case_types, non_snake_case)]
 pub mod bindings;
 
 use bindings as ffi;
@@ -37,7 +37,7 @@ trait Ok_ {
     fn ok(self) -> Result<(), Error>;
 }
 impl Ok_ for ffi::GhosttyResult {
-    fn ok(self) -> Result<(), Error> { if self == ffi::GhosttyResult_GHOSTTY_SUCCESS { Ok(()) } else { Err(Error(self)) } }
+    fn ok(self) -> Result<(), Error> { if self == ffi::GHOSTTY_SUCCESS { Ok(()) } else { Err(Error(self)) } }
 }
 
 /// What callbacks collect while the library parses one write.
@@ -60,38 +60,39 @@ unsafe extern "C" fn bell_cb(_terminal: ffi::GhosttyTerminal, userdata: *mut c_v
     });
 }
 
-unsafe extern "C" fn clipboard_cb(
-    _terminal: ffi::GhosttyTerminal,
-    userdata: *mut c_void,
-    write: *const ffi::GhosttyClipboardWrite,
-) -> ffi::GhosttyClipboardWriteResult {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // SAFETY: libghostty-vt keeps `write` and its strings alive for this synchronous call.
-        unsafe { take_clipboard(userdata, write) }
-    }))
-    .unwrap_or(ffi::GhosttyClipboardWriteResult_GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA)
+unsafe extern "C" fn clipboard_cb(_terminal: ffi::GhosttyTerminal, userdata: *mut c_void, write: *const ffi::GhosttyClipboardWrite) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if write.is_null() { return; }
+        // SAFETY: libghostty-vt keeps `write` and everything it points to alive for this synchronous call.
+        let result = unsafe { take_clipboard(userdata, &*write) };
+        let reply = ffi::GhosttyClipboardWriteReply { size: mem::size_of::<ffi::GhosttyClipboardWriteReply>(), result, remember: false };
+        // SAFETY: the request's own reply function, called once during the callback with a sized reply.
+        if let Some(answer) = unsafe { (*write).reply } { unsafe { answer(write, &reply) }; }
+    }));
 }
 
-/// Keep one text/plain clipboard write (standard clipboard), bounded. Adapted from herdr's capture_clipboard_write.
-unsafe fn take_clipboard(userdata: *mut c_void, write: *const ffi::GhosttyClipboardWrite) -> ffi::GhosttyClipboardWriteResult {
-    use ffi::{GhosttyClipboardWriteResult_GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA as INVALID,
-              GhosttyClipboardWriteResult_GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS as SUCCESS,
-              GhosttyClipboardWriteResult_GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED as UNSUPPORTED};
-    if userdata.is_null() || write.is_null() { return INVALID; }
-    // The struct is sized: read only fields the library says it filled.
-    let needed = mem::offset_of!(ffi::GhosttyClipboardWrite, contents_len) + mem::size_of::<usize>();
-    // SAFETY: `size` is the leading field of a live request.
-    if unsafe { (*write).size } < needed { return INVALID; }
-    // SAFETY: the size check covers the fields read below.
-    let request = unsafe { &*write };
-    if request.location != ffi::GhosttyClipboardLocation_GHOSTTY_CLIPBOARD_LOCATION_STANDARD { return UNSUPPORTED; }
-    if request.contents_len != 1 || request.contents.is_null() { return UNSUPPORTED; }
-    // SAFETY: one content, alive for the call.
-    let content = unsafe { &*request.contents };
-    // SAFETY: borrowed strings, alive for the call.
-    let (Some(mime), Some(data)) = (unsafe { borrowed(content.mime) }, unsafe { borrowed(content.data) }) else { return INVALID };
-    let text = std::str::from_utf8(mime).ok().and_then(|m| m.split(';').next()).is_some_and(|m| m.trim().eq_ignore_ascii_case("text/plain"));
-    if !text || data.is_empty() { return UNSUPPORTED; }
+/// Keep one text clipboard write to the standard clipboard, bounded: its `text/plain` representation, or an empty
+/// write when the program clears it (as vt100 passes on). The library decodes OSC 52 (and OSC 1337 Copy, Kitty's
+/// OSC 5522); the engine passes text on as OSC 52 again, base64-encoded.
+unsafe fn take_clipboard(userdata: *mut c_void, request: &ffi::GhosttyClipboardWrite) -> ffi::GhosttyClipboardWriteResult {
+    use ffi::{GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA as INVALID,
+              GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS as SUCCESS,
+              GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED as UNSUPPORTED};
+    if userdata.is_null() { return INVALID; }
+    if request.location != ffi::GHOSTTY_CLIPBOARD_LOCATION_STANDARD { return UNSUPPORTED; }
+    let data: &[u8] = if request.contents_len == 0 { &[] } else {
+        if request.contents.is_null() || request.contents_len > 64 { return INVALID; }
+        // SAFETY: `contents_len` entries, alive for the call.
+        let contents = unsafe { slice::from_raw_parts(request.contents, request.contents_len) };
+        let text = contents.iter().find_map(|content| {
+            // SAFETY: borrowed strings, alive for the call.
+            let mime = unsafe { borrowed(content.mime) }?;
+            let plain = std::str::from_utf8(mime).ok().and_then(|m| m.split(';').next()).is_some_and(|m| m.trim().eq_ignore_ascii_case("text/plain"));
+            // SAFETY: as above.
+            if plain { unsafe { borrowed(content.data) } } else { None }
+        });
+        match text { Some(t) => t, None => return UNSUPPORTED }
+    };
     // SAFETY: userdata is this engine's boxed `Collected`.
     let c = unsafe { &mut *userdata.cast::<Collected>() };
     if data.len() > MAX_CLIPBOARD_BYTES || c.clipboard.len() >= MAX_EFFECTS || c.clipboard_bytes + data.len() > 4 * MAX_CLIPBOARD_BYTES {
@@ -211,8 +212,8 @@ pub struct Ghostty {
     notes: Notifications,
     cursor_set: CursorSet,
     effects: Vec<Effect>,
-    /// History lines the user asked for. The library's budget is in bytes and page-granular, so it is given
-    /// enough bytes for these lines and only these many are exposed (`exposed`).
+    /// History lines the user asked for. The library's line limit is page-granular (it keeps somewhat more), so
+    /// only these many are exposed (`exposed`).
     scrollback: usize,
     /// Rows no longer numbered as history: dropped by the library, or kept beyond `scrollback` and hidden.
     /// Counted from a tracked row at the bottom of the history: when rows above it go, its screen row goes down.
@@ -227,33 +228,39 @@ fn history_bytes(lines: usize, cols: u16) -> usize {
     lines.saturating_mul((usize::from(cols.max(1)) * 8 + 8) * 2)
 }
 
-/// The width the history budget is sized for. The library's budget is bytes, fixed when the terminal is made (no
-/// setter), so a pane made narrow and then widened would keep far fewer lines than asked (ghostty-audit P1-2).
-/// Budgeting for at least this width keeps the setting for panes up to it; the extra is used only by narrower
-/// panes' hidden rows (the exposed history stays the setting). Wider panes keep fewer lines.
-const BUDGET_COLS: u16 = 240;
+/// DEC private mode 2027 (grapheme clustering): flags and ZWJ sequences in one cell, also after a reset.
+const GRAPHEME_CLUSTER_MODE: ffi::GhosttyMode = 2027;
 
 impl Ghostty {
     pub fn new(cols: u16, rows: u16, scrollback: usize) -> Result<Self, Error> {
         let mut raw = ptr::null_mut();
-        let options = ffi::GhosttyTerminalOptions { cols: cols.max(1), rows: rows.max(1), max_scrollback: history_bytes(scrollback, cols.max(BUDGET_COLS)) };
-        // SAFETY: a valid out-pointer and options; a null allocator means the library's default allocator.
-        unsafe { ffi::ghostty_terminal_new(ptr::null(), &mut raw, options) }.ok()?;
-        if raw.is_null() { return Err(Error(ffi::GhosttyResult_GHOSTTY_INVALID_VALUE)); }
+        // SAFETY: a valid out-pointer; a null allocator means the library's default allocator.
+        unsafe { ffi::ghostty_terminal_new(ptr::null(), &mut raw, cols.max(1), rows.max(1)) }.ok()?;
+        if raw.is_null() { return Err(Error(ffi::GHOSTTY_INVALID_VALUE)); }
         let mut engine = Self { raw, collected: Box::default(), notes: Notifications::default(), cursor_set: CursorSet::default(),
                                 effects: Vec::new(), scrollback, dropped: 0, tracked: ptr::null_mut(), tracked_y: 0 };
         let userdata = (&mut *engine.collected as *mut Collected).cast::<c_void>();
         // SAFETY: a live terminal; `userdata` outlives it (owned by `engine`, freed after the terminal in Drop);
         // each callback has the signature its option documents.
         unsafe {
-            ffi::ghostty_terminal_set(raw, ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_USERDATA, userdata).ok()?;
-            ffi::ghostty_terminal_set(raw, ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_BELL, (bell_cb as *const ()).cast()).ok()?;
-            ffi::ghostty_terminal_set(raw, ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, (clipboard_cb as *const ()).cast()).ok()?;
-            // vqro draws no images, so it keeps none: a zero limit turns the Kitty graphics protocol off (the
-            // library would otherwise keep up to 10 MB per screen; ghostty-audit P3-1). Input: a uint64_t*.
+            ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_USERDATA, userdata).ok()?;
+            ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_BELL, (bell_cb as *const ()).cast()).ok()?;
+            ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, (clipboard_cb as *const ()).cast()).ok()?;
+            // vqro draws no images, so it keeps none (ghostty-audit P3-1): the library is built without Kitty graphics
+            // (build.rs), which also says so here (GHOSTTY_UNSUPPORTED). A build with them gets a zero limit, which
+            // turns the protocol off. Input: a uint64_t*.
             let zero: u64 = 0;
-            ffi::ghostty_terminal_set(raw, ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, (&zero as *const u64).cast()).ok()?;
+            let _ = ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, (&zero as *const u64).cast());
+            // History by bytes, sized for the width and set again on every resize (`set_budget`). The library's line
+            // limit (SCROLLBACK_MAX_LINES) is not used: at this pin it keeps fewer lines than asked, and a resize
+            // with it set kept 59 of 500 lines (measured, 2026-11-21).
+            // Clipboard transactions (Kitty's OSC 5522) buffer at most what one write may pass on.
+            let clip: usize = MAX_CLIPBOARD_BYTES;
+            ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES, (&clip as *const usize).cast()).ok()?;
+            let grapheme = ffi::GhosttyTerminalModeConfig { mode: GRAPHEME_CLUSTER_MODE, value: true };
+            ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_MODE_DEFAULT, (&grapheme as *const ffi::GhosttyTerminalModeConfig).cast()).ok()?;
         }
+        engine.set_budget(cols.max(1))?;
         engine.count_dropped(false);
         Ok(engine)
     }
@@ -265,14 +272,15 @@ impl Ghostty {
     }
 
     fn mode(&self, value: u16) -> bool {
-        let mut out = false;
-        // DEC private mode `value` (ghostty_mode_new(value, false)).
-        // SAFETY: a live terminal and a bool out-pointer.
-        unsafe { ffi::ghostty_terminal_mode_get(self.raw, value & 0x7fff, &mut out) }.ok().map(|_| out).unwrap_or(false)
+        // DEC private mode `value` (ghostty_mode_new(value, false): bit 15 clear).
+        let mut config = ffi::GhosttyTerminalModeConfig { mode: value & 0x7fff, value: false };
+        // SAFETY: a live terminal; DATA_MODE reads and fills a GhosttyTerminalModeConfig.
+        unsafe { ffi::ghostty_terminal_get(self.raw, ffi::GHOSTTY_TERMINAL_DATA_MODE, (&mut config as *mut ffi::GhosttyTerminalModeConfig).cast()) }
+            .ok().map(|_| config.value).unwrap_or(false)
     }
 
     fn scrollbar(&self) -> ffi::GhosttyTerminalScrollbar {
-        self.get::<ffi::GhosttyTerminalScrollbar>(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_SCROLLBAR).unwrap_or_default()
+        self.get::<ffi::GhosttyTerminalScrollbar>(ffi::GHOSTTY_TERMINAL_DATA_SCROLLBAR).unwrap_or_default()
     }
 
     fn scroll(&mut self, tag: ffi::GhosttyTerminalScrollViewportTag, value: ffi::GhosttyTerminalScrollViewportValue) {
@@ -281,7 +289,7 @@ impl Ghostty {
     }
 
     fn grid_ref(&self, point: ffi::GhosttyPoint) -> Option<ffi::GhosttyGridRef> {
-        let mut r = ffi::GhosttyGridRef { size: mem::size_of::<ffi::GhosttyGridRef>(), ..Default::default() };
+        let mut r = ffi::GhosttyGridRef::default();
         // SAFETY: a live terminal and a sized out struct. The ref is used at once, before the next write.
         unsafe { ffi::ghostty_terminal_grid_ref(self.raw, point, &mut r) }.ok().ok().map(|_| r)
     }
@@ -289,34 +297,34 @@ impl Ghostty {
     /// A cell: its text (a whole grapheme cluster), whether it is the tail of a wide cell, and its style.
     fn cell(&self, point: ffi::GhosttyPoint, with_style: bool) -> Option<(String, ffi::GhosttyCellWide, Option<ffi::GhosttyStyle>)> {
         let r = self.grid_ref(point)?;
-        let mut raw = ffi::GhosttyCell::default();
+        let mut raw: ffi::GhosttyCell = 0;
         // SAFETY: `r` came from this terminal just now.
         unsafe { ffi::ghostty_grid_ref_cell(&r, &mut raw) }.ok().ok()?;
-        let mut wide = ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_NARROW;
+        let mut wide = ffi::GHOSTTY_CELL_WIDE_NARROW;
         // SAFETY: a cell value and an out-pointer of its documented type.
-        unsafe { ffi::ghostty_cell_get(raw, ffi::GhosttyCellData_GHOSTTY_CELL_DATA_WIDE, (&mut wide as *mut ffi::GhosttyCellWide).cast()) }.ok().ok()?;
+        unsafe { ffi::ghostty_cell_get(raw, ffi::GHOSTTY_CELL_DATA_WIDE, (&mut wide as *mut ffi::GhosttyCellWide).cast()) }.ok().ok()?;
         // The cell's whole grapheme cluster: a small buffer first; when the library says it needs more, a buffer of
         // that size (bounded); if that still fails, the cell's base codepoint. A cell is never blanked.
         let mut cps = vec![0u32; 16];
         let mut n = 0usize;
         // SAFETY: a buffer of `cps.len()` u32; on OUT_OF_SPACE nothing is written past it and `n` is the need.
         let mut res = unsafe { ffi::ghostty_grid_ref_graphemes(&r, cps.as_mut_ptr(), cps.len(), &mut n) };
-        if res == ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE && n > cps.len() && n <= MAX_GRAPHEME {
+        if res == ffi::GHOSTTY_OUT_OF_SPACE && n > cps.len() && n <= MAX_GRAPHEME {
             cps = vec![0u32; n];
             // SAFETY: as above, with a buffer of the size the library asked for.
             res = unsafe { ffi::ghostty_grid_ref_graphemes(&r, cps.as_mut_ptr(), cps.len(), &mut n) };
         }
-        let text: String = if res == ffi::GhosttyResult_GHOSTTY_SUCCESS {
+        let text: String = if res == ffi::GHOSTTY_SUCCESS {
             cps[..n.min(cps.len())].iter().filter_map(|c| char::from_u32(*c)).collect()
         } else {
             let mut cp = 0u32;
             // SAFETY: a cell value and a u32 out-pointer, the documented type of CELL_DATA_CODEPOINT.
-            let _ = unsafe { ffi::ghostty_cell_get(raw, ffi::GhosttyCellData_GHOSTTY_CELL_DATA_CODEPOINT, (&mut cp as *mut u32).cast()) };
+            let _ = unsafe { ffi::ghostty_cell_get(raw, ffi::GHOSTTY_CELL_DATA_CODEPOINT, (&mut cp as *mut u32).cast()) };
             char::from_u32(cp).filter(|c| *c != '\0').map(String::from).unwrap_or_default()
         };
         let style = with_style.then(|| {
-            let mut s = ffi::GhosttyStyle { size: mem::size_of::<ffi::GhosttyStyle>(), ..Default::default() };
-            // SAFETY: `r` is fresh and `s` is a sized style struct.
+            let mut s = ffi::GhosttyStyle::default();
+            // SAFETY: `r` is fresh and `s` is a style struct.
             unsafe { ffi::ghostty_grid_ref_style(&r, &mut s) }.ok().ok().map(|_| s)
         }).flatten();
         Some((text, wide, style))
@@ -324,7 +332,7 @@ impl Ghostty {
 
     /// The hyperlink (OSC 8) of a cell on screen as shown, if any.
     fn link(&self, row: u16, col: u16) -> Option<String> {
-        let r = self.grid_ref(point(ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_VIEWPORT, col, row as u32))?;
+        let r = self.grid_ref(point(ffi::GHOSTTY_POINT_TAG_VIEWPORT, col, row as u32))?;
         let mut buf = vec![0u8; 2048];
         let mut n = 0usize;
         // SAFETY: a fresh ref and a buffer of `buf.len()` bytes.
@@ -339,12 +347,20 @@ impl Ghostty {
         unsafe {
             if ffi::ghostty_grid_ref_row(&r, &mut row).ok().is_err() { return false; }
             let mut wrap = false;
-            ffi::ghostty_row_get(row, ffi::GhosttyRowData_GHOSTTY_ROW_DATA_WRAP, (&mut wrap as *mut bool).cast()).ok().map(|_| wrap).unwrap_or(false)
+            ffi::ghostty_row_get(row, ffi::GHOSTTY_ROW_DATA_WRAP, (&mut wrap as *mut bool).cast()).ok().map(|_| wrap).unwrap_or(false)
         }
     }
 
     /// Rows the screen holds above the live area (history kept by the library).
-    fn kept(&self) -> usize { self.get::<usize>(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS).unwrap_or(0) }
+    fn kept(&self) -> usize { self.get::<usize>(ffi::GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS).unwrap_or(0) }
+
+    /// The history budget for `cols`: enough bytes for the lines asked for at that width (ghostty-audit P1-2: a
+    /// budget fixed at creation kept 514 of 2000 lines in a widened pane). Only `scrollback` lines are exposed.
+    fn set_budget(&mut self, cols: u16) -> Result<(), Error> {
+        let bytes = history_bytes(self.scrollback, cols);
+        // SAFETY: a live terminal; SCROLLBACK_MAX_BYTES takes a size_t*.
+        unsafe { ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, (&bytes as *const usize).cast()) }.ok()
+    }
 
     /// A view pinned on history that output or a resize (reflow) has carried past the exposed lines moves to the
     /// oldest exposed line: the rows it showed are no longer history the user can reach.
@@ -380,7 +396,7 @@ impl Ghostty {
             let mut at = ffi::GhosttyPointCoordinate::default();
             // SAFETY: a live tracked handle and an out struct of the documented type.
             let ok = unsafe { ffi::ghostty_tracked_grid_ref_has_value(self.tracked)
-                && ffi::ghostty_tracked_grid_ref_point(self.tracked, ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_SCREEN, &mut at) == ffi::GhosttyResult_GHOSTTY_SUCCESS };
+                && ffi::ghostty_tracked_grid_ref_point(self.tracked, ffi::GHOSTTY_POINT_TAG_SCREEN, &mut at) == ffi::GHOSTTY_SUCCESS };
             // The tracked row itself went (more output than history): everything up to it went.
             let gone = if ok { self.tracked_y.saturating_sub(at.y) } else { self.tracked_y as usize as u32 + 1 };
             self.dropped += gone as usize;
@@ -390,8 +406,8 @@ impl Ghostty {
         let y = (self.kept() + usize::from(self.rows())).saturating_sub(1) as u32;
         let mut tracked = ptr::null_mut();
         // SAFETY: a live terminal, a screen point inside it and an out-pointer for the handle.
-        if unsafe { ffi::ghostty_terminal_grid_ref_track(self.raw, point(ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_SCREEN, 0, y), &mut tracked) }
-            == ffi::GhosttyResult_GHOSTTY_SUCCESS {
+        if unsafe { ffi::ghostty_terminal_grid_ref_track(self.raw, point(ffi::GHOSTTY_POINT_TAG_SCREEN, 0, y), &mut tracked) }
+            == ffi::GHOSTTY_SUCCESS {
             self.tracked = tracked;
             self.tracked_y = y;
         }
@@ -413,8 +429,8 @@ impl Drop for Ghostty {
 fn color(c: ffi::GhosttyStyleColor) -> Color {
     match c.tag {
         // SAFETY: the tagged union holds `palette` for this tag.
-        ffi::GhosttyStyleColorTag_GHOSTTY_STYLE_COLOR_PALETTE => Color::Indexed(unsafe { c.value.palette }),
-        ffi::GhosttyStyleColorTag_GHOSTTY_STYLE_COLOR_RGB => {
+        ffi::GHOSTTY_STYLE_COLOR_PALETTE => Color::Indexed(unsafe { c.value.palette }),
+        ffi::GHOSTTY_STYLE_COLOR_RGB => {
             // SAFETY: the tagged union holds `rgb` for this tag.
             let rgb = unsafe { c.value.rgb };
             Color::Rgb(rgb.r, rgb.g, rgb.b)
@@ -425,11 +441,14 @@ fn color(c: ffi::GhosttyStyleColor) -> Color {
 
 fn style(s: &ffi::GhosttyStyle) -> Style {
     let mut st = Style::new().fg(color(s.fg_color)).bg(color(s.bg_color));
-    for (on, m) in [(s.bold, Modifier::BOLD), (s.faint, Modifier::DIM), (s.italic, Modifier::ITALIC), (s.underline != 0, Modifier::UNDERLINED),
-                    (s.inverse, Modifier::REVERSED), (s.strikethrough, Modifier::CROSSED_OUT), (s.blink, Modifier::SLOW_BLINK), (s.invisible, Modifier::HIDDEN)] {
-        if on { st = st.add_modifier(m); }
+    let underline = s.flags & ffi::GHOSTTY_STYLE_UNDERLINE_MASK != 0;
+    for (flag, m) in [(ffi::GHOSTTY_STYLE_FLAG_BOLD, Modifier::BOLD), (ffi::GHOSTTY_STYLE_FLAG_FAINT, Modifier::DIM), (ffi::GHOSTTY_STYLE_FLAG_ITALIC, Modifier::ITALIC),
+                      (ffi::GHOSTTY_STYLE_FLAG_INVERSE, Modifier::REVERSED), (ffi::GHOSTTY_STYLE_FLAG_STRIKETHROUGH, Modifier::CROSSED_OUT),
+                      (ffi::GHOSTTY_STYLE_FLAG_BLINK, Modifier::SLOW_BLINK), (ffi::GHOSTTY_STYLE_FLAG_INVISIBLE, Modifier::HIDDEN)] {
+        if s.flags & flag != 0 { st = st.add_modifier(m); }
     }
-    if s.underline != 0 && s.underline_color.tag != ffi::GhosttyStyleColorTag_GHOSTTY_STYLE_COLOR_NONE {
+    if underline { st = st.add_modifier(Modifier::UNDERLINED); }
+    if underline && s.underline_color.tag != ffi::GHOSTTY_STYLE_COLOR_NONE {
         st = st.underline_color(color(s.underline_color));
     }
     st
@@ -478,8 +497,13 @@ impl Engine for Ghostty {
         let back = self.scroll_offset();
         if back > 0 { self.set_scroll_offset(0); }
         let before = self.issued();
+        // The history budget follows the width: raised before a widening reflow (so it prunes nothing), lowered
+        // after a narrowing one.
+        let wider = cols.max(1) > self.cols();
+        if wider { let _ = self.set_budget(cols.max(1)); }
         // SAFETY: a live terminal; cell pixel sizes are nominal (no pixel queries are answered).
         let _ = unsafe { ffi::ghostty_terminal_resize(self.raw, cols.max(1), rows.max(1), 1, 1) };
+        if !wider { let _ = self.set_budget(cols.max(1)); }
         // Reflow re-wraps the history, so rows change without being dropped (P2-3): counting them as dropped would
         // number rows backwards and a remembered row would name other text. Instead the rows after a resize are
         // numbered above every number in use before, so an old number reads nothing. Row numbers hold between
@@ -489,13 +513,13 @@ impl Engine for Ghostty {
         self.set_scroll_offset(back);
         self.clamp_view();
     }
-    fn rows(&self) -> u16 { self.get::<u16>(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_ROWS).unwrap_or(1) }
-    fn cols(&self) -> u16 { self.get::<u16>(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLS).unwrap_or(1) }
+    fn rows(&self) -> u16 { self.get::<u16>(ffi::GHOSTTY_TERMINAL_DATA_ROWS).unwrap_or(1) }
+    fn cols(&self) -> u16 { self.get::<u16>(ffi::GHOSTTY_TERMINAL_DATA_COLS).unwrap_or(1) }
     fn application_cursor(&self) -> bool { self.mode(1) }
     fn bracketed_paste(&self) -> bool { self.mode(2004) }
     fn alternate_screen(&self) -> bool {
-        self.get::<ffi::GhosttyTerminalScreen>(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN)
-            .is_some_and(|s| s == ffi::GhosttyTerminalScreen_GHOSTTY_TERMINAL_SCREEN_ALTERNATE)
+        self.get::<ffi::GhosttyTerminalScreen>(ffi::GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN)
+            .is_some_and(|s| s == ffi::GHOSTTY_TERMINAL_SCREEN_ALTERNATE)
     }
     fn mouse(&self) -> (MouseMode, MouseEncoding) {
         let mode = if self.mode(1003) { MouseMode::AnyMotion } else if self.mode(1002) { MouseMode::ButtonMotion }
@@ -504,9 +528,9 @@ impl Engine for Ghostty {
         (mode, enc)
     }
     fn cursor(&self) -> Option<(u16, u16, CursorShape)> {
-        if self.scroll_offset() > 0 || !self.get::<bool>(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE).unwrap_or(true) { return None; }
-        let x = self.get::<u16>(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_CURSOR_X)?;
-        let y = self.get::<u16>(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_CURSOR_Y)?;
+        if self.scroll_offset() > 0 || !self.get::<bool>(ffi::GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE).unwrap_or(true) { return None; }
+        let x = self.get::<u16>(ffi::GHOSTTY_TERMINAL_DATA_CURSOR_X)?;
+        let y = self.get::<u16>(ffi::GHOSTTY_TERMINAL_DATA_CURSOR_Y)?;
         let shape = match self.cursor_set.chosen {
             None => CursorShape::Default,
             Some(1) => CursorShape::BlinkBlock,
@@ -527,11 +551,11 @@ impl Engine for Ghostty {
         let n = n.min(self.exposed());
         // 0 follows the live screen as output arrives; a row pins the view to that content.
         if n == 0 {
-            return self.scroll(ffi::GhosttyTerminalScrollViewportTag_GHOSTTY_SCROLL_VIEWPORT_BOTTOM, ffi::GhosttyTerminalScrollViewportValue::default());
+            return self.scroll(ffi::GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM, ffi::GhosttyTerminalScrollViewportValue { _padding: [0; 2] });
         }
         let s = self.scrollbar();
         let top = (s.total.saturating_sub(s.len) as usize).saturating_sub(n);
-        self.scroll(ffi::GhosttyTerminalScrollViewportTag_GHOSTTY_SCROLL_VIEWPORT_ROW, ffi::GhosttyTerminalScrollViewportValue { row: top });
+        self.scroll(ffi::GHOSTTY_TERMINAL_SCROLL_VIEWPORT_ROW, ffi::GhosttyTerminalScrollViewportValue { row: top });
     }
     fn scrollback_len(&self) -> usize { self.exposed() }
     fn scrolled(&self) -> usize { self.dropped + self.kept() }
@@ -546,14 +570,14 @@ impl Engine for Ghostty {
         if y < self.kept() - self.exposed() || y >= self.kept() + usize::from(self.rows()) { return None; }
         let (mut chars, mut starts) = (Vec::new(), Vec::new());
         for col in 0..self.cols() {
-            let Some((text, wide, _)) = self.cell(point(ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_SCREEN, col, y as u32), false) else { break };
-            if wide == ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_SPACER_TAIL || wide == ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_SPACER_HEAD { continue; }
+            let Some((text, wide, _)) = self.cell(point(ffi::GHOSTTY_POINT_TAG_SCREEN, col, y as u32), false) else { break };
+            if wide == ffi::GHOSTTY_CELL_WIDE_SPACER_TAIL || wide == ffi::GHOSTTY_CELL_WIDE_SPACER_HEAD { continue; }
             for c in if text.is_empty() { " ".to_string() } else { text }.chars() {
                 chars.push(c);
                 starts.push(col);
             }
         }
-        let wrapped = self.wrapped(point(ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_SCREEN, 0, y as u32));
+        let wrapped = self.wrapped(point(ffi::GHOSTTY_POINT_TAG_SCREEN, 0, y as u32));
         while !wrapped && chars.last() == Some(&' ') {
             chars.pop();
             starts.pop();
@@ -565,10 +589,10 @@ impl Engine for Ghostty {
         let (rows, cols) = (self.rows().min(area.height), self.cols().min(area.width));
         for row in 0..rows {
             for col in 0..cols {
-                let Some((text, wide, st)) = self.cell(point(ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_VIEWPORT, col, row as u32), true) else { continue };
-                if wide == ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_SPACER_TAIL { continue; }
+                let Some((text, wide, st)) = self.cell(point(ffi::GHOSTTY_POINT_TAG_VIEWPORT, col, row as u32), true) else { continue };
+                if wide == ffi::GHOSTTY_CELL_WIDE_SPACER_TAIL { continue; }
                 if let Some(out) = buf.cell_mut((area.x + col, area.y + row)) {
-                    out.set_symbol(if text.is_empty() || wide == ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_SPACER_HEAD { " " } else { &text });
+                    out.set_symbol(if text.is_empty() || wide == ffi::GHOSTTY_CELL_WIDE_SPACER_HEAD { " " } else { &text });
                     out.set_style(st.as_ref().map(style).unwrap_or_default());
                 }
             }
@@ -580,8 +604,8 @@ impl Engine for Ghostty {
         for row in 0..self.rows() {
             let mut line = String::new();
             for col in 0..self.cols() {
-                let Some((text, wide, _)) = self.cell(point(ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_VIEWPORT, col, row as u32), false) else { break };
-                if wide == ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_SPACER_TAIL { continue; }
+                let Some((text, wide, _)) = self.cell(point(ffi::GHOSTTY_POINT_TAG_VIEWPORT, col, row as u32), false) else { break };
+                if wide == ffi::GHOSTTY_CELL_WIDE_SPACER_TAIL { continue; }
                 line.push_str(if text.is_empty() { " " } else { &text });
             }
             out.push_str(line.trim_end());
@@ -649,11 +673,11 @@ mod tests {
         assert!(g.take_effects().is_empty());
     }
 
-    /// ghostty-audit P1-2: a pane made narrow and then widened keeps the lines asked for (the budget is sized for
-    /// BUDGET_COLS), and only those are exposed when narrow.
+    /// ghostty-audit P1-2: a pane made narrow and then widened keeps the lines asked for (the budget follows the
+    /// width on every resize), and only those are exposed when narrow.
     #[test]
     fn a_widened_pane_keeps_its_history() {
-        for (from, to) in [(40u16, 200u16), (20, 240), (80, 200)] {
+        for (from, to) in [(40u16, 200u16), (20, 240), (80, 200), (20, 400)] {
             let mut g = Ghostty::new(from, 10, 2000).unwrap();
             g.resize(to, 10);
             let line = "x".repeat(usize::from(to) - 1) + "\r\n";
@@ -687,8 +711,11 @@ mod tests {
     /// ghostty-audit P3-1: images are not kept (vqro draws none).
     #[test]
     fn kitty_images_are_not_stored() {
-        let g = Ghostty::new(40, 4, 100).unwrap();
-        assert_eq!(g.get::<u64>(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_STORAGE_LIMIT), Some(0));
+        let mut g = Ghostty::new(40, 4, 100).unwrap();
+        // Built without Kitty graphics: no storage to ask about, or none allowed.
+        assert!(matches!(g.get::<u64>(ffi::GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_STORAGE_LIMIT), None | Some(0)));
+        g.process(b"\x1b_Ga=T,f=24,s=1,v=1;AAAA\x1b\\after");
+        assert!(g.contents().contains("after"), "an image command is consumed and ignored");
     }
 }
 

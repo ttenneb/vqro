@@ -1,16 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const build_config = @import("../build_config.zig");
-const locales = @import("i18n_locales.zig");
 
 const log = std.log.scoped(.i18n);
-
-/// Set for faster membership lookup of locales.
-pub const locales_map = map: {
-    var kvs: [locales.len]struct { []const u8 } = undefined;
-    for (locales, 0..) |locale, i| kvs[i] = .{locale};
-    break :map std.StaticStringMap(void).initComptime(kvs);
-};
 
 pub const InitError = error{
     InvalidResourcesDir,
@@ -28,7 +20,7 @@ pub const InitError = error{
 pub fn init(resources_dir: []const u8) InitError!void {
     if (comptime !build_config.i18n) return;
 
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         // i18n is unsupported on Windows
         .windows => return,
 
@@ -39,8 +31,8 @@ pub fn init(resources_dir: []const u8) InitError!void {
                 return error.InvalidResourcesDir;
 
             // Build our locale path
-            var buf: [std.fs.max_path_bytes]u8 = undefined;
-            const path = std.fmt.bufPrintZ(&buf, "{s}/locale", .{share_dir}) catch
+            var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const path = std.mem.printSentinel(&buf, "{s}/locale", .{share_dir}, 0) catch
                 return error.OutOfMemory;
 
             // Bind our bundle ID to the given locale path
@@ -62,9 +54,19 @@ pub fn initGlobalDomain() error{OutOfMemory}!void {
 }
 
 /// Translate a message for the Ghostty domain.
+///
+/// If this is called at comptime, the direct msgid is returned without
+/// translation. This still allows the string to be marked for translation
+/// while remaining usable in comptime contexts.
 pub fn _(msgid: [*:0]const u8) [*:0]const u8 {
     if (comptime !build_config.i18n) return msgid;
+    if (@inComptime()) return msgid;
     return dgettext(build_config.bundle_id, msgid);
+}
+
+/// Mark a string for translation without translating it immediately.
+pub fn N_(msgid: [:0]const u8) [:0]const u8 {
+    return msgid;
 }
 
 /// Canonicalize a locale name from a platform-specific value to
@@ -146,20 +148,6 @@ fn fixZhLocale(locale: []const u8) ?[:0]const u8 {
     return null;
 }
 
-/// This can be called at any point a compile-time-known locale is
-/// available. This will use comptime to verify the locale is supported.
-pub fn staticLocale(comptime v: [*:0]const u8) [*:0]const u8 {
-    comptime {
-        for (locales) |locale| {
-            if (std.mem.eql(u8, locale, v)) {
-                return locale;
-            }
-        }
-
-        @compileError("unsupported locale");
-    }
-}
-
 // Manually include function definitions for the gettext functions
 // as libintl.h isn't always easily available (e.g. in musl)
 extern fn bindtextdomain(domainname: [*:0]const u8, dirname: [*:0]const u8) ?[*:0]const u8;
@@ -190,4 +178,11 @@ test "canonicalizeLocale darwin" {
     // canonicalizeLocale does not handle encodings and will turn them into
     // underscores. We should parse them out before calling this function.
     try testing.expectEqualStrings("en_US.UTF_8", try canonicalizeLocale(&buf, "en_US.UTF-8"));
+}
+
+test "_ returns msgid at comptime" {
+    const testing = std.testing;
+
+    const msgid = comptime @"_"("Ghostty");
+    try testing.expectEqualStrings("Ghostty", std.mem.span(msgid));
 }

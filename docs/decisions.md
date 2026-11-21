@@ -693,7 +693,8 @@ The OpenTUI client stays optional and separately installed, never bundled (human
 ## D30. Terminal emulation through built-in engines; libghostty-vt first (2026-11-20, CONFIRMED)
 **Decision.** The Rust TUI draws terminal panes through one engine interface (`src/tui/emulator.rs`: `Engine`,
 `EngineKind`). The engines are built in and chosen in Settings (`doc/settings/tui.terminal_engine`). There are no
-runtime plug-ins. `libghostty` (Ghostty's libghostty-vt, vendored at c5a21edf and built with Zig 0.15.2) becomes the
+runtime plug-ins. `libghostty` (Ghostty's libghostty-vt, vendored at 9ad3c422 and built with Zig 0.17.1; first c5a21edf
+with Zig 0.15.2, moved by Q-GH-4 (b), 2026-11-21, for the upstream crash fixes the audit needed) becomes the
 default after its independent audit (plan G8); until then vt100 is the default. vt100 stays selectable and is the fallback. An engine that can't be selected or started is replaced
 by vt100 for that pane, with a notice. A crash inside a native engine can't be caught that way, so native engines
 keep their FFI defensive. One shared conformance suite (`tests/fixtures/client/engines.json`) has a baseline every
@@ -702,7 +703,10 @@ same suite. Engines answer no terminal queries: the backend already does.
 **Why.** The human asked to switch to libghostty for fidelity: grapheme clusters, OSC 8, strikethrough and
 underline styles. They also asked for a switchable engine (Q-GH-1/3, 2026-11-20). Zig as a build dependency is
 fine (Q-GH-2).
-**Consequences.** Building needs Zig 0.15.2 (`ZIG`). `vendor/` holds the pinned source, herdr's two patches and
-the notice inventory (`scripts/check_vendor.py`, `vendor/notices.json`, rendered by `scripts/license_check.py`).
+**Consequences.** Building needs Zig 0.17.1 (`ZIG`, else a user-local `~/.local/zig-0.17.1`). `vendor/` holds the
+pinned source (no local patches at 9ad3c422) and the notice inventory (`scripts/check_vendor.py`,
+`vendor/notices.json`, rendered by `scripts/license_check.py`). The library is built with only the features the
+engine uses (`-Dvt-features=-all,+grid-introspection,+color`). The FFI declarations are written by hand and
+checked against the headers by the C compiler (`src/tui/ghostty/bindings_check.c`).
 The wrapper reuses herdr's patterns as an unvetted baseline that is audited independently (plan G8). Plan:
 `<private-notes>`.

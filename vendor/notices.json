@@ -3,10 +3,10 @@
   "components": [
     {
       "name": "libghostty-vt (Ghostty)",
-      "version": "1.3.2-HEAD c5a21edf",
+      "version": "1.0.2-dev+9ad3c42",
       "license": "MIT",
       "where": "vendor/libghostty-vt (statically linked into the vqro binary)",
-      "source": "https://github.com/ghostty-org/ghostty at c5a21edfcbc2d5b46540ad91b7980aca31f5f1f3, via herdr a5c69bea",
+      "source": "https://github.com/ghostty-org/ghostty at 9ad3c422222e45b32c5f9ab9f4cd32e0e3694ef7 (zig build dist -Demit-lib-vt)",
       "files": [
         {
           "path": "vendor/libghostty-vt/LICENSE",
@@ -53,7 +53,7 @@
       "version": "0.2.0",
       "license": "MIT AND Unicode-3.0",
       "where": "Zig package; its Unicode tables are compiled into libghostty-vt",
-      "source": "https://github.com/jacobsandlund/uucode tag v0.2.0 (licences/), package uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6o-Exj6m9",
+      "source": "https://github.com/jacobsandlund/uucode tag v0.2.0 (licences/), package uucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv (its LICENSE.md is the same text)",
       "files": [
         {
           "path": "vendor/notices/uucode/LICENSE.md",
@@ -71,7 +71,7 @@
     },
     {
       "name": "Zig compiler_rt",
-      "version": "Zig 0.15.2",
+      "version": "Zig 0.17.1",
       "license": "MIT",
       "where": "Zig toolchain runtime library, linked into libghostty-vt",
       "source": "https://ziglang.org (lib/compiler_rt; the toolchain's LICENSE)",
@@ -79,6 +79,19 @@
         {
           "path": "vendor/notices/zig/LICENSE",
           "sha256": "5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177"
+        }
+      ]
+    },
+    {
+      "name": "musl (parts of Zig compiler_rt)",
+      "version": "as ported into Zig 0.17.1's lib/compiler_rt",
+      "license": "MIT",
+      "where": "Zig toolchain runtime library, linked into libghostty-vt: math routines ported from musl (their headers say so)",
+      "source": "https://git.musl-libc.org/cgit/musl/plain/COPYRIGHT (fetched 2026-11-21)",
+      "files": [
+        {
+          "path": "vendor/notices/musl/COPYRIGHT",
+          "sha256": "b870108ec5e7790e9f9919064f1b9421d62d5f9b0e6c230c6adf7ea2da62e97b"
         }
       ]
     }

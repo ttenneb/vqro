@@ -32,6 +32,7 @@ pub const TrackedGridRef = struct {
 };
 
 pub fn tracked_grid_ref_free(ref_: CTrackedGridRef) callconv(lib.calling_conv) void {
+    if (comptime !lib.feature(.grid_introspection)) return;
     const ref = ref_ orelse return;
     if (ref.terminal) |wrapper| {
         _ = wrapper.tracked_grid_refs.swapRemove(ref);
@@ -41,6 +42,7 @@ pub fn tracked_grid_ref_free(ref_: CTrackedGridRef) callconv(lib.calling_conv) v
 }
 
 pub fn tracked_grid_ref_has_value(ref_: CTrackedGridRef) callconv(lib.calling_conv) bool {
+    if (comptime !lib.feature(.grid_introspection)) return false;
     const ref = ref_ orelse return false;
     _ = ref.pageList() orelse return false;
     return !ref.pin.garbage;
@@ -50,6 +52,7 @@ pub fn tracked_grid_ref_snapshot(
     ref_: CTrackedGridRef,
     out_ref: ?*grid_ref_c.CGridRef,
 ) callconv(lib.calling_conv) Result {
+    if (comptime !(lib.feature(.grid_introspection) and lib.feature(.snapshot))) return .unsupported;
     const ref = ref_ orelse return .invalid_value;
     _ = ref.pageList() orelse return .no_value;
     if (ref.pin.garbage) return .no_value;
@@ -59,10 +62,12 @@ pub fn tracked_grid_ref_snapshot(
 
 pub fn tracked_grid_ref_point(
     ref_: CTrackedGridRef,
-    tag: point.Tag,
+    tag_: lib.CEnum(point.Tag),
     out: ?*point.Coordinate,
 ) callconv(lib.calling_conv) Result {
+    if (comptime !lib.feature(.grid_introspection)) return .unsupported;
     const ref = ref_ orelse return .invalid_value;
+    const tag = lib.enumFromC(point.Tag, tag_) orelse return .invalid_value;
     const list = ref.pageList() orelse return .no_value;
     if (ref.pin.garbage) return .no_value;
     const pt = list.pointFromPin(tag, ref.pin.*) orelse return .no_value;
@@ -75,13 +80,15 @@ pub fn tracked_grid_ref_set(
     terminal_: terminal_c.Terminal,
     pt: point.Point.C,
 ) callconv(lib.calling_conv) Result {
+    if (comptime !lib.feature(.grid_introspection)) return .unsupported;
     const ref = ref_ orelse return .invalid_value;
     const wrapper = terminal_ orelse return .invalid_value;
     if (ref.terminal != terminal_) return .invalid_value;
 
     const t = wrapper.terminal;
     const list = &t.screens.active.pages;
-    const p = list.pin(point.Point.fromC(pt)) orelse return .invalid_value;
+    const p = list.pin(point.Point.fromC(pt) orelse return .invalid_value) orelse
+        return .invalid_value;
     const tracked_pin = list.trackPin(p) catch return .out_of_memory;
 
     if (ref.pageList()) |old_list| old_list.untrackPin(ref.pin);
@@ -96,7 +103,8 @@ test "tracked_grid_ref snapshots after terminal scroll" {
     try testing.expectEqual(Result.success, terminal_c.new(
         &lib.alloc.test_allocator,
         &terminal,
-        .{ .cols = 5, .rows = 2, .max_scrollback = 10_000 },
+        5,
+        2,
     ));
     defer terminal_c.free(terminal);
 
@@ -128,7 +136,8 @@ test "tracked_grid_ref reports no value after reset" {
     try testing.expectEqual(Result.success, terminal_c.new(
         &lib.alloc.test_allocator,
         &terminal,
-        .{ .cols = 5, .rows = 2, .max_scrollback = 10_000 },
+        5,
+        2,
     ));
     defer terminal_c.free(terminal);
 
@@ -154,7 +163,8 @@ test "tracked_grid_ref reports no value after alternate screen reset" {
     try testing.expectEqual(Result.success, terminal_c.new(
         &lib.alloc.test_allocator,
         &terminal,
-        .{ .cols = 5, .rows = 2, .max_scrollback = 10_000 },
+        5,
+        2,
     ));
     defer terminal_c.free(terminal);
 
@@ -194,7 +204,8 @@ test "tracked_grid_ref reports no value after terminal free" {
     try testing.expectEqual(Result.success, terminal_c.new(
         &lib.alloc.test_allocator,
         &terminal,
-        .{ .cols = 5, .rows = 2, .max_scrollback = 10_000 },
+        5,
+        2,
     ));
 
     terminal_c.vt_write(terminal, "A", 1);
