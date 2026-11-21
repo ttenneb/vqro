@@ -321,7 +321,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
     let laid: Vec<Flat>;
     let rows: &[Flat] = match &layout { Some(l) => { laid = rows.iter().map(|r| l.apply(r, icons)).collect(); &laid } None => rows };
     let local = child_tables(rows, area.width.saturating_sub(1), icons);
-    let rows = local.as_slice();
+    let rows = local.as_deref().unwrap_or(rows);
     // `pin: "bottom"` rows (feature pin): below the list, never scrolled, at most half of what is left.
     let first_bottom = rows.iter().position(|r| r.bottom).unwrap_or(rows.len());
     let mut bottom_y = area.bottom();
@@ -531,7 +531,8 @@ fn column_layout(spec: &[Value], rows: &[Flat], width: u16, icons: &Icons) -> Co
 
 /// A group's `child_table` lays out only its immediate children. Descendants and
 /// neighbouring conversation rows keep their own layout; every row retains its id/hit index.
-fn child_tables(rows: &[Flat], width: u16, icons: &Icons) -> Vec<Flat> {
+fn child_tables(rows: &[Flat], width: u16, icons: &Icons) -> Option<Vec<Flat>> {
+    if !rows.iter().any(|r| r.item["child_table"].is_object()) { return None; }
     let mut out = rows.to_vec();
     let mut by_parent = std::collections::HashMap::<usize, Vec<usize>>::new();
     for (i, row) in rows.iter().enumerate().filter(|(_, r)| r.item["columns"].is_array()) {
@@ -550,7 +551,7 @@ fn child_tables(rows: &[Flat], width: u16, icons: &Icons) -> Vec<Flat> {
             out[i].item["_child_table_width"] = Value::from(width);
         }
     }
-    out
+    Some(out)
 }
 
 fn join_cells(cells: Vec<String>, widths: &[usize], aligns: &[bool]) -> String {
@@ -751,6 +752,7 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
     if kind(&r.item) == "composer" { return draw_composer(buf, row, &r.item, selected, chip, i, hits, pal, icons, comp); }
     if kind(&r.item) == "message" || fold(&r.item).is_some() { return draw_block(buf, row, r, selected, i, skip, hits, pal, open); }
     let item = &r.item;
+    // Client-internal annotation produced by child_tables; not a published panel field.
     let row = Rect { width: item["_child_table_width"].as_u64().map(|w| (w.min(u16::MAX as u64) as u16).min(row.width)).unwrap_or(row.width), ..row };
     let w = row.width as usize;
     let y = row.y;
@@ -994,6 +996,15 @@ mod tests {
         assert_eq!(buf[(size, 1)].fg, pal.text, "past the styles given");
         assert_eq!(buf[(find(2, "✗"), 2)].fg, pal.error);
         assert_eq!(buf[(find(2, "pwd"), 2)].fg, pal.text);
+    }
+
+    #[test]
+    fn ordinary_panels_do_not_allocate_child_table_rows() {
+        for v in [json!({"items":[{"text":"ordinary"}]}),
+                  json!({"items":[{"text":"ignored", "child_table":17}]})] {
+            let rows = crate::ui_model::panel::rows(&v, &State::default());
+            assert!(child_tables(&rows, 100, &Icons::default()).is_none());
+        }
     }
 
     #[test]
