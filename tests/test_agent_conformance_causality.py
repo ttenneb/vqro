@@ -132,3 +132,91 @@ class C12Negatives(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class C11Fake:
+    """A fake public endpoint whose facts follow the Pi-wire native fixture reports, unless `fault` breaks one rule."""
+    def __init__(self, fault=None):
+        self.fault, self.evidence, self.serial = fault, [], 0
+        self.manifest = {"wire": "pi"}
+        self.report, self.native_cwd, self.model = None, None, "fixture-small"
+        self.native = self
+        self.agents = [{"id": "r1"}]
+
+    # native fixture control
+    async def call(self, verb, **params):
+        if verb == "state":
+            return {"cwd": self.native_cwd or "/launch", "model": self.model, "effort": "off"}
+        if verb == "native_cwd":
+            self.native_cwd = params["cwd"]
+        if verb == "usage":
+            self.report = params["report"]
+        return {}
+
+    def _usage(self):
+        report = self.report
+        if report is None:
+            return None
+        usage = {}
+        context = report.get("contextUsage")
+        if context:
+            usage["context"] = {"window": context["contextWindow"]}
+            if context.get("tokens") is not None:
+                usage["context"]["used"] = context["tokens"]
+            elif self.fault == "used_from_last_turn" and "tokens" in report:
+                usage["context"]["used"] = report["tokens"]["total"]
+        if "tokens" in report:
+            t = report["tokens"]
+            usage["tokens"] = {"input": t["input"], "output": t["output"], "cache_read": t["cacheRead"], "cache_write": t["cacheWrite"]}
+        elif self.fault == "zero_tokens":
+            usage["tokens"] = {"input": 0, "output": 0}
+        if self.fault == "priced_cost" and "cost" in report:
+            usage["cost"] = {"amount": report["cost"], "currency": "USD", "basis": "reported"}
+        return usage
+
+    async def facts(self):
+        cwd = "/bridge-process" if self.fault == "bridge_cwd" else (self.native_cwd or "/launch")
+        model = {"id": "guessed-model" if self.fault == "guessed_model" else self.model, "effort": "off"}
+        return {"state": "idle", "session": {"id": "s1", "cwd": cwd, "model": model}, "usage": self._usage(),
+                "caps": {"rev": 1, "agent.send": {"modes": {"start": {}}}, "agent.configure": {}},
+                "config": [{"id": "model", "type": "select", "rev": 1, "value": "a", "choices": [{"value": "a"}, {"value": "b"}]}]}
+
+    async def ensure_session(self):
+        return await self.facts()
+
+    async def wait_facts(self, predicate, timeout=2):
+        facts = await self.facts()
+        if not predicate(facts):
+            raise CheckFailed("public agent facts did not reach the required state")
+        return facts
+
+    async def invoke(self, op, args, **root):
+        return {"outcome": "observed"}
+
+    async def send(self, text, **kwargs):
+        return {"outcome": "accepted"}
+
+    async def attach(self):
+        class Reducer:
+            snapshots = 1
+            entities = {("message", "m1"): {"value": {"role": "assistant", **({"usage": {"tokens": {"input": 1, "output": 1}}} if self.fault == "apportioned_message" else {})}}}
+        class View:
+            reducer = Reducer()
+        return View()
+
+    async def wait_view(self, view, predicate):
+        return predicate(view.reducer)
+
+
+def run11(fault=None):
+    asyncio.run(HANDLERS["C11"](C11Fake(fault)))
+
+
+class C11Negatives(unittest.TestCase):
+    def test_conforming_fake_passes(self):
+        run11()
+
+    def test_each_broken_rule_fails(self):
+        for fault in ("used_from_last_turn", "zero_tokens", "priced_cost", "bridge_cwd", "guessed_model", "apportioned_message"):
+            with self.subTest(fault=fault), self.assertRaises(CheckFailed):
+                run11(fault)

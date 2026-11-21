@@ -266,6 +266,7 @@ class CodexMixin:
             thread = self.thread(row, required=False)
             return {"pid": os.getpid(), "wire": "codex", "seq": self.serial,
                     "active": bool(thread and thread["run"]), "session": thread["meta"]["id"] if thread else None,
+                    "cwd": thread["meta"]["cwd"] if thread else None, "model": "fixture-small", "effort": None,
                     "sessions": list(self.threads), "limits": {"record_bytes": 1 << 20, "ledger_bytes": 16 << 20,
                     "commands": 64, "threads": 200, "script_actions": 1024}}
         if verb == "session_switch":
@@ -355,6 +356,13 @@ class CodexMixin:
                         "status": "inProgress" if state == "start" else "completed", "aggregatedOutput": row.get("text", "")}
                 await self.event("item/started" if state == "start" else "item/completed", {"threadId": session, "turnId": thread["run"], "item": item})
                 await self.barrier("tool", "after")
+            elif verb == "usage":
+                # C11 (test-only): one native thread/tokenUsage/updated notification, exactly as reported.
+                report = row.get("report")
+                if not isinstance(report, dict) or len(json.dumps(report).encode()) > 4096:
+                    raise ValueError("fixture usage report must be a bounded native tokenUsage object")
+                self.record("usage", session=session, report=report)
+                await self.event("thread/tokenUsage/updated", {"threadId": session, "turnId": thread["run"], "tokenUsage": report})
             elif verb == "retain":
                 count, text = row.get("count", 1), row.get("text", "retained fixture text")
                 if not isinstance(count, int) or not 0 <= count <= 1024 or not isinstance(text, str) or len(text.encode()) > 256 * 1024:

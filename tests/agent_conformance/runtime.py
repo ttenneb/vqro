@@ -36,6 +36,9 @@ class Runtime:
         self.requests, self.barriers, self.drop = {}, {}, set()
         self.queue_modes = {"steering": "one-at-a-time", "follow_up": "one-at-a-time"}
         self.model, self.thinking = dict(MODEL), "off"
+        # C11 (test-only, verb-gated): a native usage report merged into get_session_stats and a native cwd in
+        # get_state. Both stay unset unless the C11 `usage`/`native_cwd` verbs set them; other rows are unaffected.
+        self.usage_report, self.native_cwd = None, None
         self.compaction = True
         self.output_lock = asyncio.Lock()
         self.tasks = set()
@@ -186,6 +189,8 @@ class Runtime:
                 "steeringMode": self.queue_modes["steering"], "followUpMode": self.queue_modes["follow_up"],
                 "autoCompactionEnabled": self.compaction, "messageCount": len(self.entries),
                 "pendingMessageCount": len(self.steering) + len(self.follow_up)}
+            if self.native_cwd is not None:
+                snapshot["cwd"] = self.native_cwd
             self.record("preflight", active=self.active)
             await self.barrier("preflight", "after")
             await self.reply(command, snapshot)
@@ -212,8 +217,13 @@ class Runtime:
             await self.reply(command, {"tree": [{"entry": e, "children": []} for e in self.entries],
                                        "leafId": self.entries[-1]["id"] if self.entries else None})
         elif kind == "get_session_stats":
-            await self.reply(command, {"userMessages": len(self.entries), "assistantMessages": 0, "toolCalls": 0,
-                                       "tokens": {"input": 0, "output": 0, "total": 0}, "cost": 0})
+            stats = {"userMessages": len(self.entries), "assistantMessages": 0, "toolCalls": 0,
+                     "tokens": {"input": 0, "output": 0, "total": 0}, "cost": 0}
+            if self.usage_report is not None:
+                # Pi1.5.2 stats shape (see fixtures/fake_pi.py): the native session id fences the observation.
+                stats = {key: value for key, value in stats.items() if key not in ("tokens", "cost")}
+                stats.update(self.usage_report, sessionId=f"fixture-{self.session}")
+            await self.reply(command, stats)
         elif kind in ("prompt", "steer", "follow_up"):
             text = command.get("message")
             if not isinstance(text, str):
@@ -335,6 +345,7 @@ class Runtime:
         if verb == "state":
             return {"pid": os.getpid(), "wire": self.args.wire, "seq": self.serial, "active": self.active,
                     "session": f"fixture-{self.session}", "steering": self.steering[:], "follow_up": self.follow_up[:],
+                    "cwd": self.native_cwd or os.getcwd(), "model": self.model.get("id"), "effort": self.thinking,
                     "limits": {"record_bytes": MAX_RECORD, "ledger_bytes": MAX_LEDGER, "commands": 64, "script_actions": 1024}}
         if verb in ("pause_before", "pause_after", "hang"):
             phase = row.get("phase", "acceptance")
@@ -446,6 +457,18 @@ class Runtime:
                         "type": "text_delta", "contentIndex": 0, "delta": part}})
                 await self.emit({"type": "message_end", "message": {"role": "assistant", "content": [
                     {"type": "text", "text": current if chunks is not None else f"{index}:{text}"}], "stopReason": "stop"}})
+        elif verb == "usage":
+            report = row.get("report")
+            if report is not None and (not isinstance(report, dict) or len(json.dumps(report).encode()) > 4096):
+                raise ValueError("fixture usage report must be a bounded native stats object or null")
+            self.usage_report = report
+            self.record("usage", report=report)
+        elif verb == "native_cwd":
+            cwd = row.get("cwd")
+            if cwd is not None and (not isinstance(cwd, str) or not cwd or len(cwd.encode()) > 4096):
+                raise ValueError("fixture native cwd must be a bounded string or null")
+            self.native_cwd = cwd
+            self.record("native_cwd", cwd=cwd)
         elif verb == "failure":
             await self.emit({"type": "message_end", "message": {"role": "assistant", "content": [],
                              "stopReason": "error", "errorMessage": row.get("message", "fixture failure")}})

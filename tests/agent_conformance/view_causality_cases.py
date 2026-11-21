@@ -164,3 +164,169 @@ async def generic_causality_wire(ctx):
     ctx.evidence.append({"kind": "c12_adapter_declined_forms", "forms": declined})
     ctx.evidence.append({"kind": "c12_bounds", "cause_bytes": 4096, "string_bytes": 256, "containers": 64,
                          "correlation_bytes": 256, "accepted_forms": 7, "refused_forms": len(refusals)})
+
+
+# ---- C11: optional view facts -------------------------------------------------------------------------------------
+# Native usage reports are fixture input in each wire's own native shape; the expected standard facts follow the
+# agent-v0 §2.3 mapping (context.window/used, tokens input/output/cache_read/cache_write). Nothing is derived here:
+# a section the native report lacks must stay absent in the facts.
+
+def native_report(wire, *, window=None, used=None, tokens=None, cost=None):
+    """(native report, standard usage expected from it) for one wire. `tokens` = (input, output, cache_read, cache_write)."""
+    expected = {}
+    if wire == "pi":
+        report = {}
+        if window is not None:
+            report["contextUsage"] = {"contextWindow": window, "tokens": used}
+            expected["context"] = {"window": window, **({"used": used} if used is not None else {})}
+        if tokens is not None:
+            report["tokens"] = {"input": tokens[0], "output": tokens[1], "cacheRead": tokens[2], "cacheWrite": tokens[3],
+                                "total": sum(tokens)}
+            expected["tokens"] = {"input": tokens[0], "output": tokens[1], "cache_read": tokens[2], "cache_write": tokens[3]}
+        if cost is not None:
+            report["cost"] = cost  # Pi's aggregate is a bare number: no currency/basis to preserve
+        return report, expected
+    if wire == "codex":
+        # App-server reports the model window but no occupancy: `used` must stay absent (window-only runtime).
+        report = {}
+        if window is not None:
+            report["modelContextWindow"] = window
+            expected["context"] = {"window": window}
+        if tokens is not None:
+            total = {"inputTokens": tokens[0], "outputTokens": tokens[1], "cachedInputTokens": tokens[2],
+                     "reasoningOutputTokens": 0, "totalTokens": sum(tokens)}
+            report["total"] = total
+            report["last"] = dict(total)  # last-turn totals: never context occupancy
+            expected["tokens"] = {"input": tokens[0], "output": tokens[1], "cache_read": tokens[2]}
+        return report, expected
+    raise HarnessGap("C11 needs a native usage-report fixture for wire " + str(wire))
+
+
+async def wait_usage(ctx, expected, label):
+    try:
+        return await ctx.wait_facts(usage_matches(expected), timeout=5)
+    except CheckFailed:
+        current = await ctx.facts()
+        ctx.evidence.append({"kind": "c11_usage_mismatch", "form": label, "expected": expected,
+                             "facts_usage": current.get("usage"), "incomplete": current.get("incomplete")})
+        raise CheckFailed(f"C11 {label}: facts usage {current.get('usage')!r} never matched the native report {expected!r}")
+
+
+async def report_usage(ctx, wire, report):
+    await ctx.native.call("usage", report=report)
+    if wire == "pi":
+        # The Pi wire observes stats after a native settle; the settle itself carries no usage.
+        await ctx.native.call("turn", state="settled")
+
+
+def usage_matches(expected):
+    def match(facts):
+        usage = facts.get("usage")
+        return isinstance(usage, dict) and {key: usage.get(key) for key in ("context", "tokens")} == {
+            key: expected.get(key) for key in ("context", "tokens")}
+    return match
+
+
+def check_cost(usage, label):
+    cost = (usage or {}).get("cost")
+    if cost is None:
+        return
+    check(isinstance(cost.get("currency"), str) and cost.get("basis") in ("reported", "estimated")
+          and isinstance(cost.get("amount"), (int, float)),
+          f"C11 {label}: published cost lacks its native currency/basis: {cost}")
+
+
+async def observe_native_state(ctx):
+    facts = await ctx.facts()
+    options = [row for row in facts.get("config", []) if row.get("type") == "select" and row.get("choices")]
+    if "agent.configure" not in facts.get("caps", {}) or not options:
+        raise HarnessGap("C11 native-cwd observation needs a declared select configuration option to confirm state")
+    option = options[0]
+    alternate = next((row["value"] for row in option["choices"] if row["value"] != option.get("value")), None)
+    if alternate is None:
+        raise HarnessGap("C11 configuration option has no alternate value")
+    result = await ctx.invoke("agent.configure", {"id": option["id"], "value": alternate, "rev": option["rev"]})
+    check(result.get("outcome") in ("observed", "accepted", "dispatched"), f"C11: declared configuration change failed: {result}")
+    ctx.evidence.append({"kind": "c11_state_observation", "option": option["id"], "value": alternate, "outcome": result.get("outcome")})
+
+
+@case("C11")
+async def optional_view_facts(ctx):
+    wire = ctx.manifest.get("wire")
+    if wire not in ("pi", "codex"):
+        raise HarnessGap("C11 native usage fixture exists for the pi and codex wires only")
+    facts = await ctx.ensure_session()
+    native = await ctx.native.call("state")
+    if "cwd" not in native or "model" not in native:
+        raise HarnessGap("C11 fixture state lacks its native cwd/model oracle")
+
+    # Session facts follow the runtime's own reports, never the bridge/viewer process or a guessed model.
+    if wire == "pi":
+        reported_cwd = "/c11-native-reported-cwd"
+        await ctx.native.call("native_cwd", cwd=reported_cwd)
+        # A declared configuration change is confirmed by re-reading native state; that read carries the cwd.
+        await observe_native_state(ctx)
+    else:
+        reported_cwd = native["cwd"]
+    try:
+        facts = await ctx.wait_facts(lambda f: (f.get("session") or {}).get("cwd") == reported_cwd, timeout=5)
+    except CheckFailed:
+        current = await ctx.facts()
+        ctx.evidence.append({"kind": "c11_session_mismatch", "reported_cwd": reported_cwd, "facts_session": current.get("session")})
+        raise CheckFailed(f"C11: session.cwd {(current.get('session') or {}).get('cwd')!r} is not the native-reported {reported_cwd!r}")
+    native = await ctx.native.call("state")  # model/effort truth after any configuration change
+    facts = await ctx.wait_facts(lambda f: ((f.get("session") or {}).get("model") or {}).get("id") == native["model"], timeout=5)
+    model = (facts.get("session") or {}).get("model") or {}
+    check(model.get("id") == native["model"], f"C11: session.model.id {model.get('id')!r} is not the native model {native['model']!r}")
+    if native.get("effort") is None:
+        check("effort" not in model, f"C11: session.model.effort {model.get('effort')!r} was guessed; native reported none")
+    else:
+        check(model.get("effort") == native["effort"], f"C11: effort {model.get('effort')!r} != native {native['effort']!r}")
+    ctx.evidence.append({"kind": "c11_session", "native": {"cwd": reported_cwd, "model": native.get("model"), "effort": native.get("effort")},
+                         "facts": {"cwd": facts["session"].get("cwd"), "model": model}})
+
+    # 1. A full native report: window, occupancy (where the runtime reports it), token and cache totals, bare cost.
+    report, expected = native_report(wire, window=200000, used=4321, tokens=(1100, 220, 33, 4), cost=0.75)
+    await report_usage(ctx, wire, report)
+    facts = await wait_usage(ctx, expected, "full")
+    check_cost(facts["usage"], "full")
+    if isinstance(report.get("cost"), (int, float)):
+        # The native aggregate is a bare number: no currency or reported/estimated basis to preserve.
+        check("cost" not in facts["usage"], "C11: a bare native cost number became a priced standard cost (currency/basis invented)")
+    ctx.evidence.append({"kind": "c11_usage", "form": "full", "native": report, "facts": facts["usage"],
+                         "incomplete": facts.get("incomplete")})
+
+    # 2. Window only: occupancy stays absent; last-turn totals never become context.used.
+    report, expected = native_report(wire, window=128000, tokens=(500, 60, 0, 0))
+    await report_usage(ctx, wire, report)
+    facts = await wait_usage(ctx, expected, "window_only")
+    context = facts["usage"].get("context") or {}
+    check("used" not in context, f"C11: window-only report published occupancy {context.get('used')!r}")
+    ctx.evidence.append({"kind": "c11_usage", "form": "window_only", "native": report, "facts": facts["usage"]})
+
+    # 3. Sections the runtime stops reporting stay unknown, never zero.
+    report, expected = native_report(wire, window=96000)
+    await report_usage(ctx, wire, report)
+    facts = await wait_usage(ctx, expected, "tokens_absent")
+    check("tokens" not in facts["usage"], f"C11: absent native token totals published as {facts['usage'].get('tokens')!r}")
+    check_cost(facts["usage"], "window")
+    ctx.evidence.append({"kind": "c11_usage", "form": "tokens_absent", "native": report, "facts": facts["usage"]})
+
+    # 4. Run and thought entities carry usage only when natively reported; this runtime reported none for them.
+    # One ordinary turn (input, a native model call and output, settle) gives the adapter run/message entities to
+    # publish; the fixture reports usage only at the session level, so none of them may carry usage.
+    await idle(ctx)
+    result = await ctx.send("C11 run observation")
+    check(result.get("outcome") == "accepted", f"C11: run observation send not accepted: {result}")
+    await ctx.native.call("turn", state="start")
+    await ctx.native.call("model_call")
+    await ctx.native.call("retain", count=1, text="C11 assistant output")
+    await ctx.native.call("turn", state="settled")
+    await ctx.wait_facts(lambda f: f.get("state") == "idle")
+    view = await ctx.attach()
+    await ctx.wait_view(view, lambda reducer: reducer.snapshots > 0)
+    carried = [(key, row["value"].get("usage")) for key, row in view.reducer.entities.items()
+               if key[0] in ("run", "message") and "usage" in row["value"]]
+    check(not carried, f"C11: run/thought usage was apportioned without a native report: {carried[:2]}")
+    ctx.evidence.append({"kind": "c11_entities", "runs": sum(1 for key in view.reducer.entities if key[0] == "run"),
+                         "messages": sum(1 for key in view.reducer.entities if key[0] == "message"), "usage_carried": 0})
