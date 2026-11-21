@@ -1717,6 +1717,8 @@ class Coordinator:
                     raise CoordinationError("conflict", "handover was aborted")
                 destination = plan["to"]
                 policy.require(context["principal"], "handover", destination["agent"])
+                if plan["state"] == "completed":
+                    raise CoordinationError("conflict", "handover is already final")
                 resource, native = self._facts(destination["agent"])
                 if not resource or resource.get("incarnation", "") != destination["incarnation"] or native.get("lifecycle") == "ended":
                     raise CoordinationError("conflict", "successor changed or ended")

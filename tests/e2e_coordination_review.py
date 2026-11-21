@@ -559,6 +559,13 @@ def case_handover():
     src, sent, plan = prepare('predecessor')
     completed = cmd('handover', {'op': op('complete'), 'action': 'complete', 'plan': plan})
     assert completed['state'] == 'completed', completed
+    before_repeat = cmd('inbox.get', {'delivery': sent['delivery']})
+    try:
+        cmd('handover', {'op': op('repeat-complete'), 'action': 'complete', 'plan': plan})
+        raise AssertionError('completed handover was completed again')
+    except RPCError as error:
+        assert error.kind == 'conflict' and 'already final' in str(error), str(error)
+    assert cmd('inbox.get', {'delivery': sent['delivery']}) == before_repeat
     record = cmd('inbox.get', {'delivery': sent['delivery']})
     assert record['to']['session'] == 's2' and record['handed_over_from']['session'] == 's1', record
     assert not received, received
@@ -581,7 +588,8 @@ def case_handover():
     assert owner.call('workspace.get', {'key': 'doc/agents/names/@accepted-before-abort'})['value']['agent'] == dst
     assert len(received) == 1, received
     return {'successor_session': 's2', 'native_writes': 1, 'sender_provenance': 'inbox-record',
-            'transport_matches_core': True, 'abort_restores_held': True, 'accepted_config_not_reverted': True}
+            'transport_matches_core': True, 'abort_restores_held': True, 'accepted_config_not_reverted': True,
+            'repeated_complete_already_final': True}
 
 
 def case_archive():
