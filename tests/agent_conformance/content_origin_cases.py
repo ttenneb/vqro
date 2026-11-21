@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 import hashlib
 from pathlib import Path
+import re
 import shutil
 import sys
 
@@ -244,18 +245,54 @@ def bound_origin(receipt, expected, supplied):
     return origin
 
 
-def model_origin(message, rendering, expected, *, sender=None):
+def model_claims(header, supplied):
+    """Grade explicit field/value assertions in the frame, not body keywords.
+
+    Recognize labeled claims ("asserted kind: agent") and field-local
+    parentheticals ("agent: endpoint (claimed)"). A claim about one field never
+    qualifies a different field, and opaque values remain case-sensitive.
+    """
+    def affirmative(pattern):
+        return any(re.search(r"(?i:\b(?:not|never|no)(?:\s+the)?\s*)$", header[:match.start()]) is None
+                   for match in re.finditer(pattern, header))
+    for field in ("kind", "agent"):
+        label = rf"(?i:{field})"
+        qualifier = r"(?i:asserted|claimed)"
+        if field not in supplied:
+            check(not re.search(rf"\b(?:{qualifier}\s+{label}\s*[:=]|{label}\s*[:=][^\r\n;]*\(\s*{qualifier}\b)", header),
+                  "model invented an asserted " + field + " from identity spelling")
+            continue
+        value = re.escape(supplied[field])
+        before = rf"\b{qualifier}\s+{label}\s*[:=]\s*{value}(?=$|[\s;,)\]])"
+        after = rf"\b{label}\s*[:=]\s*{value}\s*\(\s*{qualifier}\b[^()\r\n;]*\)"
+        check(affirmative(before) or affirmative(after),
+              "model envelope omitted/changed the asserted " + field + " claim")
+
+
+def sender_assertion(header, sender):
+    """An assertion must qualify this sender in its own framing clause."""
+    qualifier = r"(?i:\b(?:asserted|claimed)\s+sender(?:\s+provenance)?\b|\bsender(?:\s+provenance)?\s+(?:(?:is\s+)?(?:asserted|claimed)|assertion)\b)"
+    negated = r"(?i:\b(?:not|never|no)(?:\s+the)?\s+(?:asserted|claimed|assertion)\b)"
+    identity = rf"(?:^|[\s(]){re.escape(sender['principal'])}(?=$|[\s),\]])"
+    return any(re.search(identity, clause) is not None and re.search(qualifier, clause) is not None
+               and re.search(negated, clause) is None
+               for clause in re.split(r"[\r\n;]+", header))
+
+
+def model_origin(message, rendering, expected, supplied, *, sender=None):
     check(message.get("role") == rendering.get("role"), "native model role differs from declared rendering")
     check(message.get("role") not in ("system", "developer"), "caller claim gained privileged model authority")
     content = message.get("content", [])
     text = "\n".join(block.get("text", "") for block in content if isinstance(block, dict))
+    # Original content starts at this independently checked literal marker.
+    # Claims planted in the input body cannot stand in for framing metadata.
+    header = text.split("D17-body:", 1)[0]
+    model_claims(header, supplied)
     principal = sender["principal"] if sender else expected["principal"]
-    check(principal in text and expected["actor"] in text, "native envelope omitted sender/current-actor frame")
+    check(principal in header and expected["actor"] in header, "native envelope omitted sender/current-actor frame")
     if sender:
-        # Check the provenance frame, never a word planted in the user's body.
-        header = text.split("D17-body:", 1)[0].lower()
-        check(any(word in header for word in ("asserted", "assertion", "claimed")),
-              "inbox-record provenance was not labeled as an extension assertion in the model frame")
+        check(sender_assertion(header, sender),
+              "inbox-record provenance was not labeled as this sender's extension assertion in the model frame")
         check(expected["principal"] != principal and expected.get("initiator") != principal,
               "dispatch identity was rewritten to the original inbox sender", component="harness")
     return text
@@ -419,7 +456,7 @@ async def inserted_origin(ctx, invoke, request, expected, rendering, *, sender=N
           "origin-bearing input was never inserted or was duplicated")
     after = await model_cut(ctx, "D17-after")
     message = new_model_message(before, after, request["args"]["content"], sender_header=True)
-    model_origin(message, rendering, expected, sender=sender)
+    model_origin(message, rendering, expected, request["args"]["origin"], sender=sender)
     ctx.evidence.append({"kind": "D17_model_origin", "origin": receipt["origin"], "effect_audit": audit,
                          "delivery": receipt["delivery"],
                          "native_message": message, "model_seq": after["seq"]})

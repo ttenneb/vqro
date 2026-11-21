@@ -143,8 +143,14 @@ class Context:
         native = deepcopy(content)
         if expected["principal"] != "fixture-owner":
             sender = origin.get("sender", {}).get("principal", expected["principal"])
-            label = " (sender asserted by extension)" if "sender" in origin and self.fault != "sender_unlabeled" else ""
-            header = f"from {sender} via {expected['actor']}{label}\n\n"
+            label = " (sender asserted by extension)" if "sender" in origin and self.fault not in ("sender_unlabeled", "sender_assertion_decoy") else ""
+            claims = []
+            for field in ("kind", "agent"):
+                if field not in args["origin"] or self.fault == "model_agent_missing" and field == "agent":
+                    continue
+                qualifier = "" if self.fault == "model_kind_unasserted" and field == "kind" else "asserted "
+                claims.append(f"{qualifier}{field}: {args['origin'][field]}")
+            header = "; ".join(claims) + f"\nfrom {sender} via {expected['actor']}{label}\n\n"
             native.insert(0, {"type": "text", "text": header})
         if self.fault == "drop":
             native = native[:-1]
@@ -251,6 +257,39 @@ class ContentChecks(unittest.TestCase):
         public["content"][0]["text"] = "changed"
         self.assertFalse(subject.public_content_matches(public, message))
 
+    def test_model_claim_values_are_case_sensitive_and_field_local(self):
+        subject.model_claims("asserted kind: agent; asserted agent: A1", {"kind": "agent", "agent": "A1"})
+        subject.model_claims("kind: agent (claimed)\nagent: A1 (asserted by extension)", {"kind": "agent", "agent": "A1"})
+        for header in ("asserted kind: agent; agent: A1", "asserted kind: agent; asserted agent: a1",
+                       "asserted kind: agent; asserted agent: A1-longer",
+                       "asserted kind: agent; not asserted agent: A1",
+                       "not asserted kind: agent; asserted agent: A1"):
+            with self.subTest(header=header), self.assertRaises(CheckFailed):
+                subject.model_claims(header, {"kind": "agent", "agent": "A1"})
+        for header in ("asserted kind: agent; asserted agent: A1", "asserted kind: agent; agent: A1 (claimed)"):
+            with self.subTest(header=header), self.assertRaises(CheckFailed):
+                subject.model_claims(header, {"kind": "agent"})
+
+    def test_sender_qualification_is_associated_with_actual_sender(self):
+        sender = {"principal": "actual-sender"}
+        self.assertTrue(subject.sender_assertion("from actual-sender via extension:coord (sender asserted by extension)", sender))
+        self.assertTrue(subject.sender_assertion("asserted sender: actual-sender via extension:coord", sender))
+        for header in ("asserted kind: agent\nfrom actual-sender via extension:coord",
+                       "asserted kind: agent; from actual-sender via extension:coord",
+                       "asserted sender: someone-else\nfrom actual-sender via extension:coord",
+                       "asserted sender: actual-sender-other via extension:coord",
+                       "asserted sender: different-actual-sender via extension:coord",
+                       "not asserted sender: actual-sender via extension:coord"):
+            with self.subTest(header=header):
+                self.assertFalse(subject.sender_assertion(header, sender))
+
+    def test_body_claim_labels_do_not_rescue_missing_model_frame(self):
+        expected = {"principal": "P", "actor": "extension:coord"}
+        message = {"role": "user", "content": [{"type": "text", "text":
+            "from P via extension:coord\nD17-body:asserted kind: agent; asserted agent: A1"}]}
+        with self.assertRaisesRegex(CheckFailed, "asserted kind claim"):
+            subject.model_origin(message, {"role": "user"}, expected, {"kind": "agent", "agent": "A1"})
+
     def test_proof_probe_needs_actual_core_error_not_provider_refusal(self):
         with self.assertRaises(CheckFailed):
             subject.core_forbidden({"result": {"outcome": "rejected", "error": {"kind": "forbidden"}}})
@@ -303,6 +342,26 @@ class HandlerChecks(unittest.IsolatedAsyncioTestCase):
             with self.subTest(fault=fault), self.assertRaises((CheckFailed, TimeoutError)):
                 with patch.object(subject, "public_origin_route", route):
                     await subject.core_bound_origin(Context(fault=fault))
+
+    async def test_d17_complete_handler_rejects_missing_native_agent_despite_good_receipt(self):
+        ctx = Context(fault="model_agent_missing")
+        with patch.object(subject, "public_origin_route", route), self.assertRaisesRegex(CheckFailed, "asserted agent claim"):
+            await subject.core_bound_origin(ctx)
+        self.assertTrue(any(row["kind"] == "inserted" for row in ctx.native.rows))
+        self.assertNotIn("D17-asserted-agent", json.dumps(ctx.native.messages))
+
+    async def test_d17_complete_handler_rejects_kind_assertion_as_sender_label_decoy(self):
+        ctx = Context(fault="sender_assertion_decoy")
+        with patch.object(subject, "public_origin_route", route), self.assertRaisesRegex(CheckFailed, "this sender's extension assertion"):
+            await subject.core_bound_origin(ctx)
+        native = json.dumps(ctx.native.messages[-1])
+        self.assertIn("asserted kind: agent", native)
+        self.assertIn("D17-original-inbox-sender", native)
+        self.assertNotIn("sender asserted", native)
+
+    async def test_d17_complete_handler_rejects_unasserted_native_kind(self):
+        with patch.object(subject, "public_origin_route", route), self.assertRaisesRegex(CheckFailed, "asserted kind claim"):
+            await subject.core_bound_origin(Context(fault="model_kind_unasserted"))
 
     async def test_missing_callback_cannot_be_exclusion_or_pass(self):
         @asynccontextmanager
