@@ -308,7 +308,7 @@ mod layout {
         assert_eq!((size_of::<GhosttyStyle>(), align_of::<GhosttyStyle>()), (16, 2));
         assert_eq!((offset_of!(GhosttyStyle, bg_color), offset_of!(GhosttyStyle, underline_color), offset_of!(GhosttyStyle, flags), offset_of!(GhosttyStyle, reserved)), (4, 8, 12, 14));
         assert_eq!((size_of::<GhosttyTerminalModeConfig>(), offset_of!(GhosttyTerminalModeConfig, value)), (4, 2));
-        assert_eq!(size_of::<GhosttyTerminalScrollbar>(), 24);
+        assert_eq!((size_of::<GhosttyTerminalScrollbar>(), offset_of!(GhosttyTerminalScrollbar, offset), offset_of!(GhosttyTerminalScrollbar, len)), (24, 8, 16));
         assert_eq!((size_of::<GhosttyTerminalScrollViewportValue>(), size_of::<GhosttyTerminalScrollViewport>(), offset_of!(GhosttyTerminalScrollViewport, value)), (16, 24, 8));
         assert_eq!((size_of::<GhosttyClipboardContent>(), offset_of!(GhosttyClipboardContent, data)), (32, 16));
         assert_eq!((size_of::<GhosttyClipboardWriteReply>(), offset_of!(GhosttyClipboardWriteReply, result), offset_of!(GhosttyClipboardWriteReply, remember)), (16, 8, 12));

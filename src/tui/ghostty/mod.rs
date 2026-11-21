@@ -52,10 +52,8 @@ struct Collected {
 
 const MAX_CLIPBOARD_BYTES: usize = 768 * 1024; // decoded; within the 1 MiB base64 bound the vt100 engine uses
 
-// The callbacks have exactly the types the library's options take (ghostty-audit P3-1): checked here by the Rust
-// compiler, and the C typedefs by bindings_check.c.
-const _: ffi::GhosttyTerminalBellFn = Some(bell_cb);
-const _: ffi::GhosttyTerminalClipboardWriteFn = Some(clipboard_cb);
+// The callbacks have exactly the types the library's options take (ghostty-audit P3-1): `new` registers them through
+// the option types (ffi::GhosttyTerminal*Fn), and bindings_check.c restates those typedefs with their parameters.
 
 unsafe extern "C" fn bell_cb(_terminal: ffi::GhosttyTerminal, userdata: *mut c_void) {
     let _ = std::panic::catch_unwind(|| {
@@ -251,8 +249,11 @@ impl Ghostty {
         // each callback has the signature its option documents.
         unsafe {
             ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_USERDATA, userdata).ok()?;
-            ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_BELL, (bell_cb as *const ()).cast()).ok()?;
-            ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, (clipboard_cb as *const ()).cast()).ok()?;
+            // Registered through the option's own type (the library takes the function pointer as the value).
+            let bell: ffi::GhosttyTerminalBellFn = Some(bell_cb);
+            let clipboard: ffi::GhosttyTerminalClipboardWriteFn = Some(clipboard_cb);
+            ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_BELL, bell.map_or(ptr::null(), |f| f as *const c_void)).ok()?;
+            ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, clipboard.map_or(ptr::null(), |f| f as *const c_void)).ok()?;
             // vqro draws no images, so it keeps none (ghostty-audit P3-1): the library is built without Kitty graphics
             // (build.rs), which also says so here (GHOSTTY_UNSUPPORTED). A build with them gets a zero limit, which
             // turns the protocol off. Input: a uint64_t*.
