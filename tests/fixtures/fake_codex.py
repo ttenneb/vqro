@@ -24,6 +24,7 @@ parser.add_argument("--ledger", default=os.environ.get("AGENT_CONFORMANCE_LEDGER
 parser.add_argument("--reply-delay-ms", type=int, default=int(os.environ.get("CODEX_FAKE_REPLY_DELAY_MS", "0")))
 parser.add_argument("--hold", action="store_true", default=os.environ.get("CODEX_FAKE_HOLD") == "1")
 parser.add_argument("--model-read-delay-ms", type=int, default=int(os.environ.get("CODEX_FAKE_MODEL_READ_DELAY_MS", "0")))
+parser.add_argument("--model-read-gate", default=os.environ.get("CODEX_FAKE_MODEL_READ_GATE"), help="fixture-only release-file barrier")
 parser.add_argument("--reject-model-read", action="store_true", help="fixture-only native read error witness")
 parser.add_argument("--ignore-model-override", action="store_true", default=os.environ.get("CODEX_FAKE_IGNORE_MODEL")=="1")
 parser.add_argument("--omit-model-readback", action="store_true")
@@ -125,6 +126,8 @@ def handle(request):
         if thread_id not in threads:
             error(request,"unknown thread");return
         time.sleep(args.model_read_delay_ms / 1000)
+        while args.model_read_gate and not Path(args.model_read_gate).exists():
+            time.sleep(0.005)
         model=None if args.omit_model_readback else thread_models[thread_id]
         reply(request,{"thread":{**threads[thread_id],"model":model,"reasoningEffort":None},"readState":None})
     elif method == "thread/list":

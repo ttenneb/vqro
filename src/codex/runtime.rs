@@ -580,11 +580,22 @@ impl Runtime {
                 this.emit(index, &endpoint, vec![change], false);
                 receipt
             };
+            let admitted = result.is_ok();
+            let admission_diagnostic = match &result {
+                Err(Fault::Reject(error) | Fault::Unknown(error)) => Some(
+                    configuration::failure(configuration::FailureStage::NativeRpc, error)
+                        .data
+                        .unwrap(),
+                ),
+                Ok(_) => None,
+            };
+            // Reply from the actual ACK receipt now; metadata observation must not delay it.
+            let _ = tx.send(result.map(|_| receipt));
             if let Some((session, epoch, requested)) = model_scope {
                 // One bound read-only observation after this dispatch's native ACK, not execution telemetry.
                 // Admission stays serialized while it runs. A missing observation never replays input
                 // or turns a known admitted receipt into an unknown/rejected delivery.
-                let read = if result.is_ok() {
+                let read = if admitted {
                     Some(
                         this.native
                             .call_with_timeout(
@@ -621,26 +632,11 @@ impl Runtime {
                                 .data
                                 .unwrap(),
                         ),
-                        None => {
-                            let error = match &result {
-                                Err(Fault::Reject(error) | Fault::Unknown(error)) => error,
-                                _ => unreachable!(),
-                            };
-                            endpoint.model_unknown(
-                                configuration::failure(
-                                    configuration::FailureStage::NativeRpc,
-                                    error,
-                                )
-                                .data
-                                .unwrap(),
-                            )
-                        }
+                        None => endpoint.model_unknown(admission_diagnostic.unwrap()),
                     };
                     this.emit(index, &endpoint, changes, false);
                 }
             }
-            let result = result.map(|_| receipt);
-            let _ = tx.send(result);
         });
         // Leave scheduling margin for the provider to flush its one reply before the core deadline.
         let reply_at = deadline

@@ -21,6 +21,14 @@ async fn fixture_delays(
     delay_ms: u64,
     config_ms: u64,
 ) -> (tempfile::TempDir, Child, Peer, IncomingReceiver) {
+    fixture_options(hold, delay_ms, config_ms, false).await
+}
+async fn fixture_options(
+    hold: bool,
+    delay_ms: u64,
+    config_ms: u64,
+    read_gate: bool,
+) -> (tempfile::TempDir, Child, Peer, IncomingReceiver) {
     let root = tempfile::tempdir().unwrap();
     let mut child = Command::new("python3")
         .env_clear()
@@ -29,6 +37,14 @@ async fn fixture_delays(
         .env("CODEX_FAKE_HOLD", if hold { "1" } else { "0" })
         .env("CODEX_FAKE_REPLY_DELAY_MS", delay_ms.to_string())
         .env("CODEX_FAKE_MODEL_READ_DELAY_MS", config_ms.to_string())
+        .env(
+            "CODEX_FAKE_MODEL_READ_GATE",
+            if read_gate {
+                root.path().join("model-release").into_os_string()
+            } else {
+                std::ffi::OsString::new()
+            },
+        )
         .env("AGENT_CONFORMANCE_LEDGER", root.path().join("ledger.jsonl"))
         .arg(format!(
             "{}/tests/fixtures/fake_codex.py",
@@ -418,7 +434,7 @@ async fn future_intent_is_pending_without_native_write_then_bound_per_thread_rea
 #[tokio::test]
 async fn late_model_readback_clears_pending_without_replaying_admitted_input() {
     use vqro::provider_client::Outcome;
-    let (root, child, peer, incoming) = fixture_delays(false, 0, 300).await;
+    let (root, child, peer, incoming) = fixture_options(false, 0, 0, true).await;
     let (runtime, drain) = open_runtime(peer.clone(), incoming, 1).await;
     runtime.initialize_models(deadline()).await.unwrap();
     runtime
@@ -447,12 +463,17 @@ async fn late_model_readback_clears_pending_without_replaying_admitted_input() {
         runtime.facts()[0]["data"]["agent"]["session"]["model"]["id"],
         "fake-model"
     );
-    let result=runtime.invoke("endpoint-1","inc","agent.send",json!({"v":0,"mode":"admit","delivery":"late-model","origin":{"principal":"p","actor":"actor","kind":"agent"},"content":[{"type":"text","text":"one"}]}),tokio::time::Instant::now()+Duration::from_millis(80)).await.unwrap();
+    let result=tokio::time::timeout(Duration::from_secs(1),runtime.invoke("endpoint-1","inc","agent.send",json!({"v":0,"mode":"admit","delivery":"late-model","origin":{"principal":"p","actor":"actor","kind":"agent"},"content":[{"type":"text","text":"one"}]}),deadline())).await.expect("native ACK reply must not wait for unreleased readback").unwrap();
     assert!(matches!(result, Outcome::Accepted(_)));
     assert_eq!(
         runtime.facts()[0]["data"]["agent"]["config"][0]["pending"],
         true
     );
+    assert_eq!(
+        runtime.facts()[0]["data"]["agent"]["session"]["model"]["id"],
+        "fake-model"
+    );
+    std::fs::write(root.path().join("model-release"), b"release").unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if runtime.facts()[0]["data"]["agent"]["config"][0]["pending"] == false {

@@ -345,7 +345,7 @@ impl Endpoint {
 
     pub fn begin_model_turn(&mut self) -> Vec<Change> {
         self.config_pending = true;
-        self.config_uncertain = true;
+        // Keep the last actual native model while awaiting the one readback; an ACK is not a model report.
         self.config_status = "pending".into();
         self.config_diagnostic = None;
         self.usage = None;

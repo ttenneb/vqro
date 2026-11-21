@@ -66,6 +66,9 @@ class CodexMixin:
             row["error"] = data
         self.record("native_reply", command=method, operation=operation, request=command.get("id"), success=success)
         await self.emit(row)
+        if method in ("turn/start","thread/read"):
+            # Positive emitted response witness, unlike the pre-write legacy native_reply row.
+            self.record("native_response",command=method,operation=operation,request=command.get("id"),success=success,value=row)
 
     async def error(self, command, message, code=-32600):
         await self.reply(command, {"code": code, "message": message}, False)
@@ -248,8 +251,15 @@ class CodexMixin:
                     thread["model"] = params["model"]
                 self.record("session", action="resume" if method.endswith("resume") else "read", session=session)
                 if method=="thread/read":
-                    # Native Thread.model is configured metadata, NOT Turn execution telemetry.
-                    await self.reply(command,{"thread":{**thread["meta"],"model":thread["model"],"reasoningEffort":thread.get("effort")},"readState":None})
+                    await self.barrier("model_readback")
+                    readback=thread.get("readback",{})
+                    if readback.get("reject"):
+                        await self.error(command,"fixture native model read rejected")
+                    else:
+                        # Native Thread.model is configured metadata, NOT Turn execution telemetry.
+                        model=None if readback.get("omit") else thread["model"]
+                        await self.reply(command,{"thread":{**thread["meta"],"model":model,"reasoningEffort":thread.get("effort")},"readState":None})
+                    await self.barrier("model_readback","after")
                 else:
                     await self.reply(command, {"thread": thread["meta"], "model": thread["model"]})
             elif method in ("turn/start", "turn/steer"):
@@ -290,6 +300,10 @@ class CodexMixin:
 
     async def control(self, row):
         verb = row.get("verb")
+        if verb in ("pause_before","pause_after","hang") and row.get("phase")=="model_readback":
+            when="after" if verb=="pause_after" else "before"
+            self.barriers[(when,"model_readback")]=asyncio.Event()
+            return {"paused":"model_readback","when":when}
         if verb in ("pause_before", "pause_after", "hang", "release", "drop_reply", "exit", "crash"):
             return await super().control(row)
         if verb == "host_exit":
@@ -328,6 +342,15 @@ class CodexMixin:
                                         completed_at=times.get("completed_at"))
                 else:
                     raise ValueError("unknown turn state")
+            elif verb == "model_readback":
+                if "model" in row:
+                    if not isinstance(row["model"],str) or not row["model"] or len(row["model"].encode())>256: raise ValueError("bounded configured model required")
+                    thread["model"]=row["model"]
+                for key in ("omit","reject"):
+                    if key in row and type(row[key]) is not bool: raise ValueError("readback flags must be bool")
+                thread["readback"]={key:row.get(key,False) for key in ("omit","reject")}
+                self.record("model_readback_control",session=session,model=thread["model"],**thread["readback"])
+                return {"session":session,"model":thread["model"],**thread["readback"]}
             elif verb == "failure":
                 message = row.get("message", "Fixture native turn failure")
                 if not isinstance(message, str) or len(message.encode()) > 4096:

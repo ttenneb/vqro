@@ -110,7 +110,7 @@ fn intent_is_pending_until_actual_native_thread_readback_not_request_or_ack() {
     assert_eq!(call.params["model"], "native-two");
     assert_eq!(call.params["input"][1]["text"], "literal");
     e.begin_model_turn();
-    assert!(e.session_info().get("model").is_none());
+    assert_eq!(e.session_info()["model"]["id"], "native-one");
     assert_eq!(e.model_option()["pending"], true);
     e.finish_model_readback(
         &json!({"thread":{"id":"s1","model":"native-two"}}),
