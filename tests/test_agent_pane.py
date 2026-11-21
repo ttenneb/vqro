@@ -10,6 +10,7 @@ from agents import Agents
 import agents as agents_module
 import agent_transcript
 from agent_fixture import FakeCore
+from vqro_ext import VqroError
 
 
 def line(record):
@@ -667,6 +668,38 @@ class AgentPane(unittest.TestCase):
         chip = next(r for r in self.core.live["agents-r2"]["items"] if r.get("id") == "gear")["chips"][0]
         reply = self.core.handlers[chip["command"]](dict(chip["args"]))
         return self.core.live[reply["client"]["popup"]["view"]]["items"]
+
+    def test_opening_gear_uses_event_caches_not_a_workspace_snapshot(self):
+        self.feed(snapshot(CONVERSATION))
+        def no_snapshot():
+            self.fail("opening derived UI must not fetch all live transcripts")
+        self.core.fresh = no_snapshot
+        self.gear()
+        self.core.resources["r2"]["name"] = "Renamed by resource event"
+        self.agents.event("resource", {"id": "r2"})
+        self.gear()
+        self.assertTrue(self.core.live["agents-pane-r2"]["title"].startswith("Renamed by resource event"))
+        del self.core.resources["r2"]
+        self.agents.event("resource.removed", {"id": "r2"})
+        refreshed = []
+        self.core.fresh = lambda: refreshed.append(True)
+        with self.assertRaises(VqroError):
+            self.core.handlers["agents.pane"]({"resource": "r2"})
+        self.assertEqual(refreshed, [True], "a cache miss checks the authoritative snapshot once")
+
+    def test_gear_cache_miss_refreshes_and_bridge_action_still_refreshes(self):
+        resource = self.core.resources.pop("r2")
+        refreshed = []
+        def fresh():
+            refreshed.append(True)
+            self.core.resources["r2"] = resource
+        self.core.fresh = fresh
+        reply = self.core.handlers["agents.pane"]({"resource": "r2"})
+        self.assertEqual(reply["client"]["popup"]["view"], "agents-pane-r2")
+        self.assertEqual(refreshed, [True])
+        with self.assertRaises(VqroError):
+            self.core.handlers["agents.pane"]({"resource": "r2", "value": "bridge"})
+        self.assertEqual(refreshed, [True, True], "bridge action always revalidates even with a cache hit")
 
     def test_view_filters_in_the_gear_write_this_panes_settings_and_make_default_copies_them(self):
         self.feed(snapshot(CONVERSATION))

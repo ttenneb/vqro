@@ -3,6 +3,13 @@
 D16: build vqro itself, smallest complete and usable first. The north star: an agent can substantially modify its own
 workspace through reliable public primitives, without changing the host or endangering underlying processes.
 
+## Agents gear popup latency (2026-11-21)
+
+Opening `agents.pane` uses event-fed facts rather than copying every live transcript via a workspace snapshot.
+Cache misses still refresh; the bridge action keeps its fresh validation. Private 200-agent command-reply
+median fell from 3617 ms to 0.92 ms; a 100 ms p95 benchmark bound and cache/action tests protect it.
+Quick gate passed all eight stages in a shared slot. See `research/agents-gear-popup-latency.md` for scope and evidence.
+
 ## Explicit owner-unset recovery (2026-11-20)
 
 Missing/invalid owner resolution no longer guesses the default: owner TUI connections get an unresolved core

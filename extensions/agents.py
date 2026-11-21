@@ -752,8 +752,19 @@ class Agents:
 
     def pane_menu(self, args):
         """agents.pane {resource}: open the ⚙ popup; {value: bridge}: show the agent's bridge terminal (from it)."""
-        self.ext.fresh()
-        r = self.agent(args, inspect=True)
+        # This is derived UI: the event-fed caches already supply its facts. A full workspace
+        # snapshot also copies every live transcript, making a small popup scale with all agents.
+        # Actions selected here validate their target again in their own command handlers.
+        if args.get("value") == "bridge":
+            self.ext.fresh()
+        try:
+            r = self.agent(args, inspect=True)
+        except VqroError:
+            if args.get("value") == "bridge":
+                raise
+            # A just-created resource may not have reached the event cache yet.
+            self.ext.fresh()
+            r = self.agent(args, inspect=True)
         if args.get("value") == "bridge":
             host = self.ext.resources.get(r.get("host"))
             if not host or host.get("kind") != "terminal":
