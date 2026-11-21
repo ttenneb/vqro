@@ -63,6 +63,9 @@ async def c6_non_confirm(ctx, declaration):
         check(isinstance(preserved, str) and detail in preserved,
               "C6: the request entity lost the actual native request detail", component="adapter")
     facts = await ctx.facts()
+    # The loop checks the bound only after observable requests; the facts after a refused attempt must fit too.
+    check(encoded(facts) <= FACTS_BOUND,
+          f"agent facts exceeded 64 KiB after native request pressure ({len(made)} requests, refused: {overflow is not None})")
     summaries = {row["request"]: row for row in facts.get("requests", [])}
     for request in made:
         summary = summaries.get(request["request"])

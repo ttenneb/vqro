@@ -58,7 +58,10 @@ class Fake:
             summaries[0]["title"] = summaries[0]["title"][:3]
         if self.fault == "summary_omits_title" and summaries:
             summaries[0].pop("title")
-        return {"state": self.state, "requests": summaries}
+        facts = {"state": self.state, "requests": summaries}
+        if self.fault == "oversized_after_refusal" and self.serial > self.BUDGET:
+            facts["overflow_padding"] = "p" * (70 << 10)  # summaries stay valid; only the post-refusal facts exceed 64 KiB
+        return facts
 
     async def wait_facts(self, predicate, timeout=2):
         facts = await self.facts()
@@ -160,7 +163,8 @@ class RequestFixtureNegatives(unittest.TestCase):
     def test_each_broken_rule_fails(self):
         for branch, faults in ((branches.c6_non_confirm, ("oversized_facts", "silent_title_cut", "summary_omits_title", "detail_lost",
                                                           "silent_overflow", "overflow_other_error", "overflow_wrong_cancel",
-                                                          "overflow_harness_gap", "overflow_missing_native_id")),
+                                                          "overflow_harness_gap", "overflow_missing_native_id",
+                                                          "oversized_after_refusal")),
                                (branches.r2_native_withdrawal, ("ignore_native_resolution", "answer_withdrawn")),
                                (branches.r6_background_foreground, ("interrupt_withdraws_all", "background_bound_to_foreground",
                                                                     "answer_wrong_native", "stale_indeterminate", "stale_writes"))):
