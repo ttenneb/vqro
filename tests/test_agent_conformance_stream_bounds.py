@@ -58,7 +58,10 @@ class AdapterPreservesOrMarks(unittest.TestCase):
     def test_whole_or_split_or_marked_passes(self):
         self.assertTrue(m.adapter_preserves_or_marks([self.text], self.bytes, self.sha))
         self.assertTrue(m.adapter_preserves_or_marks([self.text[:40000], self.text[40000:]], self.bytes, self.sha))
-        self.assertTrue(m.adapter_preserves_or_marks([self.text[:60000], "[message truncated: too large]"], self.bytes, self.sha))
+        self.assertTrue(m.adapter_preserves_or_marks([self.text[:60000]], self.bytes, self.sha,
+                                                     other_texts=["[message truncated: too large]"]))
+        self.assertFalse(m.adapter_preserves_or_marks([self.text[:60000], "[message truncated: too large]"], self.bytes,
+                                                      self.sha), "a marker in the RAW body never counts")
 
     def test_silent_truncation_fails(self):
         self.assertFalse(m.adapter_preserves_or_marks([self.text[:60000]], self.bytes, self.sha), "silently cut at the bound")
@@ -127,11 +130,12 @@ class ReviewCounterexamples(unittest.TestCase):
         omitted = {("message", "a"): {"rev": 1, "value": {"content": [{"type": "text", "text": text[:60000]}]}},
                    ("notice", "n"): {"rev": 1, "value": {"content": [{"type": "text", "text": "assistant output omitted: too large"}]}},
                    ("message", "old"): {"rev": 1, "value": {"content": [{"type": "text", "text": "too large earlier"}]}}}
-        texts, others = m.message_texts(reducer(omitted), "O12-", {("message", "old"): ["too large earlier"]})
+        old_seen = {("message", "old"): {"shown": ["too large earlier"], "body": m.body_fingerprint(omitted[("message", "old")]["value"])}}
+        texts, others = m.message_texts(reducer(omitted), "O12-", old_seen)
         self.assertTrue(m.adapter_preserves_or_marks(texts, n, sha, other_texts=others), "omission-only entity")
         silent = {("message", "a"): {"rev": 1, "value": {"content": [{"type": "text", "text": text[:60000]}]}},
                   ("message", "old"): {"rev": 1, "value": {"content": [{"type": "text", "text": "too large earlier"}]}}}
-        texts, others = m.message_texts(reducer(silent), "O12-", {("message", "old"): ["too large earlier"]})
+        texts, others = m.message_texts(reducer(silent), "O12-", old_seen)
         self.assertFalse(m.adapter_preserves_or_marks(texts, n, sha, other_texts=others), "old marker is not this refusal")
 
 
@@ -347,7 +351,25 @@ class WholeHandlerControls(unittest.TestCase):
         old_marker_rev_bumped = {("message", "old"): message(1, 1, "[earlier output was truncated: too large]")}
         def bump_old_marker_only(t):
             return {("message", "old"): message(2, 1, "[earlier output was truncated: too large]")}
+        full = "0:" + "".join("O12-" + "x" * 1020 for _ in range(70))
+        old_seen_marker = "[earlier output was truncated: too large]"
         controls = {
+            # prim-agent-ux HOLD on dfa1a85b: raw text never marks; raw freshness is separate from shown freshness.
+            "fresh truncation cannot borrow the same entity's old marker": (
+                lambda t: {("message", "m"): message(2, 1, t[:60000], old_seen_marker)},
+                {("message", "m"): message(1, 1, full[:1000], old_seen_marker)}, False),
+            "updated complete raw body whose clipped shown rows are unchanged": (
+                lambda t: {("message", "m"): message(2, 1, t)}, {("message", "m"): message(1, 1, full[:50000])}, True),
+            "unchanged complete raw history with a bumped revision": (
+                lambda t: {("message", "m"): message(2, 1, t)}, {("message", "m"): message(1, 1, full)}, False),
+            "newly shown current refusal marker": (
+                lambda t: {("message", "m"): message(2, 1, t[:60000], "[current output omitted: too large]")},
+                {("message", "m"): message(1, 1, full[:1000], old_seen_marker)}, True),
+            "marker at the tail of a long raw line, clipped out of the shown rows": (
+                lambda t: {("message", "m"): message(1, 1, t[:60000] + " [output truncated: too large]")}, None, False),
+            "marker only inside stripped OSC hyperlink metadata": (
+                lambda t: {("message", "m"): message(1, 1, t[:1000] + "\x1b]8;;https://omitted.example/\x07link\x1b]8;;\x07")},
+                None, False),
             "whole text in one entity": (lambda t: {("message", "m"): message(1, 2, t)}, None, True),
             "marker only in an image block's extra text (never shown)": (image_extra_marker, None, False),
             "rev-bumped old marker, no O12 output": (bump_old_marker_only, old_marker_rev_bumped, False),

@@ -448,17 +448,17 @@ async def incompatible_viewers(ctx):
 # ---------------------------------------------------------------------------------------------------------------------
 # O12 adapter-side checker (unit-tested with negatives)
 
-def adapter_preserves_or_marks(stream_texts, emitted_bytes, emitted_sha256, marker_words=("truncated", "omitted", "too large", "too_large"), other_texts=()):
-    """O12: after a producer too_large refusal, the adapter's item stream either still carries the whole emitted text
-    (some text has exactly the native ledger's length and sha256, or the body texts joined in order do) or marks the
-    refusal; a shorter text with no marker is silent loss. `stream_texts` are the text blocks of the correlated message
-    entities (body and any separate marker block); `other_texts` are texts of other entities the message produced
-    (an omission-only entity), searched for the marker only."""
+def adapter_preserves_or_marks(body_texts, emitted_bytes, emitted_sha256, marker_words=("truncated", "omitted", "too large", "too_large"), other_texts=()):
+    """O12: after a producer too_large refusal, the adapter's item stream either still carries the whole emitted text,
+    or visibly marks the refusal; a shorter text with no marker is silent loss. The two halves never mix:
+    - `body_texts`: the RAW text blocks of the freshly emitted message (stream content), used ONLY for whole-text
+      preservation: one block, or all of them joined in order, has exactly the native ledger's length and sha256;
+    - `other_texts`: ONLY newly SHOWN rows (production content_rows output new since the baseline, from any entity,
+      including the emitted message itself), used ONLY for the marker. Raw text never counts as a marker."""
     import hashlib
     def same(text): return len(text.encode()) == emitted_bytes and hashlib.sha256(text.encode()).hexdigest() == emitted_sha256
-    body = [text for text in stream_texts if not any(word in text.lower() for word in marker_words)]
-    whole = any(same(text) for text in stream_texts) or same("".join(body)) or same("".join(stream_texts))
-    marked = any(word in text.lower() for text in list(stream_texts) + list(other_texts) for word in marker_words)
+    whole = any(same(text) for text in body_texts) or same("".join(body_texts))
+    marked = any(word in text.lower() for text in other_texts for word in marker_words)
     return whole or marked
 
 
@@ -485,41 +485,54 @@ def body_texts(value):
             and isinstance(block.get("text"), str) and block["text"].strip()]
 
 
+def body_fingerprint(value):
+    """The raw body's identity: sha256 of its text blocks joined (the shown rows clip long lines, so two different
+    bodies can render identically; this keeps raw freshness separate from shown freshness)."""
+    import hashlib
+    return hashlib.sha256("\x00".join(body_texts(value)).encode()).hexdigest()
+
+
 def shown_baseline(reducer):
-    """What every entity shows before the native emission: {key: [shown texts]}."""
-    return {key: shown_texts(entity.get("value") or {}) for key, entity in reducer.entities.items()}
+    """Every entity before the native emission: {key: {"shown": [shown rows], "body": raw body fingerprint}}."""
+    return {key: {"shown": shown_texts(entity.get("value") or {}), "body": body_fingerprint(entity.get("value") or {})}
+            for key, entity in reducer.entities.items()}
 
 
 def message_texts(reducer, needle, baseline=None):
-    """Correlate the emitted message once, from CURRENT shown output only. `baseline` is shown_baseline() taken before
-    the native emission; a revision bump that shows nothing new is still history. Returns (texts, other_texts):
-    `texts` are the body text blocks of every message entity whose body newly carries `needle`, in timeline (position)
-    order, followed by that entity's newly shown marker rows; `other_texts` are the shown texts of any other entity
-    that are new since the baseline (e.g. an omission-only notice). Hidden fields never count."""
+    """The emitted message's evidence from CURRENT output only, given shown_baseline() taken before the emission.
+    Returns (body_texts, fresh_shown):
+    - body_texts: the raw text blocks of every message entity whose raw body carries `needle` and changed since the
+      baseline (new entity or new body fingerprint), in timeline (position) order: whole-text preservation only;
+    - fresh_shown: every shown row (production content_rows) new since the baseline, from any entity, EXCEPT the rows
+      the emitted body text (its blocks carrying `needle`) itself renders to: marker only. A refusal marker is shown apart from the body; a word
+      inside a body line (an escaped URL, a clipped tail) is body content, not a marker.
+    A revision bump that changes neither the raw body nor the shown rows is history and contributes nothing."""
     baseline = baseline or {}
-    if any(not isinstance(shown, list) for shown in baseline.values()):
-        raise ValueError("message_texts baseline is shown_baseline() ({key: [shown texts]}), not a revision map")
-    texts, others = [], []
+    if any(not isinstance(row, dict) or not isinstance(row.get("shown"), list) or not isinstance(row.get("body"), str)
+           for row in baseline.values()):
+        raise ValueError("message_texts baseline is shown_baseline() ({key: {shown, body}}), not a revision map")
+    bodies, fresh_shown = [], []
     def timeline(item):  # the message's own position, never the opaque entity id; unpositioned entities last
         position = (item[1].get("value") or {}).get("position")
         return (0, position, str(item[0])) if isinstance(position, int) and not isinstance(position, bool) else (1, 0, str(item[0]))
     for key, entity in sorted(reducer.entities.items(), key=timeline):
         value = entity.get("value") or {}
-        before = list(baseline.get(key, []))
-        fresh = []
-        for text in shown_texts(value):  # shown texts not already shown before (multiset difference)
-            if text in before:
-                before.remove(text)
-            else:
-                fresh.append(text)
-        if not fresh:
-            continue  # nothing newly shown: history, whatever its revision
+        before = baseline.get(key)
         body = body_texts(value) if key[0] == "message" else []
-        if any(needle in text for text in body) and any(needle in text for text in fresh):
-            texts += body + [text for text in fresh if needle not in text]  # body, then its newly shown markers
-        else:
-            others += fresh
-    return texts, others
+        emitted = any(needle in text for text in body) and (before is None or before["body"] != body_fingerprint(value))
+        if emitted:
+            bodies += body
+        # Rows that are the body itself (the emitted text blocks as production renders them) are never markers.
+        body_rows = shown_texts({"content": [{"type": "text", "text": text} for text in body if needle in text]}) if emitted else []
+        shown_before = list(before["shown"]) if before else []
+        for text in shown_texts(value):  # shown rows not already shown before (multiset difference)
+            if text in shown_before:
+                shown_before.remove(text)
+            elif text in body_rows:
+                body_rows.remove(text)
+            else:
+                fresh_shown.append(text)
+    return bodies, fresh_shown
 
 
 @case("O12")
@@ -552,7 +565,7 @@ async def producer_append_bounds(ctx):
     witness = emitted[-1]
     def settled(reducer):
         texts, others = message_texts(reducer, "O12-", baseline)
-        return texts and adapter_preserves_or_marks(texts, witness["text_bytes"], witness["text_sha256"], other_texts=others)
+        return adapter_preserves_or_marks(texts, witness["text_bytes"], witness["text_sha256"], other_texts=others)
     try:
         await ctx.wait_view(view, settled, timeout=15)
     except Exception:
