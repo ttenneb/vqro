@@ -34,10 +34,11 @@ pub fn outer_safe(text: &[u8]) -> bool {
     std::str::from_utf8(text).is_ok_and(|s| !s.chars().any(char::is_control))
 }
 
-/// An OSC 52 write that is safe to pass on: selection names `[a-z0-9]*`, data base64 (never the `?` read).
+/// An OSC 52 write that is safe to pass on: selection names `[a-z0-9]*`, data base64 (never the `?` read). Empty
+/// data is a valid write (it clears the selection) and passes, as it did before.
 pub fn clipboard_safe(selection: &[u8], data: &[u8]) -> bool {
     selection.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-        && !data.is_empty() && data.iter().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+        && data.iter().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
 }
 const MAX_CLIPBOARD_B64: usize = 1 << 20;
 

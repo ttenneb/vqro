@@ -5446,6 +5446,12 @@ mod independent_security_sink_controls {
         // Decoded clipboard content can contain NUL; the *wire* data remains safe base64.
         assert_eq!(effect_bytes(&Effect::Clipboard(b"c".to_vec(), b"AA==".to_vec())), b"\x1b]52;c;AA==\x07");
         assert_eq!(effect_bytes(&Effect::Bell), b"\x07");
+        // An empty write (it clears the selection) passes as before: vt100 produces one (the secondary's control).
+        assert_eq!(effect_bytes(&Effect::Clipboard(b"c".to_vec(), Vec::new())), b"\x1b]52;c;\x07");
+        let mut e = Emulator::with_engine(emulator::EngineKind::Vt100, 20, 2, 10);
+        e.process(b"\x1b]52;c;\x07");
+        let fx = e.take_effects();
+        assert_eq!(fx.iter().map(effect_bytes).collect::<Vec<_>>(), vec![b"\x1b]52;c;\x07".to_vec()]);
     }
 
     #[test]
