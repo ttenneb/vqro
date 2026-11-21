@@ -77,9 +77,12 @@ def launch(command, owner=None):
     for pid, started in owners:
         inside.extend([str(pid), started])
     inside.extend(["--", *command])
+    # A stop that outlives TimeoutStopSec makes systemd (259) "abort" the leftovers with WatchdogSignal, SIGABRT by
+    # default: each SIGTERM-ignoring leftover then dumps core and the desktop reports a crash. SIGKILL ends them the
+    # same way without a core dump.
     args = ["systemd-run", "--user", "--quiet", "--wait", "--pipe", "--collect", "--expand-environment=no",
             "--service-type=exec", "--property=ExitType=main", "--property=KillMode=control-group",
-            "--property=TimeoutStopSec=2s", "--property=CPUWeight=50",
+            "--property=TimeoutStopSec=2s", "--property=WatchdogSignal=SIGKILL", "--property=CPUWeight=50",
             f"--property=Nice={max(10, os.getpriority(os.PRIO_PROCESS, 0))}",
             f"--property=WorkingDirectory={os.getcwd()}", f"--unit={unit}", "--", "/usr/bin/env", "-i"]
     args.extend(f"{name}={value}" for name, value in env.items())

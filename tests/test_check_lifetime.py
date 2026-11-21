@@ -188,6 +188,7 @@ class LifetimeUnitTests(unittest.TestCase):
             self.assertEqual(lifetime.launch(['/bin/true']), 0)
         args = run.call_args.args[0]
         self.assertIn('--property=KillMode=control-group', args)
+        self.assertIn('--property=WatchdogSignal=SIGKILL', args)  # no core dump for a stop timeout
         self.assertIn('--property=ExitType=main', args)
         self.assertIn('--expand-environment=no', args)
         self.assertIn('-i', args)
