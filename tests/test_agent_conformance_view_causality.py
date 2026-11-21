@@ -68,12 +68,28 @@ class Peer:
         return value
 
 
+class Witness:
+    """In-process stand-in for the public dispatch-boundary provider: records what the fake core dispatches."""
+    rid = "w1"
+
+    def __init__(self):
+        self.received = []
+
+    async def start(self):
+        return self
+
+    async def close(self):
+        pass
+
+
 class Ctx:
     """Implements the core rule unless `fault` names one rule to break."""
     def __init__(self, fault=None):
         self.fault, self.events, self.evidence, self.serial = fault, [], [], 0
         self.native, self.peer = Native(fault), Peer(self)
         self.agents = [{"id": "r1"}]
+        self.witness = Witness()
+        self.dispatch_witness_factory = lambda: self.witness
 
     async def facts(self):
         return {"epoch": "e1", "state": "idle", "caps": {"rev": 1, "agent.send": {"modes": {"start": {}}}}}
@@ -85,7 +101,8 @@ class Ctx:
         self.serial += 1
         return "d" + str(self.serial)
 
-    async def invoke(self, op, args, **root):
+    async def invoke(self, op, args, rid=None, defaults=True, **root):
+        args = json.loads(json.dumps(args))  # a real RPC never shares caller memory with the core
         links, invalid = {}, False
         for field in ("cause", "correlation"):
             nested, explicit = args.get(field), root.get(field)
@@ -103,6 +120,8 @@ class Ctx:
         if invalid:
             if self.fault == "write_on_refusal":
                 self.native.rows.append({"kind": "command", "effectful": True})
+                if rid == self.witness.rid:
+                    self.witness.received.append({"op": op, "args": args})
             return {"outcome": "rejected", "rpc_error": True, "error": {"message": "invalid", "data": {"kind": "invalid"}}}
         self.serial += 1
         effect = "boot-1:e" + str(self.serial)
@@ -111,8 +130,13 @@ class Ctx:
             audit.pop("cause")
         if self.fault == "rewrite_provenance" and "cause" in audit:
             audit["cause"] = dict(audit["cause"], provenance="asserted" if audit["cause"]["provenance"] != "asserted" else "adapter")
-        if self.fault == "mutate_args":
-            args.pop("cause", None)
+        dispatched = json.loads(json.dumps(args))
+        if self.fault == "drop_dispatched_cause":
+            dispatched.pop("cause", None)  # audit stays right, the adapter-bound args lose the link
+        if self.fault == "inject_root_link" and "cause" in root and "cause" not in dispatched:
+            dispatched["cause"] = root["cause"]  # the core must not rewrite args with root metadata
+        if rid == self.witness.rid:
+            self.witness.received.append({"op": op, "args": dispatched})
         self.events.append({"type": "effect", "data": {"effect": effect, "op": op, "outcome": "accepted", **audit}})
         self.native.rows.append({"kind": "command", "effectful": True})
         return {"outcome": "accepted", "effect": effect, "data": {"receipt": {"delivery": args.get("delivery")}}}
@@ -127,7 +151,8 @@ class C12Negatives(unittest.TestCase):
         run()
 
     def test_each_broken_rule_fails(self):
-        for fault in ("accept_invalid", "accept_conflict", "write_on_refusal", "drop_cause", "rewrite_provenance", "mutate_args"):
+        for fault in ("accept_invalid", "accept_conflict", "write_on_refusal", "drop_cause", "rewrite_provenance",
+                      "drop_dispatched_cause", "inject_root_link"):
             with self.subTest(fault=fault), self.assertRaises(CheckFailed):
                 run(fault)
 
@@ -174,6 +199,8 @@ class C11Fake:
             usage["tokens"] = {"input": 0, "output": 0}
         if self.fault == "priced_cost" and "cost" in report:
             usage["cost"] = {"amount": report["cost"], "currency": "USD", "basis": "reported"}
+        if self.fault == "late_priced_cost" and "cost" not in report:
+            usage["cost"] = {"amount": 77.0, "currency": "USD", "basis": "reported", "plan": "fabricated-with-no-native-report"}
         return usage
 
     async def facts(self):
@@ -219,6 +246,7 @@ class C11Negatives(unittest.TestCase):
         run11()
 
     def test_each_broken_rule_fails(self):
-        for fault in ("used_from_last_turn", "zero_tokens", "priced_cost", "bridge_cwd", "guessed_model", "apportioned_message"):
+        for fault in ("used_from_last_turn", "zero_tokens", "priced_cost", "late_priced_cost", "bridge_cwd", "guessed_model",
+                      "apportioned_message"):
             with self.subTest(fault=fault), self.assertRaises(CheckFailed):
                 run11(fault)
