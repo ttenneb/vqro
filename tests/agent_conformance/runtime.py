@@ -464,10 +464,15 @@ class Runtime:
             count = row.get("count", 1)
             if not isinstance(count, int) or not 0 <= count <= 1024:
                 raise ValueError("fixture retain count bound")
+            # O10 (test-only): `start_index` only shifts the fixture's own text ordinal prefix, so sequential bursts
+            # continue 0..N-1; it is not a native field. Default 0 keeps every existing row unchanged.
+            start = row.get("start_index", 0)
+            if type(start) is not int or start < 0 or start + count > 1024:
+                raise ValueError("fixture retain start_index must keep ordinals within 0..1023")
             text, chunks = row.get("text", "fixture retained text"), row.get("chunks")
             if chunks is not None and (not isinstance(chunks, list) or len(chunks) > 256 or any(not isinstance(part, str) for part in chunks)):
                 raise ValueError("fixture delta work bound")
-            for index in range(count):
+            for index in range(start, start + count):
                 current = f"{index}:" if chunks is not None else ""
                 await self.emit({"type": "message_start", "message": {"role": "assistant", "content": [
                     {"type": "text", "text": current}] if chunks is not None else []}})

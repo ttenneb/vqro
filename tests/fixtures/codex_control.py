@@ -391,12 +391,16 @@ class CodexMixin:
                 chunks = row.get("chunks")
                 if not isinstance(count, int) or not 0 <= count <= 1024 or not isinstance(text, str) or len(text.encode()) > 256 * 1024:
                     raise ValueError("retain count/text bound")
+                # O10 (test-only): fixture text ordinal offset for sequential bursts; never a native field.
+                start = row.get("start_index", 0)
+                if type(start) is not int or start < 0 or start + count > 1024:
+                    raise ValueError("fixture retain start_index must keep ordinals within 0..1023")
                 # O12 (test-only): `chunks` streams one agentMessage as several native deltas (bounded work).
                 if chunks is not None and (not isinstance(chunks, list) or not 1 <= len(chunks) <= 256
                         or any(not isinstance(part, str) for part in chunks)
                         or sum(len(part.encode()) for part in chunks) > 1024 * 1024):
                     raise ValueError("fixture delta work bound")
-                for index in range(count):
+                for index in range(start, start + count):
                     self.item_serial += 1
                     ident = f"assistant-{self.item_serial}"
                     item = {"id": ident, "type": "agentMessage", "text": ""}
@@ -408,7 +412,8 @@ class CodexMixin:
                     await self.event_recorded("item/completed", {"threadId": session, "turnId": thread["run"], "item": {**item, "text": output}})
                     if chunks is not None:
                         self.native_emit("item/completed", "assistant", ident, output)
-                self.record("retain", session=session, count=count, text_bytes=len(text.encode()))
+                self.record("retain", session=session, count=count, text_bytes=len(text.encode()),
+                            **({"start_index": start} if start else {}))
             else:
                 raise ValueError(f"unimplemented native Codex fixture verb: {verb}")
             return {"seq": self.serial, "session": session}
