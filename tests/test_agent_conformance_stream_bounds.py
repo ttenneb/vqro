@@ -150,7 +150,12 @@ class ViewerPin(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             source, root = Path(tmp) / "viewer", Path(tmp) / "root"
             source.mkdir(); (root / "ext").mkdir(parents=True)
-            names = evidence.git(evidence.HARNESS_REPO, "ls-tree", "--name-only", self.REV, "extensions/").decode().split()
+            try:
+                names = evidence.git(evidence.HARNESS_REPO, "ls-tree", "--name-only", self.REV, "extensions/").decode().split()
+            except HarnessGap:
+                # A source archive without Git cannot hold a trusted revision; the handler itself then reports a
+                # HarnessGap, which these tests cannot exercise from here.
+                self.skipTest("trusted Git revision " + self.REV[:12] + " is not available in this source tree")
             for path in names:
                 if path.endswith(".py"):
                     (source / Path(path).name).write_bytes(evidence.git(evidence.HARNESS_REPO, "show", f"{self.REV}:{path}"))
