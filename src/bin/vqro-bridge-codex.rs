@@ -182,6 +182,15 @@ async fn run(args: Args) -> Result<(), String> {
     let result = match init {
         Ok(init) => {
             native.notify("initialized", json!({}));
+            if runtime
+                .initialize_models(tokio::time::Instant::now() + Duration::from_secs(5))
+                .await
+                .is_err()
+            {
+                eprintln!(
+                    "native model discovery unavailable; model configuration is not advertised"
+                );
+            }
             let mut config = Config::new(provider_name, provider_instance, runtime.capabilities());
             config.role = "runtime".into();
             config.token = Some(token);
@@ -310,8 +319,8 @@ async fn serve(
                             // An upsert notification can arrive before a response but commit after
                             // its audit. The public sync acknowledgement fences the current inventory
                             // before an observed session change; never repeat the native operation.
-                            if request.op=="agent.session" && matches!(result,Ok(vqro::provider_client::Outcome::Observed(_)))
-                                && matches!(request.args["action"].as_str(),Some("new"|"resume")) {
+                            if matches!(result,Ok(vqro::provider_client::Outcome::Observed(_)))
+                                && ((request.op=="agent.session" && matches!(request.args["action"].as_str(),Some("new"|"resume"))) || request.op=="agent.configure") {
                                 let publication=tokio::time::timeout_at(request.deadline,async {
                                     let _publisher=publisher.lock().await;
                                     connection.full_sync(runtime.facts()).await
@@ -319,7 +328,7 @@ async fn serve(
                                 let failure=match publication {Ok(Ok(()))=>None,Ok(Err(e))=>Some(e.kind),Err(_)=>Some("timeout".into())};
                                 if let Some(kind)=failure {
                                     let native_data=match &result {Ok(vqro::provider_client::Outcome::Observed(data))=>data.clone(),_=>None};
-                                    request.respond(Err(ProviderError::new("backend","native session observed; core facts publication was not confirmed")
+                                    request.respond(Err(ProviderError::new("backend","native session/configuration observed; core facts publication was not confirmed")
                                         .with_data(json!({"outcome":"indeterminate","native_outcome":"observed","native_data":native_data,"publication_kind":kind}))));
                                     return;
                                 }

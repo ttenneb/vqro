@@ -13,6 +13,14 @@ async fn fixture_delay(
     hold: bool,
     delay_ms: u64,
 ) -> (tempfile::TempDir, Child, Peer, IncomingReceiver) {
+    fixture_delays(hold, delay_ms, 0).await
+}
+
+async fn fixture_delays(
+    hold: bool,
+    delay_ms: u64,
+    config_ms: u64,
+) -> (tempfile::TempDir, Child, Peer, IncomingReceiver) {
     let root = tempfile::tempdir().unwrap();
     let mut child = Command::new("python3")
         .env_clear()
@@ -20,6 +28,7 @@ async fn fixture_delay(
         .env("HOME", root.path())
         .env("CODEX_FAKE_HOLD", if hold { "1" } else { "0" })
         .env("CODEX_FAKE_REPLY_DELAY_MS", delay_ms.to_string())
+        .env("CODEX_FAKE_CONFIG_DELAY_MS", config_ms.to_string())
         .env("AGENT_CONFORMANCE_LEDGER", root.path().join("ledger.jsonl"))
         .arg(format!(
             "{}/tests/fixtures/fake_codex.py",
@@ -274,6 +283,222 @@ async fn provider_deadline_dispatches_once_then_native_receipt_arrives_later() {
             .count(),
         1
     );
+    cleanup(child, peer).await;
+    drain.await.unwrap();
+}
+
+#[tokio::test]
+async fn model_configuration_is_native_per_thread_and_used_by_future_turns() {
+    use vqro::provider_client::Outcome;
+    let (root, child, peer, incoming) = fixture(false).await;
+    let (runtime, drain) = open_runtime(peer.clone(), incoming, 2).await;
+    runtime.initialize_models(deadline()).await.unwrap();
+    for id in ["endpoint-1", "endpoint-2"] {
+        runtime
+            .invoke(
+                id,
+                "inc",
+                "agent.session",
+                json!({"v":0,"action":"new"}),
+                deadline(),
+            )
+            .await
+            .unwrap();
+    }
+    let before = runtime.facts();
+    let option = &before[0]["data"]["agent"]["config"][0];
+    let ledger = root.path().join("ledger.jsonl");
+    let original = std::fs::read_to_string(&ledger).unwrap();
+    for (value, rev, kind) in [
+        (json!("invented"), option["rev"].clone(), "invalid"),
+        (json!("fake-alternate"), json!(0), "stale"),
+    ] {
+        let result = runtime
+            .invoke(
+                "endpoint-1",
+                "inc",
+                "agent.configure",
+                json!({"v":0,"id":"model","value":value,"rev":rev}),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result,Outcome::Rejected{kind:ref actual,..} if actual==kind));
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap(), original);
+    }
+    let result = runtime
+        .invoke(
+            "endpoint-1",
+            "inc",
+            "agent.configure",
+            json!({"v":0,"id":"model","value":"fake-alternate","rev":option["rev"]}),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, Outcome::Observed(_)));
+    let after = runtime.facts();
+    assert_eq!(
+        after[0]["data"]["agent"]["session"]["model"]["id"],
+        "fake-alternate"
+    );
+    assert_eq!(
+        after[1]["data"]["agent"]["session"]["model"]["id"],
+        "fake-model"
+    );
+    assert_eq!(
+        before[0]["data"]["agent"]["epoch"],
+        after[0]["data"]["agent"]["epoch"]
+    );
+    for (i, id) in ["endpoint-1", "endpoint-2"].into_iter().enumerate() {
+        let result=runtime.invoke(id,"inc","agent.send",json!({"v":0,"mode":"admit","delivery":format!("model-d{i}"),"origin":{"principal":"p","actor":"actor","kind":"agent"},"content":[{"type":"text","text":"literal"}]}),deadline()).await.unwrap();
+        assert!(matches!(result, Outcome::Accepted(_)));
+    }
+    let rows: Vec<Value> = std::fs::read_to_string(&ledger)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let configured: Vec<_> = rows
+        .iter()
+        .filter(|row| row["method"] == "thread/resume")
+        .collect();
+    assert_eq!(configured.len(), 1);
+    assert_eq!(
+        configured[0]["params"],
+        json!({"threadId":"thread-1","model":"fake-alternate","excludeTurns":true})
+    );
+    let turns: Vec<_> = rows
+        .iter()
+        .filter(|row| row["method"] == "turn/start")
+        .collect();
+    assert_eq!(turns[0]["params"]["model"], "fake-alternate");
+    assert!(turns[1]["params"].get("model").is_none());
+    assert!(
+        rows.iter()
+            .all(|row| !row["method"].as_str().unwrap_or("").starts_with("config/"))
+    );
+    cleanup(child, peer).await;
+    drain.await.unwrap();
+}
+
+#[tokio::test]
+async fn late_model_readback_is_published_once_without_replaying_the_native_setter() {
+    use vqro::provider_client::Outcome;
+    let (root, child, peer, incoming) = fixture_delays(false, 0, 300).await;
+    let (runtime, drain) = open_runtime(peer.clone(), incoming, 1).await;
+    runtime.initialize_models(deadline()).await.unwrap();
+    runtime
+        .invoke(
+            "endpoint-1",
+            "inc",
+            "agent.session",
+            json!({"v":0,"action":"new"}),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    let mut changed = runtime.changes();
+    let result = runtime
+        .invoke(
+            "endpoint-1",
+            "inc",
+            "agent.configure",
+            json!({"v":0,"id":"model","value":"fake-alternate"}),
+            tokio::time::Instant::now() + Duration::from_millis(80),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, Outcome::Dispatched(_)));
+    assert!(runtime.facts()[0]["data"]["agent"]["config"][0]["value"].is_null());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if runtime.facts()[0]["data"]["agent"]["config"][0]["value"] == "fake-alternate" {
+                break;
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let rows = std::fs::read_to_string(root.path().join("ledger.jsonl")).unwrap();
+    assert_eq!(
+        rows.lines()
+            .filter(
+                |line| serde_json::from_str::<Value>(line).unwrap()["method"] == "thread/resume"
+            )
+            .count(),
+        1
+    );
+    cleanup(child, peer).await;
+    drain.await.unwrap();
+}
+
+#[tokio::test]
+async fn lost_model_reply_blocks_input_and_never_replays_after_disconnect() {
+    use vqro::provider_client::Outcome;
+    let (root, child, peer, incoming) = fixture(true).await;
+    let (runtime, drain) = open_runtime(peer.clone(), incoming, 1).await;
+    runtime.initialize_models(deadline()).await.unwrap();
+    runtime
+        .invoke(
+            "endpoint-1",
+            "inc",
+            "agent.session",
+            json!({"v":0,"action":"new"}),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    let mut changed = runtime.changes();
+    let result = runtime
+        .invoke(
+            "endpoint-1",
+            "inc",
+            "agent.configure",
+            json!({"v":0,"id":"model","value":"fake-alternate"}),
+            tokio::time::Instant::now() + Duration::from_millis(80),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, Outcome::Dispatched(_)));
+    let pending_rev = runtime.facts()[0]["data"]["agent"]["config"][0]["rev"]
+        .as_u64()
+        .unwrap();
+    peer.close();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if runtime.facts()[0]["data"]["agent"]["config"][0]["rev"]
+                .as_u64()
+                .unwrap()
+                > pending_rev
+            {
+                break;
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        runtime.facts()[0]["data"]["agent"]["session"]
+            .get("model")
+            .is_none()
+    );
+    let result=runtime.invoke("endpoint-1","inc","agent.send",json!({"v":0,"mode":"admit","delivery":"not-replayed","origin":{"principal":"p","actor":"actor","kind":"agent"},"content":[{"type":"text","text":"must not send"}]}),deadline()).await.unwrap();
+    assert!(matches!(result,Outcome::Rejected{ref kind,..} if kind=="busy"));
+    let rows: Vec<Value> = std::fs::read_to_string(root.path().join("ledger.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row["method"] == "thread/resume")
+            .count(),
+        1
+    );
+    assert!(rows.iter().all(|row| row["method"] != "turn/start"));
     cleanup(child, peer).await;
     drain.await.unwrap();
 }

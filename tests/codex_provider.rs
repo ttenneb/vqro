@@ -626,6 +626,50 @@ async fn session_observed_reply_waits_for_confirmed_core_facts() {
 }
 
 #[tokio::test]
+async fn model_publication_refusal_keeps_native_readback_without_replaying_configure() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = UnixListener::bind(root.path().join("core.sock")).unwrap();
+    let child = bridge(&root, 1, 0, &[]);
+    let mut core = Core::accept(&listener, 1, "bootstrap").await;
+    core.wait(|facts| facts.len() == 1).await;
+    core.effect(
+        "new",
+        "endpoint-1",
+        "agent.session",
+        json!({"v":0,"action":"new"}),
+        1000,
+    )
+    .await;
+    core.reject_syncs
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let incarnation = core.facts.lock().unwrap()["endpoint-1"]["incarnation"].clone();
+    let rev = core.facts.lock().unwrap()["endpoint-1"]["data"]["agent"]["config"][0]["rev"].clone();
+    let result=core.peer.call_with_timeout("effect.invoke",json!({"generation":1,"effect":"model-refused","ref":"endpoint-1","incarnation":incarnation,
+        "op":"agent.configure","args":{"v":0,"id":"model","value":"fake-alternate","rev":rev},"deadline_ms":1000}),Duration::from_secs(2)).await;
+    finish(child).await;
+    core.close().await;
+    let error = result.unwrap_err().data.unwrap();
+    assert_eq!(error["outcome"], "indeterminate");
+    assert_eq!(error["native_outcome"], "observed");
+    assert_eq!(error["native_data"]["value"], "fake-alternate");
+    let rows: Vec<Value> = std::fs::read_to_string(root.path().join("native.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row["method"] == "thread/resume")
+            .count(),
+        1
+    );
+    assert!(
+        rows.iter()
+            .all(|row| !row["method"].as_str().unwrap_or("").starts_with("config/"))
+    );
+}
+
+#[tokio::test]
 async fn session_publication_refusal_keeps_native_observation_and_never_replays() {
     let root = tempfile::tempdir().unwrap();
     let listener = UnixListener::bind(root.path().join("core.sock")).unwrap();

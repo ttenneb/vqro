@@ -13,7 +13,8 @@ import stat
 import sys
 import time
 
-OPERATIONS = {"initialize": "query", "initialized": "query", "thread/start": "session.new",
+MODELS = ("fixture-small", "fixture-large")
+OPERATIONS = {"initialize": "query", "initialized": "query", "model/list": "query", "thread/start": "session.new",
               "thread/resume": "session.resume", "thread/list": "query", "thread/read": "query",
               "turn/start": "send", "turn/steer": "send", "turn/interrupt": "interrupt"}
 
@@ -40,7 +41,7 @@ class CodexMixin:
         self.thread_serial += 1
         ident = f"thread-{self.thread_serial}"
         value = {"meta": {"id": ident, "name": None, "cwd": cwd or os.getcwd(), "status": {"type": "idle"}},
-                 "run": None, "entries": []}
+                 "run": None, "entries": [], "model": MODELS[0]}
         self.threads[ident] = value
         return value
 
@@ -213,11 +214,19 @@ class CodexMixin:
             return
         if method == "initialized":
             return
+        if method == "model/list":
+            await self.reply(command, {"data":[{"id":"catalog-"+model,"model":model,"displayName":model,"description":"Native fixture model",
+                "hidden":False,"isDefault":model==MODELS[0],"defaultReasoningEffort":"low","supportedReasoningEfforts":[]} for model in MODELS], "nextCursor":None})
+            return
         if method == "thread/start":
+            model = params.get("model", MODELS[0])
+            if model not in MODELS:
+                await self.error(command, "unknown native model"); return
             thread = self.create_thread(params.get("cwd"))
+            thread["model"] = model
             self.record("session", action="new", session=thread["meta"]["id"])
             await self.event("thread/started", {"thread": thread["meta"]})
-            await self.reply(command, {"thread": thread["meta"], "model": "fixture-small"})
+            await self.reply(command, {"thread": thread["meta"], "model": thread["model"]})
             return
         if method == "thread/list":
             start = int(params.get("cursor") or "0")
@@ -233,8 +242,12 @@ class CodexMixin:
         try:
             thread = self.threads[session]
             if method in ("thread/resume", "thread/read"):
+                if method == "thread/resume" and "model" in params:
+                    if params["model"] not in MODELS:
+                        await self.error(command, "unknown native model"); return
+                    thread["model"] = params["model"]
                 self.record("session", action="resume" if method.endswith("resume") else "read", session=session)
-                await self.reply(command, {"thread": thread["meta"], "model": "fixture-small"})
+                await self.reply(command, {"thread": thread["meta"], "model": thread["model"]})
             elif method in ("turn/start", "turn/steer"):
                 await self.barrier("preflight")
                 try:
@@ -249,6 +262,10 @@ class CodexMixin:
                 if method == "turn/steer" and (thread["run"] is None or params.get("expectedTurnId") != thread["run"]):
                     await self.error(command, "expected active turn id does not match")
                     return
+                if method == "turn/start" and "model" in params:
+                    if params["model"] not in MODELS:
+                        await self.error(command, "unknown native model"); return
+                    thread["model"] = params["model"]
                 text = next((b["text"] for b in content if b["type"] == "text"), "")
                 self.record("input_received", session=session, request=command.get("id"), text=text,
                             texts=[b["text"] for b in content if b["type"] == "text"], content=content)
@@ -277,7 +294,7 @@ class CodexMixin:
             thread = self.thread(row, required=False)
             return {"pid": os.getpid(), "wire": "codex", "seq": self.serial,
                     "active": bool(thread and thread["run"]), "session": thread["meta"]["id"] if thread else None,
-                    "cwd": thread["meta"]["cwd"] if thread else None, "model": "fixture-small", "effort": None,
+                    "cwd": thread["meta"]["cwd"] if thread else None, "model": thread["model"] if thread else MODELS[0], "effort": None,
                     "sessions": list(self.threads), "limits": {"record_bytes": 1 << 20, "ledger_bytes": 16 << 20,
                     "commands": 64, "threads": 200, "script_actions": 1024}}
         if verb == "session_switch":

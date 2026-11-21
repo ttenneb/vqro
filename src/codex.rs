@@ -2,6 +2,7 @@
 //!
 //! Protocol evidence/declarations: docs/research/codex-adapter.md. The native JSONL transport is
 //! the existing bounded `rpc::Peer`; this module only validates and reduces native observations.
+pub mod configuration;
 pub mod observation;
 pub mod runtime;
 
@@ -231,6 +232,11 @@ pub struct Endpoint {
     pub lifecycle: String,
     pub caps_rev: u64,
     model: Option<Value>,
+    model_choices: Vec<Value>,
+    config_rev: u64,
+    config_pending: bool,
+    config_uncertain: bool,
+    configured_model: Option<String>,
     usage: Option<Value>,
     run_metadata: Option<Value>,
     next_request: u64,
@@ -258,6 +264,11 @@ impl Endpoint {
             lifecycle: "live".into(),
             caps_rev: 1,
             model: None,
+            model_choices: Vec::new(),
+            config_rev: 1,
+            config_pending: false,
+            config_uncertain: false,
+            configured_model: None,
             usage: None,
             run_metadata: None,
             next_request: 0,
@@ -267,8 +278,136 @@ impl Endpoint {
         }
     }
 
+    pub fn model_config_available(&self) -> bool {
+        self.session.is_some() && !self.model_choices.is_empty()
+    }
+
+    pub fn install_models(&mut self, choices: Vec<Value>) {
+        let before = self.model_config_available();
+        self.model_choices = choices;
+        self.config_rev = self.config_rev.saturating_add(1);
+        if before != self.model_config_available() {
+            self.caps_rev = self.caps_rev.saturating_add(1);
+        }
+    }
+
+    pub fn model_option(&self) -> Value {
+        json!({"id":"model","label":"Model","description":"Native thread model; change while idle","category":"model",
+            "type":"select","value":if self.config_pending || self.config_uncertain {Value::Null}else{self.model.as_ref().map(|model|model["id"].clone()).unwrap_or(Value::Null)},
+            "choices":self.model_choices,"rev":self.config_rev})
+    }
+
+    pub fn prepare_model(&self, args: &Value) -> Result<(String, Value), RpcError> {
+        self.validate(args)?;
+        let option = id(args, "id")?;
+        if !self.model_config_available() || option != "model" {
+            return Err(rejected(
+                "unsupported",
+                "native model configuration is not advertised",
+            ));
+        }
+        if args
+            .get("rev")
+            .is_some_and(|rev| rev.as_u64() != Some(self.config_rev))
+        {
+            return Err(rejected("stale", "model option revision changed"));
+        }
+        let value = args["value"]
+            .as_str()
+            .filter(|value| {
+                self.model_choices
+                    .iter()
+                    .any(|choice| choice["value"] == *value)
+            })
+            .ok_or_else(|| rejected("invalid", "model is outside the native choices"))?;
+        if self.config_pending || self.state != "idle" {
+            return Err(rejected(
+                "busy",
+                "native model change requires an idle thread and no unresolved configuration",
+            ));
+        }
+        Ok((
+            value.to_owned(),
+            json!({"threadId":self.session,"model":value,"excludeTurns":true}),
+        ))
+    }
+
+    pub fn begin_model(&mut self) {
+        self.config_pending = true;
+        self.config_uncertain = true;
+        self.usage = None;
+        self.config_rev = self.config_rev.saturating_add(1);
+    }
+
+    pub fn finish_model(
+        &mut self,
+        response: &Value,
+        session: &str,
+        requested: &str,
+    ) -> Result<(bool, Vec<Change>), RpcError> {
+        if self.lifecycle == "ended"
+            || self.session.as_deref() != Some(session)
+            || response["thread"]["id"] != session
+        {
+            return Err(rejected(
+                "stale",
+                "late model response cannot rebind or revive a thread",
+            ));
+        }
+        let id = reported_string(&response["model"], 256)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                rejected(
+                    "backend",
+                    "native model acknowledgement omitted its model report",
+                )
+            })?;
+        let matched = id == requested;
+        let mut model = json!({"id":id});
+        if let Some(effort) = reported_string(&response["reasoningEffort"], 128) {
+            model["effort"] = json!(effort);
+        }
+        self.model = Some(model);
+        self.configured_model = matched.then(|| requested.to_owned());
+        self.config_pending = false;
+        self.config_uncertain = false;
+        self.usage = None;
+        self.config_rev = self.config_rev.saturating_add(1);
+        Ok((
+            matched,
+            vec![
+                Change::new("session", "current", self.session_info()),
+                self.state_entity(),
+            ],
+        ))
+    }
+
+    pub fn model_unknown(&mut self) -> Vec<Change> {
+        self.config_pending = false;
+        self.config_uncertain = true;
+        self.model = None;
+        self.usage = None;
+        self.configured_model = None;
+        self.config_rev = self.config_rev.saturating_add(1);
+        vec![
+            Change::new("session", "current", self.session_info()),
+            self.state_entity(),
+        ]
+    }
+
+    pub fn model_override(&self) -> Option<&str> {
+        self.configured_model.as_deref()
+    }
+
     pub fn facts(&self) -> Value {
         let mut caps = Value::Object(capabilities());
+        if !self.model_config_available() {
+            caps["agent"]["modules"]
+                .as_object_mut()
+                .unwrap()
+                .remove("config");
+            caps.as_object_mut().unwrap().remove("agent.configure");
+        }
         caps["rev"] = json!(self.caps_rev);
         let items = caps["agent"]["items"].clone();
         let requests: Vec<_> = self
@@ -300,7 +439,9 @@ impl Endpoint {
                     "incarnation":self.incarnation,"kind":"server","owns_lifecycle":true},
                 "completion":self.completion,"session":self.session_info(),
                 "epoch":self.epoch,"caps":caps,"queue":null,"requests":requests,"background":null,
-                "config":[],"commands":[],"usage":self.usage,"incomplete":[],
+                "config":if self.model_config_available(){vec![self.model_option()]}else{Vec::<Value>::new()},"commands":[],
+                "usage":if self.config_pending || self.config_uncertain {None}else{self.usage.as_ref()},
+                "incomplete":if self.config_pending || self.config_uncertain {vec!["config.model"]}else{vec![]},
                 "items":items}}})
     }
 
@@ -358,6 +499,12 @@ impl Endpoint {
         context: SendContext,
     ) -> Result<NativeCall, RpcError> {
         self.validate(args)?;
+        if self.config_pending || self.config_uncertain {
+            return Err(rejected(
+                "busy",
+                "native model configuration is unresolved; input not sent",
+            ));
+        }
         if args["mode"] != "admit" {
             return Err(rejected(
                 "unsupported",
@@ -476,7 +623,7 @@ impl Endpoint {
             input.push(json!({"type":"text","text":text,"text_elements":[]}));
         }
         let guarded = args["guard"].get("run").and_then(Value::as_str);
-        let (method, params) = if let Some(run) = guarded {
+        let (method, mut params) = if let Some(run) = guarded {
             (
                 "turn/steer",
                 json!({"threadId":session,"expectedTurnId":run,"input":input}),
@@ -484,6 +631,11 @@ impl Endpoint {
         } else {
             ("turn/start", json!({"threadId":session,"input":input}))
         };
+        if method == "turn/start" {
+            if let Some(model) = &self.configured_model {
+                params["model"] = json!(model);
+            }
+        }
         if !small(&params, 256 * 1024) {
             return Err(rejected("invalid", "input exceeds adapter 256 KiB bound"));
         }
@@ -548,8 +700,10 @@ impl Endpoint {
 
     pub fn state_entity(&self) -> Change {
         let mut value = json!({"state":self.state,"run":self.run,"completion":self.completion,"background":null});
-        if let Some(usage) = &self.usage {
-            value["usage"] = usage.clone();
+        if !self.config_pending && !self.config_uncertain {
+            if let Some(usage) = &self.usage {
+                value["usage"] = usage.clone();
+            }
         }
         Change::new("state", "current", value)
     }
@@ -562,8 +716,10 @@ impl Endpoint {
         if let Some(cwd) = &self.cwd {
             session["cwd"] = json!(cwd);
         }
-        if let Some(model) = &self.model {
-            session["model"] = model.clone();
+        if !self.config_pending && !self.config_uncertain {
+            if let Some(model) = &self.model {
+                session["model"] = model.clone();
+            }
         }
         session
     }
@@ -584,6 +740,11 @@ impl Endpoint {
                 model["effort"] = json!(effort);
             }
             self.model = Some(model);
+        }
+        if self.configured_model.as_deref()
+            != self.model.as_ref().and_then(|model| model["id"].as_str())
+        {
+            self.configured_model = None;
         }
         Ok(vec![
             Change::new("session", "current", self.session_info()),
@@ -631,7 +792,13 @@ impl Endpoint {
             ));
         }
         let session = id(thread, "id")?;
+        if !self.model_config_available() && !self.model_choices.is_empty() {
+            self.caps_rev = self.caps_rev.saturating_add(1);
+        }
         self.session = Some(session);
+        self.config_pending = false;
+        self.config_uncertain = false;
+        self.config_rev = self.config_rev.saturating_add(1);
         self.epoch = epoch;
         self.title = thread
             .get("name")

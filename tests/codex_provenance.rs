@@ -26,7 +26,10 @@ fn declared_topology_request_scopes_and_ordered_content_select_the_right_cases()
     assert_eq!(provider["agent.send"]["content"]["types"], json!(["text"]));
     assert_eq!(provider["agent.send"]["origin"][0]["role"], json!(["user"]));
     assert_eq!(provider["agent.send"]["receipts"]["retain"], 256);
-    assert_eq!(c["agent"]["modules"], json!({"sessions":{"v":0}}));
+    assert_eq!(
+        c["agent"]["modules"],
+        json!({"sessions":{"v":0},"config":{"v":0}})
+    );
     assert_eq!(c["host"], json!({"kind":"server","endpoints":"many"}));
     assert_eq!(c["agent.respond"]["scopes"], json!(["session", "run"]));
     assert_eq!(c["agent.respond"]["background_requests"], true);

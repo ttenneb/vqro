@@ -1,7 +1,7 @@
 {
   "agent": {
     "v": 0,
-    "modules": {"sessions": {"v": 0}},
+    "modules": {"sessions": {"v": 0}, "config": {"v": 0}},
     "items": {"retain_bytes": 131072, "entities": 512, "entity_bytes": 524288, "record_bytes": 65536, "coverage": "tail", "max_viewers": 4, "snapshot_bytes_per_provider": 8388608, "snapshot_buffer_bytes": 1048576}
   },
   "host": {"kind": "server", "endpoints": "many"},
@@ -20,5 +20,6 @@
   "agent.interrupt": {"pending": "unknown", "scope": "foreground", "waits": "none"},
   "agent.receipt": {},
   "agent.respond": {"methods": ["permission", "form"], "scopes": ["session", "run"], "background_requests": true, "native_timeout": "none", "ack": "dispatched"},
-  "agent.session": {"actions": ["new", "resume", "list"]}
+  "agent.session": {"actions": ["new", "resume", "list"]},
+  "agent.configure": {}
 }

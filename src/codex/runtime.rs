@@ -369,6 +369,53 @@ impl Runtime {
         }
     }
 
+    /// Read-only bounded discovery. Unsupported/malformed catalogs never become synthetic choices.
+    pub async fn initialize_models(
+        self: &Arc<Self>,
+        deadline: Instant,
+    ) -> Result<(), ProviderError> {
+        let mut choices = Vec::new();
+        let mut cursor = Value::Null;
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..super::configuration::PAGES {
+            let page = self
+                .native
+                .call_with_timeout(
+                    "model/list",
+                    json!({"limit":64,"cursor":cursor,"includeHidden":true}),
+                    remaining(deadline),
+                )
+                .await
+                .map_err(|_| {
+                    ProviderError::new("unavailable", "native model catalog unavailable")
+                })?;
+            let next = super::configuration::page(&page, &mut choices).map_err(|_| {
+                ProviderError::new("backend", "native model catalog invalid or exceeds bound")
+            })?;
+            match next {
+                Some(next) if seen.insert(next.clone()) => cursor = json!(next),
+                Some(_) => {
+                    return Err(ProviderError::new(
+                        "backend",
+                        "native model catalog repeats a cursor",
+                    ));
+                }
+                None => {
+                    for (index, slot) in self.slots.iter().enumerate() {
+                        let mut endpoint = slot.endpoint.lock().unwrap();
+                        endpoint.install_models(choices.clone());
+                        self.emit(index, &endpoint, Vec::new(), false);
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        Err(ProviderError::new(
+            "backend",
+            "native model catalog exceeds page bound",
+        ))
+    }
+
     async fn operation(
         self: &Arc<Self>,
         index: usize,
@@ -385,6 +432,7 @@ impl Runtime {
             .map_err(Fault::Reject)?;
         match op {
             "agent.send" => self.send(index, args, deadline, context).await,
+            "agent.configure" => self.configure(index, args, deadline).await,
             "agent.receipt" => {
                 let delivery = super::id(&args, "delivery").map_err(Fault::Reject)?;
                 Ok(Outcome::Observed(Some(
@@ -539,6 +587,110 @@ impl Runtime {
         }
     }
 
+    async fn configure(
+        self: &Arc<Self>,
+        index: usize,
+        args: Value,
+        deadline: Instant,
+    ) -> Result<Outcome, Fault> {
+        let gate = self.slots[index]
+            .admission
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| {
+                Fault::Reject(RpcError::new(
+                    "busy",
+                    "native admission or configuration is unresolved",
+                ))
+            })?;
+        let permit = self
+            .native_admissions
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                Fault::Reject(RpcError::new(
+                    "overloaded",
+                    "native configuration capacity full",
+                ))
+            })?;
+        let (requested, params) = self.slots[index]
+            .endpoint
+            .lock()
+            .unwrap()
+            .prepare_model(&args)
+            .map_err(Fault::Reject)?;
+        let session = params["threadId"].as_str().unwrap().to_owned();
+        if Instant::now() >= deadline {
+            return Err(Fault::Reject(RpcError::new(
+                "timeout",
+                "deadline before native model write",
+            )));
+        }
+        let (tx, mut rx) = oneshot::channel();
+        let this = self.clone();
+        tokio::spawn(async move {
+            let (_gate, _permit) = (gate, permit);
+            if Instant::now() >= deadline {
+                let _ = tx.send(Err(Fault::Reject(RpcError::new(
+                    "timeout",
+                    "deadline before native model write",
+                ))));
+                return;
+            }
+            {
+                let mut endpoint = this.slots[index].endpoint.lock().unwrap();
+                endpoint.begin_model();
+                this.emit(index, &endpoint, Vec::new(), false);
+            }
+            // Native resumes this same thread with a model override, never config/value/write.
+            let result = this
+                .native
+                .call_with_timeout("thread/resume", params, NATIVE_LIMIT)
+                .await;
+            let outcome = {
+                let mut endpoint = this.slots[index].endpoint.lock().unwrap();
+                match result {
+                    Ok(response) => match endpoint.finish_model(&response, &session, &requested) {
+                        Ok((matched, changes)) => {
+                            let value = endpoint.model_option();
+                            this.emit(index, &endpoint, changes, false);
+                            Ok(if matched {
+                                Outcome::Observed(Some(value))
+                            } else {
+                                Outcome::Accepted(Some(value))
+                            })
+                        }
+                        Err(_) => {
+                            let changes = endpoint.model_unknown();
+                            this.emit(index, &endpoint, changes, false);
+                            Err(Fault::Unknown(RpcError::new(
+                                "backend",
+                                "native model readback missing or changed thread; do not replay",
+                            )))
+                        }
+                    },
+                    Err(_) => {
+                        let changes = endpoint.model_unknown();
+                        this.emit(index, &endpoint, changes, false);
+                        Err(Fault::Unknown(RpcError::new(
+                            "backend",
+                            "native model outcome unknown; do not replay",
+                        )))
+                    }
+                }
+            };
+            let _ = tx.send(outcome);
+        });
+        let reply_at = deadline
+            .checked_sub(Duration::from_millis(10))
+            .unwrap_or(deadline);
+        tokio::select! {
+            biased;
+            result=&mut rx=>result.unwrap_or_else(|_|Err(Fault::Unknown(RpcError::new("backend","native configuration worker ended; do not replay")))),
+            _=tokio::time::sleep_until(reply_at)=>Ok(Outcome::Dispatched(None)),
+        }
+    }
+
     async fn session(
         &self,
         index: usize,
@@ -609,7 +761,7 @@ impl Runtime {
             .unwrap()
             .may_switch(args)
             .map_err(Fault::Reject)?;
-        let (method, params) = if action == "new" {
+        let (method, mut params) = if action == "new" {
             let cwd = args.get("cwd").filter(|v| !v.is_null());
             if cwd.is_some_and(|v| v.as_str().is_none_or(|s| s.len() > 4096)) {
                 return Err(Fault::invalid("cwd must be a bounded host path string"));
@@ -627,6 +779,15 @@ impl Runtime {
             }
             ("thread/resume", json!({"threadId":session}))
         };
+        if let Some(model) = self.slots[index]
+            .endpoint
+            .lock()
+            .unwrap()
+            .model_override()
+            .map(str::to_owned)
+        {
+            params["model"] = json!(model);
+        }
         let result = self
             .native
             .call_with_timeout(method, params, remaining(deadline))

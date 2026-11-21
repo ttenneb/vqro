@@ -15,12 +15,15 @@ import time
 
 lock = threading.Lock()
 threads = {}
+thread_models = {}
+MODELS = ("fake-model", "fake-alternate")
 turns = {}
 sequence = 0
 parser = argparse.ArgumentParser()
 parser.add_argument("--ledger", default=os.environ.get("AGENT_CONFORMANCE_LEDGER"))
 parser.add_argument("--reply-delay-ms", type=int, default=int(os.environ.get("CODEX_FAKE_REPLY_DELAY_MS", "0")))
 parser.add_argument("--hold", action="store_true", default=os.environ.get("CODEX_FAKE_HOLD") == "1")
+parser.add_argument("--config-delay-ms", type=int, default=int(os.environ.get("CODEX_FAKE_CONFIG_DELAY_MS", "0")))
 parser.add_argument("--exit-after-init", action="store_true")
 parser.add_argument("--control", type=Path, help="K1 private control socket; enables controlled mode")
 parser.add_argument("--script", type=Path)
@@ -87,19 +90,34 @@ def handle(request):
         reply(request, {"userAgent": "fake-codex/fixture-1", "platformFamily": "test", "platformOs": "test"})
         if args.exit_after_init:
             sys.exit(0)
+    elif method == "model/list":
+        reply(request, {"data": [{"id":"catalog-"+model,"model":model,"displayName":model,"description":"Native fixture model",
+            "hidden":False,"isDefault":model==MODELS[0],"defaultReasoningEffort":"low","supportedReasoningEfforts":[]} for model in MODELS], "nextCursor":None})
     elif method == "thread/start":
+        model = params.get("model", MODELS[0])
+        if model not in MODELS:
+            error(request, "unknown native model"); return
         sequence += 1
         thread_id = "thread-" + str(sequence)
         thread = {"id": thread_id, "status": {"type": "idle"}, "cwd": params.get("cwd"), "name": None}
         threads[thread_id] = thread
+        thread_models[thread_id] = model
         event("thread/started", {"thread": thread})
-        reply(request, {"thread": thread, "model": params.get("model", "fake-model")})
+        reply(request, {"thread": thread, "model": model})
     elif method == "thread/resume":
         thread_id = params["threadId"]
         if thread_id not in threads:
             error(request, "unknown thread")
         else:
-            reply(request, {"thread": threads[thread_id], "model": "fake-model"})
+            model = params.get("model", thread_models[thread_id])
+            if model not in MODELS:
+                error(request, "unknown native model"); return
+            if "model" in params:
+                time.sleep(args.config_delay_ms / 1000)
+                thread_models[thread_id] = model
+                if args.hold:
+                    return  # native mutation happened, acknowledgement intentionally lost
+            reply(request, {"thread": threads[thread_id], "model": thread_models[thread_id]})
     elif method == "thread/list":
         data = list(threads.values())[:min(params.get("limit", 64), 64)]
         reply(request, {"data": data, "nextCursor": None})
@@ -108,6 +126,10 @@ def handle(request):
         if thread_id not in threads:
             error(request, "unknown thread")
             return
+        if method == "turn/start" and "model" in params:
+            if params["model"] not in MODELS:
+                error(request, "unknown native model"); return
+            thread_models[thread_id] = params["model"]
         if method == "turn/steer" and params.get("expectedTurnId") != turns.get(thread_id):
             error(request, "expected active turn id does not match")
             return
