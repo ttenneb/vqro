@@ -47,6 +47,11 @@ class CodexMixin:
     async def event(self, method, params):
         await self.emit({"method": method, "params": params})
 
+    async def event_recorded(self, method, params):
+        """Emit, THEN record the exact emitted native payload (ledger kind native_event) for O13 witnesses."""
+        await self.event(method, params)
+        self.record("native_event", wire="codex", method=method, **self.emitted_payload(params))
+
     async def reply(self, command, data=None, success=True):
         method = command.get("method", "respond")
         operation = OPERATIONS.get(method, "respond" if method == "respond" else "unknown")
@@ -98,7 +103,7 @@ class CodexMixin:
         if started_at is not None:
             turn["startedAt"] = started_at  # native Turn time: Unix seconds (src/codex.rs:500)
         self.record("turn", state="start", session=thread["meta"]["id"], run=run, native_turn=turn)
-        await self.event("turn/started", {"threadId": thread["meta"]["id"], "turn": turn})
+        await self.event_recorded("turn/started", {"threadId": thread["meta"]["id"], "turn": turn})
         await self.event("thread/status/changed", {"threadId": thread["meta"]["id"], "status": thread["meta"]["status"]})
         return run
 
@@ -121,7 +126,7 @@ class CodexMixin:
             if value is not None:
                 turn[key] = value  # native Turn times: Unix seconds (src/codex.rs:500)
         self.record("turn", state="settled", session=session, run=run, aborted=aborted, error=failure, native_turn=turn)
-        await self.event("turn/completed", {"threadId": session, "turn": turn})
+        await self.event_recorded("turn/completed", {"threadId": session, "turn": turn})
         await self.event("thread/status/changed", {"threadId": session, "status": {"type": "idle"}})
 
     async def insert_native(self, thread, command, content, run):
@@ -364,7 +369,7 @@ class CodexMixin:
                         "processId": None, "commandActions": [], "exitCode": None if state == "start" else 0,
                         "durationMs": None if state == "start" else 1,
                         "status": "inProgress" if state == "start" else "completed", "aggregatedOutput": row.get("text", "")}
-                await self.event("item/started" if state == "start" else "item/completed", {"threadId": session, "turnId": thread["run"], "item": item})
+                await self.event_recorded("item/started" if state == "start" else "item/completed", {"threadId": session, "turnId": thread["run"], "item": item})
                 await self.barrier("tool", "after")
             elif verb == "usage":
                 # C11 (test-only): one native thread/tokenUsage/updated notification, exactly as reported.
@@ -387,12 +392,12 @@ class CodexMixin:
                     self.item_serial += 1
                     ident = f"assistant-{self.item_serial}"
                     item = {"id": ident, "type": "agentMessage", "text": ""}
-                    await self.event("item/started", {"threadId": session, "turnId": thread["run"], "item": item})
+                    await self.event_recorded("item/started", {"threadId": session, "turnId": thread["run"], "item": item})
                     deltas = [f"{index}:{text}"] if chunks is None else [f"{index}:" + chunks[0], *chunks[1:]]
                     for delta in deltas:
                         await self.event("item/agentMessage/delta", {"threadId": session, "turnId": thread["run"], "itemId": ident, "delta": delta})
                     output = "".join(deltas)
-                    await self.event("item/completed", {"threadId": session, "turnId": thread["run"], "item": {**item, "text": output}})
+                    await self.event_recorded("item/completed", {"threadId": session, "turnId": thread["run"], "item": {**item, "text": output}})
                     if chunks is not None:
                         self.native_emit("item/completed", "assistant", ident, output)
                 self.record("retain", session=session, count=count, text_bytes=len(text.encode()))

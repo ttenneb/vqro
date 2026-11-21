@@ -80,6 +80,19 @@ class Runtime:
         self.record("native_emit", wire=self.args.wire, type=kind, role=role, item_id=item,
                     text_bytes=len(data), text_sha256=hashlib.sha256(data).hexdigest())
 
+    def emitted_payload(self, payload):
+        """O13 (test-only): the exact emitted native payload, or a bounded size/digest/key witness when large."""
+        data = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        if len(data) <= 4096:
+            return {"payload": payload}
+        inner = payload.get("item") if isinstance(payload.get("item"), dict) else payload
+        return {"omitted": True, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "keys": sorted(inner)}
+
+    async def emit_recorded(self, event):
+        """Emit, THEN record the exact emitted payload (ledger kind native_event) as the absence/presence witness."""
+        await self.emit(event)
+        self.record("native_event", wire=self.args.wire, type=event.get("type"), **self.emitted_payload(event))
+
     async def emit(self, row):
         data = json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
         if len(data) > MAX_RECORD:
@@ -267,8 +280,8 @@ class Runtime:
                 await self.input_ack(command, "started")
                 self.native_turn = True
                 self.record("turn", state="start", source="native")
-                await self.emit({"type": "agent_start"})
-                await self.emit({"type": "turn_start"})
+                await self.emit_recorded({"type": "agent_start"})
+                await self.emit_recorded({"type": "turn_start"})
                 await self.insert(text, "prompt", command.get("images", []))
             await self.rules("input", {"text": text, "command": kind})
         elif kind == "abort":
@@ -381,22 +394,22 @@ class Runtime:
             if state == "start":
                 self.active = True
                 self.native_turn = True
-                await self.emit({"type": "agent_start"})
-                await self.emit({"type": "turn_start"})
+                await self.emit_recorded({"type": "agent_start"})
+                await self.emit_recorded({"type": "turn_start"})
             elif state in ("end", "settled"):
                 self.native_turn = False
-                await self.emit({"type": "agent_end", "messages": [], "willRetry": False})
+                await self.emit_recorded({"type": "agent_end", "messages": [], "willRetry": False})
                 if state == "settled":
                     self.active = False
-                    await self.emit({"type": "agent_settled", "aborted": bool(row.get("aborted", False))})
+                    await self.emit_recorded({"type": "agent_settled", "aborted": bool(row.get("aborted", False))})
             else:
                 raise ValueError("unknown turn state")
         elif verb == "tool_call":
             await self.barrier("tool")
             ident, state = row.get("id_ref", "tool-1"), row["state"]
             self.record("tool_call", tool=ident, state=state)
-            await self.emit({"type": "tool_execution_start" if state == "start" else "tool_execution_end",
-                             "toolCallId": ident, "toolName": "fixture", "args": {}, "result": {}, "isError": False})
+            await self.emit_recorded({"type": "tool_execution_start" if state == "start" else "tool_execution_end",
+                                      "toolCallId": ident, "toolName": "fixture", "args": {}, "result": {}, "isError": False})
             await self.barrier("tool", "after")
         elif verb == "model_call":
             await self.barrier("model")
@@ -464,7 +477,7 @@ class Runtime:
                         {"type": "text", "text": current}]}, "assistantMessageEvent": {
                         "type": "text_delta", "contentIndex": 0, "delta": part}})
                 final = current if chunks is not None else f"{index}:{text}"
-                await self.emit({"type": "message_end", "message": {"role": "assistant", "content": [
+                await self.emit_recorded({"type": "message_end", "message": {"role": "assistant", "content": [
                     {"type": "text", "text": final}], "stopReason": "stop"}})
                 if chunks is not None:
                     self.native_emit("message_end", "assistant", None, final)
