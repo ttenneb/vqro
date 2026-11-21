@@ -285,9 +285,13 @@ def message_rows(eid, value, names, receipts, show_time=True, fold=None, thinkin
     return rows + body
 
 
-def framed(eid, value, plain_rows):
-    """Another sender's message as a framed block (feature `message`, folding after OTHER_FOLD lines); clients without
-    it show `plain_rows`. Text-only messages up to FRAME_BYTES; anything else stays plain rows."""
+def framed(eid, value, plain_rows, own=False, fold=OTHER_FOLD):
+    """A message as a block on the card background (the human's relay-12 cards; feature `card`):
+    - another sender's: framed too (`frame: true`), folding after OTHER_FOLD lines; clients without `card` draw today's
+      framed block, and clients without `message`/`fold` the plain rows;
+    - your own (`own`): a card without a frame, only on clients with `card` (`requires`), else the plain rows, so your
+      messages never get the other senders' frame.
+    Text-only messages up to FRAME_BYTES; anything else stays plain rows."""
     content = value.get("content") if isinstance(value.get("content"), list) else []
     if not content or any(not isinstance(b, dict) or b.get("type") != "text" or not isinstance(b.get("text"), str) for b in content):
         return plain_rows
@@ -297,10 +301,12 @@ def framed(eid, value, plain_rows):
     head = plain_rows[0]
     title = head["text"] + "".join(" · " + r["text"] for r in plain_rows[1:2] if str(r.get("text", "")).startswith("quoting "))
     markdown = any(b.get("format") == "markdown" for b in content)
-    return [{"type": "message", "id": head["id"], "text": title, "title": title, "body": body,
-             **({"format": "markdown"} if markdown else {}), "fold": OTHER_FOLD, "focusable": True,
+    return [{"type": "message", "id": head["id"], "text": title, "title": title, "body": body, "look": "card",
+             **({"format": "markdown"} if markdown else {}), **({"fold": fold} if fold else {}), "focusable": True,
+             **({} if own else {"frame": True}),
              **({"copy": head["copy"]} if head.get("copy") else {}), **({"style": head["style"]} if head.get("style") not in (None, "bold") else {}),
-             "requires": ["message", "fold"], "fallback": plain_rows}]
+             "requires": ["message", "card"] + (["fold"] if fold else []) if own else ["message", "fold"],
+             "fallback": plain_rows}]
 
 
 PRIMARY = {"bash": "command", "shell": "command", "read": "path", "edit": "path", "write": "path", "grep": "pattern",
@@ -845,8 +851,12 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
                 elif key == "agent" and role == "assistant":
                     blocks.append(body)
                     tail["agent"] = len(blocks) - 1
+                elif other:
+                    blocks.append(framed(eid, value, body))
+                elif role == "user":  # your own message: a card, no frame (relay-12)
+                    blocks.append(framed(eid, value, body, own=True, fold=FOLD_LINES if compact else None))
                 else:
-                    blocks.append(framed(eid, value, body) if other else body)
+                    blocks.append(body)
         elif kind == "compaction":
             add("system", [{"type": "text", "style": "dim", "text": "· System · context compacted"}], "System · context compacted", [value], eid)
         elif kind == "plan":  # shown whole, generically

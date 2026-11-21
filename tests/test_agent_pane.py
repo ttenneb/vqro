@@ -288,6 +288,21 @@ class TranscriptRows(unittest.TestCase):
                          ["Pi", "Activity · 1 tool · 0.2s", "Done.", "Activity · 1 tool · 0.2s", "", "Pi", "Next."],
                          "each reply keeps one label; later work continues the earlier reply's block")
 
+    def test_your_messages_and_other_senders_are_cards_replies_stay_plain(self):
+        """Cards (the human's relay-12; spike-adjacent's `card`): yours a card without a frame, only where cards exist;
+        another sender's a card with its frame; the agent's replies plain."""
+        rows = agent_transcript.rows({k: (1, v) for k, v in CONVERSATION.items()},
+                                     agent_transcript.Names({"r2": {"name": "Pi"}, "r7": {"name": "vqro-lead", "kind": "agent", "principal": "p:lead"}}, "r2"))
+        mine = next(r for r in rows if r.get("id") == "m:m1")
+        self.assertEqual((mine["type"], mine["look"], "frame" in mine, mine["requires"]), ("message", "card", False, ["message", "card"]))
+        self.assertEqual(mine["body"], "Why is the build red?")
+        plain_rows = base([mine], ("message", "fold"))
+        self.assertEqual(([r.get("type") for r in plain_rows][:2], plain_rows[1]["text"]), (["text", "text"], "Why is the build red?"),
+                         "a client with frames but no cards: today's plain rows, never the frame")
+        other = next(r for r in rows if r.get("id") == "m:m3")
+        self.assertEqual((other["look"], other["frame"], other["fold"], other["requires"]), ("card", True, 4, ["message", "fold"]))
+        self.assertFalse(any(r.get("type") == "message" and r.get("id") == "m:m2" for r in rows), "replies stay plain")
+
     def test_another_senders_message_folds_after_4_lines_and_blocks_are_spaced(self):
         long = {("message", "a"): {"position": 1, "role": "user", "final": True, "origin": {"kind": "agent", "agent": "r7", "principal": "p:lead"},
                                    "content": text("\n".join(f"point {i}" for i in range(9)))},
@@ -314,7 +329,7 @@ class TranscriptRows(unittest.TestCase):
         rows = agent_transcript.rows({k: (1, v) for k, v in huge.items()},
                                      agent_transcript.Names({"r2": {"name": "Pi"}}, "r2"))
         self.assertLessEqual(len(json.dumps(rows).encode()), agent_transcript.BUDGET)
-        self.assertIn("Why is the build red?", [r.get("text") for r in rows], "the older conversation survives")
+        self.assertIn("Why is the build red?", [r.get("text") for r in base(rows)], "the older conversation survives")
         group = next(r for r in rows if r.get("text", "").startswith("Activity"))
         rest = group["children"][1]["children"][-1]["children"]
         self.assertEqual(len(rest), agent_transcript.HIDDEN_ROWS + 1)
@@ -493,7 +508,7 @@ class ViewSettings(unittest.TestCase):
         long = {("message", f"m{i}"): {"position": i, "role": "user", "at_ms": 1_763_600_000_000, "final": True,
                                        "origin": {"kind": "human"}, "content": text("\n".join(f"line {n}" for n in range(60)))}
                 for i in range(2)}
-        rows = agent_transcript.rows({k: (1, v) for k, v in long.items()}, names, None, agent_transcript.view_settings({"density": "compact"}))
+        rows = base(agent_transcript.rows({k: (1, v) for k, v in long.items()}, names, None, agent_transcript.view_settings({"density": "compact"})))
         headers = [r["text"] for r in rows if str(r.get("id", "")).startswith("m:")]
         self.assertEqual(headers, ["Human (undeclared) · " + agent_transcript.when(1_763_600_000_000), "Human (undeclared)"],
                          "time only when the sender changes")
