@@ -309,36 +309,271 @@ class WholeHandlerControls(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(self.accepts(lambda: self.o14(rows, pane)), want)
 
-    def o12(self, new_entities, old_entities=None, old_notices=(), new_notices=()):
+    def o12(self, new_entities, old_entities=None, old_notices=(), new_notices=(), *, wait_error=None,
+            health_fault=None, evidence_out=None, new_epoch=None, wait_returns_early=False, republish_flag=False,
+            fresh_challenge=False, native_mismatch=False):
         import asyncio, hashlib
         from types import SimpleNamespace
         from unittest.mock import AsyncMock, patch
         from agent_conformance import evidence
         from agent_conformance.results import CheckFailed
-        text = "0:" + "".join("O12-" + "x" * 1020 for _ in range(70))
+        chunks, needle = m.o12_emission_chunks() if fresh_challenge else (["O12-" + "x" * 1020 for _ in range(70)], "O12-")
+        text = "0:" + "".join(chunks)
         from collections import deque
         # Faithful to wire.ItemReducer: live notices live in a bounded deque(maxlen=64).
-        reducer = SimpleNamespace(snapshots=1, entities=dict(old_entities or {}), notices=deque(old_notices, maxlen=64))
+        reducer = SimpleNamespace(snapshots=1, entities=dict(old_entities or {}), notices=deque(old_notices, maxlen=64),
+                                  epoch='o12-epoch', sequence=1, cursor={'epoch': 'o12-epoch', 'seq': 1},
+                                  failure=None, staged=None, pending=bytearray(), trace=[], trace_dropped=0)
+        def accept(row):  # Minimal installed-live-put semantics; real NDJSON is tested separately below.
+            if row.get('op') != 'put' or row.get('seq', -1) <= reducer.sequence:
+                return
+            reducer.entities[(row['kind'], row['id'])] = {'rev': row['rev'], 'value': dict(row['value'])}
+            reducer.sequence = row['seq']
+            reducer.cursor = {'epoch': reducer.epoch, 'seq': reducer.sequence}
+        reducer.accept = accept
+        peer = SimpleNamespace(failure=None, closed=False, task=SimpleNamespace(done=lambda: False))
+        view = SimpleNamespace(initial='reset', reducer=reducer, peer=peer, stream=1, closed=None, close_notice=None)
         class Native:
             def mark(self): return 0
             async def call(self, *args, **kw):
-                reducer.entities.update(new_entities(text))
+                rows = new_entities(text)
+                for key, row in rows.items():
+                    if key[0] == 'message':
+                        row['value'].setdefault('final', True)  # This fixture emits a completed native message.
+                for key, row in rows.items():
+                    if republish_flag and row['value'].get('incomplete') is True:
+                        reducer.accept({'op': 'put', 'seq': reducer.sequence + 1, 'kind': key[0], 'id': key[1],
+                                        'rev': row['rev'], 'value': dict(row['value'])})
+                    else:
+                        reducer.entities[key] = row
                 reducer.notices.extend(new_notices)
+                self.emitted = True
+                if health_fault == 'flag_loss':
+                    for i in range(m.AppliedFlagPuts.MAX + 1):
+                        reducer.accept({'op': 'put', 'seq': reducer.sequence + 1, 'kind': 'message', 'id': 'lost-' + str(i),
+                                        'rev': 1, 'value': {'incomplete': True, 'content': []}})
+                if new_epoch is not None:
+                    reducer.epoch = new_epoch
+                    reducer.cursor = {'epoch': new_epoch, 'seq': 1}
+                    reducer.snapshots += 1
+                if health_fault == 'unknown_view': del view.closed
+                if health_fault == 'unknown_peer': del peer.failure
+                if health_fault == 'peer_task': peer.task = SimpleNamespace(done=lambda: True)
+                if health_fault == 'peer': peer.failure = RuntimeError('connection interrupted')
+                if health_fault == 'closed': peer.closed = True
+                if health_fault == 'reducer': reducer.failure = 'record reconstruction failed'
+                if health_fault == 'staged': reducer.staged = {}
+                if health_fault == 'terminal':
+                    view.closed = 'retention'
+                    view.close_notice = {'method': 'stream.gap', 'reason': {'reason': 'retention'},
+                                         'last_good_cursor': dict(reducer.cursor)}
             def records(self, *args, **kw):
                 return [{"type": "message_end", "role": "assistant", "text_bytes": len(text.encode()),
-                         "text_sha256": hashlib.sha256(text.encode()).hexdigest()}]
+                         "text_sha256": hashlib.sha256((text + 'wrong' if native_mismatch else text).encode()).hexdigest()}]
         async def wait_view(view, predicate, **kw):
-            if not predicate(view.reducer): raise CheckFailed("not reached")
-        ctx = SimpleNamespace(evidence=[], native=Native(), wait_view=wait_view,
-                              attach=AsyncMock(return_value=SimpleNamespace(initial="reset", reducer=reducer)))
+            observed = predicate(view.reducer)
+            if wait_error is not None and getattr(ctx.native, 'emitted', False): raise wait_error
+            if not observed and not wait_returns_early: raise CheckFailed("not reached")
+        ctx = SimpleNamespace(evidence=evidence_out if evidence_out is not None else [], native=Native(), wait_view=wait_view,
+                              attach=AsyncMock(return_value=view))
         # Inherited producer evidence is stubbed ONLY to isolate the adapter half; it proves nothing here.
         with patch.dict(evidence.REGRESSIONS, {"O12": {}}), patch.object(evidence, "component", lambda *a: ({}, None, None, None)), \
-             patch.object(evidence, "regressions", lambda *a: None), patch.object(evidence, "inherited", lambda *a: None):
-            asyncio.run(m.producer_append_bounds(ctx))
+             patch.object(evidence, "regressions", lambda *a: None), patch.object(evidence, "inherited", lambda *a: None), \
+             patch.object(m, 'o12_emission_chunks', lambda: (chunks, needle)):
+            try:
+                asyncio.run(m.producer_append_bounds(ctx))
+            finally:
+                self.assertIs(reducer.accept, accept, 'case observer must restore the exact original on every exit')
+        return ctx.evidence
+
+    def test_o12_fresh_flag_and_completed_unmarked_results(self):
+        from agent_conformance.results import CheckFailed, HarnessGap
+        def row(text, *, flag=None, rev=1, final=True):
+            value = {'role': 'assistant', 'position': 1, 'content': [{'type': 'text', 'text': text}], 'final': final}
+            if flag is not None: value['incomplete'] = flag
+            return {'rev': rev, 'value': value}
+        results = self.o12(lambda t: {('message', 'm'): row(t[:6000], flag=True)})
+        record = results[-1]
+        with self.assertRaisesRegex(HarnessGap, 'flag observation gap'):
+            self.o12(lambda t: {('message', 'm'): row(t[:6000], flag=True)}, health_fault='flag_loss')
+        self.assertEqual(len(record['incomplete_witnesses']), 1)
+        self.assertIs(record['incomplete_witnesses'][0]['value']['incomplete'], True)
+        self.assertIsNone(record['observation']['wait_error'])
+        self.assertTrue(record['observation']['peer_known'])
+        text = '0:' + ''.join('O12-' + 'x' * 1020 for _ in range(70))
+        old = {('message', 'm'): row(text[:1000], flag=True)}
+        for name, new, before in (
+                ('stale flag', lambda t: {('message', 'm'): row(t[:6000], flag=True, rev=2)}, old),
+                ('no flag or marker', lambda t: {('message', 'm'): row(t[:6000])}, None),
+                ('numeric is not boolean', lambda t: {('message', 'm'): row(t[:6000], flag=1)}, None),
+                ('unrelated flag', lambda t: {('message', 'm'): row(t[:6000]),
+                                             ('message', 'other'): row('unrelated', flag=True)}, None)):
+            with self.subTest(name=name), self.assertRaises(CheckFailed) as raised:
+                self.o12(new, before)
+            self.assertNotIsInstance(raised.exception, HarnessGap)
+            self.assertEqual(raised.exception.component, 'adapter')
+        # The same opaque ID in a genuinely new epoch is a new entity, not a stale flag.
+        self.o12(lambda t: {('message', 'm'): row(t[:6000], flag=True)}, old, new_epoch='o12-new-epoch')
+
+    def test_o12_observation_failures_are_gaps_even_with_positive_witness(self):
+        from agent_conformance.results import CheckFailed, HarnessGap
+        def marked(t):
+            return {('message', 'm'): {'rev': 1, 'value': {'role': 'assistant', 'final': True, 'incomplete': True,
+                                                         'content': [{'type': 'text', 'text': t[:6000]}]}}}
+        for fault in (None, 'peer', 'closed', 'reducer', 'staged', 'terminal', 'unknown_view', 'unknown_peer', 'peer_task'):
+            retained = []
+            with self.subTest(fault=fault), self.assertRaises(HarnessGap):
+                self.o12(marked, health_fault=fault, evidence_out=retained,
+                         wait_error=CheckFailed('forced wait failure') if fault is None else None)
+            record = retained[-1]
+            self.assertEqual(len(record['incomplete_witnesses']), 1)
+            if fault is None:
+                self.assertEqual(record['observation']['wait_error']['message'], 'forced wait failure')
+            if fault == 'terminal':
+                self.assertEqual(record['observation']['terminal']['reason'], {'reason': 'retention'})
+        retained = []
+        def held(t):
+            return {('message', 'm'): {'rev': 1, 'value': {'role': 'assistant', 'final': False,
+                                                         'content': [{'type': 'text', 'text': t[:6000]}]}}}
+        with self.assertRaises(HarnessGap):
+            self.o12(held, evidence_out=retained)
+        self.assertIsNotNone(retained[-1]['observation']['wait_error'])
+        retained = []
+        with self.assertRaisesRegex(HarnessGap, 'held prefix'):
+            self.o12(held, evidence_out=retained, wait_returns_early=True)
+        self.assertIsNone(retained[-1]['observation']['wait_error'])
+        # Even independently positive body/marker evidence cannot erase a caught wait failure.
+        def whole(t):
+            return {('message', 'm'): {'rev': 1, 'value': {'role': 'assistant', 'content': [{'type': 'text', 'text': t}]}}}
+        def warning(t):
+            return {('notice', 'n'): {'rev': 1, 'value': {'content': [{'type': 'text', 'text': 'output omitted: too large'}]}}}
+        for positive in (whole, warning):
+            retained = []
+            with self.subTest(positive=positive.__name__), self.assertRaises(HarnessGap):
+                self.o12(positive, wait_error=CheckFailed('interrupted after observation'), evidence_out=retained)
+            self.assertEqual(retained[-1]['observation']['wait_error']['message'], 'interrupted after observation')
+
+    def test_o12_flag_transition_is_public_fresh_and_correlated(self):
+        from agent_conformance.results import CheckFailed, HarnessGap
+        text = '0:' + ''.join('O12-' + 'x' * 1020 for _ in range(70))
+        value = {'role': 'assistant', 'content': [{'type': 'text', 'text': text[:6000]}], 'final': True}
+        old_value = dict(value, content=[{'type': 'text', 'text': text[:1000]}])
+        old = {('message', 'm'): {'rev': 1, 'value': dict(old_value, incomplete=False)}}
+        rows = self.o12(lambda t: {('message', 'm'): {'rev': 2, 'value': dict(value, incomplete=True)}}, old)
+        self.assertTrue(rows[-1]['incomplete_witnesses'][0]['fresh_incomplete'])
+        old_true = {('message', 'm'): {'rev': 1, 'value': dict(old_value, incomplete=True)}}
+        republished = self.o12(lambda t: {('message', 'm'): {'rev': 2, 'value': dict(value, incomplete=True)}},
+                               old_true, republish_flag=True)
+        self.assertIs(republished[-1]['incomplete_witnesses'][0]['flag_put']['value']['incomplete'], True)
+        with self.assertRaisesRegex(HarnessGap, 'flag observation gap'):
+            self.o12(lambda t: {('message', 'm'): {'rev': 2, 'value': dict(value, incomplete=True)}},
+                     old_true, health_fault='flag_loss', wait_returns_early=True)
+        # The same value mutation without a new public revision is not a fresh publication.
+        with self.assertRaises(HarnessGap):
+            self.o12(lambda t: {('message', 'm'): {'rev': 1, 'value': dict(value, incomplete=True)}}, old)
+        def user_flag(t):
+            return {('message', 'm'): {'rev': 1, 'value': dict(value)},
+                    ('message', 'user'): {'rev': 1, 'value': dict(value, role='user', incomplete=True)}}
+        with self.assertRaises(CheckFailed) as raised:
+            self.o12(user_flag)
+        self.assertNotIsInstance(raised.exception, HarnessGap)
+
+    def test_o12_applied_puts_exclude_ignored_duplicates_and_snapshot_replay(self):
+        import json
+        from copy import deepcopy
+        from agent_conformance.wire import ItemReducer
+        reducer = ItemReducer()
+        def deliver(row):
+            reducer.feed(reducer.offset, (json.dumps(row) + '\n').encode())
+            self.assertIsNone(reducer.failure)
+        value = {'role': 'assistant', 'position': 1, 'incomplete': True,
+                 'content': [{'type': 'text', 'text': '0:O12-' + 'x' * 100}]}
+        deliver({'op': 'snapshot', 'phase': 'begin', 'epoch': 'e', 'coverage': 'tail'})
+        deliver({'op': 'put', 'kind': 'message', 'id': 'm', 'rev': 1, 'value': value})
+        deliver({'op': 'snapshot', 'phase': 'end', 'seq': 1})
+        original = reducer.accept
+        recorder = m.AppliedFlagPuts(reducer)
+        try:
+            baseline = m.shown_baseline(reducer, applied_flags=recorder)
+            deliver({'op': 'append', 'seq': 2, 'kind': 'message', 'id': 'm', 'base': 1, 'rev': 2,
+                     'field': '/content/0/text', 'text': 'xx'})
+            saved = deepcopy(reducer.entities)
+            for seq, rev in ((1, 1), (2, 2)):
+                deliver({'op': 'put', 'seq': seq, 'kind': 'message', 'id': 'm', 'rev': rev, 'value': value})
+                self.assertEqual(reducer.entities, saved)
+                self.assertIsNone(m.o12_flag_put(reducer, baseline, ('message', 'm')))
+            published = dict(value, final=True)
+            deliver({'op': 'put', 'seq': 3, 'kind': 'message', 'id': 'm', 'rev': 3, 'value': published})
+            self.assertEqual(m.o12_flag_put(reducer, baseline, ('message', 'm'))['seq'], 3)
+            deliver({'op': 'snapshot', 'phase': 'begin', 'epoch': 'new', 'coverage': 'tail'})
+            deliver({'op': 'put', 'kind': 'message', 'id': 'm', 'rev': 1, 'value': value})
+            deliver({'op': 'snapshot', 'phase': 'end', 'seq': 0})
+            self.assertIsNone(m.o12_flag_put(reducer, baseline, ('message', 'm')))
+            self.assertEqual(recorder.received, 1)
+        finally:
+            recorder.restore()
+        self.assertEqual(reducer.accept, original)
+
+    def test_o12_observer_preserves_original_call_return_exception_and_restore(self):
+        from types import SimpleNamespace
+        from copy import deepcopy
+        sentinel, failure, calls = object(), RuntimeError('original failure'), []
+        def original(row):
+            calls.append(row)
+            if row.get('fail'): raise failure
+            return sentinel
+        reducer = SimpleNamespace(epoch='e', sequence=1, staged=None, entities={}, accept=original)
+        recorder = m.AppliedFlagPuts(reducer)
+        row = {'op': 'ignored', 'payload': {'keep': True}}
+        saved = deepcopy(row)
+        try:
+            self.assertIs(reducer.accept(row), sentinel)
+            self.assertIs(calls[-1], row)
+            self.assertEqual(row, saved)
+            with self.assertRaises(RuntimeError) as raised:
+                reducer.accept({'fail': True})
+            self.assertIs(raised.exception, failure)
+            self.assertEqual(len(calls), 2)
+        finally:
+            recorder.restore()
+        self.assertIs(reducer.accept, original)
+
+    def test_o12_current_emission_challenge_and_exact_prefix_binding(self):
+        from agent_conformance.results import CheckFailed, HarnessGap
+        a, needle_a = m.o12_emission_chunks()
+        b, needle_b = m.o12_emission_chunks()
+        self.assertNotEqual(needle_a, needle_b)
+        self.assertEqual((len(a), len(b)), (70, 70))
+        self.assertTrue(all(len(chunk.encode()) == 1024 for chunk in a + b))
+        def row(text, flag=None):
+            return {'rev': 1, 'value': {'role': 'assistant', 'final': True, 'incomplete': flag,
+                                      'content': [{'type': 'text', 'text': text}]}}
+        self.o12(lambda t: {('message', 'm'): row(t[:6000], True)}, fresh_challenge=True)
+        for wrong in ('O12-not-the-emitted-message', 'unrelated label mentions O12-but is not emitted body'):
+            with self.subTest(wrong=wrong), self.assertRaises(CheckFailed) as raised:
+                self.o12(lambda t: {('message', 'm'): row(t[:6000]), ('message', 'other'): row(wrong, True)})
+            self.assertNotIsInstance(raised.exception, HarnessGap)
+        old_text = '0:' + ''.join('O12-' + 'x' * 1020 for _ in range(70))
+        old = {('message', 'old'): row(old_text[:1000], True)}
+        self.o12(lambda t: {('message', 'old'): row(t[:6000], True)}, old,
+                 new_epoch='genuine-new-epoch', fresh_challenge=True)
+        with self.assertRaises(CheckFailed) as raised:
+            self.o12(lambda t: {('message', 'm'): row(t[:6000], True)}, fresh_challenge=True, native_mismatch=True)
+        self.assertEqual(raised.exception.component, 'fixture')
+        with self.assertRaises(HarnessGap):
+            self.o12(lambda t: {('message', 'old'): row(old_text[:1000], True)}, old,
+                     new_epoch='replayed-epoch', fresh_challenge=True)
+        with self.assertRaises(HarnessGap):
+            self.o12(lambda t: {('message', 'old'): row(old_text[:1000], True)}, old, new_epoch='replayed-epoch')
+        split = row(old_text[:1000], True)
+        split['value']['content'] = [{'type': 'text', 'text': old_text[:300]}, {'type': 'text', 'text': old_text[300:1000]}]
+        with self.assertRaises(HarnessGap):
+            self.o12(lambda t: {('message', 'old'): row(old_text[:1000], True)},
+                     {('message', 'old'): split}, new_epoch='replayed-blocks')
 
     def test_o12_item_stream_ruling(self):
-        """vqro-lead ruling: O12 is graded on the PUBLIC ITEM STREAM's display content, not on what the bundled pane
-        renders (the pane not showing notices is a separate K3 bug)."""
+        """Shown-marker half of O12's public stream rule (fresh incomplete flags are tested separately).
+        Bundled-pane rendering remains separate K3 work."""
         def message(rev, position, *blocks):
             return {"rev": rev, "value": {"role": "assistant", "position": position, "content": list(blocks)}}
         body = lambda t: {"type": "text", "text": t[:60000]}

@@ -7,7 +7,10 @@ adapter half observes a real bridge refusal; either missing is an honest harness
 """
 import asyncio
 from collections import deque
+from copy import deepcopy
+import hashlib
 import json
+import secrets
 import os
 from pathlib import Path
 import subprocess
@@ -479,8 +482,8 @@ def display_text(text):
 def shown_texts(value):
     """O12 marker evidence is graded on the adapter's PUBLIC ITEM STREAM (vqro-lead ruling), not on what a bundled
     pane renders: the display content of an entity's agent-v0 content blocks (section 3.2): `text {text}` and
-    `resource {text}` as display text; `image`, `audio` and `resource_link` carry no marker text, and no extra field
-    of any block, top-level field or `native` metadata ever counts."""
+    `resource {text}` as display text; `image`, `audio` and `resource_link` carry no marker text. Extra fields and
+    `native` metadata never count as text; the standardized entity incomplete flag is graded separately."""
     content = value.get("content") if isinstance(value, dict) else None
     if not isinstance(content, list):
         return []
@@ -489,6 +492,7 @@ def shown_texts(value):
 
 
 NOTICES = ("__live_notices__",)  # baseline key for the stream's live notice records (op notice, no seq)
+OBSERVATION = ("__o12_observation__",)  # client receipt cut, not a native record/sequence
 
 
 class ReceivedNotices(deque):
@@ -606,16 +610,67 @@ def marker_lines(texts, emitted, needle):
     return [line for text in texts for line in added_lines(text, emitted, needle)]
 
 
-def shown_baseline(reducer, emitted=None, needle="O12-"):
-    """The item stream before the native emission: per entity {"shown": [added display lines], "body": raw body
-    fingerprint}, plus the live notices already delivered under NOTICES. `emitted` is the exact text about to be
+class AppliedFlagPuts:
+    """Case-local bounded evidence of installed LIVE puts, never raw debug receipts."""
+    LIMIT = 128 << 10
+    MAX = 128
+
+    def __init__(self, reducer):
+        self.reducer, self.records, self.bytes, self.received, self.lost = reducer, [], 0, 0, False
+        self.original = getattr(reducer, "accept", None)
+        self.known = callable(self.original)
+        self.hook = self.accept
+        if self.known:
+            reducer.accept = self.hook
+
+    def accept(self, row):
+        before_epoch, before_seq = self.reducer.epoch, self.reducer.sequence
+        live = self.reducer.staged is None
+        result = self.original(row)  # Preserve the original return/exception, not an application receipt.
+        if (not live or row.get("op") != "put" or type(before_seq) is not int
+                or self.reducer.epoch != before_epoch or self.reducer.sequence != row.get("seq")
+                or self.reducer.sequence <= before_seq):
+            return result
+        key = (row.get("kind"), row.get("id"))
+        installed = self.reducer.entities.get(key)
+        if (not installed or installed.get("rev") != row.get("rev") or (row.get("value") or {}).get("incomplete") is not True
+                or (installed.get("value") or {}).get("incomplete") is not True):
+            return result
+        self.received += 1
+        try:
+            size = len(json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode())
+            if len(self.records) >= self.MAX or self.bytes + size > self.LIMIT:
+                self.lost = True
+                return result
+            recorded = deepcopy(row)
+        except Exception:
+            self.lost = True  # Observation failure must not alter decoder behavior.
+            return result
+        self.records.append({"receipt": self.received, "epoch": self.reducer.epoch, "put": recorded})
+        self.bytes += size
+        return result
+
+    def restore(self):
+        if self.known and self.reducer.accept == self.hook:
+            self.reducer.accept = self.original
+
+
+def shown_baseline(reducer, emitted=None, needle="O12-", *, applied_flags=None):
+    """The item stream before native emission: per-entity display/body, incomplete flag, revision and epoch,
+    plus live notices already delivered under NOTICES. `emitted` is the exact text about to be
     emitted, so the baseline's display lines are reduced exactly as the later ones are."""
     baseline = {key: {"shown": marker_lines(shown_texts(entity.get("value") or {}), emitted, needle),
-                      "body": body_fingerprint(entity.get("value") or {})}
+                      "body": body_fingerprint(entity.get("value") or {}),
+                      "body_text_sha256": hashlib.sha256("".join(body_texts(entity.get("value") or {})).encode()).hexdigest(),
+                      "incomplete": (entity.get("value") or {}).get("incomplete") is True,
+                      "rev": entity.get("rev"), "epoch": getattr(reducer, "epoch", None)}
                 for key, entity in reducer.entities.items()}
     received = track_notices(reducer)
     baseline[NOTICES] = {"shown": marker_lines(notice_texts(reducer), emitted, needle), "body": "",
                          **({"received": received} if received is not None else {})}
+    baseline[OBSERVATION] = {"shown": [], "body": "", "epoch": getattr(reducer, "epoch", None),
+                             "applied_flags": applied_flags,
+                             "applied_received": applied_flags.received if applied_flags else None}
     return baseline
 
 
@@ -654,6 +709,83 @@ def message_texts(reducer, needle, baseline=None, emitted=None):
     return bodies, fresh
 
 
+def o12_flag_put(reducer, baseline, key):
+    """A qualifying put must have advanced the live cursor and installed its value."""
+    observed = baseline.get(OBSERVATION, {})
+    recorder, cut = observed.get("applied_flags"), observed.get("applied_received")
+    if recorder is None or not recorder.known or type(cut) is not int:
+        return None
+    for entry in reversed(recorder.records):
+        row = entry["put"]
+        if entry["receipt"] > cut and entry["epoch"] == reducer.epoch and (row.get("kind"), row.get("id")) == key:
+            return deepcopy(row)
+    return None
+
+
+def o12_affected_entities(reducer, baseline, emitted, needle="O12-"):
+    """Bind flags to the controlled message body, never an unrelated/global flag.
+
+    An empty omitted entity needs a separate correlation witness; freshness alone
+    cannot identify it as the native message. Existing shown notices still work.
+    """
+    rows = []
+    epoch = getattr(reducer, "epoch", None)
+    for key, entity in reducer.entities.items():
+        value = entity.get("value") or {}
+        body = "".join(body_texts(value))
+        if (key[0] != "message" or value.get("role") != "assistant" or not body.startswith("0:" + needle)
+                or not emitted.startswith(body)):
+            continue
+        fingerprint = body_fingerprint(value)
+        text_hash = hashlib.sha256(body.encode()).hexdigest()
+        # An epoch/ID/block-boundary replay is not current emission evidence.
+        # The challenge is unique; reject identical baseline text explicitly too.
+        if any(k[0] == "message" and (old.get("body") == fingerprint or old.get("body_text_sha256") == text_hash)
+               for k, old in baseline.items()):
+            continue
+        before = baseline.get(key)
+        new_epoch = bool(before and isinstance(epoch, str) and isinstance(before.get("epoch"), str)
+                         and epoch != before["epoch"])
+        fresh_record = before is None or new_epoch or (
+            type(entity.get("rev")) is int and type(before.get("rev")) is int and entity["rev"] > before["rev"])
+        flagged = value.get("incomplete") is True
+        flag_put = o12_flag_put(reducer, baseline, key) if flagged else None
+        fresh_flag = flagged and fresh_record and (before is None or new_epoch or before.get("incomplete") is not True
+                                                   or flag_put is not None)
+        body_changed = before is None or before["body"] != fingerprint
+        if body_changed and not fresh_record:
+            raise HarnessGap("O12 correlation gap: body changed without a new public revision")
+        if body_changed or fresh_flag:
+            rows.append({"kind": key[0], "id": key[1], "epoch": epoch, "rev": entity.get("rev"),
+                         "fresh_incomplete": fresh_flag, "baseline_incomplete": before.get("incomplete") if before else None,
+                         "baseline_rev": before.get("rev") if before else None,
+                         "baseline_epoch": before.get("epoch") if before else None,
+                         "flag_put": flag_put, "value": deepcopy(value)})
+    return rows
+
+
+def o12_observation(view, error):
+    """Retain client observation state before deciding adapter versus harness."""
+    reducer, peer = view.reducer, getattr(view, "peer", None)
+    def failure(value):
+        return None if value is None else {"type": type(value).__name__, "message": str(value)}
+    task = getattr(peer, "task", None)
+    read_done = getattr(task, "done", None)
+    return {"wait_error": failure(error), "stream": getattr(view, "stream", None),
+            "view_known": hasattr(view, "closed") and hasattr(view, "close_notice"),
+            "view_closed": getattr(view, "closed", None), "terminal": deepcopy(getattr(view, "close_notice", None)),
+            "peer_known": peer is not None and hasattr(peer, "failure") and hasattr(peer, "closed") and callable(read_done),
+            "peer_closed": getattr(peer, "closed", None), "peer_failure": failure(getattr(peer, "failure", None)),
+            "peer_read_done": read_done() if callable(read_done) else None,
+            "reducer_known": hasattr(reducer, "failure") and hasattr(reducer, "staged"),
+            "reducer_failure": failure(getattr(reducer, "failure", None)),
+            "cursor": deepcopy(getattr(reducer, "cursor", None)), "epoch": getattr(reducer, "epoch", None),
+            "sequence": getattr(reducer, "sequence", None), "snapshots": getattr(reducer, "snapshots", None),
+            "staged": getattr(reducer, "staged", None) is not None,
+            "pending_bytes": len(getattr(reducer, "pending", b"")),
+            "trace_dropped": getattr(reducer, "trace_dropped", None)}
+
+
 @case("O12")
 async def producer_append_bounds(ctx):
     """A small append whose resulting whole snapshot put exceeds the record bound returns too_large with entity,
@@ -670,9 +802,23 @@ async def producer_append_bounds(ctx):
     # Adapter half: an oversized assistant message streamed through the actual bridge.
     from .cases import fresh_view
     view = await fresh_view(ctx)
-    chunks = ["O12-" + "x" * 1020 for _ in range(70)]  # about 70 KiB of text_delta appends in one message
-    expected = "0:" + "".join(chunks)  # the fixture's exact emitted text (seam 5d9b0590: "<index>:" + chunks)
-    baseline = shown_baseline(view.reducer, expected)
+    recorder = AppliedFlagPuts(view.reducer)
+    try:
+        await o12_adapter_result(ctx, view, recorder)
+    finally:
+        recorder.restore()
+
+
+def o12_emission_chunks():
+    """A fresh native-body challenge; preserve the 70x1024-byte workload exactly."""
+    needle = "O12-" + secrets.token_hex(16) + ":"
+    return [needle + "x" * (1024 - len(needle)) for _ in range(70)], needle
+
+
+async def o12_adapter_result(ctx, view, recorder):
+    chunks, needle = o12_emission_chunks()
+    expected = "0:" + "".join(chunks)  # seam 5d9b0590: "<index>:" + chunks
+    baseline = shown_baseline(view.reducer, expected, needle, applied_flags=recorder)
     mark = ctx.native.mark()
     # Fixture seam 5d9b0590 (prim-final-review): retain with chunks emits one assistant message as len(chunks)
     # native deltas, text "0:" + "".join(chunks), and one native_emit ledger row (Pi message_end, Codex item/completed).
@@ -683,20 +829,53 @@ async def producer_append_bounds(ctx):
         raise HarnessGap("O12 adapter half needs the native fixture's ledger witness of the emitted message "
                          "(native_emit message_end with text_bytes and text_sha256)")
     witness = emitted[-1]
+    check(witness["text_bytes"] == len(expected.encode()) and witness["text_sha256"] == hashlib.sha256(expected.encode()).hexdigest(),
+          "O12 native emission did not match the controlled body challenge", component="fixture")
+    def observed(reducer):
+        texts, others = message_texts(reducer, needle, baseline, expected)
+        affected = o12_affected_entities(reducer, baseline, expected, needle)
+        positive = (adapter_preserves_or_marks(texts, witness["text_bytes"], witness["text_sha256"], other_texts=others)
+                    or any(row["fresh_incomplete"] for row in affected))
+        return texts, others, affected, positive
     def settled(reducer):
-        texts, others = message_texts(reducer, "O12-", baseline, expected)
-        return adapter_preserves_or_marks(texts, witness["text_bytes"], witness["text_sha256"], other_texts=others)
+        _, _, affected, positive = observed(reducer)
+        # A completed partial entity must be graded FAIL rather than waiting for
+        # a positive verdict and misclassifying the resulting timeout as loss.
+        return positive or bool(affected) and all(row["value"].get("final") is True for row in affected)
+    wait_error = None
     try:
         await ctx.wait_view(view, settled, timeout=15)
-    except Exception:
-        pass  # graded below from what the stream actually holds
-    texts, others = message_texts(view.reducer, "O12-", baseline, expected)
+    except Exception as error:
+        wait_error = error  # Never erase an interrupted observation or upgrade it to adapter evidence.
+    health = o12_observation(view, wait_error)
+    health["applied_flags_known"] = recorder.known
+    health["applied_flags_baseline"] = baseline[OBSERVATION]["applied_received"]
+    health["applied_flags_received"] = recorder.received
+    health["applied_flag_evidence_lost"] = recorder.lost
+    try:
+        texts, others, affected, verdict = observed(view.reducer)
+    except Exception as error:
+        health["evidence_error"] = {"type": type(error).__name__, "message": str(error)}
+        texts, others, affected, verdict = [], [], [], False
     ctx.evidence.append({"kind": "o12_adapter", "emitted": witness, "stream_text_bytes": [len(t.encode()) for t in texts],
-                         "other_new_entity_strings": [t[:200] for t in others][:16]})
-    verdict = adapter_preserves_or_marks(texts, witness["text_bytes"], witness["text_sha256"], other_texts=others)
+                         "other_new_entity_strings": [t[:200] for t in others][:16],
+                         "affected_entities": affected,
+                         "applied_flag_puts": deepcopy(recorder.records),
+                         "incomplete_witnesses": [row for row in affected if row["fresh_incomplete"]],
+                         "observation": health})
+    if (wait_error is not None or health.get("evidence_error") is not None
+            or not recorder.known or not health["view_known"] or not health["peer_known"] or not health["reducer_known"]
+            or health["peer_closed"] is not False or health["peer_failure"] is not None
+            or health["peer_read_done"] is True or health["reducer_failure"] is not None or health["staged"]
+            or health["view_closed"] is not None):
+        raise HarnessGap("O12 observation gap: wait/view/peer/reducer health does not establish an uninterrupted public witness")
+    if recorder.lost:
+        raise HarnessGap("O12 flag observation gap: applied flag evidence exceeded the bounded recorder")
     if not verdict and getattr(view.reducer.notices, "lost", False):
         raise HarnessGap("O12 notice observation gap: more live notices arrived since the baseline than the recorder "
                          "keeps, so a refusal marker may have been received and cannot be excluded")
+    if not verdict and (not affected or any(row["value"].get("final") is not True for row in affected)):
+        raise HarnessGap("O12 observation gap: only a held prefix/no completed affected entity was observed")
     check(verdict,
-          "after the producer refusal the adapter keeps the whole emitted text or visibly marks the refusal "
-          "(no silent loss)")
+          "after the producer refusal the adapter keeps the whole emitted text or publicly marks the affected "
+          "output incomplete (no silent loss)")
