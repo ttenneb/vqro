@@ -296,6 +296,34 @@ class TranscriptRows(unittest.TestCase):
         self.assertNotIn("children", agent_transcript.thought_step("s", "short"), "nothing more to open")
         self.assertEqual([c["text"] for c in agent_transcript.thought_step("s", "one\ntwo")["children"]], ["┊ one", "┊ two"])
 
+    def test_many_locations_never_push_the_output_out(self):
+        """vqro-lead-secondary (gear-81 parent readout): 24 long locations left the output under "N more not shown"."""
+        step = agent_transcript.tool_row("l", {"title": "grep", "status": "completed", "content": text("THE OUTPUT"),
+                                               "locations": [{"path": "/w/" + "d" * 900 + f"/{i}.rs", "line": i} for i in range(24)]})
+        texts = [c.get("text") for c in step["children"]]
+        self.assertIn("THE OUTPUT", texts)
+        self.assertTrue(any(t and t.startswith("… ") and "more locations not shown" in t for t in texts))
+
+    def test_tool_lines_carry_aligned_cells_and_the_activity_opens_a_turn_table(self):
+        """Cards/table slice (the human's relay-12 answers): tool lines line up; Activity → [Table] of this turn only."""
+        group = next(r for r in self.rows() if r.get("text", "").startswith("Activity"))
+        read, test = group["children"]
+        self.assertEqual((read["columns"], test["columns"]), (["✓ read", "ci.yml"], ["✗ bash", "npm test"]))
+        self.assertEqual(group["id"], "g:t1", "the run is named by its first tool")
+        self.assertEqual(group["actions"], [{"text": "Table", "command": "agents.tools", "args": {"run": "t1"}}])
+        self.assertEqual(group["menu"][0]["command"], "agents.tools")
+        runs = agent_transcript.tool_runs({k: (1, v) for k, v in CONVERSATION.items()})
+        self.assertEqual({k: [e for e, _ in v] for k, v in runs.items()}, {"t1": ["t1", "t2"]})
+        table = agent_transcript.tools_table(runs["t1"], "Tools · Pi r2 · this turn")
+        self.assertEqual([c["label"] for c in table["columns"]], ["", "Tool", "What", "Output", "Time"])
+        self.assertEqual([r["columns"] for r in table["items"]],
+                         [["✓", "read", "ci.yml", "—", "0.2s"], ["✗", "bash", "npm test", "30 lines", "4.6s"]])
+        self.assertEqual([(r["facets"], r["sort"]["output"]) for r in table["items"]],
+                         [({"status": "completed", "tool": "read"}, 0), ({"status": "failed", "tool": "bash"}, 30)])
+        self.assertEqual((table["title_right"], table["search"]), ("2 tools · 1 failed · 4.8s", True))
+        self.assertFalse({"badges", "children", "actions"} & set(table["items"][0]), "one line of cells; open/copy in its menu")
+        self.assertEqual(table["items"][1]["description"], "line 0 of the test log", "a failure still says why")
+
     def test_short_output_is_packed_and_placeholders_never_appear(self):
         listing = agent_transcript.output_rows("/w\n" + "\n".join(f"file{i}.md" for i in range(20)))
         self.assertEqual(listing[0]["text"], "/w")
@@ -677,6 +705,24 @@ class AgentPane(unittest.TestCase):
             self.agents.publish_gone("r300")
         self.assertFalse([k for k in self.agents.logged if k[0] == "r300"], "an agent's entries go with it")
         self.assertEqual(err.getvalue().count("failed for r300"), 2)
+
+    def test_the_turn_table_opens_from_the_pane_and_follows_the_conversation(self):
+        self.feed(snapshot(CONVERSATION))
+        pane = self.core.live["agents-r2"]
+        self.assertEqual(pane["columns"], agent_transcript.TOOL_COLUMNS, "the pane declares the tool cells' layout")
+        reply = self.core.handlers["agents.tools"]({"resource": "r2", "run": "t1"})
+        self.assertEqual(reply["client"]["popup"]["view"], "agents-tools-r2")
+        self.assertEqual(len(self.core.live["agents-tools-r2"]["items"]), 2)
+        self.assertIn("view/agents-tools-r2", self.core.entries, "declared with the agent, like its other popups")
+        more = dict(CONVERSATION)
+        more[("tool", "t3")] = {"position": 5, "title": "read", "status": "running", "input": {"path": "b.rs"}}
+        more = {k: (dict(v, position=v["position"] + 1) if k in (("message", "m3"), ("message", "m4"), ("message", "m5")) else v)
+                for k, v in more.items()}
+        self.feed(snapshot(more))
+        self.assertEqual([r["columns"][0] for r in self.core.live["agents-tools-r2"]["items"]], ["✓", "✗", "…"],
+                         "an open table follows its turn")
+        with self.assertRaises(Exception):
+            self.core.handlers["agents.tools"]({"resource": "r2"})
 
     def test_the_waiting_line_and_the_runtimes_queue_are_pinned(self):
         items = self.make_v0(requests=[{"request": "q1", "revision": 1, "method": "confirm", "title": "Run git push?", "params": {}}],

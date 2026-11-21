@@ -281,7 +281,8 @@ PANE_KEYS = {
 COMPOSER_ROWS = 8
 VIEW_DEFAULTS = "doc/settings/agents"  # {"view": {...}}: defaults for new agent panes (agent_transcript.view_settings)
 VIEW_PANE = "doc/agents/view/"  # + rid: this agent pane's own view settings (AS10d: per pane, workspace defaults)
-OWNED_PREFIXES = ("view/agents-requests-", "view/agents-settings-", "view/agents-stop-", "view/agents-send-", "view/agents-")
+OWNED_PREFIXES = ("view/agents-requests-", "view/agents-settings-", "view/agents-stop-", "view/agents-send-", "view/agents-pane-",
+                  "view/agents-tools-", "view/agents-")
 
 
 def host_of(resources, r):
@@ -444,7 +445,8 @@ class Agents:
         self.strict, self.logged = bool(getattr(ext, "strict_render", False)), {}
         self.open_requests = set()
         self.open_settings = set()
-        self.open_pane, self.published_pane = set(), {}  # ⚙ popups shown (republished as the view or agent changes)
+        self.open_pane, self.published_pane = set(), {}
+        self.open_tools, self.published_tools = {}, {}  # rid -> the run its open tools table shows; last published  # ⚙ popups shown (republished as the view or agent changes)
         self.published = {}  # Only current agents; suppress unchanged derived panel RPCs.
         # Conversations from item streams; a worker attaches, reattaches and republishes (coalesced).
         self.conversations, self.conv_lock, self.conv_event = {}, threading.Lock(), threading.Event()
@@ -464,6 +466,7 @@ class Agents:
                                 ("view", self.set_view, "Show, summarise or hide parts of an agent pane (args: set, value)"),
                                 ("stop", self.stop, "Stop an agent: kill its bridge terminal and the runtime in it (asks first)"),
                                 ("pane", self.pane_menu, "The agent pane's ⚙ popup: view filters, settings, bridge terminal, stop"),
+                                ("tools", self.tools_table, "One turn's tools as a table (args: run = the turn's first tool id)"),
                                 ("forget", self.forget, "Forget an unavailable agent's cached facts (its process is not touched)")]:
             ext.command("agents."+name, title)(self.guarded(fn))
         for op, title in EFFECTS.items():
@@ -750,6 +753,32 @@ class Agents:
             self.ext.publish(target, content)
             self.published_pane[r["id"]] = content
         return {"client": {"popup": {"view": target, "width": 60}}}
+
+    def tools_panel(self, r, run_id):
+        """The ⊞ Table popup of one turn's tools (mockup Screen C), from the conversation as it is now."""
+        c = self.conversations.get(r["id"])
+        session = agent_facts(r).get("session") if isinstance(agent_facts(r).get("session"), dict) else {}
+        title = "Tools · " + label(r.get("name") or "Agent") + " " + r["id"] + " · this turn"
+        if c is None:
+            return {"title": title, "items": [{"type": "text", "style": "dim", "text": "This agent doesn't stream its conversation."}]}
+        with c.lock:
+            run = agent_transcript.tool_runs(c.view.entities).get(run_id, [])
+        return agent_transcript.tools_table(run, title, session.get("cwd") if isinstance(session.get("cwd"), str) else None)
+
+    def tools_table(self, args):
+        """agents.tools {resource, run}: open the turn's tools table (republished while open, like the ⚙ popup)."""
+        self.ext.fresh()
+        r = self.agent(args, inspect=True)
+        run = args.get("run")
+        if not isinstance(run, str) or not run or len(run) > 256:
+            raise VqroError("which turn? (run: its first tool id)", "invalid")
+        target = "agents-tools-" + r["id"]
+        with self.lock:
+            self.open_tools[r["id"]] = run
+            content = self.tools_panel(r, run)
+            self.ext.publish(target, content)
+            self.published_tools[r["id"]] = content
+        return {"client": {"popup": {"view": target, "width": 120}}}
 
     def frame(self, r):
         """The pane's frame: name · folder as the title, the live state at its right end (feature-free fallback: the
@@ -1531,7 +1560,7 @@ class Agents:
         conversation = self.conversation_rows(r)
         if conversation is not None:
             # The agent's own item stream: the conversation is drawn here (agent pane, K3 phase 2).
-            content = {**self.frame(r), "follow": True, "search": True,
+            content = {**self.frame(r), "follow": True, "search": True, "columns": agent_transcript.TOOL_COLUMNS,
                        "items": [*conversation, *self.bottom_rows(r),
                 agent_transcript.facts_footer(agent_facts(r), plain(str(r.get("name") or r["id"])))]}
         elif sources:
@@ -1648,7 +1677,7 @@ class Agents:
             # client must already know: a view written by the same click can reach a client after the reply, and the
             # popup is then dropped ("popup: no view"). Opening a popup writes no workspace state.
             for popup, title in (("stop", "Stop agent"), ("requests", "Pending requests"), ("settings", "Agent settings"),
-                                 ("send", "Send to agent"), ("pane", "Agent pane")):
+                                 ("send", "Send to agent"), ("pane", "Agent pane"), ("tools", "Tools")):
                 entries[f"view/agents-{popup}-{rid}"] = {"kind": "panel", "title": f"{title} {rid}", "items": [
                     {"type": "text", "text": "Loading… (stays if the agents extension is not running)"}]}
             # The ⚙ (view filters, settings, bridge terminal, stop) is also in the pane menu: recovery, D15.
@@ -1729,6 +1758,17 @@ class Agents:
             if self.published.get(rid) != content:
                 self.ext.publish(view(rid), content)
                 self.published[rid] = content
+            if rid in self.open_tools:
+                try:
+                    table = self.tools_panel(resource, self.open_tools[rid])
+                except Exception as error:  # noqa: BLE001
+                    if self.strict:
+                        raise
+                    self.log_failure(rid, "tools table", error)
+                    table = broken_panel(resource, error)
+                if self.published_tools.get(rid) != table:
+                    self.ext.publish("agents-tools-" + rid, table)
+                    self.published_tools[rid] = table
             if rid in self.open_pane:
                 try:
                     gear = self.gear_panel(resource)
@@ -1747,6 +1787,8 @@ class Agents:
             del self.logged[key]
         self.open_pane.discard(rid)
         self.published_pane.pop(rid, None)
+        self.open_tools.pop(rid, None)
+        self.published_tools.pop(rid, None)
         entry = self.ext.entries.get("view/"+view(rid), {})
         if entry.get("value", {}).get("owner") == "agents":
             self.ext.publish(view(rid), {"items": [{"type": "text", "style": "warn", "text": "Agent gone (facts not currently available); no operation sent. Close this tab or use Close ended tabs."}]})

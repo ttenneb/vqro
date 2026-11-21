@@ -22,7 +22,8 @@ MARKDOWN_ROW_BYTES = 60 * 1024  # under the 64 KiB per formatted row (core-proto
 LINE_BYTES = 4096  # one row; longer lines are cut with a mark (display only, never a request's question)
 TOOL_LINES = 12  # lines of a tool's output shown before "… N more lines" (redesign mockup)
 HIDDEN_ROWS, HIDDEN_BYTES = 200, 8 * 1024
-ARGS_BYTES = 8 * 1024  # of those, the extra arguments: the output keeps the rest
+ARGS_BYTES = 8 * 1024
+LOCATION_BYTES = 4 * 1024  # and the locations: the output keeps at least the remaining 12 KiB  # of those, the extra arguments: the output keeps the rest
 STEP_CHILD_BYTES = 24 * 1024  # one tool line's details; with its copy (TOOL_COPY_BYTES) a step stays well under 40 KiB
 ACTIVITY_BYTES = 64 * 1024  # one Activity row's steps (newest kept), well inside the panel's BUDGET
 # A tool's output lines and copy, kept small: a turn can have dozens of calls, and the panel's BUDGET is shared.
@@ -390,6 +391,11 @@ def bounded_children(children, limit=None, what="lines"):
     return kept
 
 
+def output_lines(output):
+    """How many lines a tool's output has (a trailing newline ends the last line; it doesn't start another)."""
+    return len(ANSI.sub("", output).rstrip("\n").split("\n")) if output else 0
+
+
 def tool_row(eid, value, cwd=None):
     """One line per tool call (redesign): icon, name, its main argument; size and time on the right. Opening it shows
     the other arguments as "name value" lines and the output, wrapped and cut."""
@@ -401,7 +407,7 @@ def tool_row(eid, value, cwd=None):
         main = main[len(cwd.rstrip("/")) + 1:]  # a path argument inside the agent's folder reads relative to it
     output = text_of(value)
     took = duration(value.get("started_ms"), value.get("ended_ms"))
-    count = len([line for line in ANSI.sub("", output).split("\n")]) if output else 0
+    count = output_lines(output)
     children = []
     if isinstance(args, dict):
         for key, arg in args.items():
@@ -411,10 +417,13 @@ def tool_row(eid, value, cwd=None):
             children.append({"type": "text", "wrap": True, "style": "dim", "text": clip(plain(f"{key} {shown}"), 1024)})
     # The extra arguments get at most ARGS_BYTES, so the output always has room (prim-opus-review P3).
     children = bounded_children(children, ARGS_BYTES, "arguments")
+    places = []
     for loc in value.get("locations") if isinstance(value.get("locations"), list) else []:
         if isinstance(loc, dict) and isinstance(loc.get("path"), str):
             line = f":{loc['line']}" if type(loc.get("line")) is int else ""
-            children.append({"type": "text", "style": "accent", "text": clip(plain(loc["path"] + line), 1024)})
+            places.append({"type": "text", "style": "accent", "text": clip(plain(loc["path"] + line), 1024)})
+    # Locations too get a bounded share before the output (24 long ones used to push it out: vqro-lead-secondary).
+    children += bounded_children(places, LOCATION_BYTES, "locations")
     if output:
         children += output_rows(output)
     children += [r for r in content_rows([b for b in value.get("content") or [] if isinstance(b, dict) and b.get("type") != "text"])]
@@ -432,6 +441,8 @@ def tool_row(eid, value, cwd=None):
     if copy:
         menu.append({"label": "Copy " + ("output" if output else "input"), "command": "client.copy"})
     return {"id": "t:" + eid, **({"menu": menu} if menu else {}), **({"actions": actions} if actions else {}), "text": f"{TOOL_ICON.get(status, '?')} {clip(name, 40)}" + (f"   {main}" if main else ""),
+            # Aligned cells (feature columns, the panel's TOOL_COLUMNS); `text` is what other clients show.
+            "columns": [f"{TOOL_ICON.get(status, '?')} {clip(name, 40)}", main],
             "style": "error" if status == "failed" else None, **({"copy": copy} if copy else {}),
             **({"badges": [{"text": b, "style": "dim"} for b in badges]} if badges else {}),
             # A failed call says why on its line (the first line of what it returned), else just "failed".
@@ -481,8 +492,84 @@ def group_row(steps, cwd=None):
         tally[key] = tally.get(key, 0) + 1
     badges = [{"text": f"{icon} {name}" + (f" ×{n}" if n > 1 else ""), "style": "error" if icon == "✗" else "dim"}
               for (icon, name), n in list(tally.items())[:6]]
-    return {"id": "g:" + steps[0][0], "text": "Activity · " + " · ".join(summary), "badges": badges,
+    run = tools[0][0]
+    table = [{"text": "Table", "command": "agents.tools", "args": {"run": run}}]  # this turn's tools as a table
+    return {"id": "g:" + run, "text": "Activity · " + " · ".join(summary), "badges": badges,
+            "actions": table, "menu": [{"label": "Tools of this turn as a table…", **{k: table[0][k] for k in ("command", "args")}}],
             "children": children, "expanded": False}
+
+
+# The conversation panel's column layout: only rows carrying `columns` (tool lines) use it; no header (no labels).
+TOOL_COLUMNS = [{"width": 12}, {"width": "fill"}]
+TABLE_BYTES = 512 * 1024  # one tools table popup, well under the core's 1 MiB live item
+
+
+def tool_runs(entities):
+    """The runs of tool calls rows() draws as one Activity each, keyed by the run's first tool id: the same grouping
+    (a step with no text continues a run; any other message, plan, compaction or shown entity ends it)."""
+    timeline = sorted(((v.get("position"), kind, eid, v) for (kind, eid), (_, v) in entities.items()
+                       if isinstance(v, dict) and type(v.get("position")) is int
+                       and (kind in ("message", "tool", "plan", "compaction") or generic_kind(kind))),
+                      key=lambda t: (t[0], t[1], t[2]))
+    runs, run = {}, []
+    for _, kind, eid, value in timeline:
+        if kind == "tool":
+            run.append((eid, value))
+            continue
+        if kind == "message" and value.get("role") == "assistant" and value.get("final") is not False \
+                and not content_rows(value.get("content")):
+            continue  # a step of the work: the run goes on
+        if kind not in ("message", "plan", "compaction") and not entity_rows(kind, eid, value):
+            continue  # an entity with nothing to show doesn't break the run (rows() draws nothing for it)
+        if run:
+            runs[run[0][0]] = run
+        run = []
+    if run:
+        runs[run[0][0]] = run
+    return runs
+
+
+def tools_table(run, title, cwd=None):
+    """A turn's tools as a table popup (mockup Screen C): labelled columns, Show/Tool facets, sorts, search; each row is
+    the tool line (opens in place, [open]/[copy]). Bounded to TABLE_BYTES, in order, then a count of the rest."""
+    items, size = [], 0
+    for i, (eid, value) in enumerate(run):
+        row = tool_row(eid, value, cwd)
+        status = value.get("status") if isinstance(value.get("status"), str) else "unknown"
+        name = clip(plain(str(value.get("title") or "tool")), 40)
+        output = text_of(value)
+        lines_ = output_lines(output)
+        took = duration(value.get("started_ms"), value.get("ended_ms")) or ""
+        # A table row is one line: its cells, plus its menu (open/copy) and y to copy. Details stay in the conversation
+        # (nested rows would also be counted by the facets), and inline buttons would cover the right-hand cells.
+        for key in ("badges", "children", "actions", "expanded"):
+            row.pop(key, None)
+        row.update(columns=[TOOL_ICON.get(status, "?"), name, row["columns"][1], f"{lines_} {plural(lines_)}" if lines_ else "—", took],
+                   facets={"status": status, "tool": name},
+                   sort={"name": name.lower(), "output": lines_,
+                         **({"time": value["ended_ms"] - value["started_ms"]} if type(value.get("started_ms")) is int
+                            and type(value.get("ended_ms")) is int else {})})
+        size += len(json.dumps(row, ensure_ascii=False).encode())
+        if size > TABLE_BYTES:
+            items.append({"type": "text", "style": "dim", "text": f"… {len(run) - i} more tools not shown here (pane limit)"})
+            break
+        items.append(row)
+    failed = sum(1 for _, v in run if v.get("status") == "failed")
+    starts = [v.get("started_ms") for _, v in run if type(v.get("started_ms")) is int]
+    ends = [v.get("ended_ms") for _, v in run if type(v.get("ended_ms")) is int]
+    took = duration(min(starts), max(ends)) if starts and ends else None
+    right = " · ".join([f"{len(run)} tool" + ("s" if len(run) != 1 else "")] + ([f"{failed} failed"] if failed else []) + ([took] if took else []))
+    return {"title": title, "title_right": right, "search": True, "requires": ["menu"],
+            "columns": [{"label": "", "width": 1}, {"label": "Tool", "width": 10}, {"label": "What", "width": "fill"},
+                        {"label": "Output", "width": 10, "align": "right", "priority": 2, "min_width": 6},
+                        {"label": "Time", "width": 7, "align": "right", "priority": 1, "min_width": 4}],
+            "facets": [{"key": "status", "label": "Show", "values": [{"value": "completed", "label": "✓ done"},
+                                                                     {"value": "failed", "label": "✗ failed"},
+                                                                     {"value": "running", "label": "… running"}]},
+                       {"key": "tool", "label": "Tool"}],
+            "sorts": [{"key": "time", "label": "time", "desc": True}, {"key": "output", "label": "output", "desc": True},
+                      {"key": "name", "label": "name"}],
+            "items": items or [{"type": "text", "style": "dim", "text": "This turn's tools are no longer in the conversation."}]}
 
 
 def amount(n):
