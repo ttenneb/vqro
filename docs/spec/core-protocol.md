@@ -97,6 +97,11 @@ services or generic subprocesses, log it or persist it. SDK `host_context_hello`
 connections do not adopt the variable. CLI tool entry uses it only without another selected principal; an explicit
 endpoint principal remains the separate evidenced `env` route. Older cores returning no token yield no tool map.
 No endpoint `tool_principal: "env"` capability, delegation right or persistence guarantee is created by this route.
+When the bridge connection itself uses `host:<rid>`, it and its tools share that principal's undo scope: default
+`u`/undo may revert the bridge's own latest write or another tool's write. `actual_author` distinguishes their
+connections, not separate endpoint ownership. Select an explicit transaction for recovery when needed; no distinct
+tool actor is inferred. Rotation/re-registration invalidates old tool maps (`forbidden`); the producer exports the
+fresh map to newly launched tools rather than replaying requests or silently falling back.
 A bound connection cannot be retagged by another hello; open a new connection to deliberately change configured identity.
 
 Requests may declare diagnostic `label` (at most 256 UTF-8 bytes, no Unicode Cc controls or Unicode16 Cf

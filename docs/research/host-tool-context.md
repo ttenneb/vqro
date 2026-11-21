@@ -40,6 +40,14 @@ export the map to human shells/services. Ordinary SDK/UI calls remain undeclared
    Python3 explicit helper/export/handshake tests pass, zero warnings. Fixture/API typos and compile failures
    retained separately, not counted as functional reds. Original tokens are fixture-only, no live mutation.
 
+## Post-merge clarification
+
+The bridge connection, when it adopts the default host:<rid> identity, and its tool children share ONE principal
+undo scope. Default undo may therefore select the bridge's write or another tool's, as the shared-host contract
+requires; actual_author distinguishes connections, not endpoint ownership. Explicit transaction recovery remains
+available. No new tool actor or per-endpoint env capability is invented. After rotation/re-registration old maps
+fail forbidden and the producer exports a fresh map for NEW tools; it never replays an uncertain call.
+
 All scratch evidence under prim-slice1-host-context. Whole final-candidate gate, independent review and K1 PartB
 reprobe remain pending; no harness gap closure or live install is claimed by focused tests alone. Names/semantics
 sent to spec owner for batch7 consistency review. No install/network/model calls or live sessions touched.
