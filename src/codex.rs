@@ -236,6 +236,8 @@ pub struct Endpoint {
     config_rev: u64,
     config_pending: bool,
     config_uncertain: bool,
+    config_status: String,
+    config_diagnostic: Option<Value>,
     configured_model: Option<String>,
     usage: Option<Value>,
     run_metadata: Option<Value>,
@@ -268,6 +270,8 @@ impl Endpoint {
             config_rev: 1,
             config_pending: false,
             config_uncertain: false,
+            config_status: "native".into(),
+            config_diagnostic: None,
             configured_model: None,
             usage: None,
             run_metadata: None,
@@ -292,12 +296,13 @@ impl Endpoint {
     }
 
     pub fn model_option(&self) -> Value {
-        json!({"id":"model","label":"Model","description":"Native model for this thread and future new/resumed threads; change while idle","category":"model",
-            "type":"select","value":if self.config_pending || self.config_uncertain {Value::Null}else{self.model.as_ref().map(|model|model["id"].clone()).unwrap_or(Value::Null)},
-            "choices":self.model_choices,"rev":self.config_rev})
+        json!({"id":"model","label":"Model","description":"Accepted future-turn model intent: applies from the next native turn/start. Readback is the current configured model, not per-turn execution telemetry.","category":"model",
+            "type":"select","value":self.configured_model.as_ref().map(|model|json!(model)).unwrap_or_else(||self.model.as_ref().map(|model|model["id"].clone()).unwrap_or(Value::Null)),
+            "pending":self.config_pending,"applies_from":"next_turn","status":self.config_status,"diagnostic":self.config_diagnostic,
+            "readback_scope":"current_configured_after_turn_dispatch","choices":self.model_choices,"rev":self.config_rev})
     }
 
-    pub fn prepare_model(&self, args: &Value) -> Result<(String, Value), RpcError> {
+    pub fn prepare_model(&self, args: &Value) -> Result<String, RpcError> {
         self.validate(args)?;
         let option = id(args, "id")?;
         if !self.model_config_available() || option != "model" {
@@ -320,74 +325,94 @@ impl Endpoint {
                     .any(|choice| choice["value"] == *value)
             })
             .ok_or_else(|| rejected("invalid", "model is outside the native choices"))?;
-        if self.config_pending || self.state != "idle" {
+        if self.state != "idle" {
             return Err(rejected(
                 "busy",
-                "native model change requires an idle thread and no unresolved configuration",
+                "future model intent requires an idle thread",
             ));
         }
-        Ok((
-            value.to_owned(),
-            json!({"threadId":self.session,"model":value,"excludeTurns":true}),
-        ))
+        Ok(value.to_owned())
     }
 
-    pub fn begin_model(&mut self) {
+    /// Adapter-owned intent only: no native mutation or inference about the current model.
+    pub fn select_model(&mut self, requested: String) {
+        self.configured_model = Some(requested);
         self.config_pending = true;
-        self.config_uncertain = true;
-        self.usage = None;
+        self.config_status = "pending".into();
+        self.config_diagnostic = None;
         self.config_rev = self.config_rev.saturating_add(1);
     }
 
-    pub fn finish_model(
+    pub fn begin_model_turn(&mut self) -> Vec<Change> {
+        self.config_pending = true;
+        self.config_uncertain = true;
+        self.config_status = "pending".into();
+        self.config_diagnostic = None;
+        self.usage = None;
+        self.config_rev = self.config_rev.saturating_add(1);
+        vec![
+            Change::new("session", "current", self.session_info()),
+            self.state_entity(),
+        ]
+    }
+
+    /// One read-only native thread/read after turn/start ACK; never per-turn execution telemetry.
+    pub fn finish_model_readback(
         &mut self,
         response: &Value,
         session: &str,
+        epoch: &str,
         requested: &str,
-    ) -> Result<(bool, Vec<Change>), RpcError> {
+    ) -> Result<Vec<Change>, RpcError> {
         if self.lifecycle == "ended"
             || self.session.as_deref() != Some(session)
+            || self.epoch != epoch
+            || self.configured_model.as_deref() != Some(requested)
             || response["thread"]["id"] != session
         {
             return Err(rejected(
                 "stale",
-                "late model response cannot rebind or revive a thread",
+                "model readback cannot rebind or revive a thread",
             ));
         }
-        let id = reported_string(&response["model"], 256)
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| {
-                rejected(
-                    "backend",
-                    "native model acknowledgement omitted its model report",
-                )
-            })?;
+        if response["thread"]["status"]["type"] == "notLoaded" {
+            return Err(rejected(
+                "backend",
+                "native thread is not loaded; persisted model is not current configured readback",
+            ));
+        }
+        let id = configuration::text(&response["thread"]["model"], 256)?;
         let matched = id == requested;
         let mut model = json!({"id":id});
-        if let Some(effort) = reported_string(&response["reasoningEffort"], 128) {
+        if let Some(effort) = reported_string(&response["thread"]["reasoningEffort"], 128) {
             model["effort"] = json!(effort);
         }
         self.model = Some(model);
-        self.configured_model = matched.then(|| requested.to_owned());
-        self.config_pending = false;
+        self.config_pending = !matched;
         self.config_uncertain = false;
+        self.config_status = if matched { "confirmed" } else { "mismatch" }.into();
+        self.config_diagnostic = if matched {
+            None
+        } else {
+            Some(
+                json!({"kind":"mismatch","requested":requested,"reported":id,"scope":"current_configured_after_turn_dispatch"}),
+            )
+        };
         self.usage = None;
         self.config_rev = self.config_rev.saturating_add(1);
-        Ok((
-            matched,
-            vec![
-                Change::new("session", "current", self.session_info()),
-                self.state_entity(),
-            ],
-        ))
+        Ok(vec![
+            Change::new("session", "current", self.session_info()),
+            self.state_entity(),
+        ])
     }
 
-    pub fn model_unknown(&mut self) -> Vec<Change> {
-        self.config_pending = false;
+    pub fn model_unknown(&mut self, diagnostic: Value) -> Vec<Change> {
+        self.config_pending = self.configured_model.is_some();
         self.config_uncertain = true;
+        self.config_status = "unknown".into();
+        self.config_diagnostic = Some(diagnostic);
         self.model = None;
         self.usage = None;
-        self.configured_model = None;
         self.config_rev = self.config_rev.saturating_add(1);
         vec![
             Change::new("session", "current", self.session_info()),
@@ -440,8 +465,8 @@ impl Endpoint {
                 "completion":self.completion,"session":self.session_info(),
                 "epoch":self.epoch,"caps":caps,"queue":null,"requests":requests,"background":null,
                 "config":if self.model_config_available(){vec![self.model_option()]}else{Vec::<Value>::new()},"commands":[],
-                "usage":if self.config_pending || self.config_uncertain {None}else{self.usage.as_ref()},
-                "incomplete":if self.config_pending || self.config_uncertain {vec!["config.model"]}else{vec![]},
+                "usage":if self.config_uncertain {None}else{self.usage.as_ref()},
+                "incomplete":if self.config_uncertain {vec!["config.model"]}else{vec![]},
                 "items":items}}})
     }
 
@@ -499,12 +524,6 @@ impl Endpoint {
         context: SendContext,
     ) -> Result<NativeCall, RpcError> {
         self.validate(args)?;
-        if self.config_pending || self.config_uncertain {
-            return Err(rejected(
-                "busy",
-                "native model configuration is unresolved; input not sent",
-            ));
-        }
         if args["mode"] != "admit" {
             return Err(rejected(
                 "unsupported",
@@ -700,7 +719,7 @@ impl Endpoint {
 
     pub fn state_entity(&self) -> Change {
         let mut value = json!({"state":self.state,"run":self.run,"completion":self.completion,"background":null});
-        if !self.config_pending && !self.config_uncertain {
+        if !self.config_uncertain {
             if let Some(usage) = &self.usage {
                 value["usage"] = usage.clone();
             }
@@ -716,7 +735,7 @@ impl Endpoint {
         if let Some(cwd) = &self.cwd {
             session["cwd"] = json!(cwd);
         }
-        if !self.config_pending && !self.config_uncertain {
+        if !self.config_uncertain {
             if let Some(model) = &self.model {
                 session["model"] = model.clone();
             }
@@ -740,11 +759,6 @@ impl Endpoint {
                 model["effort"] = json!(effort);
             }
             self.model = Some(model);
-        }
-        if self.configured_model.as_deref()
-            != self.model.as_ref().and_then(|model| model["id"].as_str())
-        {
-            self.configured_model = None;
         }
         Ok(vec![
             Change::new("session", "current", self.session_info()),
@@ -796,8 +810,15 @@ impl Endpoint {
             self.caps_rev = self.caps_rev.saturating_add(1);
         }
         self.session = Some(session);
-        self.config_pending = false;
+        self.config_pending = self.configured_model.is_some();
         self.config_uncertain = false;
+        self.config_status = if self.config_pending {
+            "pending"
+        } else {
+            "native"
+        }
+        .into();
+        self.config_diagnostic = None;
         self.config_rev = self.config_rev.saturating_add(1);
         self.epoch = epoch;
         self.title = thread

@@ -23,8 +23,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--ledger", default=os.environ.get("AGENT_CONFORMANCE_LEDGER"))
 parser.add_argument("--reply-delay-ms", type=int, default=int(os.environ.get("CODEX_FAKE_REPLY_DELAY_MS", "0")))
 parser.add_argument("--hold", action="store_true", default=os.environ.get("CODEX_FAKE_HOLD") == "1")
-parser.add_argument("--config-delay-ms", type=int, default=int(os.environ.get("CODEX_FAKE_CONFIG_DELAY_MS", "0")))
-parser.add_argument("--reject-config", action="store_true", help="fixture-only native model error witness")
+parser.add_argument("--model-read-delay-ms", type=int, default=int(os.environ.get("CODEX_FAKE_MODEL_READ_DELAY_MS", "0")))
+parser.add_argument("--reject-model-read", action="store_true", help="fixture-only native read error witness")
+parser.add_argument("--ignore-model-override", action="store_true", default=os.environ.get("CODEX_FAKE_IGNORE_MODEL")=="1")
+parser.add_argument("--omit-model-readback", action="store_true")
 parser.add_argument("--exit-after-init", action="store_true")
 parser.add_argument("--control", type=Path, help="K1 private control socket; enables controlled mode")
 parser.add_argument("--script", type=Path)
@@ -114,13 +116,17 @@ def handle(request):
             if model not in MODELS:
                 error(request, "unknown native model"); return
             if "model" in params:
-                if args.reject_config:
-                    error(request, "fixture native model rejected"); return
-                time.sleep(args.config_delay_ms / 1000)
-                thread_models[thread_id] = model
-                if args.hold:
-                    return  # native mutation happened, acknowledgement intentionally lost
+                error(request,"no rollout found for thread id "+thread_id); return
             reply(request, {"thread": threads[thread_id], "model": thread_models[thread_id]})
+    elif method == "thread/read":
+        thread_id=params["threadId"]
+        if args.reject_model_read:
+            error(request,"fixture native model read rejected"); return
+        if thread_id not in threads:
+            error(request,"unknown thread");return
+        time.sleep(args.model_read_delay_ms / 1000)
+        model=None if args.omit_model_readback else thread_models[thread_id]
+        reply(request,{"thread":{**threads[thread_id],"model":model,"reasoningEffort":None},"readState":None})
     elif method == "thread/list":
         data = list(threads.values())[:min(params.get("limit", 64), 64)]
         reply(request, {"data": data, "nextCursor": None})
@@ -132,7 +138,8 @@ def handle(request):
         if method == "turn/start" and "model" in params:
             if params["model"] not in MODELS:
                 error(request, "unknown native model"); return
-            thread_models[thread_id] = params["model"]
+            if not args.ignore_model_override:
+                thread_models[thread_id] = params["model"]
         if method == "turn/steer" and params.get("expectedTurnId") != turns.get(thread_id):
             error(request, "expected active turn id does not match")
             return

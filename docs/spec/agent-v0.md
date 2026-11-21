@@ -504,7 +504,12 @@ dialogs remain answerable; nothing is auto-approved.
      [{value, label, description?}], rev}`; `category` is open (`model | mode | thought_level | _…`).
      `agent.configure {v, id, value, rev?}`: a stale `rev` or a value outside `choices` rejects before any native
      write; `observed` only once the runtime reports the new value, else `accepted` or `dispatched`. A change that
-     alters what a declaration means bumps `caps.rev` (§2.4).
+     alters what a declaration means bumps `caps.rev` (§2.4). A native future-turn override may report
+     `pending: true, applies_from: "next_turn"`: `value` is the accepted future intent, not proof of an applied
+     native setting. Keep actual `session.model` separate; clear pending only on matching native readback,
+     reporting mismatch/unknown rather than inferring from the request or acknowledgement. Declare the
+     readback's scope (for example current configured model, not per-turn execution telemetry). Unknown
+     `applies_from` values remain unknown, never an immediate-application promise.
    - Advertised commands: `{name, description?, input?: {hint}}`. `agent.command {v, name, args?}` runs only an
      advertised name; `args` is a string. Slash text inside a send is never executed (§3.2).
 4. **History.** `agent.history {v, page?}`: retained native history as snapshot records from one frozen history cut,

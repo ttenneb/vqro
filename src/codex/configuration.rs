@@ -44,7 +44,7 @@ pub fn failure(stage: FailureStage, error: &RpcError) -> RpcError {
     public
 }
 
-fn text(value: &Value, limit: usize) -> Result<&str, RpcError> {
+pub(super) fn text(value: &Value, limit: usize) -> Result<&str, RpcError> {
     value
         .as_str()
         .filter(|text| {

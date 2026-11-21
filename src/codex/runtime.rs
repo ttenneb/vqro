@@ -360,22 +360,13 @@ impl Runtime {
                 message: error.message,
             }),
             Err(Fault::Unknown(error)) => {
-                let mut public = ProviderError::new(
+                let public = ProviderError::new(
                     "backend",
                     format!(
                         "native outcome unknown: {}",
                         error.message.chars().take(512).collect::<String>()
                     ),
                 );
-                // Only the adapter-built model diagnostic crosses this boundary. Other native
-                // error data may contain payloads/credentials and remains deliberately discarded.
-                if op == "agent.configure"
-                    && error.data.as_ref().is_some_and(|data| {
-                        matches!(data["stage"].as_str(), Some("native_rpc" | "readback"))
-                    })
-                {
-                    public = public.with_data(error.data.unwrap());
-                }
                 Err(public)
             }
         }
@@ -531,6 +522,18 @@ impl Runtime {
                 "deadline expired before native write",
             )));
         }
+        let model_scope = if call.method == "turn/start" {
+            call.params["model"].as_str().map(|requested| {
+                let endpoint = self.slots[index].endpoint.lock().unwrap();
+                (
+                    call.params["threadId"].as_str().unwrap().to_owned(),
+                    endpoint.epoch.clone(),
+                    requested.to_owned(),
+                )
+            })
+        } else {
+            None
+        };
         let delivery = call.delivery.clone();
         let (tx, mut rx) = oneshot::channel();
         let this = self.clone();
@@ -546,8 +549,13 @@ impl Runtime {
             }
             {
                 let mut endpoint = this.slots[index].endpoint.lock().unwrap();
-                let change = endpoint.record_receipt(&call.delivery, "dispatched", None, &args);
-                this.emit(index, &endpoint, vec![change], false);
+                let mut changes = if model_scope.is_some() {
+                    endpoint.begin_model_turn()
+                } else {
+                    Vec::new()
+                };
+                changes.push(endpoint.record_receipt(&call.delivery, "dispatched", None, &args));
+                this.emit(index, &endpoint, changes, false);
             }
             let result = this
                 .native
@@ -572,6 +580,65 @@ impl Runtime {
                 this.emit(index, &endpoint, vec![change], false);
                 receipt
             };
+            if let Some((session, epoch, requested)) = model_scope {
+                // One bound read-only observation after this dispatch's native ACK, not execution telemetry.
+                // Admission stays serialized while it runs. A missing observation never replays input
+                // or turns a known admitted receipt into an unknown/rejected delivery.
+                let read = if result.is_ok() {
+                    Some(
+                        this.native
+                            .call_with_timeout(
+                                "thread/read",
+                                json!({"threadId":session,"includeTurns":false}),
+                                Duration::from_secs(3),
+                            )
+                            .await,
+                    )
+                } else {
+                    None
+                };
+                let mut endpoint = this.slots[index].endpoint.lock().unwrap();
+                if endpoint.lifecycle != "ended"
+                    && endpoint.session.as_deref() == Some(&session)
+                    && endpoint.epoch == epoch
+                {
+                    let changes = match read {
+                        Some(Ok(response)) => match endpoint
+                            .finish_model_readback(&response, &session, &epoch, &requested)
+                        {
+                            Ok(changes) => changes,
+                            Err(error) => endpoint.model_unknown(
+                                configuration::failure(
+                                    configuration::FailureStage::Readback,
+                                    &error,
+                                )
+                                .data
+                                .unwrap(),
+                            ),
+                        },
+                        Some(Err(error)) => endpoint.model_unknown(
+                            configuration::failure(configuration::FailureStage::NativeRpc, &error)
+                                .data
+                                .unwrap(),
+                        ),
+                        None => {
+                            let error = match &result {
+                                Err(Fault::Reject(error) | Fault::Unknown(error)) => error,
+                                _ => unreachable!(),
+                            };
+                            endpoint.model_unknown(
+                                configuration::failure(
+                                    configuration::FailureStage::NativeRpc,
+                                    error,
+                                )
+                                .data
+                                .unwrap(),
+                            )
+                        }
+                    };
+                    this.emit(index, &endpoint, changes, false);
+                }
+            }
             let result = result.map(|_| receipt);
             let _ = tx.send(result);
         });
@@ -605,102 +672,28 @@ impl Runtime {
         args: Value,
         deadline: Instant,
     ) -> Result<Outcome, Fault> {
-        let gate = self.slots[index]
+        let _gate = self.slots[index]
             .admission
             .clone()
             .try_lock_owned()
             .map_err(|_| {
                 Fault::Reject(RpcError::new(
                     "busy",
-                    "native admission or configuration is unresolved",
+                    "native admission/session preflight in flight",
                 ))
             })?;
-        let permit = self
-            .native_admissions
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| {
-                Fault::Reject(RpcError::new(
-                    "overloaded",
-                    "native configuration capacity full",
-                ))
-            })?;
-        let (requested, params) = self.slots[index]
-            .endpoint
-            .lock()
-            .unwrap()
-            .prepare_model(&args)
-            .map_err(Fault::Reject)?;
-        let session = params["threadId"].as_str().unwrap().to_owned();
+        let mut endpoint = self.slots[index].endpoint.lock().unwrap();
+        let requested = endpoint.prepare_model(&args).map_err(Fault::Reject)?;
         if Instant::now() >= deadline {
             return Err(Fault::Reject(RpcError::new(
                 "timeout",
-                "deadline before native model write",
+                "deadline before future model intent",
             )));
         }
-        let (tx, mut rx) = oneshot::channel();
-        let this = self.clone();
-        tokio::spawn(async move {
-            let (_gate, _permit) = (gate, permit);
-            if Instant::now() >= deadline {
-                let _ = tx.send(Err(Fault::Reject(RpcError::new(
-                    "timeout",
-                    "deadline before native model write",
-                ))));
-                return;
-            }
-            {
-                let mut endpoint = this.slots[index].endpoint.lock().unwrap();
-                endpoint.begin_model();
-                this.emit(index, &endpoint, Vec::new(), false);
-            }
-            // Native resumes this same thread with a model override, never config/value/write.
-            let result = this
-                .native
-                .call_with_timeout("thread/resume", params, NATIVE_LIMIT)
-                .await;
-            let outcome = {
-                let mut endpoint = this.slots[index].endpoint.lock().unwrap();
-                match result {
-                    Ok(response) => match endpoint.finish_model(&response, &session, &requested) {
-                        Ok((matched, changes)) => {
-                            let value = endpoint.model_option();
-                            this.emit(index, &endpoint, changes, false);
-                            Ok(if matched {
-                                Outcome::Observed(Some(value))
-                            } else {
-                                Outcome::Accepted(Some(value))
-                            })
-                        }
-                        Err(error) => {
-                            let changes = endpoint.model_unknown();
-                            this.emit(index, &endpoint, changes, false);
-                            Err(Fault::Unknown(configuration::failure(
-                                configuration::FailureStage::Readback,
-                                &error,
-                            )))
-                        }
-                    },
-                    Err(error) => {
-                        let changes = endpoint.model_unknown();
-                        this.emit(index, &endpoint, changes, false);
-                        Err(Fault::Unknown(configuration::failure(
-                            configuration::FailureStage::NativeRpc,
-                            &error,
-                        )))
-                    }
-                }
-            };
-            let _ = tx.send(outcome);
-        });
-        let reply_at = deadline
-            .checked_sub(Duration::from_millis(10))
-            .unwrap_or(deadline);
-        tokio::select! {
-            biased;
-            result=&mut rx=>result.unwrap_or_else(|_|Err(Fault::Unknown(RpcError::new("backend","native configuration worker ended; do not replay")))),
-            _=tokio::time::sleep_until(reply_at)=>Ok(Outcome::Dispatched(None)),
-        }
+        endpoint.select_model(requested);
+        let value = endpoint.model_option();
+        self.emit(index, &endpoint, vec![endpoint.state_entity()], false);
+        Ok(Outcome::Accepted(Some(value)))
     }
 
     async fn session(
@@ -773,7 +766,7 @@ impl Runtime {
             .unwrap()
             .may_switch(args)
             .map_err(Fault::Reject)?;
-        let (method, mut params) = if action == "new" {
+        let (method, params) = if action == "new" {
             let cwd = args.get("cwd").filter(|v| !v.is_null());
             if cwd.is_some_and(|v| v.as_str().is_none_or(|s| s.len() > 4096)) {
                 return Err(Fault::invalid("cwd must be a bounded host path string"));
@@ -791,15 +784,6 @@ impl Runtime {
             }
             ("thread/resume", json!({"threadId":session}))
         };
-        if let Some(model) = self.slots[index]
-            .endpoint
-            .lock()
-            .unwrap()
-            .model_override()
-            .map(str::to_owned)
-        {
-            params["model"] = json!(model);
-        }
         let result = self
             .native
             .call_with_timeout(method, params, remaining(deadline))

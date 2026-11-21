@@ -247,7 +247,11 @@ class CodexMixin:
                         await self.error(command, "unknown native model"); return
                     thread["model"] = params["model"]
                 self.record("session", action="resume" if method.endswith("resume") else "read", session=session)
-                await self.reply(command, {"thread": thread["meta"], "model": thread["model"]})
+                if method=="thread/read":
+                    # Native Thread.model is configured metadata, NOT Turn execution telemetry.
+                    await self.reply(command,{"thread":{**thread["meta"],"model":thread["model"],"reasoningEffort":thread.get("effort")},"readState":None})
+                else:
+                    await self.reply(command, {"thread": thread["meta"], "model": thread["model"]})
             elif method in ("turn/start", "turn/steer"):
                 await self.barrier("preflight")
                 try:

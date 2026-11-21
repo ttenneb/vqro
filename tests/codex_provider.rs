@@ -625,11 +625,10 @@ async fn session_observed_reply_waits_for_confirmed_core_facts() {
     assert_eq!(session, result["data"]["session"]);
 }
 
-#[tokio::test]
-async fn native_model_error_stage_code_and_message_survive_the_sdk_boundary() {
+async fn future_model_readback_case(extra: &[&str], status: &str, actual: Option<&str>) {
     let root = tempfile::tempdir().unwrap();
     let listener = UnixListener::bind(root.path().join("core.sock")).unwrap();
-    let child = bridge(&root, 1, 0, &["--reject-config"]);
+    let child = bridge(&root, 1, 0, extra);
     let mut core = Core::accept(&listener, 1, "bootstrap").await;
     core.wait(|facts| facts.len() == 1).await;
     core.effect(
@@ -640,67 +639,60 @@ async fn native_model_error_stage_code_and_message_survive_the_sdk_boundary() {
         1000,
     )
     .await;
-    let incarnation = core.facts.lock().unwrap()["endpoint-1"]["incarnation"].clone();
-    let result=core.peer.call_with_timeout("effect.invoke",json!({"generation":1,"effect":"model-native-error","ref":"endpoint-1","incarnation":incarnation,
-        "op":"agent.configure","args":{"v":0,"id":"model","value":"fake-alternate"},"deadline_ms":1000}),Duration::from_secs(2)).await;
-    let public = result.unwrap_err();
-    assert!(public.message.contains("native model native_rpc failure (code -32600): fixture native model rejected; do not replay"));
-    let error = public.data.unwrap();
-    assert_eq!(error["stage"], "native_rpc");
-    assert_eq!(error["native_error"]["code"], -32600);
-    assert_eq!(
-        error["native_error"]["message"],
-        "fixture native model rejected"
-    );
+    let before = std::fs::read_to_string(root.path().join("native.jsonl")).unwrap();
+    let configured = core
+        .effect(
+            "intent",
+            "endpoint-1",
+            "agent.configure",
+            json!({"v":0,"id":"model","value":"fake-alternate"}),
+            1000,
+        )
+        .await;
+    assert_eq!(configured["outcome"], "accepted");
     core.wait(|facts| {
         facts
             .get("endpoint-1")
-            .is_some_and(|row| row["data"]["agent"]["config"][0]["value"].is_null())
+            .is_some_and(|row| row["data"]["agent"]["config"][0]["pending"] == true)
     })
     .await;
-    finish(child).await;
-    core.close().await;
-    let rows: Vec<Value> = std::fs::read_to_string(root.path().join("native.jsonl"))
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
     assert_eq!(
-        rows.iter()
-            .filter(|row| row["method"] == "thread/resume")
-            .count(),
-        1
+        std::fs::read_to_string(root.path().join("native.jsonl")).unwrap(),
+        before,
+        "intent must perform zero native calls"
     );
-    assert!(rows.iter().all(|row| row["method"] != "turn/start"));
-}
-
-#[tokio::test]
-async fn model_publication_refusal_keeps_native_readback_without_replaying_configure() {
-    let root = tempfile::tempdir().unwrap();
-    let listener = UnixListener::bind(root.path().join("core.sock")).unwrap();
-    let child = bridge(&root, 1, 0, &[]);
-    let mut core = Core::accept(&listener, 1, "bootstrap").await;
-    core.wait(|facts| facts.len() == 1).await;
-    core.effect(
-        "new",
-        "endpoint-1",
-        "agent.session",
-        json!({"v":0,"action":"new"}),
-        1000,
-    )
+    assert_eq!(
+        core.facts.lock().unwrap()["endpoint-1"]["data"]["agent"]["session"]["model"]["id"],
+        "fake-model"
+    );
+    let sent=core.effect("future-send","endpoint-1","agent.send",json!({"v":0,"mode":"admit","delivery":"future-one","origin":{"principal":"p:test","actor":"actor:test","kind":"agent"},"content":[{"type":"text","text":"one"}]}),1000).await;
+    assert_eq!(sent["outcome"], "accepted");
+    core.wait(|facts| {
+        facts
+            .get("endpoint-1")
+            .is_some_and(|row| row["data"]["agent"]["config"][0]["status"] == status)
+    })
     .await;
-    core.reject_syncs
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    let incarnation = core.facts.lock().unwrap()["endpoint-1"]["incarnation"].clone();
-    let rev = core.facts.lock().unwrap()["endpoint-1"]["data"]["agent"]["config"][0]["rev"].clone();
-    let result=core.peer.call_with_timeout("effect.invoke",json!({"generation":1,"effect":"model-refused","ref":"endpoint-1","incarnation":incarnation,
-        "op":"agent.configure","args":{"v":0,"id":"model","value":"fake-alternate","rev":rev},"deadline_ms":1000}),Duration::from_secs(2)).await;
+    let facts = core.facts.lock().unwrap()["endpoint-1"]["data"]["agent"].clone();
+    assert_eq!(facts["config"][0]["value"], "fake-alternate");
+    assert_eq!(facts["config"][0]["pending"], status != "confirmed");
+    if let Some(model) = actual {
+        assert_eq!(facts["session"]["model"]["id"], model);
+    } else {
+        assert!(facts["session"].get("model").is_none());
+    }
+    if extra.contains(&"--reject-model-read") {
+        assert_eq!(
+            facts["config"][0]["diagnostic"]["native_error"]["code"],
+            -32600
+        );
+        assert_eq!(
+            facts["config"][0]["diagnostic"]["native_error"]["message"],
+            "fixture native model read rejected"
+        );
+    }
     finish(child).await;
     core.close().await;
-    let error = result.unwrap_err().data.unwrap();
-    assert_eq!(error["outcome"], "indeterminate");
-    assert_eq!(error["native_outcome"], "observed");
-    assert_eq!(error["native_data"]["value"], "fake-alternate");
     let rows: Vec<Value> = std::fs::read_to_string(root.path().join("native.jsonl"))
         .unwrap()
         .lines()
@@ -708,14 +700,30 @@ async fn model_publication_refusal_keeps_native_readback_without_replaying_confi
         .collect();
     assert_eq!(
         rows.iter()
-            .filter(|row| row["method"] == "thread/resume")
+            .filter(|row| row["method"] == "turn/start")
             .count(),
         1
     );
-    assert!(
+    assert_eq!(
         rows.iter()
-            .all(|row| !row["method"].as_str().unwrap_or("").starts_with("config/"))
+            .filter(|row| row["method"] == "thread/read")
+            .count(),
+        1
     );
+    assert!(rows.iter().all(|row| row["method"] != "thread/resume"
+        && !row["method"].as_str().unwrap_or("").starts_with("config/")));
+}
+#[tokio::test]
+async fn future_native_read_error_is_metadata_unknown_not_failed_or_replayed_delivery() {
+    future_model_readback_case(&["--reject-model-read"], "unknown", None).await;
+}
+#[tokio::test]
+async fn future_native_mismatch_reports_actual_configured_model_without_claiming_applied() {
+    future_model_readback_case(&["--ignore-model-override"], "mismatch", Some("fake-model")).await;
+}
+#[tokio::test]
+async fn future_native_missing_readback_never_manufactures_the_selected_model() {
+    future_model_readback_case(&["--omit-model-readback"], "unknown", None).await;
 }
 
 #[tokio::test]

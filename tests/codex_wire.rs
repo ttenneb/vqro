@@ -28,7 +28,7 @@ async fn fixture_delays(
         .env("HOME", root.path())
         .env("CODEX_FAKE_HOLD", if hold { "1" } else { "0" })
         .env("CODEX_FAKE_REPLY_DELAY_MS", delay_ms.to_string())
-        .env("CODEX_FAKE_CONFIG_DELAY_MS", config_ms.to_string())
+        .env("CODEX_FAKE_MODEL_READ_DELAY_MS", config_ms.to_string())
         .env("AGENT_CONFORMANCE_LEDGER", root.path().join("ledger.jsonl"))
         .arg(format!(
             "{}/tests/fixtures/fake_codex.py",
@@ -288,7 +288,7 @@ async fn provider_deadline_dispatches_once_then_native_receipt_arrives_later() {
 }
 
 #[tokio::test]
-async fn model_configuration_is_native_per_thread_and_used_by_future_turns() {
+async fn future_intent_is_pending_without_native_write_then_bound_per_thread_readback() {
     use vqro::provider_client::Outcome;
     let (root, child, peer, incoming) = fixture(false).await;
     let (runtime, drain) = open_runtime(peer.clone(), incoming, 2).await;
@@ -336,11 +336,25 @@ async fn model_configuration_is_native_per_thread_and_used_by_future_turns() {
         )
         .await
         .unwrap();
-    assert!(matches!(result, Outcome::Observed(_)));
+    assert!(matches!(result, Outcome::Accepted(_)));
+    assert_eq!(
+        std::fs::read_to_string(&ledger).unwrap(),
+        original,
+        "intent performs no native RPC"
+    );
     let after = runtime.facts();
     assert_eq!(
         after[0]["data"]["agent"]["session"]["model"]["id"],
+        "fake-model"
+    );
+    assert_eq!(
+        after[0]["data"]["agent"]["config"][0]["value"],
         "fake-alternate"
+    );
+    assert_eq!(after[0]["data"]["agent"]["config"][0]["pending"], true);
+    assert_eq!(
+        after[0]["data"]["agent"]["config"][0]["applies_from"],
+        "next_turn"
     );
     assert_eq!(
         after[1]["data"]["agent"]["session"]["model"]["id"],
@@ -369,10 +383,23 @@ async fn model_configuration_is_native_per_thread_and_used_by_future_turns() {
         .iter()
         .filter(|row| row["method"] == "thread/resume")
         .collect();
-    assert_eq!(configured.len(), 1);
+    assert!(configured.is_empty());
     assert_eq!(
-        configured[0]["params"],
-        json!({"threadId":"thread-1","model":"fake-alternate","excludeTurns":true})
+        runtime.facts()[0]["data"]["agent"]["session"]["model"]["id"],
+        "fake-alternate"
+    );
+    assert_eq!(
+        runtime.facts()[0]["data"]["agent"]["config"][0]["pending"],
+        false
+    );
+    let reads: Vec<_> = rows
+        .iter()
+        .filter(|row| row["method"] == "thread/read")
+        .collect();
+    assert_eq!(reads.len(), 1);
+    assert_eq!(
+        reads[0]["params"],
+        json!({"threadId":"thread-1","includeTurns":false})
     );
     let turns: Vec<_> = rows
         .iter()
@@ -389,7 +416,7 @@ async fn model_configuration_is_native_per_thread_and_used_by_future_turns() {
 }
 
 #[tokio::test]
-async fn late_model_readback_is_published_once_without_replaying_the_native_setter() {
+async fn late_model_readback_clears_pending_without_replaying_admitted_input() {
     use vqro::provider_client::Outcome;
     let (root, child, peer, incoming) = fixture_delays(false, 0, 300).await;
     let (runtime, drain) = open_runtime(peer.clone(), incoming, 1).await;
@@ -415,11 +442,20 @@ async fn late_model_readback_is_published_once_without_replaying_the_native_sett
         )
         .await
         .unwrap();
-    assert!(matches!(result, Outcome::Dispatched(_)));
-    assert!(runtime.facts()[0]["data"]["agent"]["config"][0]["value"].is_null());
+    assert!(matches!(result, Outcome::Accepted(_)));
+    assert_eq!(
+        runtime.facts()[0]["data"]["agent"]["session"]["model"]["id"],
+        "fake-model"
+    );
+    let result=runtime.invoke("endpoint-1","inc","agent.send",json!({"v":0,"mode":"admit","delivery":"late-model","origin":{"principal":"p","actor":"actor","kind":"agent"},"content":[{"type":"text","text":"one"}]}),tokio::time::Instant::now()+Duration::from_millis(80)).await.unwrap();
+    assert!(matches!(result, Outcome::Accepted(_)));
+    assert_eq!(
+        runtime.facts()[0]["data"]["agent"]["config"][0]["pending"],
+        true
+    );
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if runtime.facts()[0]["data"]["agent"]["config"][0]["value"] == "fake-alternate" {
+            if runtime.facts()[0]["data"]["agent"]["config"][0]["pending"] == false {
                 break;
             }
             changed.changed().await.unwrap();
@@ -430,9 +466,7 @@ async fn late_model_readback_is_published_once_without_replaying_the_native_sett
     let rows = std::fs::read_to_string(root.path().join("ledger.jsonl")).unwrap();
     assert_eq!(
         rows.lines()
-            .filter(
-                |line| serde_json::from_str::<Value>(line).unwrap()["method"] == "thread/resume"
-            )
+            .filter(|line| serde_json::from_str::<Value>(line).unwrap()["method"] == "thread/read")
             .count(),
         1
     );
@@ -441,7 +475,7 @@ async fn late_model_readback_is_published_once_without_replaying_the_native_sett
 }
 
 #[tokio::test]
-async fn lost_model_reply_blocks_input_and_never_replays_after_disconnect() {
+async fn lost_turn_ack_never_infers_model_or_replays_input_after_disconnect() {
     use vqro::provider_client::Outcome;
     let (root, child, peer, incoming) = fixture(true).await;
     let (runtime, drain) = open_runtime(peer.clone(), incoming, 1).await;
@@ -467,7 +501,9 @@ async fn lost_model_reply_blocks_input_and_never_replays_after_disconnect() {
         )
         .await
         .unwrap();
-    assert!(matches!(result, Outcome::Dispatched(_)));
+    assert!(matches!(result, Outcome::Accepted(_)));
+    let sent=runtime.invoke("endpoint-1","inc","agent.send",json!({"v":0,"mode":"admit","delivery":"not-replayed","origin":{"principal":"p","actor":"actor","kind":"agent"},"content":[{"type":"text","text":"one"}]}),tokio::time::Instant::now()+Duration::from_millis(80)).await.unwrap();
+    assert!(matches!(sent, Outcome::Dispatched(_)));
     let pending_rev = runtime.facts()[0]["data"]["agent"]["config"][0]["rev"]
         .as_u64()
         .unwrap();
@@ -492,7 +528,15 @@ async fn lost_model_reply_blocks_input_and_never_replays_after_disconnect() {
             .is_none()
     );
     let result=runtime.invoke("endpoint-1","inc","agent.send",json!({"v":0,"mode":"admit","delivery":"not-replayed","origin":{"principal":"p","actor":"actor","kind":"agent"},"content":[{"type":"text","text":"must not send"}]}),deadline()).await.unwrap();
-    assert!(matches!(result,Outcome::Rejected{ref kind,..} if kind=="busy"));
+    assert!(matches!(result, Outcome::Rejected { .. }));
+    assert_eq!(
+        runtime.facts()[0]["data"]["agent"]["config"][0]["pending"],
+        true
+    );
+    assert_eq!(
+        runtime.facts()[0]["data"]["agent"]["config"][0]["status"],
+        "unknown"
+    );
     let rows: Vec<Value> = std::fs::read_to_string(root.path().join("ledger.jsonl"))
         .unwrap()
         .lines()
@@ -500,11 +544,14 @@ async fn lost_model_reply_blocks_input_and_never_replays_after_disconnect() {
         .collect();
     assert_eq!(
         rows.iter()
-            .filter(|row| row["method"] == "thread/resume")
+            .filter(|row| row["method"] == "turn/start")
             .count(),
         1
     );
-    assert!(rows.iter().all(|row| row["method"] != "turn/start"));
+    assert!(
+        rows.iter()
+            .all(|row| row["method"] != "thread/read" && row["method"] != "thread/resume")
+    );
     cleanup(child, peer).await;
     drain.await.unwrap();
 }
