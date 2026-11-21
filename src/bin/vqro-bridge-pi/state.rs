@@ -52,6 +52,7 @@ pub struct Agent {
     pub queue:Option<Value>,pub queue_version:u64,
     pub tool_principal_env:bool,pub view:Option<String>,pub view_error:Option<String>,
     pub configuration:super::configuration::Configuration,pub commands:super::commands::Commands,
+    pub origins:super::origins::Origins,current_origin:Option<Value>,
     pub requests:super::requests::Requests,ui_cancels:Vec<(String,Value)>,ui_unconfirmed:BTreeSet<String>,pub ui_overflow:bool,
     receipt_order:VecDeque<String>,
     history:VecDeque<(String,String)>,
@@ -68,7 +69,7 @@ impl Agent {
         let boot=bytes.iter().map(|byte|format!("{byte:02x}")).collect::<String>();
         let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entities:ENTITY_COUNT,max_entity_bytes:ENTITY_TOTAL,snapshot_buffer_bytes:1024*1024,..Default::default()});
         journal.set_coverage(Coverage::Tail);
-        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,tool_principal_env:false,view:None,view_error:None,configuration:Default::default(),commands:Default::default(),requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
+        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,tool_principal_env:false,view:None,view_error:None,configuration:Default::default(),commands:Default::default(),origins:Default::default(),current_origin:None,requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
             position:0,serial:0,epoch_number:1,instance,boot,session:None,session_pending:false,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null,launch_cwd:None,usage:None,usage_revision:0};
         agent.refresh();agent
     }
@@ -148,7 +149,7 @@ impl Agent {
     }
     pub fn new_session_epoch(&mut self){
         self.invalidate_usage();
-        self.cancel_requests("epoch_changed");self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.current_message=None;self.run=None;self.completion=None;
+        self.cancel_requests("epoch_changed");self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.current_message=None;self.origins.reset();self.current_origin=None;self.run=None;self.completion=None;
     }
     pub fn ensure_session_epoch(&mut self,prior:&str){if self.epoch()==prior{self.new_session_epoch();if let Some(session)=self.session.clone(){self.store("session","current",session,false);}self.refresh();}}
     pub fn configuration_pending(&mut self,pending:bool){if pending{self.invalidate_usage();}self.configuration.pending=pending;if !pending{self.session_pending=false;}self.configuration.rebuild(&self.signals.current().metadata);self.refresh();}
@@ -267,6 +268,8 @@ impl Agent {
             value=json!({"position":position,"role":message["role"],"content":[{"type":"text","text":"[Native message exceeds the declared entity bound; content omitted]"}],"final":final_value,"incomplete":["content"]});
             if let Some(at_ms)=at_ms{value["at_ms"]=json!(at_ms);}
         }
+        // A correlated bridge send (origins.rs): its core-bound origin and delivery, kept even when content is omitted.
+        if message["role"]=="user" {if let Some(fields)=self.current_origin.as_ref().and_then(Value::as_object){for (key,field) in fields {value[key]=field.clone();}}}
         value
     }
     fn message(&mut self,record:&Value,final_value:bool) {
@@ -313,13 +316,17 @@ impl Agent {
                 for id in self.requests.ids(){self.requests.finish(&id);if let Some((_,value))=self.journal.entity("request",&id){let mut value=value.clone();value["status"]=json!("expired");self.store("request",&id,value,false);self.make_prunable("request",&id);}}
             },
             Event::ProtocolError(_)=>{self.incomplete.insert("native".into());self.journal.set_coverage(Coverage::Tail);},
-            Event::Record(record)=>match record["type"].as_str() {
+            Event::Record(record)=>{
+              if !(record["type"]=="message_start" && record["message"]["role"]=="user") {self.origins.other_record();}
+              match record["type"].as_str() {
                 Some("extension_ui_request")=>self.ui(record),
                 Some("auto_retry_start"|"auto_retry_end"|"auto_compaction_start"|"auto_compaction_end")=>{if matches!(record["type"].as_str(),Some("auto_compaction_start"|"auto_compaction_end")){self.invalidate_usage();}self.runtime_notice(record);},
                 Some("queue_update")=>{
+                    self.origins.queue_update(record);
                     self.queue=super::queue::summary(record);self.queue_version=self.queue_version.wrapping_add(1);
                     if self.queue.is_none(){self.incomplete.insert("queue".into());}else{self.incomplete.remove("queue");}
                 }
+                Some("response") if record["command"]=="prompt"=>self.origins.prompt_response(record),
                 Some("response") if record["command"]=="get_commands" && record["success"]==true=>{self.commands.observe(&record["data"]);},
                 Some("response") if record["command"]=="get_available_models" && record["success"]==true=>{self.configuration.observe_models(&record["data"]);self.configuration.rebuild(&self.signals.current().metadata);},
                 Some("response") if record["command"]=="get_available_thinking_levels" && record["success"]==true=>{self.configuration.observe_levels(&record["data"]);self.configuration.rebuild(&self.signals.current().metadata);},
@@ -351,11 +358,17 @@ impl Agent {
                 Some("agent_settled") if self.exit.is_none()=>{
                     if let Some(run)=self.run.take(){let reason=if record["aborted"]==true{"cancelled"}else{&self.reason};self.completion=Some(json!({"id":run,"reason":reason,"error":self.error.as_ref().map(|message|json!({"message":message}))}));}
                 }
-                Some("message_start")=>{self.current_message=None;self.message(record,false);},
+                Some("message_start")=>{
+                    self.current_message=None;
+                    // Only a user message the bridge sent, under the evidence rules in origins.rs; never inferred.
+                    self.current_origin=if record["message"]["role"]=="user"{self.origins.user_message(&record["message"]).map(|entry|super::origins::fields(&entry))}else{None};
+                    self.message(record,false);
+                },
                 Some("message_update")=>self.message(record,false),Some("message_end")=>self.message(record,true),
                 Some("tool_execution_start")=>self.tool(record,"running"),Some("tool_execution_update")=>self.tool(record,"running"),
                 Some("tool_execution_end")=>self.tool(record,if record["isError"]==true{"failed"}else{"completed"}),
                 _=>{}
+              }
             },
         }
         if self.incomplete.contains("items"){self.journal.set_coverage(Coverage::Tail);}

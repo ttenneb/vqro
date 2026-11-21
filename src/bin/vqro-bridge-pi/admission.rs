@@ -65,6 +65,7 @@ pub enum Admission {
     Unknown(Error),
 }
 pub type Receipt = Arc<dyn Fn(String,Result<Reply,Error>)+Send+Sync>;
+pub type Arm = Box<dyn FnOnce()+Send>;
 
 struct Flight { guard:Option<OwnedMutexGuard<()>>,signals:Arc<Signals> }
 impl Drop for Flight {
@@ -82,9 +83,18 @@ impl Starts {
     pub fn new(native:Native,signals:Arc<Signals>) -> Self { Self { native,signals,gate:Arc::new(tokio::sync::Mutex::new(())) } }
     /// A session switch cannot overlap a prompt preflight; ordinary controls never take this guard.
     pub fn session_guard(&self)->Result<tokio::sync::OwnedMutexGuard<()>,Refusal>{self.gate.clone().try_lock_owned().map_err(|_|Refusal {kind:"busy",message:"a native prompt preflight is unresolved".into()})}
-    pub async fn start(&self,args:Value,deadline:Instant,receipt:Receipt) -> Admission { self.prompt(args,deadline,receipt,false).await }
-    pub async fn admit(&self,args:Value,deadline:Instant,receipt:Receipt) -> Admission { self.prompt(args,deadline,receipt,true).await }
-    async fn prompt(&self,args:Value,deadline:Instant,receipt:Receipt,allow_busy:bool) -> Admission {
+    // Unarmed forms: the bridge always arms; tests/pi_admission.rs and pi_real_start.rs drive these directly.
+    #[allow(dead_code)]
+    pub async fn start(&self,args:Value,deadline:Instant,receipt:Receipt) -> Admission { self.prompt(args,deadline,receipt,false,None).await }
+    #[allow(dead_code)]
+    pub async fn admit(&self,args:Value,deadline:Instant,receipt:Receipt) -> Admission { self.prompt(args,deadline,receipt,true,None).await }
+    /// As start/admit, running `arm` inside the start gate just before the native write: the gate admits one prompt at
+    /// a time, so whatever `arm` records belongs to the next native `prompt` response.
+    #[allow(dead_code)] // tests that include this module drive only the unarmed forms
+    pub async fn start_armed(&self,args:Value,deadline:Instant,receipt:Receipt,arm:Arm) -> Admission { self.prompt(args,deadline,receipt,false,Some(arm)).await }
+    #[allow(dead_code)] // tests that include this module drive only the unarmed forms
+    pub async fn admit_armed(&self,args:Value,deadline:Instant,receipt:Receipt,arm:Arm) -> Admission { self.prompt(args,deadline,receipt,true,Some(arm)).await }
+    async fn prompt(&self,args:Value,deadline:Instant,receipt:Receipt,allow_busy:bool,arm:Option<Arm>) -> Admission {
         // Never wait for the gate: it also serializes session switches and commands, and input validated for one
         // session must not land in the next. A momentary overlap is a plain busy the caller can retry.
         let Ok(guard) = self.gate.clone().try_lock_owned() else {
@@ -97,6 +107,7 @@ impl Starts {
             current.starts
         };
         let flight = Flight { guard:Some(guard),signals:self.signals.clone() };
+        if let Some(arm)=arm {arm();}
         self.signals.changed.send_modify(|value|*value=value.wrapping_add(1));
         let mut ticket = match self.native.submit("prompt",args,deadline) {
             Ok(ticket)=>ticket,

@@ -204,25 +204,27 @@ async fn setter_ack_without_matching_readback_is_only_accepted_and_waits_for_cor
     assert_eq!(shared.agent.lock().unwrap().configuration.options().iter().find(|row|row["id"]=="steering_mode").unwrap()["value"],"one-at-a-time");dispose(&shared,&provider).await;
 }
 
+/// An agent.send effect from a non-owner agent sender, through the bridge's public provider path.
+async fn send(shared:&Arc<Shared>,provider:&Provider,core:&mut Core,id:u64,mode:&str,text:&str)->Outcome{
+    let wire=json!({"jsonrpc":"2.0","id":id,"method":"effect.invoke","params":{"generation":1,"effect":format!("e{id}"),"op":"agent.send","ref":"agent","incarnation":"","deadline_ms":2000,
+        "principal":"p:sender","actor":"extension:agents","initiator":"p:sender",
+        "args":{"v":0,"mode":mode,"delivery":format!("d{id}"),"origin":{"kind":"agent"},"content":[{"type":"text","text":text}]}}});
+    core.w.write_all(format!("{wire}\n").as_bytes()).await.unwrap();
+    let Request::Effect(effect)=core.requests.as_mut().unwrap().recv().await.unwrap() else{panic!("not effect")};
+    let owner=async{let get=core.recv().await;assert_eq!(get["method"],"workspace.get");core.reply(&get,json!({"value":"other-owner"})).await;};
+    let (outcome,())=tokio::join!(invoke(shared,provider,&effect),owner);let outcome=outcome.unwrap();
+    effect.respond(Ok(outcome.clone()));let reply=core.recv().await;assert_eq!(reply["id"],id);
+    outcome
+}
+async fn until(shared:&Arc<Shared>,what:&str,check:impl Fn(&Arc<Shared>)->bool){
+    let deadline=Instant::now()+Duration::from_secs(3);
+    while !check(shared){assert!(Instant::now()<deadline,"timed out waiting for {what}");tokio::time::sleep(Duration::from_millis(5)).await;}
+}
+
 /// Relay-13: a follow-up (settle) or steer (boundary) sent while Pi is idle was parked in Pi's queue and never ran.
 /// Every mode is now Pi's `prompt` with `streamingBehavior`: idle starts a run, busy queues. One native write each.
 #[tokio::test]
 async fn settle_and_boundary_start_an_idle_pi_and_queue_on_a_busy_one_exactly_once(){
-    async fn send(shared:&Arc<Shared>,provider:&Provider,core:&mut Core,id:u64,mode:&str,text:&str)->Outcome{
-        let wire=json!({"jsonrpc":"2.0","id":id,"method":"effect.invoke","params":{"generation":1,"effect":format!("e{id}"),"op":"agent.send","ref":"agent","incarnation":"","deadline_ms":2000,
-            "principal":"p:sender","actor":"extension:agents","initiator":"p:sender",
-            "args":{"v":0,"mode":mode,"delivery":format!("d{id}"),"origin":{"kind":"agent"},"content":[{"type":"text","text":text}]}}});
-        core.w.write_all(format!("{wire}\n").as_bytes()).await.unwrap();
-        let Request::Effect(effect)=core.requests.as_mut().unwrap().recv().await.unwrap() else{panic!("not effect")};
-        let owner=async{let get=core.recv().await;assert_eq!(get["method"],"workspace.get");core.reply(&get,json!({"value":"other-owner"})).await;};
-        let (outcome,())=tokio::join!(invoke(shared,provider,&effect),owner);let outcome=outcome.unwrap();
-        effect.respond(Ok(outcome.clone()));let reply=core.recv().await;assert_eq!(reply["id"],id);
-        outcome
-    }
-    async fn until(shared:&Arc<Shared>,what:&str,check:impl Fn(&Arc<Shared>)->bool){
-        let deadline=Instant::now()+Duration::from_secs(3);
-        while !check(shared){assert!(Instant::now()<deadline,"timed out waiting for {what}");tokio::time::sleep(Duration::from_millis(5)).await;}
-    }
     fn prompts(trace:&std::path::Path)->Vec<Value>{
         std::fs::read_to_string(trace).unwrap_or_default().lines().map(|row|serde_json::from_str::<Value>(row).unwrap())
             .filter(|row|row.get("type").is_some()).filter(|row|row["type"]!="get_state" && row["type"]!="get_session_stats" && row["type"]!="get_messages" && row["type"]!="get_commands").collect()
@@ -259,4 +261,83 @@ async fn settle_and_boundary_start_an_idle_pi_and_queue_on_a_busy_one_exactly_on
         assert!(sent.iter().all(|row|row["type"]!="follow_up" && row["type"]!="steer"),"queue-only commands park input on an idle Pi");
         dispose(&shared,&provider).await;
     }
+}
+
+/// The core-bound origin reaches a user message only when the bridge sent it and the evidence holds (origins.rs):
+/// started = the run's starting message with exact text; queued = oldest bridge entry of that queue, exact text, no
+/// identical text from anyone else. Natively produced, rewritten, cleared, pre-switch and pre-restart: no origin.
+#[tokio::test]
+async fn user_messages_carry_the_bridge_origin_only_under_evidence(){
+    fn users(shared:&Arc<Shared>)->Vec<Value>{
+        let snapshot=String::from_utf8(shared.agent.lock().unwrap().journal.snapshot()).unwrap();
+        let mut rows:Vec<Value>=snapshot.lines().map(|line|serde_json::from_str::<Value>(line).unwrap())
+            .filter(|row|row["op"]=="put" && row["kind"]=="message" && row["value"]["role"]=="user").map(|row|row["value"].clone()).collect();
+        rows.sort_by_key(|value|value["position"].as_u64());rows
+    }
+    fn last(shared:&Arc<Shared>,body:&str)->Value{
+        users(shared).into_iter().rev().find(|value|value["content"][0]["text"].as_str().is_some_and(|text|text.ends_with(body))).unwrap_or_else(||panic!("no user message {body:?}"))
+    }
+    async fn native(shared:&Arc<Shared>,verb:&str,args:Value){shared.native.get().unwrap().call(verb,args,Duration::from_secs(2)).await.unwrap();}
+    async fn free(shared:&Arc<Shared>){until(shared,"the start gate",|shared|shared.starts.get().unwrap().session_guard().is_ok()).await;}
+    fn receipt_origin(outcome:&Outcome)->Value{let Outcome::Accepted(Some(value))=outcome else{panic!("not accepted: {outcome:?}")};value["receipt"]["origin"].clone()}
+    let fake=format!("{}/tests/fixtures/fake_pi.py",env!("CARGO_MANIFEST_DIR"));
+    let root=tempfile::tempdir().unwrap();
+    let (shared,provider,mut core)=fixture_native(root.path(),&["/usr/bin/python3".into(),fake.clone(),"--user-messages".into()]).await;
+    // fake_pi's session id differs from the fixture's initial metadata: settle that epoch change before sending.
+    native(&shared,"get_state",json!({})).await;
+
+    // started: the run's starting message is the bridge's exact text.
+    let origin=receipt_origin(&send(&shared,&provider,&mut core,1,"settle","started from the pane").await);
+    assert_eq!(origin["principal"],"p:sender");
+    until(&shared,"the starting message",|shared|users(shared).len()==1).await;
+    let started=last(&shared,"started from the pane");
+    assert_eq!((&started["origin"],&started["delivery"]),(&origin,&json!("d1")),"{started}");
+    // A user message the bridge did not send (an extension's, or typed natively): no origin.
+    native(&shared,"test_user",json!({"text":"typed natively"})).await;
+    assert!(last(&shared,"typed natively").get("origin").is_none());
+
+    // queued: the oldest bridge entry of the delivering queue, exact text.
+    free(&shared).await;let steer=receipt_origin(&send(&shared,&provider,&mut core,2,"boundary","steer one").await);
+    free(&shared).await;send(&shared,&provider,&mut core,3,"settle","follow one").await;
+    let follow_text=shared.agent.lock().unwrap().queue.clone().unwrap()[1]["preview"].as_str().unwrap().to_string();
+    // A Pi extension queues byte-identical text behind it: Pi then holds two, the bridge sent one, so neither is named.
+    native(&shared,"test_inject",json!({"queue":"followUp","text":follow_text})).await;
+    native(&shared,"test_drain",json!({"queue":"steering"})).await;
+    let steered=last(&shared,"steer one");assert_eq!((&steered["origin"],&steered["delivery"]),(&steer,&json!("d2")),"{steered}");
+    native(&shared,"test_drain",json!({"queue":"followUp"})).await;native(&shared,"test_drain",json!({"queue":"followUp"})).await;
+    let follows:Vec<Value>=users(&shared).into_iter().filter(|v|v["content"][0]["text"].as_str().is_some_and(|t|t.ends_with("follow one"))).collect();
+    assert_eq!(follows.len(),2);assert!(follows.iter().all(|v|v.get("origin").is_none()),"ambiguous identical text: no origin: {follows:?}");
+
+    // clear_queue drops the bridge entry: the same text delivered later is not attributed.
+    free(&shared).await;send(&shared,&provider,&mut core,4,"settle","to be cleared").await;
+    let cleared=shared.agent.lock().unwrap().queue.clone().unwrap()[0]["preview"].as_str().unwrap().to_string();
+    native(&shared,"clear_queue",json!({})).await;
+    native(&shared,"test_inject",json!({"queue":"followUp","text":cleared})).await;native(&shared,"test_drain",json!({"queue":"followUp"})).await;
+    assert!(last(&shared,"to be cleared").get("origin").is_none());
+
+    // A new session drops everything pending.
+    free(&shared).await;send(&shared,&provider,&mut core,5,"settle","before the switch").await;
+    shared.agent.lock().unwrap().new_session_epoch();
+    native(&shared,"test_drain",json!({"queue":"followUp"})).await;
+    assert!(last(&shared,"before the switch").get("origin").is_none());
+
+    // Pi rewrites the started text (as it appends image-resize hints): no exact match, no origin.
+    native(&shared,"test_end",json!({})).await;native(&shared,"test_settle",json!({})).await;
+    until(&shared,"idle",|shared|shared.agent.lock().unwrap().state()=="idle").await;
+    native(&shared,"test_rewrite",json!({"hint":"\n\n[image resized]"})).await;
+    free(&shared).await;send(&shared,&provider,&mut core,6,"start","rewritten by Pi").await;
+    until(&shared,"the rewritten message",|shared|users(shared).iter().any(|v|v["content"][0]["text"].as_str().is_some_and(|t|t.ends_with("[image resized]")))).await;
+    assert!(users(&shared).iter().filter(|v|v["content"][0]["text"].as_str().is_some_and(|t|t.ends_with("[image resized]"))).all(|v|v.get("origin").is_none()));
+
+    // Receipts are unchanged by correlation (text is not stage evidence).
+    let receipts=shared.agent.lock().unwrap().receipts.clone();
+    assert_eq!((receipts["d1"]["stage"].as_str(),receipts["d2"]["stage"].as_str()),(Some("admitted"),Some("queued")));
+    dispose(&shared,&provider).await;
+
+    // A restarted bridge has nothing pending: a message queued before it is delivered without origin.
+    let root=tempfile::tempdir().unwrap();
+    let (shared,provider,_core)=fixture_native(root.path(),&["/usr/bin/python3".into(),fake,"--user-messages".into()]).await;
+    native(&shared,"test_inject",json!({"queue":"followUp","text":"from before a restart"})).await;native(&shared,"test_drain",json!({"queue":"followUp"})).await;
+    assert!(last(&shared,"from before a restart").get("origin").is_none());
+    dispose(&shared,&provider).await;
 }

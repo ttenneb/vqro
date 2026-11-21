@@ -26,6 +26,10 @@ if "--metadata" in sys.argv:
     config = {k: state[k] for k in ("model", "thinkingLevel", "steeringMode", "followUpMode", "autoCompactionEnabled") if k in state}
 steering = []
 follow = []
+# --user-messages: emit Pi's user message_start/message_end for a started prompt (its run's starting message) and
+# for test_drain, as Pi 1.5.2 does (agent-session.js _prepareRun; queue_update before a queued message's start).
+user_messages = "--user-messages" in sys.argv
+rewrite_hint = None  # test_rewrite: Pi appends text to the prompt (like its image-resize hints)
 held = []
 # Pi0.87 start-preflight race (P4): a prompt whose before-agent-start preflight is still running
 # reports not streaming; a second prompt meanwhile starts, and the first then ACKs success but is
@@ -84,6 +88,12 @@ def reply(command, data=None, success=True):
 
 def queues():
     emit({"type": "queue_update", "steering": steering, "followUp": follow})
+
+
+def user_message(text, images=()):
+    message = {"role": "user", "content": [{"type": "text", "text": text}, *images], "timestamp": int(time.time() * 1000)}
+    emit({"type": "message_start", "message": message})
+    emit({"type": "message_end", "message": message})
 
 
 def settle(aborted=False):
@@ -198,6 +208,8 @@ for line in sys.stdin.buffer:
             active = True
             emit({"type": "agent_start"})
             emit({"type": "turn_start"})
+            if user_messages:
+                user_message(message + (rewrite_hint or ""), command.get("images", []))
             if message in ("fixture-model-error", "fixture-retry-success"):
                 emit({"type": "message_end", "message": {"role": "user", "content": message}})
                 error_turn("ResourceNotFoundException: Model use case details have not been submitted", 4,
@@ -247,6 +259,25 @@ for line in sys.stdin.buffer:
         reply(command)
     elif kind == "test_settle":
         settle()
+        reply(command)
+    elif kind == "test_drain":
+        # Pi delivers the oldest entry of a queue: queue_update first, then the user message.
+        queue = steering if command.get("queue", "steering" if steering else "followUp") == "steering" else follow
+        if queue:
+            value = queue.pop(0)
+            queues()
+            user_message(value)
+        reply(command)
+    elif kind == "test_inject":
+        # A Pi extension queueing its own user message (pi.sendUserMessage with deliverAs steer/followUp).
+        (steering if command["queue"] == "steering" else follow).append(command["text"])
+        queues()
+        reply(command)
+    elif kind == "test_user":
+        user_message(command["text"])  # a user message the bridge did not send
+        reply(command)
+    elif kind == "test_rewrite":
+        rewrite_hint = command.get("hint")
         reply(command)
     elif kind == "test_boundary":
         if steering:

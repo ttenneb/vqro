@@ -10,6 +10,7 @@ mod configuration;
 mod commands;
 mod panel;
 mod views;
+mod origins;
 use std::collections::HashMap;
 use std::sync::{Arc,Mutex,OnceLock};
 use std::time::Duration;
@@ -301,9 +302,12 @@ async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant,owner_proven:bool
             record_receipt(&shared,&d,value);
         }
     });
+    // Inside the start gate, just before the write: this send's ACK is the next native prompt response (origins.rs).
+    let entry=origins::Entry::new(&delivery,&base["origin"],&native_args);let weak=Arc::downgrade(shared);
+    let arm:admission::Arm=Box::new(move||{if let Some(shared)=weak.upgrade(){shared.agent.lock().unwrap().origins.arm(entry);}});
     let result=match mode.as_str() {
-        "start"=>shared.starts.get().unwrap().start(native_args,deadline,receipt).await,
-        "admit"|"boundary"|"settle"=>shared.starts.get().unwrap().admit(native_args,deadline,receipt).await,
+        "start"=>shared.starts.get().unwrap().start_armed(native_args,deadline,receipt,arm).await,
+        "admit"|"boundary"|"settle"=>shared.starts.get().unwrap().admit_armed(native_args,deadline,receipt,arm).await,
         _=>direct(shared.native.get().unwrap(),command,native_args,deadline,receipt).await,
     };
     match result {
@@ -312,7 +316,7 @@ async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant,owner_proven:bool
             let mut value=base;value["stage"]=json!(ack_stage(&reply));value["native"]=json!({"request":native});Ok(Outcome::Accepted(Some(json!({"receipt":value}))))
         }
         Admission::Dispatched {native}=>{let mut value=base;value["stage"]=json!("dispatched");value["native"]=json!({"request":native});record_receipt(shared,&delivery,value.clone());Ok(Outcome::Dispatched(Some(json!({"receipt":value}))))}
-        Admission::Refused(error)=>rejected(error.kind,error.message),Admission::Unknown(error)=>native_failure(error),
+        Admission::Refused(error)=>{shared.agent.lock().unwrap().origins.disarm(&delivery);rejected(error.kind,error.message)},Admission::Unknown(error)=>native_failure(error),
     }
 }
 async fn publish_fenced(shared:&Shared,provider:&Provider)->Result<(),ProviderError>{
@@ -408,7 +412,9 @@ async fn command(shared:&Arc<Shared>,provider:&Provider,args:&Value,deadline:Ins
                 match result{Ok(reply)=>{value["native_success"]=json!(reply.success);if vqro::limits::encoded_bytes(&reply.data)<=48*1024{value["result"]=reply.data;}else{value["incomplete"]=json!(["result"]);}},Err(error)=>{value["outcome"]=json!("unknown");value["error"]=json!(error.kind);}}
                 shared.agent.lock().unwrap().control_result(&op,value);shared.wake();
             }});
-            match shared.starts.get().unwrap().admit(json!({"message":message}),deadline,receipt).await{
+            // A command's prompt has no core-bound sender: its response must not resolve anyone's origin.
+            let weak=Arc::downgrade(shared);let arm:admission::Arm=Box::new(move||{if let Some(shared)=weak.upgrade(){shared.agent.lock().unwrap().origins.arm(None);}});
+            match shared.starts.get().unwrap().admit_armed(json!({"message":message}),deadline,receipt,arm).await{
                 Admission::Acknowledged{reply,..} if reply.success=>Ok(Outcome::Accepted(Some(json!({"name":name,"operation":operation})))),
                 Admission::Acknowledged{reply,..}=>Err(ProviderError::new("backend",native_message(&reply))),
                 Admission::Dispatched{..}=>Ok(Outcome::Dispatched(Some(json!({"name":name,"operation":operation})))),
