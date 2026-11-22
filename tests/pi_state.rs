@@ -297,6 +297,30 @@ fn pi_tool_duration_is_the_native_duration_ms() {
     }
 }
 
+/// Startup strings are never shortened (spec e8232d24): an over-bound path/description is omitted from its entry, an
+/// over-bound name omits the entry, an over-long list loses entries from its end; each field is named incomplete.
+#[test]
+fn startup_never_shortens_a_string_or_path() {
+    let startup=|a:&Agent|entities(a,"startup").into_iter().find(|r|r["id"]=="current").unwrap()["value"].clone();
+    let mut a=Agent::with_cwd("private".into(),Signals::new(),"/w".into());
+    let long_path=format!("/{}", "p".repeat(5000));
+    let mut rows=vec![
+        json!({"name":"skill:long-path","source":"skill","sourceInfo":{"path":long_path}}),
+        json!({"name":"skill:long-desc","description":"d".repeat(2000),"source":"skill","sourceInfo":{"path":"/ok/SKILL.md"}}),
+        json!({"name":format!("skill:{}","n".repeat(200)),"source":"skill"}),
+    ];
+    for i in 0..300 {rows.push(json!({"name":format!("p{i}"),"source":"prompt"}));}
+    event(&mut a,json!({"type":"response","id":"c","command":"get_commands","success":true,"data":{"commands":rows}}));
+    let value=startup(&a);
+    assert_eq!(value["skills"],json!([{"name":"long-path"},{"name":"long-desc","path":"/ok/SKILL.md"}]),"omitted, never shortened");
+    assert_eq!(value["prompts"].as_array().unwrap().len(),256);assert_eq!(value["prompts"][255]["name"],"p255","entries lost from the end");
+    let incomplete=value["incomplete"].as_array().unwrap();
+    assert!(incomplete.contains(&json!("skills")) && incomplete.contains(&json!("prompts")));
+    let text=value.to_string();assert!(!text.contains(&"p".repeat(4097)) && !text.contains(&"d".repeat(1025)),"no shortened string published");
+    // A vqro fact always carries its source.
+    assert_eq!((&value["cwd"],&value["sources"]["cwd"]),(&json!("/w"),&json!("vqro:launch")));
+}
+
 /// agent-v0 startup (id current): only Pi's own reports, each with its source; absent stays absent.
 #[test]
 fn startup_entity_carries_only_pis_own_reports_with_sources() {

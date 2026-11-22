@@ -13,7 +13,7 @@ const PATH:usize=4096;
 #[derive(Default,Clone)]
 pub struct Startup {fields:Map<String,Value>,sources:Map<String,Value>,incomplete:Vec<String>}
 
-/// A string within `max` bytes, or None (with the field marked incomplete) when it is longer.
+/// A string within `max` bytes as is; a longer one is an error and is omitted, never shortened (field incomplete).
 fn bounded(value:&Value,max:usize)->Result<Option<String>,()> {
     match value.as_str() {None=>Ok(None),Some(text) if text.len()<=max=>Ok(Some(text.into())),Some(_)=>Err(())}
 }
