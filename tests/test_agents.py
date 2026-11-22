@@ -72,7 +72,8 @@ class AgentsTests(unittest.TestCase):
         self.core.providers["other"]["capabilities"] = {"agent.abort": {}}
         self.core.resources["r2"]["data"] = {"custom": "native other runtime"}
         self.agents.event("resource", {"id": "r2"})
-        self.assertIsNone(self.core.value("menu/agents.r2.abort"), "Abort waits for state-aware context")
+        self.assertEqual(self.core.value("menu/agents.r2.abort")["when"],
+                         {"view": "agents-r2", "menu.agent_working": True})
         self.assertIsNone(self.core.value("menu/agents.r2.prompt"))
         self.assertIsNone(self.core.value("menu/agents.r2.answer"))
         result = self.command("show", resource="r2")
@@ -91,7 +92,7 @@ class AgentsTests(unittest.TestCase):
         self.core.providers["other"]["capabilities"] = {"agent.abort": {}}
         self.agents.event("provider", {"name": "other"})
         self.assertIsNone(self.core.value("menu/agents.r2.prompt"))
-        self.assertIsNone(self.core.value("menu/agents.r2.abort"), "Abort waits for state-aware context")
+        self.assertEqual(self.core.value("menu/agents.r2.abort")["when"]["menu.agent_working"], True)
 
     def test_missing_provider_declarations_offer_no_native_actions(self):
         self.core.add_agent()

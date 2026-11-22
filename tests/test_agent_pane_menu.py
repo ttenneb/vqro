@@ -1,4 +1,4 @@
-"""Step-one agent right-click: mouse-only with existing live context; no turn/queue inference."""
+"""Mouse-only agent menus use reported live facts, never inferred work or queue state."""
 import pathlib
 import sys
 import unittest
@@ -28,17 +28,19 @@ class AgentPaneMenu(unittest.TestCase):
             'requests': [{'request': 'q', 'method': 'choice', 'status': 'pending'}]}}
         self.agents = Agents(self.core)
 
-    def menu(self):
+    def menu(self, supports_context=True):
         context = {'view': 'agents-r2', 'live': self.r.get('state') == 'live'}
+        if supports_context:
+            context.update({'menu.' + k: v for k, v in self.agents.panel(self.r)['menu_context'].items()})
         return [value for _, value in sorted(self.agents.declarations().items(), key=lambda e: e[1].get('order', 0))
                 if value.get('where') == 'pane' and all(context.get(k) == v for k, v in value.get('when', {}).items())]
 
     def test_order_group_mouse_only_and_answer_is_never_offered(self):
         menu = self.menu()
-        self.assertEqual([m['label'] for m in menu], ['Stop agent…', 'Agent settings…', 'Pane options…'])
+        self.assertEqual([m['label'] for m in menu], ['Abort', 'Clear queue', 'Stop agent…', 'Agent settings…', 'Pane options…'])
         self.assertTrue(all(m.get('group') == 'agent' for m in menu))
         self.assertTrue(all('input' not in m and m.get('args') == {'resource': 'r2'} for m in menu))
-        self.assertTrue(all(set(m['when']) == {'view', 'live'} for m in menu))
+        self.assertTrue(all(set(m['when']) <= {'view', 'live', 'menu.agent_working', 'menu.agent_queued'} for m in menu))
         self.assertNotIn('confirm', next(m for m in menu if m['command'] == 'agents.stop')['args'])
         before = list(self.core.calls)
         self.core.handlers['agents.stop']({'resource': 'r2'})
@@ -51,30 +53,71 @@ class AgentPaneMenu(unittest.TestCase):
         self.assertEqual(waiting['actions'][0]['command'], 'agents.answer', 'Answer stays as a pane action')
         self.assertNotIn('menu', waiting, 'Answer is never reintroduced by waiting-row right-click')
 
-    def test_abort_and_clear_queue_wait_for_the_followup_even_when_native_facts_exist(self):
+    def test_only_explicit_work_and_known_nonempty_queue_enable_actions(self):
+        facts = self.r['data']['agent']
         for state in ('running', 'idle', 'waiting', 'unknown', None):
-            self.r['data']['agent']['state'] = state
-            commands = [m['command'] for m in self.menu()]
-            self.assertNotIn('agents.abort', commands)
-            self.assertNotIn('agents.clear_queue', commands)
-
-    def test_existing_live_context_gates_stop_settings_options_and_forget(self):
+            facts['state'] = state
+            self.assertEqual('agents.abort' in [m['command'] for m in self.menu()], state == 'running')
+        facts['state'] = 'running'
+        for incomplete in (['state'], ['lifecycle']):
+            facts['incomplete'] = incomplete
+            self.assertFalse(self.agents.pane_menu_flags(self.r)['agent_working'])
+        facts.pop('incomplete')
+        for queue in (None, [], {}, ['invalid'], [{}], [{'mode': ''}]):
+            facts['queue'] = queue
+            self.assertNotIn('agents.clear_queue', [m['command'] for m in self.menu()])
+        facts['queue'] = [{'id': None, 'mode': 'future-mode', 'preview': 'native'}]
+        self.assertIn('agents.clear_queue', [m['command'] for m in self.menu()])
         self.r['available'] = False
-        self.r['state'] = 'finished'
-        self.assertEqual([m['label'] for m in self.menu()], ['Forget agent'])
-        self.r['state'] = 'live'
-        self.assertNotIn('Forget agent', [m['label'] for m in self.menu()], 'step one uses existing live context only')
+        self.assertFalse(self.agents.pane_menu_flags(self.r)['agent_working'])
+        self.assertFalse(self.agents.pane_menu_flags(self.r)['agent_queued'])
+
+    def test_unknown_or_ended_lifecycle_and_undeclared_capabilities_are_not_inferred(self):
+        facts = self.r['data']['agent']
+        for lifecycle in (None, 'ended'):
+            facts['lifecycle'] = lifecycle
+            self.assertFalse(self.agents.pane_menu_flags(self.r)['agent_working'])
+        facts['lifecycle'] = 'live'
+        self.core.providers.clear()
+        flags = self.agents.pane_menu_flags(self.r)
+        self.assertFalse(flags['agent_working'])
+        self.assertFalse(flags['agent_queued'])
+
+    def test_forget_matches_handler_availability_not_resource_state(self):
+        for state in ('live', 'finished'):
+            self.r['state'] = state
+            for available in (True, False):
+                self.r['available'] = available
+                self.assertEqual('Forget agent' in [m['label'] for m in self.menu()], not available)
+        self.r['available'] = None
+        self.assertFalse(self.agents.pane_menu_flags(self.r)['agent_forgettable'])
+
+    def test_old_clients_hide_conditional_actions_and_legacy_native_facts_work(self):
+        self.assertFalse(any(m['command'] in ('agents.abort', 'agents.clear_queue', 'agents.forget')
+                             for m in self.menu(supports_context=False)))
+        self.r['data'] = {'queues': {'steering': ['native queued'], 'follow_up': []}}
+        self.core.providers['other']['capabilities'] = {'agent.abort': {}, 'agent.clear_queue': {}}
+        self.r['status'] = {'state': 'working'}
+        self.assertTrue(self.agents.pane_menu_flags(self.r)['agent_working'])
+        self.assertTrue(self.agents.pane_menu_flags(self.r)['agent_queued'])
+        self.r['status'] = {'state': 'unknown'}
+        self.r['data'] = {'queues': {'steering': None}}
+        self.assertFalse(self.agents.pane_menu_flags(self.r)['agent_working'])
+        self.assertFalse(self.agents.pane_menu_flags(self.r)['agent_queued'])
 
     def test_state_changes_do_not_write_workspace_menu_transactions(self):
         self.agents.event('resource', {'id': 'r2'})
         before = self.agents.declarations()
+        transactions = len(self.core.transactions)
         self.core.calls.clear()
         self.r['data']['agent']['state'] = 'idle'
         self.r['data']['agent']['queue'] = []
         self.agents.event('resource', {'id': 'r2'})
         self.assertEqual(before, self.agents.declarations())
         self.assertFalse(any(m == 'workspace.apply' for m, _ in self.core.calls))
+        self.assertEqual(len(self.core.transactions), transactions)
         menus = {k: v for k, v in self.agents.declarations().items() if k.startswith('menu/agents.r2.')}
         self.assertFalse(any('input' in m for m in menus.values()))
-        self.assertTrue(all(k.rsplit('.', 1)[-1] not in ('send', 'prompt', 'steer', 'follow_up', 'answer',
-                                                      'abort', 'clear_queue') for k in menus))
+        self.assertTrue(all(k.rsplit('.', 1)[-1] not in ('send', 'prompt', 'steer', 'follow_up', 'answer') for k in menus))
+        self.assertEqual(self.agents.panel(self.r)['menu_context'],
+                         {'agent_working': False, 'agent_queued': False, 'agent_forgettable': False})

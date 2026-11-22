@@ -978,6 +978,28 @@ class Agents:
             return True
         return isinstance(self.provider_caps(resource).get("agent."+op), dict)
 
+    def pane_menu_flags(self, r):
+        """Native applicability travels with the panel, never through per-turn workspace writes."""
+        facts = agent_facts(r)
+        available = r.get("available") is True and not ended(r) and facts.get("lifecycle") != "ended"
+        if facts:
+            incomplete = facts.get("incomplete") if isinstance(facts.get("incomplete"), list) else []
+            working = (facts.get("lifecycle") == "live" and facts.get("state") == "running"
+                       and not any(field in incomplete for field in ("state", "lifecycle")))
+            queue = facts.get("queue")
+            queued = isinstance(queue, list) and any(isinstance(item, dict) and isinstance(item.get("mode"), str)
+                                                    and bool(item["mode"]) for item in queue)
+        else:
+            legacy = r.get("status") if isinstance(r.get("status"), dict) else {}
+            working = legacy.get("state") in ("working", "running")
+            queues = data(r).get("queues")
+            queued = isinstance(queues, dict) and any(isinstance(queues.get(key), list)
+                and any(isinstance(item, str) for item in queues[key]) for key in ("steering", "follow_up"))
+        return {"agent_working": available and working and self.supported(r, "abort"),
+                "agent_queued": available and queued and self.supported(r, "clear_queue"),
+                # Core resources declare availability as a boolean, exactly the Forget handler's guard.
+                "agent_forgettable": r.get("available") is False}
+
     def current_signature(self):
         return tuple(sorted((r["id"], tuple(op for op in EFFECTS if self.supported(r, op)), tuple(self.modes(r)),
                              self.has_settings(r), self.can_stop(r))
@@ -1654,6 +1676,7 @@ class Agents:
             content["items"].insert(0, {"type": "text", "style": "warn", "text": "Agent ended; no operation will be sent. Close this tab or use Close ended tabs."})
         elif not r.get("available"):
             content["items"].insert(0, {"type": "text", "style": "warn", "text": self.disconnected(r)})
+        content["menu_context"] = self.pane_menu_flags(r)
         bound = 32768 if conversation is None else agent_transcript.BUDGET + 32768  # the conversation bounds itself
         size = len(json.dumps(content, ensure_ascii=False).encode())
         if size > bound:  # drop the oldest rows after the first; each row's size is measured once
@@ -1720,16 +1743,17 @@ class Agents:
                                  ("send", "Send to agent"), ("pane", "Agent pane"), ("tools", "Tools")):
                 entries[f"view/agents-{popup}-{rid}"] = {"kind": "panel", "title": f"{title} {rid}", "items": [
                     {"type": "text", "text": "Loading… (stays if the agents extension is not running)"}]}
-            # Mouse-only actions use the existing live context. Abort/Clear queue wait for explicit
-            # working/queued context support; never offer them unconditionally. Keys/commands stay intact.
-            actions = [("stop", "Stop agent…", "agents.stop", True, self.can_stop(r)),
-                       ("settings", "Agent settings…", "agents.config", True, self.has_settings(r)),
-                       ("pane", "Pane options…", "agents.pane", True, True),
-                       ("forget", "Forget agent", "agents.forget", False, True)]
-            for i, (key, title, command, live, supported) in enumerate(actions):
+            # Static mouse-only entries; clients join the panel's live scalars as menu.<key>.
+            actions = [("abort", "Abort", "agents.abort", {"menu.agent_working": True}, self.supported(r, "abort")),
+                       ("clear_queue", "Clear queue", "agents.clear_queue", {"menu.agent_queued": True}, self.supported(r, "clear_queue")),
+                       ("stop", "Stop agent…", "agents.stop", {"live": True}, self.can_stop(r)),
+                       ("settings", "Agent settings…", "agents.config", {"live": True}, self.has_settings(r)),
+                       ("pane", "Pane options…", "agents.pane", {"live": True}, True),
+                       ("forget", "Forget agent", "agents.forget", {"menu.agent_forgettable": True}, True)]
+            for i, (key, title, command, condition, supported) in enumerate(actions):
                 if supported:
                     entries[f"menu/agents.{rid}.{key}"] = {"where": "pane", "label": title, "command": command,
-                        "args": {"resource": rid}, "when": {"view": view(rid), "live": live},
+                        "args": {"resource": rid}, "when": {"view": view(rid), **condition},
                         "group": "agent", "order": 100 + i}
         return entries
 

@@ -304,6 +304,8 @@ class E2E:
         # The TUI's pane context, as `when` sees it (`zoomed`: Zoom/Unzoom).
         snapshot = self.snapshot()
         context = {'view': 'agents-'+rid, 'kind': 'panel', 'resource': rid, 'resource_kind': 'agent', 'live': True, 'zoomed': False}
+        context.update({'menu.' + key: value for key, value in
+                        (snapshot.get('live', {}).get('agents-'+rid, {}).get('menu_context') or {}).items()})
         rows = [(v['value'].get('order', 0), k, v['value']) for k, v in snapshot['entries'].items()
                 if k.startswith('menu/') and v['value'].get('where') == 'pane'
                 and all(context.get(field) == value for field, value in v['value'].get('when', {}).items())]
@@ -483,7 +485,8 @@ class E2E:
             'argv': ['/usr/bin/python3', str(REPO/'tests/fixtures/other_agent.py')]}}], 'note': 'Other native runtime fixture'})
         other = self.wait(lambda: next((r for r in self.snapshot()['resources'] if r.get('provider') == 'other-agent' and r.get('available')), None), 'non-Pi agent')
         self.wait(lambda: self.snapshot()['entries'].get('menu/agents.'+other['id']+'.pane'), 'declared other pane menu')
-        assert 'menu/agents.'+other['id']+'.abort' not in self.snapshot()['entries'], 'Abort waits for state-aware menu context'
+        abort_menu = self.snapshot()['entries']['menu/agents.'+other['id']+'.abort']['value']
+        assert abort_menu['when'] == {'view': 'agents-'+other['id'], 'menu.agent_working': True}, abort_menu
         assert 'menu/agents.'+other['id']+'.prompt' not in self.snapshot()['entries']
         self.invoke(other['id'], 'abort', outcome='observed')
         self.call('command.invoke', {'name': 'agents.show', 'args': {'resource': other['id']}})
