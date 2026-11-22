@@ -561,10 +561,12 @@ class PiRpcClient:
             for task in readers:
                 task.cancel()
             await asyncio.gather(*readers, return_exceptions=True)
-            # Stop reading the inherited pipes; never signal processes we don't own.
-            transport = getattr(self.process, "_transport", None)
-            if transport is not None:
-                transport.close()
+        # A reader can finish on framing failure before pipe EOF. Close our pipe transports
+        # after the owned child exited even then; completed reader tasks do not imply closed FDs.
+        # Never signal processes we don't own (a descendant may still hold its own pipe ends).
+        transport = getattr(self.process, "_transport", None)
+        if transport is not None:
+            transport.close()
         self._disconnect(f"child exited: {code}")
         if abandoned:
             self._publish({"type": "pipes_abandoned", "reason": "a descendant kept stdout/stderr open after exit"})

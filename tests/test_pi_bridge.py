@@ -357,6 +357,11 @@ class PiBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["outcome"], "indeterminate")
         await asyncio.wait_for(client.wait_closed(), 2)
         self.assertIn("protocol error", client.diagnostics()["failure"])
+        transport = client.process._transport
+        self.assertTrue(transport.is_closing(), "a finished reader can still own an open pipe")
+        for fd in (0, 1, 2):
+            pipe = transport.get_pipe_transport(fd)
+            self.assertTrue(pipe is None or pipe.is_closing(), f"owned pipe {fd} leaked after framing failure")
 
     async def test_truncated_record_and_mismatched_response_are_indeterminate(self):
         for command in ["test_truncated", "test_bad_response"]:
