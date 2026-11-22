@@ -68,6 +68,11 @@ SAME(offsetof(GhosttyClipboardWrite, contents_len), 16); SAME(offsetof(GhosttyCl
 SAME(offsetof(GhosttyClipboardWrite, granted), 40); SAME(offsetof(GhosttyClipboardWrite, can_remember), 41);
 SAME(offsetof(GhosttyClipboardWrite, ctx), 48); SAME(offsetof(GhosttyClipboardWrite, reply), 56);
 
+/* formatter.h, types.h (vqro-rex) */
+SAME(GHOSTTY_FORMATTER_OPT_EMIT, 1); SAME(GHOSTTY_FORMATTER_OPT_TRIM, 3); SAME(GHOSTTY_FORMATTER_OPT_EXTRAS, 5);
+SAME(sizeof(GhosttyFormatterOption), 4); SAME(GHOSTTY_FORMATTER_FORMAT_VT, 1); SAME(sizeof(GhosttyFormatterFormat), 4);
+SAME(GHOSTTY_FORMATTER_EXTRAS_ALL, 0xFFF); SAME(GHOSTTY_FORMATTER_EXTRA_PALETTE, 1 << 0); SAME(sizeof(GhosttyFormatterExtras), 4);
+
 /* The functions bindings.rs declares, with the header's parameter types (a mismatch fails to compile). */
 static GhosttyResult (*const f_new)(const GhosttyAllocator*, GhosttyTerminal*, uint16_t, uint16_t) = ghostty_terminal_new;
 static void (*const f_free)(GhosttyTerminal) = ghostty_terminal_free;
@@ -88,6 +93,14 @@ static GhosttyResult (*const f_style)(const GhosttyGridRef*, GhosttyStyle*) = gh
 static GhosttyResult (*const f_uri)(const GhosttyGridRef*, uint8_t*, size_t, size_t*) = ghostty_grid_ref_hyperlink_uri;
 static GhosttyResult (*const f_cell_get)(GhosttyCell, GhosttyCellData, void*) = ghostty_cell_get;
 static GhosttyResult (*const f_row_get)(GhosttyRow, GhosttyRowData, void*) = ghostty_row_get;
+static GhosttyResult (*const f_snap_new)(const GhosttyAllocator*, GhosttySnapshotDecoder*, const uint8_t*, size_t) = ghostty_snapshot_decoder_new_buf;
+static GhosttyResult (*const f_snap_decode)(GhosttySnapshotDecoder, GhosttyTerminal*) = ghostty_snapshot_decoder_decode;
+static void (*const f_snap_free)(GhosttySnapshotDecoder) = ghostty_snapshot_decoder_free;
+static GhosttyResult (*const f_fmt_new)(const GhosttyAllocator*, GhosttyFormatter*, GhosttyTerminal) = ghostty_formatter_terminal_new;
+static GhosttyResult (*const f_fmt_set)(GhosttyFormatter, GhosttyFormatterOption, const void*) = ghostty_formatter_set;
+static GhosttyResult (*const f_fmt_alloc)(GhosttyFormatter, const GhosttyAllocator*, uint8_t**, size_t*) = ghostty_formatter_format_alloc;
+static void (*const f_fmt_free)(GhosttyFormatter) = ghostty_formatter_free;
+static void (*const f_free_buf)(const GhosttyAllocator*, uint8_t*, size_t) = ghostty_free;
 /* The callback typedefs, restated with their parameters: a typedef whose parameters change no longer converts to
  * these declared types, which fails to compile (incompatible function pointer types). The engine registers its
  * callbacks through the same typedefs on the Rust side. */

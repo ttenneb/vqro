@@ -26,6 +26,8 @@ mod compose;
 mod probe;
 mod emulator;
 mod ghostty;
+/// For `vqro-rex`: a Rex terminal's initial Ghostty snapshot as a VT repaint.
+pub use ghostty::{snapshot_to_vt, Error as GhosttyError};
 mod scrollback;
 use emulator::{CursorShape, Effect, Emulator};
 mod frame_budget;

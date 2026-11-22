@@ -135,10 +135,12 @@ fn main() {
         .arg(format!("-Dsimd={simd}"))
         .arg(format!("-Dtarget={}", zig_target(&target)))
         .arg("-Demit-xcframework=false")
-        // Only the parts the engine uses (grid references and colors); the rest is left out of the archive, so it
-        // is neither linked nor reachable: no Kitty graphics (and its image decoder), snapshots, formatter,
-        // selection, search, render state or input encoding. Left-out functions return GHOSTTY_UNSUPPORTED.
-        .arg("-Dvt-features=-all,+grid-introspection,+color")
+        // Only the parts vqro uses: grid references and colors (the TUI engine), snapshot decoding and the VT
+        // formatter (`vqro-rex` turns a Rex terminal's initial Ghostty snapshot into a VT repaint; nothing in the TUI
+        // calls them). The rest is left out of the archive, so it is neither linked nor reachable: no Kitty graphics
+        // (and its image decoder), selection, search, render state or input encoding. Left-out functions return
+        // GHOSTTY_UNSUPPORTED.
+        .arg("-Dvt-features=-all,+grid-introspection,+color,+snapshot,+formatter")
         .arg("--prefix")
         .arg(&out)
         .arg("--cache-dir")

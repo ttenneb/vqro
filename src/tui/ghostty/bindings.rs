@@ -1,5 +1,6 @@
 //! The libghostty-vt C API that the `libghostty` engine uses, declared by hand from the vendored headers
-//! (`vendor/libghostty-vt/include/ghostty/vt/*.h`, pin 9ad3c422). Only what the engine calls is here.
+//! (`vendor/libghostty-vt/include/ghostty/vt/*.h`, pin 9ad3c422). Only what the engine and `vqro-rex` (snapshot
+//! decoding and VT formatting) call is here.
 //!
 //! bindgen isn't used: these declarations are checked against the headers instead. `bindings_check.c` asserts
 //! with the C compiler every struct size and field offset, every constant's value, GhosttyStyle's alignment, and
@@ -267,11 +268,45 @@ pub struct GhosttyClipboardWrite {
     pub reply: GhosttyClipboardWriteReplyFn,
 }
 
+// ---- snapshot.h, formatter.h (vqro-rex: a Rex terminal's Ghostty snapshot becomes a VT repaint) --------------
+
+#[repr(C)]
+pub struct GhosttySnapshotDecoderImpl {
+    _opaque: [u8; 0],
+}
+pub type GhosttySnapshotDecoder = *mut GhosttySnapshotDecoderImpl;
+
+#[repr(C)]
+pub struct GhosttyFormatterImpl {
+    _opaque: [u8; 0],
+}
+pub type GhosttyFormatter = *mut GhosttyFormatterImpl;
+
+pub type GhosttyFormatterOption = c_int;
+pub const GHOSTTY_FORMATTER_OPT_EMIT: GhosttyFormatterOption = 1;
+pub const GHOSTTY_FORMATTER_OPT_TRIM: GhosttyFormatterOption = 3;
+pub const GHOSTTY_FORMATTER_OPT_EXTRAS: GhosttyFormatterOption = 5;
+/// `GhosttyFormatterFormat`, set through GHOSTTY_FORMATTER_OPT_EMIT.
+pub type GhosttyFormatterFormat = c_int;
+pub const GHOSTTY_FORMATTER_FORMAT_VT: GhosttyFormatterFormat = 1;
+/// `GhosttyFormatterExtras` (uint32_t bitmask), set through GHOSTTY_FORMATTER_OPT_EXTRAS.
+pub type GhosttyFormatterExtras = u32;
+pub const GHOSTTY_FORMATTER_EXTRAS_ALL: GhosttyFormatterExtras = 0xFFF;
+pub const GHOSTTY_FORMATTER_EXTRA_PALETTE: GhosttyFormatterExtras = 1 << 0;
+
 pub type GhosttyTerminalBellFn = Option<unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void)>;
 pub type GhosttyTerminalClipboardWriteFn =
     Option<unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void, write: *const GhosttyClipboardWrite)>;
 
 unsafe extern "C" {
+    pub fn ghostty_snapshot_decoder_new_buf(allocator: *const GhosttyAllocator, decoder: *mut GhosttySnapshotDecoder, ptr: *const u8, len: usize) -> GhosttyResult;
+    pub fn ghostty_snapshot_decoder_decode(decoder: GhosttySnapshotDecoder, terminal: *mut GhosttyTerminal) -> GhosttyResult;
+    pub fn ghostty_snapshot_decoder_free(decoder: GhosttySnapshotDecoder);
+    pub fn ghostty_formatter_terminal_new(allocator: *const GhosttyAllocator, formatter: *mut GhosttyFormatter, terminal: GhosttyTerminal) -> GhosttyResult;
+    pub fn ghostty_formatter_set(formatter: GhosttyFormatter, option: GhosttyFormatterOption, value: *const c_void) -> GhosttyResult;
+    pub fn ghostty_formatter_format_alloc(formatter: GhosttyFormatter, allocator: *const GhosttyAllocator, out_ptr: *mut *mut u8, out_len: *mut usize) -> GhosttyResult;
+    pub fn ghostty_formatter_free(formatter: GhosttyFormatter);
+    pub fn ghostty_free(allocator: *const GhosttyAllocator, ptr: *mut u8, len: usize);
     pub fn ghostty_terminal_new(allocator: *const GhosttyAllocator, terminal: *mut GhosttyTerminal, cols: u16, rows: u16) -> GhosttyResult;
     pub fn ghostty_terminal_free(terminal: GhosttyTerminal);
     pub fn ghostty_terminal_set(terminal: GhosttyTerminal, option: GhosttyTerminalOption, value: *const c_void) -> GhosttyResult;
@@ -325,7 +360,7 @@ mod layout {
     #[test]
     fn constants_match_the_c_check() {
         macro_rules! values { ($($n:ident),* $(,)?) => { vec![$((stringify!($n), $n as i64)),*] } }
-        let rust: std::collections::BTreeMap<&str, i64> = values![GHOSTTY_SUCCESS, GHOSTTY_INVALID_VALUE, GHOSTTY_OUT_OF_SPACE, GHOSTTY_POINT_TAG_ACTIVE, GHOSTTY_POINT_TAG_VIEWPORT, GHOSTTY_POINT_TAG_SCREEN, GHOSTTY_CELL_DATA_CODEPOINT, GHOSTTY_CELL_DATA_WIDE, GHOSTTY_CELL_WIDE_NARROW, GHOSTTY_CELL_WIDE_WIDE, GHOSTTY_CELL_WIDE_SPACER_TAIL, GHOSTTY_CELL_WIDE_SPACER_HEAD, GHOSTTY_ROW_DATA_WRAP, GHOSTTY_STYLE_COLOR_NONE, GHOSTTY_STYLE_COLOR_PALETTE, GHOSTTY_STYLE_COLOR_RGB, GHOSTTY_STYLE_FLAG_BOLD, GHOSTTY_STYLE_FLAG_ITALIC, GHOSTTY_STYLE_FLAG_FAINT, GHOSTTY_STYLE_FLAG_BLINK, GHOSTTY_STYLE_FLAG_INVERSE, GHOSTTY_STYLE_FLAG_INVISIBLE, GHOSTTY_STYLE_FLAG_STRIKETHROUGH, GHOSTTY_STYLE_UNDERLINE_SHIFT, GHOSTTY_STYLE_UNDERLINE_MASK, GHOSTTY_TERMINAL_OPT_USERDATA, GHOSTTY_TERMINAL_OPT_WRITE_PTY, GHOSTTY_TERMINAL_OPT_BELL, GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, GHOSTTY_TERMINAL_OPT_MODE_DEFAULT, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES, GHOSTTY_TERMINAL_DATA_COLS, GHOSTTY_TERMINAL_DATA_ROWS, GHOSTTY_TERMINAL_DATA_CURSOR_X, GHOSTTY_TERMINAL_DATA_CURSOR_Y, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE, GHOSTTY_TERMINAL_DATA_SCROLLBAR, GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS, GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_STORAGE_LIMIT, GHOSTTY_TERMINAL_DATA_MODE, GHOSTTY_TERMINAL_SCREEN_PRIMARY, GHOSTTY_TERMINAL_SCREEN_ALTERNATE, GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM, GHOSTTY_TERMINAL_SCROLL_VIEWPORT_ROW, GHOSTTY_CLIPBOARD_LOCATION_STANDARD, GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS, GHOSTTY_CLIPBOARD_WRITE_RESULT_DENIED, GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED, GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA].into_iter().collect();
+        let rust: std::collections::BTreeMap<&str, i64> = values![GHOSTTY_SUCCESS, GHOSTTY_INVALID_VALUE, GHOSTTY_OUT_OF_SPACE, GHOSTTY_POINT_TAG_ACTIVE, GHOSTTY_POINT_TAG_VIEWPORT, GHOSTTY_POINT_TAG_SCREEN, GHOSTTY_CELL_DATA_CODEPOINT, GHOSTTY_CELL_DATA_WIDE, GHOSTTY_CELL_WIDE_NARROW, GHOSTTY_CELL_WIDE_WIDE, GHOSTTY_CELL_WIDE_SPACER_TAIL, GHOSTTY_CELL_WIDE_SPACER_HEAD, GHOSTTY_ROW_DATA_WRAP, GHOSTTY_STYLE_COLOR_NONE, GHOSTTY_STYLE_COLOR_PALETTE, GHOSTTY_STYLE_COLOR_RGB, GHOSTTY_STYLE_FLAG_BOLD, GHOSTTY_STYLE_FLAG_ITALIC, GHOSTTY_STYLE_FLAG_FAINT, GHOSTTY_STYLE_FLAG_BLINK, GHOSTTY_STYLE_FLAG_INVERSE, GHOSTTY_STYLE_FLAG_INVISIBLE, GHOSTTY_STYLE_FLAG_STRIKETHROUGH, GHOSTTY_STYLE_UNDERLINE_SHIFT, GHOSTTY_STYLE_UNDERLINE_MASK, GHOSTTY_TERMINAL_OPT_USERDATA, GHOSTTY_TERMINAL_OPT_WRITE_PTY, GHOSTTY_TERMINAL_OPT_BELL, GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, GHOSTTY_TERMINAL_OPT_MODE_DEFAULT, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES, GHOSTTY_TERMINAL_DATA_COLS, GHOSTTY_TERMINAL_DATA_ROWS, GHOSTTY_TERMINAL_DATA_CURSOR_X, GHOSTTY_TERMINAL_DATA_CURSOR_Y, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE, GHOSTTY_TERMINAL_DATA_SCROLLBAR, GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS, GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_STORAGE_LIMIT, GHOSTTY_TERMINAL_DATA_MODE, GHOSTTY_TERMINAL_SCREEN_PRIMARY, GHOSTTY_TERMINAL_SCREEN_ALTERNATE, GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM, GHOSTTY_TERMINAL_SCROLL_VIEWPORT_ROW, GHOSTTY_CLIPBOARD_LOCATION_STANDARD, GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS, GHOSTTY_CLIPBOARD_WRITE_RESULT_DENIED, GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED, GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA, GHOSTTY_FORMATTER_OPT_EMIT, GHOSTTY_FORMATTER_OPT_TRIM, GHOSTTY_FORMATTER_OPT_EXTRAS, GHOSTTY_FORMATTER_FORMAT_VT, GHOSTTY_FORMATTER_EXTRAS_ALL, GHOSTTY_FORMATTER_EXTRA_PALETTE].into_iter().collect();
         let declared: std::collections::BTreeSet<&str> = include_str!("bindings.rs").lines()
             .filter_map(|l| l.strip_prefix("pub const ")).filter_map(|l| l.split(':').next()).collect();
         assert_eq!(declared, rust.keys().copied().collect(), "the list above names every constant declared in this file");

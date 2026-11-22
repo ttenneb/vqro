@@ -41,6 +41,73 @@ impl Ok_ for ffi::GhosttyResult {
     fn ok(self) -> Result<(), Error> { if self == ffi::GHOSTTY_SUCCESS { Ok(()) } else { Err(Error(self)) } }
 }
 
+/// Decode a complete Ghostty snapshot (`GHOSTSNP`, as Rex sends at the start of a terminal data channel) and format
+/// its terminal as VT sequences that redraw it: screen, history, styles, modes, cursor and the other formatter
+/// extras. For `vqro-rex`, whose viewers' engines (vt100 or libghostty) take ordinary VT, not Ghostty's format.
+///
+/// History is bounded to about `history_lines` rows: the formatted terminal is replayed into a fresh one with that
+/// limit (page-granular, so somewhat more may be kept) and formatted again, because a limit set on the decoded
+/// terminal does not drop history it already holds. The terminal's default palette is not sent: the viewer keeps
+/// its own theme (D18). The input is only borrowed; every terminal and formatter is freed before returning.
+pub fn snapshot_to_vt(snapshot: &[u8], history_lines: usize) -> Result<Vec<u8>, Error> {
+    struct Decoded(ffi::GhosttyTerminal);
+    impl Drop for Decoded {
+        fn drop(&mut self) {
+            // SAFETY: freed once; null is allowed.
+            unsafe { ffi::ghostty_terminal_free(self.0) };
+        }
+    }
+    let mut decoder: ffi::GhosttySnapshotDecoder = ptr::null_mut();
+    // SAFETY: `snapshot` outlives the decoder, which is freed below before returning.
+    unsafe { ffi::ghostty_snapshot_decoder_new_buf(ptr::null(), &mut decoder, snapshot.as_ptr(), snapshot.len()) }.ok()?;
+    let mut terminal: ffi::GhosttyTerminal = ptr::null_mut();
+    // SAFETY: a live decoder and an out-pointer of the documented type; the decoder is freed once.
+    let decoded = unsafe { ffi::ghostty_snapshot_decoder_decode(decoder, &mut terminal) }.ok();
+    unsafe { ffi::ghostty_snapshot_decoder_free(decoder) };
+    decoded?;
+    let decoded = Decoded(terminal);
+    let (mut cols, mut rows) = (0u16, 0u16);
+    // SAFETY: COLS and ROWS write a uint16_t (terminal.h) into a live terminal's out-pointers.
+    unsafe {
+        ffi::ghostty_terminal_get(decoded.0, ffi::GHOSTTY_TERMINAL_DATA_COLS, (&mut cols as *mut u16).cast()).ok()?;
+        ffi::ghostty_terminal_get(decoded.0, ffi::GHOSTTY_TERMINAL_DATA_ROWS, (&mut rows as *mut u16).cast()).ok()?;
+    }
+    let full = format_vt(decoded.0)?;
+    drop(decoded);
+    let mut bounded = Ghostty::new(cols, rows, history_lines)?;
+    bounded.process(&full);
+    format_vt(bounded.raw)
+}
+
+/// The terminal's active screen and history as VT (no trimming, every extra except the default palette).
+fn format_vt(terminal: ffi::GhosttyTerminal) -> Result<Vec<u8>, Error> {
+    struct Formatter(ffi::GhosttyFormatter);
+    impl Drop for Formatter {
+        fn drop(&mut self) {
+            // SAFETY: freed once, before the terminal it borrows (the caller keeps that alive); null is allowed.
+            unsafe { ffi::ghostty_formatter_free(self.0) };
+        }
+    }
+    let mut formatter = Formatter(ptr::null_mut());
+    // SAFETY: the caller's live terminal outlives this formatter (dropped at the end of this function).
+    unsafe { ffi::ghostty_formatter_terminal_new(ptr::null(), &mut formatter.0, terminal) }.ok()?;
+    let (emit, trim, extras): (ffi::GhosttyFormatterFormat, bool, ffi::GhosttyFormatterExtras) =
+        (ffi::GHOSTTY_FORMATTER_FORMAT_VT, false, ffi::GHOSTTY_FORMATTER_EXTRAS_ALL & !ffi::GHOSTTY_FORMATTER_EXTRA_PALETTE);
+    // SAFETY: each value points at the type its option documents (formatter.h option table).
+    unsafe {
+        ffi::ghostty_formatter_set(formatter.0, ffi::GHOSTTY_FORMATTER_OPT_EMIT, (&emit as *const ffi::GhosttyFormatterFormat).cast()).ok()?;
+        ffi::ghostty_formatter_set(formatter.0, ffi::GHOSTTY_FORMATTER_OPT_TRIM, (&trim as *const bool).cast()).ok()?;
+        ffi::ghostty_formatter_set(formatter.0, ffi::GHOSTTY_FORMATTER_OPT_EXTRAS, (&extras as *const ffi::GhosttyFormatterExtras).cast()).ok()?;
+    }
+    let (mut out, mut len): (*mut u8, usize) = (ptr::null_mut(), 0);
+    // SAFETY: out-pointers of the documented types; the buffer is copied, then freed with the same (default)
+    // allocator. Empty output is a null pointer and zero length, which ghostty_free accepts.
+    unsafe { ffi::ghostty_formatter_format_alloc(formatter.0, ptr::null(), &mut out, &mut len) }.ok()?;
+    let bytes = if out.is_null() { Vec::new() } else { unsafe { slice::from_raw_parts(out, len) }.to_vec() };
+    unsafe { ffi::ghostty_free(ptr::null(), out, len) };
+    Ok(bytes)
+}
+
 /// What callbacks collect while the library parses one write.
 #[derive(Default)]
 struct Collected {
@@ -715,6 +782,32 @@ mod tests {
         g.set_scroll_offset(30);
         g.resize(50, 10);
         assert_eq!(g.scroll_offset(), 30, "a view scrolled back stays as far back");
+    }
+
+    /// vqro-rex: a snapshot Rex sent for a terminal that printed `line N red` 40 times at 80x24 (captured from a private
+    /// Rex server, 2026-11-22) becomes VT that redraws the same screen in another engine, colours included.
+    #[test]
+    fn a_rex_snapshot_becomes_a_vt_repaint() {
+        let snapshot = include_bytes!("../../../tests/fixtures/rex/snapshot-40-red-lines.bin");
+        let vt = snapshot_to_vt(snapshot, 1000).unwrap();
+        let text = String::from_utf8_lossy(&vt).into_owned();
+        let mut g = Ghostty::new(80, 24, 100).unwrap();
+        g.process(&vt);
+        let screen = g.contents();
+        assert!(screen.starts_with("line 18 red") && screen.ends_with("line 40 red"), "the same screen (cursor on the blank 24th row): {screen}");
+        assert!(text.contains("line 1 \x1b[0m\x1b[38;5;1mred"), "history comes first, colours kept: {text}");
+        assert!(!text.contains("\x1b]4;"), "the default palette is not sent");
+        // History is bounded through a fresh terminal: many lines in, about the asked number out (page-granular).
+        let mut big = Ghostty::new(80, 24, 50_000).unwrap();
+        for i in 0..20_000 { big.process(format!("history {i}\r\n").as_bytes()); }
+        let full = format_vt(big.raw).unwrap();
+        let mut bounded = Ghostty::new(80, 24, 100).unwrap();
+        bounded.process(&full);
+        let again = String::from_utf8_lossy(&format_vt(bounded.raw).unwrap()).into_owned();
+        assert!(again.contains("history 19999") && !again.contains("history 1000\r"), "bounded");
+        assert!(again.len() < full.len() / 10, "{} of {}", again.len(), full.len());
+        assert!(snapshot_to_vt(&snapshot[..snapshot.len() - 3], 0).is_err(), "a truncated snapshot is refused");
+        assert!(snapshot_to_vt(b"GHOSTSNP\x01\x00junk", 0).is_err());
     }
 
     /// ghostty-audit P3-1: images are not kept (vqro draws none).

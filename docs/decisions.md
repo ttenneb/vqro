@@ -734,6 +734,8 @@ fine (Q-GH-2).
 pinned source (no local patches at 9ad3c422) and the notice inventory (`scripts/check_vendor.py`,
 `vendor/notices.json`, rendered by `scripts/license_check.py`). The library is built with only the features the
 engine uses (`-Dvt-features=-all,+grid-introspection,+color`). The FFI declarations are written by hand and
-checked against the headers by the C compiler (`src/tui/ghostty/bindings_check.c`).
+checked against the headers by the C compiler (`src/tui/ghostty/bindings_check.c`). *(2026-11-22, pending review:
+`+snapshot,+formatter` added for the optional Rex provider, which turns Rex's Ghostty snapshot into a VT repaint;
+the TUI does not call them. `docs/research/rex.md`.)*
 The wrapper reuses herdr's patterns as an unvetted baseline that is audited independently (plan G8). Plan:
 `<private-notes>`.

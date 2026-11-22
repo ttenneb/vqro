@@ -21,7 +21,8 @@ minisign signature verifies against Zig's published key `RWSGOq2NVecA2UPNdBUZykf
 
 **What the static library contains.** Taken from `ar t` of a
 `-Demit-lib-vt -Dvt-features=-all,+grid-introspection,+color` build of this tree (as build.rs builds it) on
-x86_64-linux-gnu, 2026-11-21. Leaving out Kitty graphics also leaves out the Wuffs image decoder, which a full build
+x86_64-linux-gnu, 2026-11-21. Adding `+snapshot,+formatter` for `vqro-rex` (2026-11-22) leaves the same eleven
+archive members (`ar t`, compared with the earlier build): both are Ghostty's own VT code, no other component. Leaving out Kitty graphics also leaves out the Wuffs image decoder, which a full build
 links (Apache-2.0):
 - Ghostty's VT code;
 - Ghostty's SIMD helpers (`codepoint_width`, `index_of`, `base64`, `vt`);
