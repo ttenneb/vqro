@@ -417,3 +417,14 @@ async fn receipts_say_input_may_be_transformed_by_unknown_extensions(){
     assert_eq!(shared.agent.lock().unwrap().receipts["d1"]["may_transform"],"unknown");
     dispose(&shared,&provider).await;
 }
+
+/// lead-secondary on 124de297: argv can never prove input_transform none (a wrapper may pass anything on; Pi's own
+/// parsing decides, e.g. a value consumed by --model, or text after --).
+#[test]
+fn launch_argv_never_proves_no_input_transforms(){
+    for argv in [vec!["pi","--no-extensions","--no-prompt-templates"],vec!["pi","-ne","-np"],vec!["pi","--model","--no-extensions","-np"],
+                 vec!["pi","--","--no-extensions","--no-prompt-templates"],vec!["pi1","--no-extensions=true","--no-prompt-templates"]] {
+        let argv:Vec<String>=argv.into_iter().map(str::to_string).collect();
+        assert!(launch_may_transform(&argv),"{argv:?}");
+    }
+}

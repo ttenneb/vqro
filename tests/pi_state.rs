@@ -385,10 +385,11 @@ fn customization_facts_follow_the_launch_and_pis_own_inventory() {
         {"name":"undeploy","source":"extension","sourceInfo":{"path":"/home/u/.pi/agent/extensions/deploy.ts","scope":"user"}}]}}));
     assert_eq!(agent(&a)["input_transform"]["names"],json!(["/home/u/.pi/agent/extensions/deploy.ts"]));
     let startup=entities(&a,"startup").into_iter().find(|r|r["id"]=="current").unwrap()["value"].clone();
-    assert_eq!(startup["extensions"],json!([{"name":"deploy.ts","kind":"extension","path":"/home/u/.pi/agent/extensions/deploy.ts",
+    assert_eq!(startup["extensions"],json!([{"name":"/home/u/.pi/agent/extensions/deploy.ts","kind":"extension","path":"/home/u/.pi/agent/extensions/deploy.ts",
         "state":"active","scope":"user","transforms":["input","tool_calls","system_prompt"]}]));
     assert!(startup["incomplete"].as_array().unwrap().contains(&json!("extensions")),"Pi lists only command-bearing extensions");
-    // as-reviewer P3: an extension whose file name is over the bound is omitted, never given an invented name.
+    // as-reviewer / secondary P3: Pi names no extension, so the name is its path (native identifier); a path over the
+    // name bound is omitted, never given a derived or invented name.
     let mut c=make();
     event(&mut c,json!({"type":"response","id":"c","command":"get_commands","success":true,"data":{"commands":[
         {"name":"x","source":"extension","sourceInfo":{"path":format!("/e/{}","n".repeat(200))}}]}}));

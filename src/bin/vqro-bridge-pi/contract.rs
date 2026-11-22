@@ -18,6 +18,10 @@ pub struct Send {
     pub origin:Value,pub quoted:Option<Value>,pub rendering:&'static str,
     pub cause:Option<Value>,pub correlation:Option<String>,
 }
+/// JavaScript's `\s` (ECMAScript WhiteSpace and LineTerminator): what Pi's `^/([^\s]+)` template regex splits on.
+fn js_space(c:char)->bool {
+    matches!(c,'\t'|'\n'|'\u{0B}'|'\u{0C}'|'\r'|' '|'\u{A0}'|'\u{1680}'|'\u{2000}'..='\u{200A}'|'\u{2028}'|'\u{2029}'|'\u{202F}'|'\u{205F}'|'\u{3000}'|'\u{FEFF}')
+}
 fn reject(kind:&'static str,message:&str)->Refusal { Refusal {kind,message:message.into()} }
 fn invalid(message:&str)->Refusal {reject("invalid",message)}
 pub fn id(value:&Value)->Result<&str,Refusal> {
@@ -192,9 +196,14 @@ pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
     // Pi's own rule for templates and extension commands (prompt-templates.js expandPromptTemplate: ^/(\S+)(\s+.*)?$
     // against the loaded names; agent-session.js _tryExecuteExtensionCommand): a leading /name it knows is expanded or
     // run, not delivered. Unknown inventory: no leading /name can be proven literal.
-    if let Some(name)=message.strip_prefix('/').map(|rest|rest.split(char::is_whitespace).next().unwrap_or("")).filter(|name|!name.is_empty()) {
-        if context.slash_names.is_none_or(|names|names.iter().any(|known|known==name)) {
-            return Err(reject("unsupported",format!("/{name} would be expanded or run by the native runtime (template or command), not delivered literally; run it with agent.command").as_str()));
+    if let Some(rest)=message.strip_prefix('/') {
+        // Every way Pi could read the name: its template regex splits on JavaScript \s (which includes U+FEFF and
+        // excludes U+0085), its extension-command lookup on ' ' only. Refuse if any reading names a known item.
+        let candidates=[rest.split(js_space).next().unwrap_or(""),rest.split(' ').next().unwrap_or(""),rest.split(char::is_whitespace).next().unwrap_or("")];
+        for name in candidates.into_iter().filter(|name|!name.is_empty()) {
+            if context.slash_names.is_none_or(|names|names.iter().any(|known|known==name)) {
+                return Err(reject("unsupported",format!("/{name} would be expanded or run by the native runtime (template or command), not delivered literally; run it with agent.command").as_str()));
+            }
         }
     }
     let mut native=json!({"message":message});

@@ -71,8 +71,9 @@ pub struct Agent {
     reason:String,error:Option<String>,exit:Option<Exit>,caps:Value,
     launch_cwd:Option<String>,usage:Option<Value>,usage_revision:u64,
     startup:super::startup::Startup,
-    /// Whether Pi was launched with extensions or prompt templates (input expanders/transformers) loaded: a fact for
-    /// the process's life. Conservative default true; main sets it from the launch argv.
+    /// Whether Pi may run input expanders/transformers (extensions, prompt templates). Always true for a bridge launch:
+    /// the argv (possibly through a wrapper) cannot prove what Pi itself parsed, so only `may` is reported; false is a
+    /// test seam for a runtime fact the bridge cannot observe today.
     pub expanders_on:bool,
 }
 impl Agent {

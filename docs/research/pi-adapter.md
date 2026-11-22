@@ -16,8 +16,10 @@ Fake/public-wire evidence and the final installed-Pi1 regression/smoke remain se
   /skill:, or /<name> of an advertised template or extension command; any leading /name while that inventory is
   unknown) is refused as non-literal: run it with agent.command. With extensions loaded, agent.send.literal is
   "none", input_transform is "may" (Pi names only command-bearing extensions) and every receipt carries
-  may_transform "unknown"; a launch that itself passes --no-extensions and --no-prompt-templates stays
-  "controlled_launch" with input_transform "none".
+  may_transform "unknown". The launch argv never proves "none" (only Pi's own parsing, possibly behind a wrapper,
+  decides whether --no-extensions took effect, and Pi does not report it). A leading /name is read the ways Pi reads
+  it (JavaScript \s for templates, ' ' for extension commands) and refused if any reading names a known item.
+  Extensions carry their path as name (Pi names none).
 - Snapshots are tail coverage, not complete native history. Shared ItemJournal owns the sole retained entity
   document; native events become puts/appends, with explicit oversized-content omissions.
 

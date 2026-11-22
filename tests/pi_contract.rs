@@ -239,3 +239,17 @@ fn leading_native_slash_names_are_refused_as_non_literal(){
     let mut other=input();other["content"]=json!([{"type":"text","text":"/review"}]);
     assert!(send(&other,&Context {slash_names:None,..context()}).unwrap().args["message"].as_str().unwrap().starts_with("from "));
 }
+
+/// lead-secondary on 124de297: Pi's template regex splits the name on JavaScript \s (U+FEFF, U+3000, ...), its
+/// extension lookup on ' '; a name any reading finds is refused.
+#[test]
+fn slash_name_readings_follow_javascript_whitespace(){
+    let mut args=input();args["origin"]["kind"]=json!("human");args["render"]=json!(["user"]);
+    let names=vec!["review".to_string()];
+    let owner=Context {owner_proven:true,slash_names:Some(&names),..context()};
+    for text in ["/review\u{FEFF}x","/review\u{3000}now","/review\u{2028}x","/review\u{A0}x","/review\u{0B}x","/review x"] {
+        args["content"]=json!([{"type":"text","text":text}]);
+        assert_eq!(send(&args,&owner).err().map(|e|e.kind),Some("unsupported"),"{text:?}");
+    }
+    args["content"]=json!([{"type":"text","text":"/reviewer\u{FEFF}x"}]);assert!(send(&args,&owner).is_ok());
+}

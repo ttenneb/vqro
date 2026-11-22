@@ -75,6 +75,10 @@ async fn startup_version(shared:Arc<Shared>,argv:Vec<String>,cwd:std::path::Path
     }
     drop(agent);shared.wake();
 }
+/// Whether Pi may run input expanders/transformers for this launch. Always true: only Pi's own parsing (of argv that may
+/// pass through a wrapper such as a `pi1` script) decides whether `--no-extensions` / `--no-prompt-templates` took
+/// effect, and Pi does not report it over RPC, so the argv can never prove `input_transform: none`.
+fn launch_may_transform(_argv:&[String])->bool {true}
 fn controlled(mut argv:Vec<String>)->Result<Vec<String>> {
     anyhow::ensure!(!argv.is_empty(),"explicit native argv required");
     for arg in &argv[1..] {
@@ -95,9 +99,7 @@ async fn main()->Result<()> {
     anyhow::ensure!(!instance.is_empty() && instance.len()<=64 && !name.is_empty() && name.len()<=128,"provider identity exceeds bounds");
     // The runtime's own --version from the exact binary the launcher starts (agent-v0 startup, version_source cli).
     let version_argv=args.native.clone();
-    // A launch that itself disables extensions and prompt templates stays a controlled, literal launch.
-    let has=|flags:&[&str]|args.native.iter().any(|arg|flags.contains(&arg.as_str()));
-    let expanders_on=!(has(&["--no-extensions","-ne"]) && has(&["--no-prompt-templates","-np"]));
+    let expanders_on=launch_may_transform(&args.native);
     let argv=controlled(args.native)?;
     let cwd=args.cwd.unwrap_or(std::env::current_dir()?).canonicalize()?;
     let signals=admission::Signals::new();
@@ -105,7 +107,7 @@ async fn main()->Result<()> {
     let mut agent=Agent::with_cwd(instance.clone(),signals.clone(),cwd.to_string_lossy().into_owned());
     agent.account=launcher_account::parse(account_raw.as_deref()).map_err(anyhow::Error::msg)?;
     let shared=Arc::new(Shared {agent:Mutex::new(agent),fallback:panel::Fallback::tty(),connected:std::sync::atomic::AtomicBool::new(false),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),metadata_refresh:Notify::new(),cwd:cwd.to_string_lossy().into_owned(),provider_name:name.clone(),instance:instance.clone(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
-    shared.agent.lock().unwrap().expanders_on=expanders_on;shared.agent.lock().unwrap().refresh();
+    shared.agent.lock().unwrap().expanders_on=expanders_on;
     let weak=Arc::downgrade(&shared);
     let native=Native::spawn(&argv,&cwd,&std::env::vars().collect::<HashMap<_,_>>(),Arc::new(move|event|{
         if let Some(shared)=weak.upgrade(){

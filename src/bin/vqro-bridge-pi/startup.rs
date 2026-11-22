@@ -59,15 +59,16 @@ impl Startup {
         self.set("skills",json!(skills),"rpc:get_commands");self.fields.insert("skills_scope".into(),json!("available"));
         self.set("prompts",json!(prompts),"rpc:get_commands");
         self.set("commands",json!(commands),"rpc:get_commands");
-        // Extensions: Pi lists only those that register a command, identified by their source path (Pi gives no
-        // extension name, so `name` is that path's file name). Always a partial view: `extensions` is incomplete.
+        // Extensions: Pi lists only those that register a command, identified by their source path. Pi gives no
+        // extension name, so `name` is that native identifier (the path) itself, never a derived label; a path over
+        // the name bound is omitted. Always a partial view: `extensions` is incomplete.
         let mut extensions:Vec<Value>=vec![];
         for row in rows.iter().filter(|row|row["source"]=="extension") {
             let Ok(Some(path))=bounded(&row["sourceInfo"]["path"],PATH) else {continue;};
             if extensions.iter().any(|e|e["path"]==path.as_str()) {continue;}
             if extensions.len()>=LIST {break;}
-            // No invented name: an extension whose file name is empty or over the bound is omitted (field incomplete).
-            let Some(name)=path.rsplit('/').next().filter(|n|!n.is_empty() && n.len()<=NAME).map(str::to_string) else {continue;};
+            if path.is_empty() || path.len()>NAME {continue;}
+            let name=path.clone();
             let mut entry=json!({"name":name,"kind":"extension","path":path,"state":"active",
                 "transforms":["input","tool_calls","system_prompt"]}); // Pi extension API: input, tool_call, before_agent_start
             if let Ok(Some(scope))=bounded(&row["sourceInfo"]["scope"],64) {if matches!(scope.as_str(),"user"|"project"){entry["scope"]=json!(scope);}}
