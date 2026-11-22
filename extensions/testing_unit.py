@@ -198,6 +198,9 @@ def collect(state_dir, extensions_dir, *, client=None, hello=None, offline=False
             test_started = time.monotonic()
             test_timeout = timeout if tests_budget is None else min(timeout, max(0, tests_budget))
             test = tests_row(name, extensions_dir, enabled=tests, timeout=test_timeout)
+            if test_timeout < timeout and test["status"] == "fail" and test["evidence"].startswith("timeout"):
+                # Cut short by the shared command budget, not by its own limit: no verdict either way.
+                test = row("tests", name, "unverified", "not finished: command time budget; run the CLI for full tests")
             if tests_budget is not None:
                 tests_budget -= time.monotonic() - test_started
             rows.append(test)

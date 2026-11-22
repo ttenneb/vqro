@@ -283,6 +283,21 @@ class HealthChecks(unittest.TestCase):
             self.assertEqual(timeouts, [120, 120, 120])
         self.assertEqual(unit.tests_row("absent", self.extensions, timeout=0)["status"], "skip")
 
+    def test_budget_cut_short_is_unverified_not_fail(self):
+        directory = self.extensions / "tests" / "sample"
+        directory.mkdir(parents=True)
+        (directory / "test_fixture.py").write_text("# test fixture\n")
+
+        def run(*args, **kwargs):
+            raise unit.subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+        with patch.object(unit.subprocess, "run", side_effect=run):
+            budgeted = self.rows(self.report(tests_budget=5))["tests/sample"]
+            own_limit = self.rows(self.report())["tests/sample"]
+        self.assertEqual(budgeted["status"], "unverified")
+        self.assertIn("command time budget", budgeted["evidence"])
+        self.assertEqual(own_limit["status"], "fail")
+
     def test_tests_runner_scrubs_all_live_environment(self):
         self.install_test("import os, pathlib, unittest\nclass Tests(unittest.TestCase):\n"
                           " def test_env(self):\n"
