@@ -129,6 +129,24 @@ class StartupCard(unittest.TestCase):
         self.assertIn("source not reported", unknown)
         self.assertNotIn("vqro launch record", unknown)
 
+    def test_overbound_names_descriptions_and_status_fields_are_omitted(self):
+        card = self.rows({"skills": [
+            {"name": "界" * 43, "path": "/must-not-survive-name-rejection"},
+            {"name": "retained", "description": "d" * 1025, "path": "/exact/native/path"}],
+            "commands": [{"name": "cmd", "kind": "k" * 65}],
+            "mcp": [{"name": "server", "status": "s" * 65}]})[0]
+        encoded = json.dumps(card, ensure_ascii=False)
+        self.assertNotIn("must-not-survive", encoded)
+        self.assertNotIn("d" * 100, encoded)
+        self.assertNotIn("s" * 64, encoded)
+        self.assertIn("retained", encoded)
+        self.assertIn("/exact/native/path", encoded)
+        self.assertIn("skills", encoded)
+        self.assertIn("incomplete", encoded.lower())
+        original = {"skills": [{"name": "retained", "description": "d" * 1025}]}
+        transcript.startup_row(original)
+        self.assertEqual(len(original["skills"][0]["description"]), 1025, "projection never mutates native facts")
+
     def test_malformed_optional_fields_do_not_break_the_conversation(self):
         for value in ({"skills": [None, 1, {"name": []}], "runtime": []},
                       {"sources": [], "incomplete": [[], 3]}, {"model": {}, "cwd": False}):

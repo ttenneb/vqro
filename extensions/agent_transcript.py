@@ -790,6 +790,10 @@ def startup_row(value):
     incomplete = [shown(f, 64) for f in value.get("incomplete", [])[:32] if isinstance(f, str)] \
         if isinstance(value.get("incomplete"), list) else []
     runtime = value.get("runtime") if isinstance(value.get("runtime"), dict) else {}
+    if isinstance(runtime.get("name"), str) and len(runtime["name"].encode()) > 128:
+        runtime = {}
+        if "runtime" not in incomplete:
+            incomplete.append("runtime")
     identity = " ".join(filter(None, (shown(runtime.get("name")), shown(runtime.get("version")))))
     model, cwd = shown(value.get("model")), shown(value.get("cwd"), 4096)
     if isinstance(value.get("cwd"), str) and len(value["cwd"].encode()) > 4096:
@@ -807,13 +811,25 @@ def startup_row(value):
             for entry in entries[:256]:
                 if not isinstance(entry, dict) or not shown(entry.get("path" if field == "instructions" else "name")):
                     continue
-                raw_path = entry.get("path")
-                if isinstance(raw_path, str) and len(raw_path.encode()) > 4096:
+                if field != "instructions" and len(entry["name"].encode()) > 128:
+                    if field not in incomplete:
+                        incomplete.append(field)
+                    continue
+                limits = {"path": 4096}
+                if field in ("skills", "prompts", "commands"):
+                    limits["description"] = 1024
+                if field == "commands":
+                    limits["kind"] = 64
+                if field == "mcp":
+                    limits["status"] = 64
+                over = {key for key, limit in limits.items()
+                        if isinstance(entry.get(key), str) and len(entry[key].encode()) > limit}
+                if over:
                     if field not in incomplete:
                         incomplete.append(field)
                     if field == "instructions":
                         continue
-                    entry = {key: item for key, item in entry.items() if key != "path"}
+                    entry = {key: item for key, item in entry.items() if key not in over}
                 inventories[field].append(entry)
             if len(entries) > 256 and field not in incomplete:
                 incomplete.append(field)
@@ -892,7 +908,7 @@ def startup_row(value):
                 line += " · " + shown(entry["status"], 64)  # runtime's own word, no status inference
             text(line)
             path(entry.get("path"))
-            description = shown(entry.get("description"), 1024)
+            description = shown(entry.get("description"), 1024) if field in ("skills", "prompts", "commands") else ""
             if description:
                 text(description, "dim")
     if incomplete:
