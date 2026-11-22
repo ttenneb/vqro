@@ -444,6 +444,22 @@ reasoning the runtime exposes for display):
   inferred. Unlike the live `notice` record it is retained, with the normal entity and epoch lifecycle: a new epoch's
   snapshot replaces it like any other entity. Produced by the Pi bridge for native `notify`. For both the entity and
   the live record, an unknown or non-string `severity` is treated as absent.
+- `startup` (id `current`, at most one per epoch): what the runtime natively reports about itself at start-up, for a
+  viewer's start-up card. Every field is optional; absent means not reported, never guessed, and no terminal output is
+  scraped. Fields:
+  - `runtime {name, version?, version_source?}`; `model?` (string); `cwd?` (string);
+  - `instructions?: [{path}]` (instruction/context files the runtime says it loaded);
+  - `skills?: [{name, description?, path?}]` with `skills_scope?: loaded | available`;
+  - `prompts?: [{name, description?, path?}]`; `commands?: [{name, description?, path?, kind?}]`;
+  - `plugins?: [{name, enabled?, version?, path?}]`; `mcp?: [{name, status}]` (`status` the runtime's own word);
+  - `sources?: {<field>: <source>}`: provenance per top-level field, e.g. `"rpc:get_commands"`, `"cli:--version"`,
+    `"vqro:launch"` (a fact vqro itself recorded, such as the launch folder), `"rpc:initialize"`;
+  - `incomplete?: [<field>]`: a list cut to the bounds, or an inventory that errored (then the field is absent);
+  - `native?`: bounded extras.
+  Bounds: each list ≤ 256 entries; `name` ≤ 128 bytes, `description` ≤ 1 KiB, `path` ≤ 4 KiB, `status`/`kind` ≤ 64
+  bytes; the whole entity within the entity bound. An over-bound list or string is cut and its field named in
+  `incomplete`. Inventories that arrive late update the entity in place (a new `rev`); a new epoch's snapshot
+  replaces it. Paths are as the runtime reports them (absolute or as given); viewers may open or copy them.
 - Kinds starting with `_` are implementation-private state (for example the Pi bridge's `_ui`): retained in the
   stream, which viewers need not show (a debug view may), and not part of this contract.
 
