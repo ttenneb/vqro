@@ -459,7 +459,9 @@ reasoning the runtime exposes for display):
   Bounds: each list ≤ 256 entries; `name` ≤ 128 bytes, `description` ≤ 1 KiB, `path` ≤ 4 KiB, `status`/`kind` ≤ 64
   bytes; the whole entity within the entity bound. An over-bound list or string is cut and its field named in
   `incomplete`. Inventories that arrive late update the entity in place (a new `rev`); a new epoch's snapshot
-  replaces it. Paths are as the runtime reports them (absolute or as given); viewers may open or copy them.
+  replaces it. Paths are as the runtime reports them (absolute or as given), on the runtime's own host; they carry
+  no evidence of which machine that is. Viewers copy them, and offer to open one only through a route positively known
+  to reach that host (never by assuming the viewer's or the core's machine is the runtime's).
 - Kinds starting with `_` are implementation-private state (for example the Pi bridge's `_ui`): retained in the
   stream, which viewers need not show (a debug view may), and not part of this contract.
 
