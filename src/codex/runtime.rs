@@ -324,7 +324,7 @@ impl Runtime {
                 }
                 if matches!(
                     method.as_str(),
-                    "account/updated" | "account/login/completed"
+                    "account/updated" | "account/login/completed" | "account/rateLimits/updated"
                 ) {
                     self.account_revision.fetch_add(1, Ordering::AcqRel);
                 }

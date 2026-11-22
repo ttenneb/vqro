@@ -169,6 +169,42 @@ fn stale_foreign_and_ended_signals_cannot_block_or_revive() {
     assert_eq!(e.lifecycle, "ended");
 }
 
+#[test]
+fn each_persistent_cause_requires_its_own_native_clear_even_across_retrying() {
+    for reason in ["auth", "_retrying"] {
+        let mut e = endpoint();
+        e.notification("error", &error(json!("usageLimitExceeded"), json!(false)));
+        e.notification(
+            "turn/completed",
+            &json!({"threadId":"s1","turn":{"id":"t1","status":"failed"}}),
+        );
+        e.notification("turn/started", &json!({"threadId":"s1","turn":{"id":"t2"}}));
+        let mut next = error(json!("unauthorized"), json!(reason == "_retrying"));
+        next["turnId"] = json!("t2");
+        e.notification("error", &next);
+        assert_eq!(availability(&e)["reason"], reason);
+        if reason == "auth" {
+            e.notification("account/login/completed", &json!({"success":true}));
+        } else {
+            e.notification(
+                "turn/completed",
+                &json!({"threadId":"s1","turn":{"id":"t2","status":"failed"}}),
+            );
+        }
+        assert_eq!(
+            availability(&e)["state"],
+            "blocked",
+            "{reason} clear must not imply quota recovery"
+        );
+        assert_eq!(availability(&e)["reason"], "quota");
+        e.notification(
+            "account/rateLimits/updated",
+            &json!({"ordinaryUsageAllowed":true}),
+        );
+        assert_eq!(availability(&e)["state"], "available");
+    }
+}
+
 use std::sync::{Arc, Mutex};
 use tokio::time::{Duration, Instant};
 use vqro::codex::runtime::Runtime;
@@ -242,6 +278,15 @@ async fn wire(permission: Value) -> Wire {
                         .incoming(Incoming::Notification {
                             method: "account/updated".into(),
                             params: json!({"authMode":"chatgpt"}),
+                        });
+                }
+                if let Some(permission) = response.get("_fixture_permission_change") {
+                    account_runtime
+                        .upgrade()
+                        .unwrap()
+                        .incoming(Incoming::Notification {
+                            method: "account/rateLimits/updated".into(),
+                            params: json!({"ordinaryUsageAllowed":permission,"rateLimits":{}}),
                         });
                 }
                 server_peer.respond(id, Ok(response));
@@ -482,6 +527,31 @@ async fn read_timeout_stays_blocked_and_never_resends_input() {
             "account/rateLimits/read"
         ]
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn newer_false_or_null_permission_push_fences_an_older_true_read() {
+    for permission in [json!(false), Value::Null] {
+        let w = wire(json!({"ordinaryUsageAllowed":true,"_fixture_permission_change":permission}))
+            .await;
+        w.native
+            .notify("error", error(json!("usageLimitExceeded"), json!(false)));
+        w.read_notice.notified().await;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            w.runtime.facts()[0]["data"]["agent"]["availability"]["state"],
+            "blocked",
+            "newer {permission} must fence old true"
+        );
+        *w.permission.lock().unwrap() = json!({"ordinaryUsageAllowed":true});
+        tokio::time::advance(Duration::from_secs(60)).await;
+        until(&w, |f| {
+            f["data"]["agent"]["availability"]["state"] == "available"
+        })
+        .await;
+    }
 }
 
 #[tokio::test(start_paused = true)]

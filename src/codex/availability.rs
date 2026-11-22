@@ -1,40 +1,52 @@
-//! Native-only availability. No error-text classification, credential handling or input retry.
+//! Native-only availability. No error-text classification, credentials or input retry.
 use super::{Change, Endpoint};
 use serde_json::{Value, json};
 
 impl Endpoint {
     pub(super) fn reset_availability(&mut self) {
         self.availability = None;
-        self.availability_turn = None;
+        self.availability_blocks.clear();
+        self.availability_retry = None;
         self.availability_generation = self.availability_generation.saturating_add(1);
     }
 
-    fn available(&mut self, native: Value) -> bool {
-        if self
-            .availability
-            .as_ref()
-            .is_none_or(|a| a["state"] != "blocked")
-        {
-            return false;
-        }
-        self.availability = Some(json!({"state":"available","native":native}));
-        self.availability_turn = None;
+    // At most three persistent native classes plus one transient native retry. A clear for one
+    // cause must not invent recovery for another. The public fact shows retry, else latest cause.
+    fn refresh_availability(&mut self, native_clear: Value) -> bool {
+        self.availability = self
+            .availability_retry
+            .clone()
+            .or_else(|| self.availability_blocks.last().cloned())
+            .or_else(|| {
+                self.availability
+                    .as_ref()
+                    .map(|_| json!({"state":"available","native":native_clear}))
+            });
         self.availability_generation = self.availability_generation.saturating_add(1);
         true
     }
 
-    fn reason(&self) -> Option<&str> {
-        self.availability.as_ref()?.get("reason")?.as_str()
+    fn clear_availability_causes(&mut self, reasons: &[&str], native: Value) -> bool {
+        let before = self.availability_blocks.len();
+        self.availability_blocks
+            .retain(|a| !reasons.contains(&a["reason"].as_str().unwrap_or("")));
+        before != self.availability_blocks.len() && self.refresh_availability(native)
     }
 
     pub(super) fn availability_notification(&mut self, method: &str, p: &Value) -> Option<bool> {
         match method {
-            "account/rateLimits/updated" => Some(self.usage_permission(p)),
-            // Exact native0.170 login completion signal; the adapter never initiates login.
+            "account/rateLimits/updated" => {
+                // Even false/null/partial newer metadata fences an older in-flight true read.
+                self.availability_generation = self.availability_generation.saturating_add(1);
+                Some(self.usage_permission(p))
+            }
+            // Exact native0.170 signal; no adapter login/credential flow is introduced.
             "account/login/completed" => Some(
-                self.reason() == Some("auth")
-                    && p["success"] == true
-                    && self.available(json!({"method":method,"success":true})),
+                p["success"] == true
+                    && self.clear_availability_causes(
+                        &["auth"],
+                        json!({"method":method,"success":true}),
+                    ),
             ),
             "error" => {
                 if self.session.is_none() || p["threadId"].as_str() != self.session.as_deref() {
@@ -59,27 +71,29 @@ impl Endpoint {
                     (Some(false), Some("unauthorized")) => "auth",
                     _ => return Some(false),
                 };
-                // Known short category only: arbitrary error text/data can contain secrets.
-                let native = json!({"codexErrorInfo":info.filter(|s| matches!(*s, "usageLimitExceeded" | "rateLimitExceeded" | "unauthorized" | "serverOverloaded" | "internalServerError")),
+                // Known categories only: arbitrary error text/data can contain secrets.
+                let native = json!({"codexErrorInfo":info.filter(|s| matches!(*s,
+                    "usageLimitExceeded" | "rateLimitExceeded" | "unauthorized" | "serverOverloaded" | "internalServerError")),
                     "willRetry":p["willRetry"],"threadId":self.session,"turnId":turn});
-                self.availability =
-                    Some(json!({"state":"blocked","reason":reason,"native":native}));
-                self.availability_turn = Some(turn.into());
-                self.availability_generation = self.availability_generation.saturating_add(1);
-                Some(true)
+                let fact = json!({"state":"blocked","reason":reason,"native":native});
+                if reason == "_retrying" {
+                    self.availability_retry = Some(fact);
+                } else {
+                    self.availability_blocks.retain(|a| a["reason"] != reason);
+                    self.availability_blocks.push(fact);
+                }
+                Some(self.refresh_availability(Value::Null))
             }
             _ => None,
         }
     }
 
     fn usage_permission(&mut self, p: &Value) -> bool {
-        if matches!(self.reason(), Some("quota" | "rate_limited"))
-            && p["ordinaryUsageAllowed"] == true
-        {
-            self.available(json!({"method":"account/rateLimits","ordinaryUsageAllowed":true}))
-        } else {
-            false
-        }
+        p["ordinaryUsageAllowed"] == true
+            && self.clear_availability_causes(
+                &["quota", "rate_limited"],
+                json!({"method":"account/rateLimits","ordinaryUsageAllowed":true}),
+            )
     }
 
     pub(super) fn availability_turn_completed(&mut self, turn: &Value) {
@@ -90,17 +104,29 @@ impl Endpoint {
             turn["status"].as_str(),
             Some("completed" | "failed" | "interrupted")
         );
-        let retry_end =
-            self.reason() == Some("_retrying") && self.availability_turn.as_deref() == Some(id);
+        let retry_end = self
+            .availability_retry
+            .as_ref()
+            .is_some_and(|a| a["native"]["turnId"] == id);
         let success = self.run.as_deref() == Some(id) && turn["status"] == "completed";
         if terminal && (retry_end || success) {
-            self.available(json!({"method":"turn/completed","turnId":id,"status":turn["status"]}));
+            if success {
+                self.availability_blocks.clear();
+            }
+            self.availability_retry = None;
+            self.refresh_availability(
+                json!({"method":"turn/completed","turnId":id,"status":turn["status"]}),
+            );
         }
     }
 
     pub(super) fn availability_read_fence(&self) -> Option<(String, u64)> {
-        (self.lifecycle == "live" && matches!(self.reason(), Some("quota" | "rate_limited")))
-            .then(|| (self.epoch.clone(), self.availability_generation))
+        (self.lifecycle == "live"
+            && self
+                .availability_blocks
+                .iter()
+                .any(|a| matches!(a["reason"].as_str(), Some("quota" | "rate_limited"))))
+        .then(|| (self.epoch.clone(), self.availability_generation))
     }
 
     pub(super) fn finish_availability_read(
@@ -122,7 +148,7 @@ mod tests {
     use super::*;
     #[test]
     fn late_permission_never_clears_a_new_block_epoch_or_ended_endpoint() {
-        for change in ["block", "epoch", "end"] {
+        for change in ["block", "epoch", "end", "null_permission"] {
             let mut e = Endpoint::new("e".into(), "inc".into(), "host".into(), "epoch".into());
             e.set_session(
                 &json!({"id":"s1","status":{"type":"idle"}}),
@@ -142,6 +168,12 @@ mod tests {
                         "epoch2".into(),
                     )
                     .unwrap();
+                }
+                "null_permission" => {
+                    e.notification(
+                        "account/rateLimits/updated",
+                        &json!({"ordinaryUsageAllowed":null}),
+                    );
                 }
                 _ => {
                     e.host_exited("native EOF");
