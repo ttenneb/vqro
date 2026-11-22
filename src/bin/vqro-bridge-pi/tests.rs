@@ -379,3 +379,12 @@ async fn startup_version_child_gets_the_filtered_native_environment(){
     assert_eq!(value["runtime"]["version"],"none/none//s.sock","{value}");
     dispose(&shared,&provider).await;
 }
+
+/// Human stopgap (b): the controlled launch keeps extensions and prompt templates off but no longer disables skills.
+#[test]
+fn controlled_launch_enables_skills_but_not_extensions_or_templates(){
+    let argv=controlled(vec!["pi".into()]).unwrap();
+    assert_eq!(argv,["pi","--mode","rpc","--no-extensions","--no-prompt-templates"]);
+    assert!(!argv.iter().any(|arg|arg=="--no-skills"));
+    for forbidden in ["-e","--extension=x","--prompt-template=y","-p","--print"] {assert!(controlled(vec!["pi".into(),forbidden.into()]).is_err(),"{forbidden}");}
+}
