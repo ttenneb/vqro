@@ -195,3 +195,25 @@ fn skill_prefixed_owner_text_is_refused_as_non_literal(){
     let sent=send(&other,&context()).unwrap();
     assert!(sent.args["message"].as_str().unwrap().starts_with("from ")&&sent.args["message"].as_str().unwrap().ends_with("\n\n/skill:review"));
 }
+
+/// lead-secondary control on 329fd91c: with skills enabled, literal data must not reach native skill expansion.
+#[test]
+fn secondary_enabled_skills_literal_owner_prefix_refuses_before_dispatch() {
+    let mut unsafe_modes = Vec::new();
+    for mode in ["start", "admit", "boundary", "settle"] {
+        let mut args = input();
+        args["mode"] = json!(mode);
+        args["origin"]["kind"] = json!("human");
+        args["content"][0]["text"] = json!("/skill:known");
+        let framed = send(&args, &context()).unwrap();
+        assert!(!framed.args["message"].as_str().unwrap().starts_with("/skill:"));
+        match send(&args, &Context { owner_proven: true, ..context() }) {
+            Err(error) => assert_eq!(error.kind, "unsupported"),
+            Ok(prepared) => {
+                assert_eq!(prepared.args["message"], "/skill:known");
+                unsafe_modes.push(mode);
+            }
+        }
+    }
+    assert!(unsafe_modes.is_empty(), "literal owner skill prefixes dispatched in {unsafe_modes:?}");
+}
