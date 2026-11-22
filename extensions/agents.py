@@ -878,9 +878,8 @@ class Agents:
             rows.append({"id": "waiting", "pin": "bottom", "style": "warn", "command": "agents.answer", "args": {"resource": rid},
                          "text": f"⚠ {name} is waiting for your answer: " + head(plain(str(waiting[0].get("title") or waiting[0]["request"])), 160) + more,
                          "description": (str(fallback) + ' · ' if fallback else '') + "Enter: answer…",
-                         # [Answer…] (feature actions; mockup Screen D), the same in the menu for other clients.
-                         "actions": [{"text": "Answer…", "command": "agents.answer", "args": {"resource": rid}}],
-                         "menu": [{"label": "Answer…", "command": "agents.answer", "args": {"resource": rid}}]})
+                         # Answer stays in the pane (button/Enter), never in a right-click menu.
+                         "actions": [{"text": "Answer…", "command": "agents.answer", "args": {"resource": rid}}]})
         # The pane's one settings button, ⚙ (agents.pane: view filters, agent settings, bridge terminal, stop). The
         # user's icon set draws it (a bare "⚙" is ambiguous width: its highlight came out uneven).
         gear = {"text": "", "icon": {"name": "settings", "text": "⚙"}, "style": "control", "icon_style": "control", "command": "agents.pane", "args": {"resource": rid}}
@@ -1721,27 +1720,17 @@ class Agents:
                                  ("send", "Send to agent"), ("pane", "Agent pane"), ("tools", "Tools")):
                 entries[f"view/agents-{popup}-{rid}"] = {"kind": "panel", "title": f"{title} {rid}", "items": [
                     {"type": "text", "text": "Loading… (stays if the agents extension is not running)"}]}
-            # The ⚙ (view filters, settings, bridge terminal, stop) is also in the pane menu: recovery, D15.
-            entries["menu/agents."+rid+".pane"] = {"where": "pane", "label": "Pane options (⚙)…", "command": "agents.pane",
-                                                  "when": {"view": view(rid)}, "order": 98}
-            entries["menu/agents."+rid+".stop"] = {"where": "pane", "label": "Stop agent…", "command": "agents.stop",
-                                                  "when": {"view": view(rid)}, "order": 190}
-            # Static (menus are workspace entries; no churn per disconnect): the command refuses connected agents.
-            entries["menu/agents."+rid+".forget"] = {"where": "pane", "label": "Forget agent (if unavailable)", "command": "agents.forget",
-                                                    "when": {"view": view(rid)}, "order": 191}
-            for i, (op, title) in enumerate(EFFECTS.items()):
-                if not self.supported(r, op):
-                    continue
-                menu = {"where": "pane", "label": title, "command": "agents."+op, "when": {"view": view(rid)}, "order": 100+i}
-                if op in ("prompt", "steer", "follow_up"):
-                    menu["input"] = title
-                entries["menu/agents."+rid+"."+op] = menu
-            if self.modes(r):
-                entries["menu/agents."+rid+".send"] = {"where": "pane", "label": "Send…", "command": "agents.send",
-                                                       "when": {"view": view(rid)}, "order": 98}
-            if self.has_settings(r):
-                entries["menu/agents."+rid+".settings"] = {"where": "pane", "label": "Agent settings…", "command": "agents.config",
-                                                           "when": {"view": view(rid)}, "order": 99}
+            # Mouse-only actions use the existing live context. Abort/Clear queue wait for explicit
+            # working/queued context support; never offer them unconditionally. Keys/commands stay intact.
+            actions = [("stop", "Stop agent…", "agents.stop", True, self.can_stop(r)),
+                       ("settings", "Agent settings…", "agents.config", True, self.has_settings(r)),
+                       ("pane", "Pane options…", "agents.pane", True, True),
+                       ("forget", "Forget agent", "agents.forget", False, True)]
+            for i, (key, title, command, live, supported) in enumerate(actions):
+                if supported:
+                    entries[f"menu/agents.{rid}.{key}"] = {"where": "pane", "label": title, "command": command,
+                        "args": {"resource": rid}, "when": {"view": view(rid), "live": live},
+                        "group": "agent", "order": 100 + i}
         return entries
 
     def refresh(self, prune_views=False):

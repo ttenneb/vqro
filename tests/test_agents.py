@@ -72,7 +72,7 @@ class AgentsTests(unittest.TestCase):
         self.core.providers["other"]["capabilities"] = {"agent.abort": {}}
         self.core.resources["r2"]["data"] = {"custom": "native other runtime"}
         self.agents.event("resource", {"id": "r2"})
-        self.assertIsNotNone(self.core.value("menu/agents.r2.abort"))
+        self.assertIsNone(self.core.value("menu/agents.r2.abort"), "Abort waits for state-aware context")
         self.assertIsNone(self.core.value("menu/agents.r2.prompt"))
         self.assertIsNone(self.core.value("menu/agents.r2.answer"))
         result = self.command("show", resource="r2")
@@ -91,7 +91,7 @@ class AgentsTests(unittest.TestCase):
         self.core.providers["other"]["capabilities"] = {"agent.abort": {}}
         self.agents.event("provider", {"name": "other"})
         self.assertIsNone(self.core.value("menu/agents.r2.prompt"))
-        self.assertIsNotNone(self.core.value("menu/agents.r2.abort"))
+        self.assertIsNone(self.core.value("menu/agents.r2.abort"), "Abort waits for state-aware context")
 
     def test_missing_provider_declarations_offer_no_native_actions(self):
         self.core.add_agent()
@@ -203,7 +203,7 @@ class AgentsTests(unittest.TestCase):
         Agents(core)
         self.assertIsNone(core.value("binding/agents.new"))
         self.assertEqual(core.value("menu/pi.new")["owner"], "pi")
-        self.assertIsNotNone(core.value("menu/agents.r2.prompt"))
+        self.assertIsNone(core.value("menu/agents.r2.prompt"), "typing shortcuts no longer appear on right-click")
 
     def test_activation_keeps_referenced_panels_before_inventory_returns(self):
         core = FakeCore()
@@ -251,7 +251,7 @@ class AgentsTests(unittest.TestCase):
     def test_agent_settings_popup_configure_and_command_use_only_declared_rows(self):
         self.declare_settings()
         menu = self.core.value("menu/agents.r2.settings")
-        self.assertEqual((menu["command"], menu["when"]), ("agents.config", {"view": "agents-r2"}))
+        self.assertEqual((menu["command"], menu["when"]), ("agents.config", {"view": "agents-r2", "live": True}))
         self.assertEqual(self.core.live["agents-r2"]["items"][0]["command"], "agents.config", "panel row opens it too")
         self.command("list")
         row = self.core.live["agents-list"]["items"][0]
@@ -343,7 +343,7 @@ class AgentsTests(unittest.TestCase):
 
     def test_stop_asks_first_then_kills_only_the_host_terminal_and_reports_the_outcome(self):
         self.stoppable()
-        self.assertEqual(self.core.value("menu/agents.r2.stop")["when"], {"view": "agents-r2"})
+        self.assertEqual(self.core.value("menu/agents.r2.stop")["when"], {"view": "agents-r2", "live": True})
         self.assertIsNotNone(self.core.value("view/agents-stop-r2"), "popup declared with the agent, not on click")
         before = len(self.core.transactions)
         popup = self.command("stop", context={"view": "agents-r2"})
@@ -422,7 +422,8 @@ class AgentsTests(unittest.TestCase):
         self.core.add_agent()
         self.core.resources["r4"] = dict(self.core.resources["r2"], id="r4")
         self.agents.event("resource", {})
-        template = self.core.value("menu/agents.r2.prompt")
+        self.assertIsNone(self.core.value("menu/agents.r2.prompt"))
+        template = self.core.value("binding/agents.prompt")
         self.command("prompt", **dict(template.get("args", {}), context={"view": "agents-r4"}, text="focused"))
         self.assertEqual(self.native()[-1][1]["resource"], "r4")
 
@@ -467,7 +468,7 @@ class AgentV0Tests(unittest.TestCase):
         self.assertTrue(args["delivery"].startswith("d:"))
         self.assertEqual(args["origin"], {"kind": "human"}, "identity is the core's record (C2); only the claim is ours")
         self.assertIsNone(self.core.value("menu/agents.r2.steer"), "boundary is not declared")
-        self.assertIsNotNone(self.core.value("menu/agents.r2.send"))
+        self.assertIsNone(self.core.value("menu/agents.r2.send"), "typing remains in the pane, keys and command list")
         self.command("follow_up", resource="r2", text="later")
         self.assertEqual(self.native()[-1][1]["args"]["mode"], "settle")
 

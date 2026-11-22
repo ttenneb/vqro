@@ -302,13 +302,24 @@ class E2E:
         self.ui('send-keys', '-t', 'ui:0.0', 'm')
         self.ui_frame('pane-menu', title)
         # The TUI's pane context, as `when` sees it (`zoomed`: Zoom/Unzoom).
+        snapshot = self.snapshot()
         context = {'view': 'agents-'+rid, 'kind': 'panel', 'resource': rid, 'resource_kind': 'agent', 'live': True, 'zoomed': False}
-        rows = [(v['value'].get('order', 0), k, v['value']) for k, v in self.snapshot()['entries'].items()
+        rows = [(v['value'].get('order', 0), k, v['value']) for k, v in snapshot['entries'].items()
                 if k.startswith('menu/') and v['value'].get('where') == 'pane'
                 and all(context.get(field) == value for field, value in v['value'].get('when', {}).items())]
         rows.sort(key=lambda r: (r[0], r[1]))
         index = next(i for i, (_, _, item) in enumerate(rows) if item.get('label') == title)
         self.ui('send-keys', '-t', 'ui:0.0', *(['Down']*index), 'Enter')
+
+    def ui_command(self, command, title):
+        self.ui('send-keys', '-t', 'ui:0.0', 'C-g', ':')
+        self.ui('send-keys', '-t', 'ui:0.0', '-l', command)
+        self.ui_frame('command-list-' + command, title)
+        self.ui('send-keys', '-t', 'ui:0.0', 'Enter')
+
+    def ui_abort(self):
+        # Abort remains a command-list action while state-aware right-click support is deferred.
+        self.ui_command('agents.abort', 'Abort')
 
     def ui_launch(self):
         before = self.snapshot()
@@ -327,14 +338,15 @@ class E2E:
         event = self.audit_error(cursor, 'observed', 'resource.spawn')
         rid = agent['id']
         self.ui_navigation(rid, agent['host'])
-        self.ui_menu(rid, 'Prompt')
+        self.ui('send-keys', '-t', 'ui:0.0', 'C-g', 'p')  # typing stays on the prompt key, not right-click
+        self.ui_frame('prompt-key-input', 'Prompt agent')
         self.ui('send-keys', '-t', 'ui:0.0', '-l', 'ui-typed-prompt')
         self.ui_frame('prompt-input', 'ui-typed-prompt')
         self.ui('send-keys', '-t', 'ui:0.0', 'Enter')
         self.agent(rid, lambda r: r['data']['run']['active'])
         self.ui_frame('working', 'working', 'Running')
         assert next(row for row in reversed(self.trace()) if row.get('type') == 'prompt')['message'] == 'ui-typed-prompt', 'agent input was implicitly prefilled'
-        self.ui_menu(rid, 'Abort')
+        self.ui_abort()
         self.agent(rid, lambda r: r['data']['run']['settled'] and r['data']['run']['aborted'])
         # Prefix p on the focused agent pane: asks for the text, then the agent receives exactly it.
         prompts = sum(row.get('type') == 'prompt' for row in self.trace())
@@ -345,7 +357,7 @@ class E2E:
         self.agent(rid, lambda r: r['data']['run']['active'])
         sent = [row['message'] for row in self.trace() if row.get('type') == 'prompt']
         assert sent[prompts:] == ['prefix p: exact text'], sent
-        self.ui_menu(rid, 'Abort')
+        self.ui_abort()
         self.agent(rid, lambda r: r['data']['run']['settled'] and r['data']['run']['aborted'])
         self.log.append({'prefix_p_prompt': 'PASS', 'received': sent[prompts:]})
         # Agent settings: the bridge declares Pi's model choices; picking one sends exactly set_model.
@@ -362,7 +374,8 @@ class E2E:
         self.ui_frame('model-changed', 'Model', 'Fake Large')
         self.ui('send-keys', '-t', 'ui:0.0', 'Escape')
         self.log.append({'agent_settings_model': 'PASS', 'set_model': changed})
-        self.ui_menu(rid, 'Prompt')
+        self.ui('send-keys', '-t', 'ui:0.0', 'C-g', 'p')
+        self.ui_frame('failed-turn-prompt-key', 'Prompt agent')
         self.ui('send-keys', '-t', 'ui:0.0', '-l', 'fixture-model-error')
         self.ui('send-keys', '-t', 'ui:0.0', 'Enter')
         failed = self.agent(rid, lambda r: r['status']['state'] == 'error' and r['data']['run']['settled'])
@@ -435,7 +448,7 @@ class E2E:
         self.ui('send-keys', '-t', 'ui:0.0', '-H', *[f'{byte:02x}' for byte in click])
         self.ui_frame('sidebar-focused-agent', 'Ready for a prompt', 'Bridge terminal')
         self.ui('send-keys', '-t', 'ui:0.0', 'C-g', 'm')
-        self.ui_frame('sidebar-click-focus-menu', 'Prompt', 'Abort')
+        self.ui_frame('sidebar-click-focus-menu', 'Stop agent…', 'Pane options…')
         self.ui('send-keys', '-t', 'ui:0.0', 'Escape')
         for args in ({'resource': rid}, {'picked': rid}):
             self.call('command.invoke', {'name': 'tabs.show', 'args': args})
@@ -469,7 +482,8 @@ class E2E:
         self.call('workspace.apply', {'ops': [{'op': 'set', 'key': 'extension/other-agent', 'value': {'enabled': True,
             'argv': ['/usr/bin/python3', str(REPO/'tests/fixtures/other_agent.py')]}}], 'note': 'Other native runtime fixture'})
         other = self.wait(lambda: next((r for r in self.snapshot()['resources'] if r.get('provider') == 'other-agent' and r.get('available')), None), 'non-Pi agent')
-        self.wait(lambda: self.snapshot()['entries'].get('menu/agents.'+other['id']+'.abort'), 'declared other abort menu')
+        self.wait(lambda: self.snapshot()['entries'].get('menu/agents.'+other['id']+'.pane'), 'declared other pane menu')
+        assert 'menu/agents.'+other['id']+'.abort' not in self.snapshot()['entries'], 'Abort waits for state-aware menu context'
         assert 'menu/agents.'+other['id']+'.prompt' not in self.snapshot()['entries']
         self.invoke(other['id'], 'abort', outcome='observed')
         self.call('command.invoke', {'name': 'agents.show', 'args': {'resource': other['id']}})
@@ -742,7 +756,7 @@ class E2E:
             if self.args.agents_ui:
                 before_answer = self.snapshot()
                 cursor = {key: before_answer[key] for key in ('epoch', 'seq')}
-                self.ui_menu(rid, 'Answer pending request')
+                self.ui_command('agents.answer', 'Answer pending request')
                 self.ui_frame('requests', 'Requests: '+rid, 'Fixture confirmation')
                 self.ui('send-keys', '-t', 'ui:0.0', 'Enter')
                 self.ui_frame('confirm-options', 'Yes', 'No')
