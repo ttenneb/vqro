@@ -117,12 +117,13 @@ def capacities(rows, candidates):
 
 
 def pick_new(ext, candidates, runtime):
-    mode=settings(ext)['new_agents']
+    configured=settings(ext);mode=configured['new_agents']
     if mode=='ask': return None
     try: observed=resources(ext)
     except VqroError: return None  # no cached/guessed capacity fallback
     blocked_ids={configured_id(row) for row in observed if blocked(row)}
-    eligible=[row for row in candidates if row['id'] not in blocked_ids]
+    eligible=[row for row in candidates if row['id'] not in blocked_ids
+              and (row['kind']!='api_key' or configured['api_key_overflow'])]
     if mode=='most_remaining_capacity':
         scores=capacities(observed,eligible)
         eligible=[row for row in eligible if scores.get(row['id']) is not None and scores[row['id']]>0]

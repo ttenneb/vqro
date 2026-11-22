@@ -91,6 +91,20 @@ class CapacityPolicy(unittest.TestCase):
         self.core.op_entry={'version':1,'value':{'attempts':{'old':'unsupported future row'},'children':[],'hosts':[],'uncertain':{}}}
         self.accounts.handle_blocked('old');self.assertEqual(self.core.launches,[])
 
+    def test_implicit_new_agent_choices_do_not_use_api_key_profiles_without_opt_in(self):
+        paid=self.add('paid',kind='api_key')
+        self.settings(new_agents='round_robin')
+        with self.subTest(mode='round_robin'):
+            self.assertEqual([self.choose()[0]['id'] for _ in range(4)],['a','b','a','b'])
+        self.settings(new_agents='most_remaining_capacity')
+        self.core.resources['free']=resource('free',self.b,50)
+        self.core.resources['paid']=resource('paid',paid,0)
+        with self.subTest(mode='most_remaining_capacity'):self.assertEqual(self.choose()[0]['id'],'b')
+        self.settings(new_agents='most_remaining_capacity',api_key_overflow=True)
+        self.assertEqual(self.choose()[0]['id'],'paid')
+        explicit,_=profiles.choose(self.core,{'account':'paid'},'pi','pi.new')
+        self.assertEqual(explicit['id'],'paid')
+
     def test_round_robin_cas_failure_does_not_start_anything(self):
         self.settings(new_agents='round_robin');apply=self.core.apply
         def fail_cursor(ops,note):

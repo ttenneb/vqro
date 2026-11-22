@@ -81,8 +81,10 @@ Accounts offers `doc/settings/accounts-policy` (ordinary undoable workspace conf
   unknown capacity labelled. Automatic handling requires a known configured source and positive fresh reported
   headroom on an alternative, and a single unambiguous inert runtime executable. Otherwise it reports no action.
   Automatic targets use most reported headroom, independently of the new-agent picker setting.
-- `api_key_overflow` is off by default. Turning it on permits already-configured API-key profiles as overflow
-  targets; it does not import/store/unlock keys or initiate billing/model requests. Native setup stays separate.
+- `api_key_overflow` is off by default: implicit rotation/capacity choices and blocked-agent alternatives exclude
+  API-key profiles. Turning it on permits already-configured API-key profiles in automatic selection/overflow;
+  explicit account choices are unaffected. It does not import/store/unlock keys or send a model request. Native
+  setup stays separate; declared kind is not verified billing identity.
 
 A restart does **not** stop, switch, resume, migrate or feed the blocked conversation. No source prompt, transcript,
 queue, session ID, cwd or model choice is copied. The launch uses its ordinary project/runtime defaults with

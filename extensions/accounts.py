@@ -46,7 +46,7 @@ class Accounts:
             items.append({'type':'text','style':'warn','text':'Unrecognized account policy: using ask + notify, no API-key overflow. Saving replaces the invalid policy.'})
         for field,title,choices in [('new_agents','New agents',['ask','most_remaining_capacity','round_robin']),
                 ('blocked','When quota/rate limited',['notify','offer_restart','auto_restart']),
-                ('api_key_overflow','Allow API-key overflow',[False,True])]:
+                ('api_key_overflow','Allow automatic API-key profiles',[False,True])]:
             items.append({'type':'select','text':title,'value':configured[field], 'command':'accounts.policy',
                           'args':{'field':field,'expect':entry['version'] if entry else 0},
                           'options':[{'label':str(value).replace('_',' '),'value':value} for value in choices]})
