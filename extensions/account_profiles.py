@@ -113,6 +113,17 @@ def native_login_argv(runtime, argv):
     return out + (['login'] if runtime == 'codex' else ['auth','login'] if runtime == 'claude' else [])
 
 
+def require_fresh(runtime, argv):
+    """Fresh-work launches must not execute/resume a configured prompt or conversation."""
+    try: native_login_argv(runtime, argv)  # strict inert-options/script-prefix validator, never executed
+    except VqroError:
+        raise VqroError('fresh work refuses resume, prompt-bearing or unrecognized native argv','unsupported') from None
+    if runtime == 'codex':
+        tail = argv[argv.index('app-server')+1:]
+        if tail not in ([], ['--stdio'], ['--listen','stdio://']):
+            raise VqroError('fresh Codex work requires a plain stdio app-server launch','unsupported')
+
+
 def environment(account, env=None):
     result = dict(env or {})
     # Untrusted runtime settings cannot smuggle a different account fact into a normal launch.
@@ -129,15 +140,22 @@ def choose(ext, args, runtime, command):
     if '_account_revision' in args and args['_account_revision'] != revision:
         raise VqroError('account choices changed; choose again before launching', 'stale')
     candidates = [row for row in rows if row['runtime'] == runtime]
-    if selected == 'normal' or selected is None and not candidates:
-        return None, None
+    if selected == 'normal': return None, None
+    if selected is None and not candidates:
+        from accounts_policy import settings
+        if settings(ext)['new_agents'] == 'ask': return None, None
+        # Explicit capacity/rotation policy with no candidate must ask, not guess normal-login capacity.
     if selected is not None:
         account = next((row for row in candidates if row['id'] == selected), None)
         if account is None:
             raise VqroError('account is missing or belongs to another program; nothing launched', 'invalid')
         return account, None
+    if selected is None:
+        from accounts_policy import pick_new
+        account = pick_new(ext, candidates, runtime)
+        if account is not None: return account, None
     view = 'accounts-choice-' + command.replace('.', '-')
-    forwarded = {k:args[k] for k in ('runtime','cwd','context') if k in args}
+    forwarded = {k:args[k] for k in ('runtime','cwd','context','fresh') if k in args}
     ext.publish(view, {'title':'New '+runtime+' agent: account', 'requires':['menu'], 'items':[
         {'text':'Use my normal login', 'description':'Native defaults; login and billing mode not inspected', 'command':command,
          'args':dict(forwarded, account='normal', _account_revision=revision)},

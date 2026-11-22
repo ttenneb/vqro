@@ -13,7 +13,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
-from account_profiles import choose as choose_account, environment as account_environment, runtime_environment
+from account_profiles import choose as choose_account, environment as account_environment, runtime_environment, require_fresh
 from agent_launch import initialize_request_route, launch, launch_cwd, runtimes as validate_runtimes
 
 SETTINGS = 'doc/settings/codex'
@@ -63,10 +63,11 @@ class Codex:
             self.ext.publish('codex-runtimes', {'title': 'New Codex agent: runtime', 'requires': ['menu'], 'items': [
                 {'text': label(row['name']), 'description': label(' '.join(row['argv'])), 'command': 'codex.new',
                  'args': {'runtime': row['name'], **({'cwd': cwd} if cwd else {}),
-                          **{k:args[k] for k in ('account','_account_revision') if k in args}}} for row in options]})
+                          **{k:args[k] for k in ('account','_account_revision','fresh') if k in args}}} for row in options]})
             return {'client': {'popup': {'view': 'codex-runtimes', 'width': 72}}}
         runtime = next((row for row in options if row['name'] == selected), None) if selected is not None else options[0]
         if runtime is None: raise VqroError('configured Codex runtime not found', 'invalid')
+        if args.get('fresh') is True: require_fresh('codex', runtime['argv'])
         account, popup = choose_account(self.ext, dict(args, runtime=runtime['name'], **({'cwd':cwd} if cwd else {})), 'codex', 'codex.new')
         if popup: return popup
         principal = 'p:' + uuid.uuid4().hex

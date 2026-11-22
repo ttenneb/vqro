@@ -28,7 +28,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
-from account_profiles import choose as choose_account, environment as account_environment, provider_argv, fact as account_fact
+from account_profiles import choose as choose_account, environment as account_environment, provider_argv, fact as account_fact, require_fresh
 
 HERE = Path(__file__).resolve().parent
 RUN = HERE / "tier1_run.py"
@@ -100,6 +100,7 @@ class Tier1:
         settings = self.ext.value(SETTINGS, DEFAULTS)
         argv = settings.get(runtime) if isinstance(settings, dict) else None
         argv = argv if valid_argv(argv) else DEFAULTS[runtime]
+        if args.get('fresh') is True: require_fresh(runtime, argv)
         account, popup = choose_account(self.ext, args, runtime, 'tier1.'+runtime)
         if popup: return popup
         argv = provider_argv(argv, account)

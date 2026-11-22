@@ -9,7 +9,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
-from account_profiles import choose as choose_account, environment as account_environment, provider_argv, runtime_environment
+from account_profiles import choose as choose_account, environment as account_environment, provider_argv, runtime_environment, require_fresh
 from agent_launch import initialize_request_route, launch, launch_cwd, runtimes as validate_runtimes, valid_argv
 
 SETTINGS = "doc/settings/pi"
@@ -68,11 +68,12 @@ class Pi:
             self.ext.publish("pi-runtimes", {"title": "New Pi agent: runtime", "requires": ["menu"], "items": [
                 {"text": label(r["name"]), "description": label(" ".join(r["argv"])), "command": "pi.new",
                  "args": {"runtime": r["name"], **({"cwd": cwd} if cwd else {}),
-                          **{k:args[k] for k in ('account','_account_revision') if k in args}}} for r in options]})
+                          **{k:args[k] for k in ('account','_account_revision','fresh') if k in args}}} for r in options]})
             return {"client": {"popup": {"view": "pi-runtimes", "width": 72}}}
         runtime = next((r for r in options if r["name"] == selected), None) if selected is not None else options[0]
         if runtime is None:
             raise VqroError("configured runtime not found", "invalid")
+        if args.get('fresh') is True: require_fresh('pi', runtime['argv'])
         account, popup = choose_account(self.ext, dict(args, runtime=runtime['name'], **({'cwd':cwd} if cwd else {})), 'pi', 'pi.new')
         if popup: return popup
         native_argv = provider_argv(runtime['argv'], account)

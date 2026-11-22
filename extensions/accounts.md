@@ -1,4 +1,4 @@
-# Runtime accounts (slice 1)
+# Runtime accounts and capacity policy
 
 `accounts.show` opens a metadata-only registry and native sign-in actions. Account records live in
 `doc/settings/accounts = {"accounts": [...]}`. The **Add account…** prompt accepts a JSON object, for example:
@@ -15,7 +15,7 @@ not performed. The native runtime creates/manages the profile when you sign in; 
 copies, migrates or deletes profile contents. Never put a token/API key/credential in registry fields or argv.
 Only metadata fields are accepted; secret-shaped extra fields are rejected.
 
-With named accounts present, `pi.new`, `codex.new`, `tier1.pi` and `tier1.claude` ask for an account before spawning.
+With named accounts present, `pi.new`, `codex.new`, `tier1.pi` and `tier1.claude` default to asking for an account before spawning; the optional policy below changes only implicit NEW-agent choices.
 An explicit `account:<id>` selects it; `account:"normal"` means **Use my normal login**, keeping the launcher's
 existing native profile behavior. With no matching records, existing launch commands behave as before. Offered
 choices carry a registry revision; a changed registry requires choosing again. No prompt/input is sent at launch,
@@ -53,8 +53,60 @@ Tier-1 terminals retain equivalent configured metadata in their launcher declara
 agent endpoint. The tier1 wrapper strips internal `VQRO_ACCOUNT` before native exec while retaining the selected
 native profile selector, so nested normal launches cannot inherit stale configured-account facts. Unknown/malformed metadata is rejected before a native child is started.
 
-No account switching of an existing conversation, automatic capacity balancing, overflow/replay, usage fetching,
-provider-specific OAuth implementation, credential storage or authenticated verification is added. Disable the
-accounts UI to remove its commands/menu; existing processes/native stores are untouched, and launchers can still
-interpret explicitly configured account metadata. This extension is replaceable using public workspace commands;
-core has no accounts registry or authentication policy.
+## Capacity strategies (slice 3)
+
+Accounts offers `doc/settings/accounts-policy` (ordinary undoable workspace configuration):
+
+```json
+{"new_agents":"ask","blocked":"notify","api_key_overflow":false}
+```
+
+- `new_agents`: `ask` (default), `most_remaining_capacity`, or `round_robin`. Explicit account/normal-login
+  choices always win. These choices never change an existing agent. Without matching named profiles the default
+  `ask` preserves existing native launch behavior; an explicitly selected capacity/rotation mode instead asks
+  before using an uninspected normal login. Unknown/malformed policies fall back to ask + notify, overflow off.
+- `most_remaining_capacity` ranks **reported percentage headroom**, taking the smallest remaining percentage
+  across each account's reported windows. A row must be account-scoped to the launcher's configured ID, sourced,
+  observed within60 seconds, not future-dated and not expired. Counts without a denominator, unknown windows,
+  stale/expired/unsourced reports never become spare capacity. A native known-blocked live account is excluded.
+  No positive comparable result means ask; reset times never manufacture a fresh100%. This is a comparison of
+  reported fractions, **not** equal token allocations, entitlement, authenticated identity or permission to run.
+- `round_robin` rotates eligible configured profiles in registry order, excluding known live blocked accounts.
+  Unknown capacity is not called available; this mode is rotation, not a capacity inference. The transactional
+  `doc/accounts/round-robin/<runtime>` cursor records an attempted selection. A failed/unknown launch consumes
+  its turn, with no effect retry to repair the cursor. A CAS conflict stops before spawning.
+- `blocked`: native Q5 `availability.state=blocked`, with declared `quota|rate_limited`, is handled as `notify`
+  (default), `offer_restart`, or `auto_restart`. Auth/unknown errors and coarse status text are not quota signals.
+  Offers are explicit **ONE new empty agent/session** actions on another configured account/provider, with
+  unknown capacity labelled. Automatic handling requires a known configured source and positive fresh reported
+  headroom on an alternative, and a single unambiguous inert runtime executable. Otherwise it reports no action.
+  Automatic targets use most reported headroom, independently of the new-agent picker setting.
+- `api_key_overflow` is off by default. Turning it on permits already-configured API-key profiles as overflow
+  targets; it does not import/store/unlock keys or initiate billing/model requests. Native setup stays separate.
+
+A restart does **not** stop, switch, resume, migrate or feed the blocked conversation. No source prompt, transcript,
+queue, session ID, cwd or model choice is copied. The launch uses its ordinary project/runtime defaults with
+`fresh:true`; launchers preserve that flag through pickers and reject resume/prompt-bearing/unknown native argv
+before spawn. This does not inspect native history/auth/profile contents. Observe the native result; launch intent
+is not a promise of authenticated identity or a successfully initialized native session.
+
+Fresh-work actions claim a bounded128KiB **protected operational** `accounts` domain before invoking a launcher
+once. Claims are outside workspace undo/history, survive extension restart and fence resource incarnation/native
+session epoch. Unknown/adopted-but-unconfirmed claim or launch outcomes never cause an automatic resend. Known
+new child/host IDs, or the target account after an uncertain outcome, suppress restart chains. The journal keeps
+at most64 source-epoch records and64 child/host/uncertain markers; full/unsupported state fails closed, without eviction
+that could replay an old attempt. Handling is conservative: at most one fresh attempt per source incarnation,
+native epoch (even after switching away and back); further work can always be an explicit ordinary new-agent action. Pending work is
+bounded64; overload is reported, never silently turned into extra launches. No polling or new quota/auth request
+is made; fresh native resource reports and policy changes drive re-evaluation.
+
+Missing `operational.*` refuses offered/automatic fresh-restart effects; there is no private-file or undoable-claim
+fallback. Normal new-agent selection and notifications still work. The source is rechecked after claim admission;
+a stale check consumes the claim rather than retrying an effect. Native launch/readback errors are reported without
+copying raw native error bodies into workspace state.
+
+Disabling the accounts extension removes its UI and stops its background blocked-agent handling; existing
+processes/native stores remain untouched. Launchers still honor saved new-agent selection policy and explicit
+account metadata. No switching/replay of an existing conversation, usage fetching, provider-specific OAuth,
+credential storage or authenticated verification is added. This remains replaceable extension policy over public
+workspace/resource/command/operational primitives; core has no accounts registry or capacity policy.
