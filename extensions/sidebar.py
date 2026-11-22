@@ -522,8 +522,8 @@ def build(sh=None, compact=True):
                              "command": "sidebar.worktrees_more", "args": {"path": w["path"]}, "children": []})
             menu = [{"label": "Switch to its tabs", "command": "workspaces.open", "args": {"path": w["path"]}},
                     {"label": "Open shell here", "command": "workspaces.shell", "args": {"path": w["path"]}}]
-            if w.get("git"):
-                menu.append({"label": "New worktree…", "command": "workspaces.worktree", "args": {"repo": w["path"]}, "input": "Branch name"})
+            # "New worktree…" asks for a branch name, so it stays in the command list, not this right-click menu
+            # (human feedback batch 5).
             menu += [{"label": "Refresh git state", "command": "workspaces.refresh"},
                      {"label": "Remove from workspaces", "command": "workspaces.remove", "args": {"path": w["path"]}}]
             rows.append({

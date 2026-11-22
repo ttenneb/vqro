@@ -93,6 +93,32 @@ class PaneBasics(unittest.TestCase):
         self.assertEqual(tabs["tabs"][1]["node"], {"split": "h", "children": [leaf("d"), leaf("a")], "sizes": [1, 1]})
         self.assertEqual(tabs["active"], 1)
 
+    def test_move_without_a_tab_number_offers_the_tabs_to_click(self):
+        # Human feedback batch 5: a right-click menu item needs no typing. The reply opens a list of the tabs; a row
+        # runs the move with `to` in the same pane's context and closes the list.
+        before = self.root()
+        reply = self.run_("panes.move", path=[1, 0, 0], view="a")
+        self.assertEqual(reply, {"client": {"popup": {"view": "panes.move-to", "width": 50}}})
+        self.assertEqual(self.root(), before, "nothing moves yet")
+        rows = self.core.live["panes.move-to"]["items"]
+        self.assertEqual([r["text"] for r in rows], ["1  one  (here)", "2  two"])
+        self.assertTrue(rows[0]["disabled"])
+        self.assertNotIn("input", rows[1])
+        reply = self.run_(rows[1]["command"], rows[1]["args"], path=[1, 0, 0], view="a")
+        self.assertEqual(self.tabs()["tabs"][1]["node"], {"split": "h", "children": [leaf("d"), leaf("a")], "sizes": [1, 1]})
+        self.assertEqual(reply["client"], {"focus": {"view": "a"}, "close": True})
+
+    def test_right_click_menus_need_no_typing(self):
+        # Human feedback batch 5: pane and tab menu items finish with the mouse; Zoom and Unzoom follow `zoomed`.
+        menus = {k: e["value"] for k, e in self.core.entries.items() if k.startswith("menu/") and e["value"].get("where") in ("pane", "tab")}
+        for key, item in menus.items():
+            self.assertNotIn("input", item, key)
+        self.assertNotIn("menu/panes.rename", menus)
+        self.assertNotIn("menu/tabs.rename", menus)
+        self.assertEqual((menus["menu/panes.zoom"]["when"], menus["menu/panes.unzoom"]["when"]), ({"zoomed": False}, {"zoomed": True}))
+        order = [v["label"] for v in sorted((v for v in menus.values() if v["where"] == "tab"), key=lambda v: v["order"])]
+        self.assertEqual(order, ["Close tab", "Move tab left", "Move tab right", "Close ended tabs"])
+
     def test_moving_a_whole_tab_pane_removes_that_tab(self):
         self.run_("panes.move", {"to": 1}, path=[1, 1], view="d", tab=1)
         tabs = self.tabs()

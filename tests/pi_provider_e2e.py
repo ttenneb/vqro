@@ -301,7 +301,8 @@ class E2E:
         self.ui_frame('prefix-menu', 'pane menu')
         self.ui('send-keys', '-t', 'ui:0.0', 'm')
         self.ui_frame('pane-menu', title)
-        context = {'view': 'agents-'+rid, 'kind': 'panel', 'resource': rid, 'resource_kind': 'agent', 'live': True}
+        # The TUI's pane context, as `when` sees it (`zoomed`: Zoom/Unzoom).
+        context = {'view': 'agents-'+rid, 'kind': 'panel', 'resource': rid, 'resource_kind': 'agent', 'live': True, 'zoomed': False}
         rows = [(v['value'].get('order', 0), k, v['value']) for k, v in self.snapshot()['entries'].items()
                 if k.startswith('menu/') and v['value'].get('where') == 'pane'
                 and all(context.get(field) == value for field, value in v['value'].get('when', {}).items())]

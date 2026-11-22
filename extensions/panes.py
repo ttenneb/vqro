@@ -222,12 +222,25 @@ def break_out(args):
     return follow(ctx)
 
 
-@ext.command("panes.move", "Move a pane into another tab, beside its panes (args: to = <n> counting from 1, or text)")
+MOVE_PICK = "panes.move-to"
+
+
+@ext.command("panes.move", "Move a pane into another tab, beside its panes (args: to = <n> counting from 1, or text; "
+             "none: choose the tab from a list)")
 def move(args):
     ctx, key, ver, root, scope, found, i = arrange(args)
     if not scope:
         raise VqroError("this layout has no tabs to move a pane to", "invalid")
     tabs = node_at(root, ctx["tab_path"])["tabs"]
+    if args.get("to") is None and args.get("text") is None:
+        # From a right-click menu: the tabs as a list to click (no typing; human feedback batch 5). Each row runs
+        # this command again with `to`, in the same pane's context (popups keep the context that opened them).
+        here = ctx["tab_index"]
+        ext.publish(MOVE_PICK, {"title": "Move pane to tab", "items": [
+            {"text": f"{n + 1}  {t.get('title') or 'tab'}", "command": "panes.move", "args": {"to": n + 1, "close": True}}
+            if n != here else {"text": f"{n + 1}  {t.get('title') or 'tab'}  (here)", "style": "dim", "disabled": True}
+            for n, t in enumerate(tabs)]})
+        return {"client": {"popup": {"view": MOVE_PICK, "width": 50}}}
     try:
         to = int(str(args.get("to", args.get("text"))).strip()) - 1
     except ValueError:
@@ -247,7 +260,10 @@ def move(args):
     group = node_at(root, ctx["tab_path"])
     group["active"] = to
     ext.apply([{"op": "set", "key": key, "value": root, "expect": ver}], "panes: move to tab")
-    return follow(ctx)
+    reply = follow(ctx) or {"client": {}}
+    if args.get("close"):
+        reply["client"]["close"] = True
+    return reply
 
 
 RESIZE_AXIS = {"left": "h", "right": "h", "up": "v", "down": "v"}
@@ -362,12 +378,16 @@ def show(args):
 
 
 ext.contribute({
-    "menu/panes.rename": {"where": "pane", "label": "Rename", "command": "panes.rename", "input": "Pane name", "prefill": {"context": "title"}, "order": 10},
+    # Right-click menus hold only what the mouse can finish (human feedback batch 5): no item that asks for typing.
+    # Rename stays in the command list; typing a tab number stays on the M key.
+    # Clients that can zoom say whether the pane is zoomed (`zoomed` in the pane context); others show neither.
+    "menu/panes.zoom": {"where": "pane", "label": "Zoom", "command": "client.zoom", "when": {"zoomed": False}, "order": 15},
+    "menu/panes.unzoom": {"where": "pane", "label": "Unzoom", "command": "client.zoom", "when": {"zoomed": True}, "order": 15},
     "menu/panes.split-right": {"where": "pane", "label": "Split right (new shell)", "command": "panes.split", "args": {"dir": "right"}, "order": 20},
     "menu/panes.split-down": {"where": "pane", "label": "Split down (new shell)", "command": "panes.split", "args": {"dir": "down"}, "order": 21},
-    "menu/panes.show": {"where": "pane", "label": "Show another resource", "command": "panes.show", "pick": "resource", "when": {"kind": "terminal"}, "order": 30},
-    "menu/panes.break": {"where": "pane", "label": "Move to a new tab", "command": "panes.break", "order": 35},
-    "menu/panes.move": {"where": "pane", "label": "Move to tab…", "command": "panes.move", "input": "Move pane to tab (1, 2, …)", "order": 36},
+    "menu/panes.break": {"where": "pane", "label": "Move to a new tab", "command": "panes.break", "order": 30},
+    "menu/panes.move": {"where": "pane", "label": "Move to tab…", "command": "panes.move", "order": 31},
+    "menu/panes.show": {"where": "pane", "label": "Show another resource", "command": "panes.show", "pick": "resource", "when": {"kind": "terminal"}, "order": 35},
     "menu/panes.close": {"where": "pane", "label": "Close pane (program keeps running)", "command": "panes.close", "order": 40},
     "menu/panes.kill": {"where": "pane", "label": "Kill program", "command": "panes.kill", "when": {"live": True, "kind": "terminal"}, "order": 50},
     "binding/panes.menu": {"key": "m", "command": "client.menu", "args": {"where": "pane"}, "label": "pane menu"},

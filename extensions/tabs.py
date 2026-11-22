@@ -366,8 +366,8 @@ ext.contribute({
     "view/tabs-settings": {"kind": "panel", "title": "Tabs", "items": []},
     # An icon alone: the label stays empty so a set's `add` glyph replaces the `+`.
     "menu/tabs.new": {"where": "tabbar", "label": "", "icon": {"name": "add", "text": "+"}, "command": "tabs.open", "order": 0},
-    "menu/tabs.rename": {"where": "tab", "label": "Rename tab", "command": "tabs.rename", "input": "Tab name", "prefill": {"context": "tab_title"}, "order": 10},
-    "menu/tabs.close": {"where": "tab", "label": "Close tab", "command": "tabs.close", "order": 20},
+    # Right-click menus hold only what the mouse can finish (human feedback batch 5): renaming stays on the r key.
+    "menu/tabs.close": {"where": "tab", "label": "Close tab", "command": "tabs.close", "order": 10},
     # The tab bar keeps only "+"; other actions live in menus and the command list.
     "menu/tabs.close-ended": {"where": "tab", "label": "Close ended tabs", "command": "tabs.close_ended", "order": 30},
     "menu/tabs.move-left": {"where": "tab", "label": "Move tab left", "command": "tabs.move", "args": {"to": "left"}, "order": 15},

@@ -125,6 +125,21 @@ class SidebarTree(unittest.TestCase):
         walk(rows)
         self.assertEqual(bridges, ["r5"], "a bridge is only its agent's child, never a row of its own")
 
+    def test_row_menus_need_no_typing(self):
+        # Human feedback batch 5: right-click menus hold only what the mouse can finish ("New worktree…" asked for a
+        # branch name; it stays in the command list).
+        def walk(rows):
+            for row in rows:
+                yield row
+                yield from walk(row.get("children", []))
+        rows = list(walk(self.build()))
+        self.assertTrue(any(r.get("menu") for r in rows))
+        for row in rows:
+            for item in row.get("menu", []):
+                self.assertNotIn("input", item, (row.get("id"), item))
+        self.assertEqual([i["label"] for i in find(self.build(), "ws:" + WS)["menu"]],
+                         ["Switch to its tabs", "Open shell here", "Refresh git state", "Remove from workspaces"])
+
     def test_hiding_tabs_moves_panes_up_under_the_workspace(self):
         set_show(self.module, self.ext, tabs=False)
         ws = find(self.build(), "ws:" + WS)

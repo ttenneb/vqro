@@ -72,7 +72,7 @@ try:
     out = text("p")
     check("prefix menu lists recovery actions", all(s in out for s in ("undo last change", "reset layout", "safe mode / recovery choices")), out)
     out = text("menu tab")
-    check("contributed menus resolve for the focused pane", "Rename tab" in out and "Close tab" in out, out)
+    check("contributed menus resolve for the focused pane", "Close tab" in out and "Move tab left" in out, out)
     # Settings through its own command, then the dependency warning as pick-one options (D29).
     out = text("run settings.open; filter tabs")
     # One dense row per extension: title, id and kind as columns (feature columns).
