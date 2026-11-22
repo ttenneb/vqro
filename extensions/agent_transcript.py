@@ -91,6 +91,14 @@ def duration(start, end):
     return f"{seconds:.1f}s" if seconds < 10 else f"{seconds:.0f}s" if seconds < 120 else f"{seconds / 60:.0f}m"
 
 
+def tool_time(value):
+    """A tool's Time: the runtime-reported duration_ms (agent-v0 4) if present, else its start/end, else None."""
+    elapsed = value.get("duration_ms")
+    if type(elapsed) is int and elapsed >= 0:
+        return duration(0, elapsed)
+    return duration(value.get("started_ms"), value.get("ended_ms"))
+
+
 def plural(n):
     return "line" if n == 1 else "lines"
 
@@ -421,7 +429,7 @@ def tool_row(eid, value, cwd=None):
     if used & set(FILE_ARGS) and isinstance(cwd, str) and len(cwd) > 1 and main.startswith(cwd.rstrip("/") + "/"):
         main = main[len(cwd.rstrip("/")) + 1:]  # a path argument inside the agent's folder reads relative to it
     output = text_of(value)
-    took = duration(value.get("started_ms"), value.get("ended_ms"))
+    took = tool_time(value)
     count = output_lines(output)
     children = []
     if isinstance(args, dict):
@@ -494,7 +502,7 @@ def group_row(steps, cwd=None):
         row["column_styles"] = [None, target_style, state_style, "dim", "dim"]
         row["columns"] = [clip(plain(str(value.get("title") or "tool")), 40), row["columns"][1],
                           TOOL_ICON.get(value.get("status"), "?") + " " + str(value.get("status") or "unknown"),
-                          duration(value.get("started_ms"), value.get("ended_ms")) or "—",
+                          tool_time(value) or "—",
                           f"{len(output.encode('utf-8'))} B" if output else "—"]
         row.pop("badges", None)  # status/time/size are cells, not distant right-aligned chips
         children.append(row)
@@ -588,7 +596,7 @@ def tools_table(run, title, cwd=None):
         name = clip(plain(str(value.get("title") or "tool")), 40)
         output = text_of(value)
         lines_ = output_lines(output)
-        took = duration(value.get("started_ms"), value.get("ended_ms")) or ""
+        took = tool_time(value) or ""
         # A table row is one line: its cells, plus its menu (open/copy) and y to copy. Details stay in the conversation
         # (nested rows would also be counted by the facets), and inline buttons would cover the right-hand cells.
         for key in ("badges", "children", "actions", "expanded"):
@@ -598,7 +606,8 @@ def tools_table(run, title, cwd=None):
         row.update(columns=[TOOL_ICON.get(status, "?"), name, row["columns"][1], f"{lines_} {plural(lines_)}" if lines_ else "—", took],
                    facets={"status": status, "tool": name},
                    sort={"name": name.lower(), "output": lines_,
-                         **({"time": value["ended_ms"] - value["started_ms"]} if type(value.get("started_ms")) is int
+                         **({"time": value["duration_ms"]} if type(value.get("duration_ms")) is int and value["duration_ms"] >= 0
+                            else {"time": value["ended_ms"] - value["started_ms"]} if type(value.get("started_ms")) is int
                             and type(value.get("ended_ms")) is int else {})})
         size += len(json.dumps(row, ensure_ascii=False).encode())
         if size > TABLE_BYTES:

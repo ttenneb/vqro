@@ -428,7 +428,8 @@ reasoning the runtime exposes for display):
   may carry optional `usage` in the same shape as `data.agent.usage`, only when reported by the runtime; absent is
   unknown, never apportioned or inferred from other usage.
 - `tool`: `position`, `title`, `status: pending|running|completed|failed|cancelled`, `input?`, `content?`,
-  `locations?`, `diff?`, `terminal?` (a display-terminal id, §6.6), `started_ms?`, `ended_ms?`.
+  `locations?`, `diff?`, `terminal?` (a display-terminal id, §6.6), `started_ms?`, `ended_ms?`, `duration_ms?` (the
+  runtime's own elapsed time for the tool, a non-negative integer; only when reported, never computed by vqro).
 - `run`: id is the run referenced by `state.run`; `started_ms?`, `ended_ms?`, optional runtime-reported `usage`
   (same shape as `data.agent.usage`; absent means unknown). Run/tool times and message `at_ms`
   are optional, evidenced timestamps; absence is unknown, never inferred from arrival time or completion order.

@@ -348,6 +348,8 @@ impl Agent {
         };
         let mut value=self.journal.entity("tool",&id).map(|(_,value)|value.clone()).unwrap_or_else(||json!({"position":self.position,"title":record["toolName"],"input":record["args"]}));
         value["status"]=json!(status);
+        // Pi's own elapsed time (tool_execution_end.durationMs, monotonic; pi-agent-core types.d.ts). Nothing else is timed.
+        if let Some(duration)=count(&record["durationMs"]) {value["duration_ms"]=json!(duration);}
         if let Some(result)=record.get("result").or_else(||record.get("partialResult")){
             value["content"]=project_content(&result["content"]);
             let mut extras=result.as_object().cloned().unwrap_or_default();extras.remove("content");value["native"]=json!(extras);

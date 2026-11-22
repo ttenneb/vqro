@@ -89,6 +89,11 @@ def expected_times(kind, native, wire):
     if kind == 'run' and wire == 'codex':
         return {'started_ms': native_ms(native.get('startedAt'), 1000),
                 'ended_ms': native_ms(native.get('completedAt'), 1000)}
+    if kind == 'tool' and wire == 'pi':
+        # Pi 1.5.2 tool_execution_end.durationMs (types.d.ts:498-500): the runtime's elapsed ms, mapped exactly.
+        duration = native_ms(native.get('durationMs'))
+        return {'started_ms': None, 'ended_ms': None,
+                'duration_ms': duration if duration is not None and duration < (1 << 53) else None}
     return {'started_ms': None, 'ended_ms': None}
 
 

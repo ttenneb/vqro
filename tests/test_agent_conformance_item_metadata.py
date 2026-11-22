@@ -53,6 +53,21 @@ class ItemMetadataTests(unittest.TestCase):
                 with self.subTest(kind=kind, wire=wire, invented=invented):
                     with self.assertRaises(CheckFailed): check_times(kind, {}, {field: invented}, wire)
 
+    def test_pi_tool_duration_is_the_native_duration_ms_only(self):
+        # Pi 1.5.2 tool_execution_end.durationMs (pi-agent-core types.d.ts:498-500): a non-negative integer, or absent.
+        check_times('tool', {'durationMs': 1234}, {'duration_ms': 1234}, 'pi')
+        check_times('tool', {'durationMs': 0}, {'duration_ms': 0}, 'pi')
+        check_times('tool', {}, {}, 'pi')
+        for native, public in (({'durationMs': 1234}, {}),                    # dropped
+                               ({'durationMs': 1234}, {'duration_ms': 1235}),  # changed
+                               ({}, {'duration_ms': 5}),                       # invented
+                               ({'durationMs': -1}, {'duration_ms': -1}),      # negative never published
+                               ({'durationMs': 1.5}, {'duration_ms': 1.5}),    # non-integer never published
+                               ({'durationMs': 7}, {'duration_ms': '7'}),
+                               ({'durationMs': 7}, {'duration_ms': 7, 'started_ms': 1})):  # no invented start
+            with self.subTest(native=native, public=public), self.assertRaises(CheckFailed):
+                check_times('tool', native, public, 'pi')
+
     def test_invalid_native_time_does_not_become_evidence(self):
         for value in (None, True, False, -1, 2.0, '1234', U64_MAX + 1):
             self.assertIsNone(native_ms(value))

@@ -265,6 +265,25 @@ fn pi_retry_publishes_blocked_until_its_native_end() {
     assert_eq!(facts(&b),Value::Null,"no inference from error text");
 }
 
+/// Pi's own tool_execution_end.durationMs becomes duration_ms; nothing else is timed, and nothing is invented.
+#[test]
+fn pi_tool_duration_is_the_native_duration_ms() {
+    let mut a=make();
+    let tool=|a:&Agent,title:&str|entities(a,"tool").into_iter().map(|r|r["value"].clone()).find(|v|v["title"]==title).unwrap();
+    event(&mut a,json!({"type":"tool_execution_start","toolCallId":"c1","toolName":"bash","args":{}}));
+    assert!(tool(&a,"bash").get("duration_ms").is_none());
+    event(&mut a,json!({"type":"tool_execution_end","toolCallId":"c1","toolName":"bash","result":{"content":[]},"isError":false,"durationMs":1234}));
+    let done=tool(&a,"bash");
+    assert_eq!(done["duration_ms"],1234);
+    assert!(done.get("started_ms").is_none() && done.get("ended_ms").is_none() && done.get("times").is_none(),"{done}");
+    for (id,name,value) in [("c2","none",Value::Null),("c3","negative",json!(-5)),("c4","fraction",json!(1.5)),("c5","text",json!("9"))] {
+        let mut end=json!({"type":"tool_execution_end","toolCallId":id,"toolName":name,"result":{"content":[]},"isError":false});
+        if !value.is_null(){end["durationMs"]=value;}
+        event(&mut a,end);
+        assert!(tool(&a,name).get("duration_ms").is_none(),"{name}");
+    }
+}
+
 #[test]
 fn modules_are_versioned_descriptor_maps_for_resource_and_provider() {
     let a=make();

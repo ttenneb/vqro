@@ -468,6 +468,17 @@ class TranscriptRows(unittest.TestCase):
         self.assertIn("THE OUTPUT", texts)
         self.assertTrue(any(t and t.startswith("… ") and "more locations not shown" in t for t in texts))
 
+    def test_native_tool_duration_shows_as_time(self):
+        # A runtime-reported duration_ms (Pi's own durationMs) is the Time; without it, start/end as before, else "—".
+        timed = {k: v for k, v in CONVERSATION[("tool", "t1")].items() if k not in ("started_ms", "ended_ms")}
+        timed["duration_ms"] = 2500
+        self.assertEqual(agent_transcript.group_row([("t1", timed)])["children"][1]["columns"][3], "2.5s")
+        self.assertEqual(agent_transcript.tools_table([("t1", timed)], "Tools")["items"][0]["columns"][4], "2.5s")
+        bare = {k: v for k, v in timed.items() if k != "duration_ms"}
+        self.assertEqual(agent_transcript.group_row([("t1", bare)])["children"][1]["columns"][3], "—")
+        for bad in (-1, 1.5, "2500", True):
+            self.assertEqual(agent_transcript.group_row([("t1", dict(bare, duration_ms=bad))])["children"][1]["columns"][3], "—")
+
     def test_tool_lines_carry_aligned_cells_and_the_activity_opens_a_turn_table(self):
         """Cards/table slice (the human's relay-12 answers): tool lines line up; Activity → [Table] of this turn only."""
         group = next(r for r in self.rows() if r.get("text", "").startswith("Activity"))
