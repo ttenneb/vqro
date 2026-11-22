@@ -2,6 +2,7 @@
 //!
 //! Protocol evidence/declarations: docs/research/codex-adapter.md. The native JSONL transport is
 //! the existing bounded `rpc::Peer`; this module only validates and reduces native observations.
+mod availability;
 pub mod configuration;
 pub mod observation;
 pub mod runtime;
@@ -239,6 +240,9 @@ pub struct Endpoint {
     config_status: String,
     config_diagnostic: Option<Value>,
     configured_model: Option<String>,
+    availability: Option<Value>,
+    availability_turn: Option<String>,
+    availability_generation: u64,
     usage: Option<Value>,
     run_metadata: Option<Value>,
     next_request: u64,
@@ -273,6 +277,9 @@ impl Endpoint {
             config_status: "native".into(),
             config_diagnostic: None,
             configured_model: None,
+            availability: None,
+            availability_turn: None,
+            availability_generation: 0,
             usage: None,
             run_metadata: None,
             next_request: 0,
@@ -472,7 +479,7 @@ impl Endpoint {
             "requires_action" => "blocked",
             _ => "working",
         };
-        json!({"ref":self.reference,"incarnation":self.incarnation,"kind":"agent",
+        let mut facts = json!({"ref":self.reference,"incarnation":self.incarnation,"kind":"agent",
             "state":if self.lifecycle == "ended" {"finished"} else {"live"},
             "name":self.reference,"title":self.title,"cwd":self.cwd,"status":{"state":status,"app":"codex"},
             "data":{"agent":{"v":0,"state":self.state,"run":self.run,"lifecycle":self.lifecycle,
@@ -483,7 +490,11 @@ impl Endpoint {
                 "config":if self.model_config_available(){vec![self.model_option()]}else{Vec::<Value>::new()},"commands":[],
                 "usage":if self.config_uncertain {None}else{self.usage.as_ref()},
                 "incomplete":if self.config_uncertain {vec!["config.model"]}else{vec![]},
-                "items":items}}})
+                "items":items}}});
+        if let Some(availability) = &self.availability {
+            facts["data"]["agent"]["availability"] = availability.clone();
+        }
+        facts
     }
 
     /// All adapter-side preconditions are checked before a native request can be constructed.
@@ -740,6 +751,9 @@ impl Endpoint {
                 value["usage"] = usage.clone();
             }
         }
+        if let Some(availability) = &self.availability {
+            value["availability"] = availability.clone();
+        }
         Change::new("state", "current", value)
     }
 
@@ -837,6 +851,7 @@ impl Endpoint {
         self.config_diagnostic = None;
         self.config_rev = self.config_rev.saturating_add(1);
         self.epoch = epoch;
+        self.reset_availability();
         self.title = thread
             .get("name")
             .or_else(|| thread.get("title"))
@@ -887,6 +902,7 @@ impl Endpoint {
     /// Only runtime evidence (not bridge or viewer disconnection) may end an endpoint.
     pub fn host_exited(&mut self, reason: &str) -> Vec<Change> {
         self.lifecycle = "ended".into();
+        self.reset_availability();
         self.state = "unknown".into();
         let mut changes = Vec::new();
         for (key, mut pending) in std::mem::take(&mut self.pending) {
@@ -905,6 +921,13 @@ impl Endpoint {
     pub fn notification(&mut self, method: &str, p: &Value) -> Vec<Change> {
         if self.lifecycle == "ended" {
             return Vec::new();
+        }
+        if let Some(changed) = self.availability_notification(method, p) {
+            return if changed {
+                vec![self.state_entity()]
+            } else {
+                Vec::new()
+            };
         }
         if p["threadId"].as_str() != self.session.as_deref() {
             return Vec::new();
@@ -931,6 +954,7 @@ impl Endpoint {
                 let Some(run) = turn["id"].as_str().filter(|s| s.len() <= 128) else {
                     return Vec::new();
                 };
+                self.availability_turn_completed(turn);
                 // A late old-turn completion must not mark a newer turn idle.
                 let (reason, known) = match turn["status"].as_str() {
                     Some("completed") => ("end_turn", true),

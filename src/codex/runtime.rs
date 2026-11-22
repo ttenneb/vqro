@@ -4,7 +4,7 @@ use super::{Change, Endpoint, SendContext, configuration, provider_capabilities}
 use crate::provider_client::{Outcome, ProviderError};
 use crate::rpc::{Incoming, Peer, RpcError};
 use serde_json::{Map, Value, json};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, oneshot, watch};
@@ -12,6 +12,7 @@ use tokio::time::Instant;
 
 pub type Observer = Arc<dyn Fn(usize, &str, Vec<Change>, bool) + Send + Sync>;
 const NATIVE_LIMIT: Duration = Duration::from_secs(300);
+const AVAILABILITY_READ_INTERVAL: Duration = Duration::from_secs(60);
 
 struct Slot {
     endpoint: Mutex<Endpoint>,
@@ -28,6 +29,7 @@ pub struct Runtime {
     observer: Option<Observer>,
     incarnation: String,
     launcher_principal: Option<String>,
+    account_revision: AtomicU64,
 }
 
 enum Fault {
@@ -124,6 +126,7 @@ impl Runtime {
             observer,
             incarnation,
             launcher_principal,
+            account_revision: AtomicU64::new(0),
         });
         for (index, slot) in runtime.slots.iter().enumerate() {
             let endpoint = slot.endpoint.lock().unwrap();
@@ -137,7 +140,86 @@ impl Runtime {
                 false,
             );
         }
+        Self::start_availability_reads(&runtime);
         runtime
+    }
+
+    // One host-wide, bounded native metadata read at most once per60s while quota-blocked.
+    // Native0.170 has no structured retry-after duration. Timers only read; they never clear,
+    // send input, refresh tokens or redeem credits. Weak ownership lets an idle runtime drop.
+    fn start_availability_reads(runtime: &Arc<Self>) {
+        let weak = Arc::downgrade(runtime);
+        let mut changed = runtime.changes();
+        tokio::spawn(async move {
+            let mut next_read = Instant::now();
+            loop {
+                let Some(this) = weak.upgrade() else {
+                    break;
+                };
+                let blocked = this.slots.iter().any(|slot| {
+                    slot.endpoint
+                        .lock()
+                        .unwrap()
+                        .availability_read_fence()
+                        .is_some()
+                });
+                drop(this);
+                if !blocked {
+                    if changed.changed().await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep_until(next_read) => {},
+                    result = changed.changed() => { if result.is_err() { break; } continue; }
+                }
+                let Some(this) = weak.upgrade() else {
+                    break;
+                };
+                let fences: Vec<_> = this
+                    .slots
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, slot)| {
+                        slot.endpoint
+                            .lock()
+                            .unwrap()
+                            .availability_read_fence()
+                            .map(|fence| (i, fence))
+                    })
+                    .collect();
+                if fences.is_empty() {
+                    continue;
+                }
+                next_read = Instant::now() + AVAILABILITY_READ_INTERVAL;
+                let revision = this.account_revision.load(Ordering::Acquire);
+                let Ok(_permit) = this.native_admissions.clone().try_acquire_owned() else {
+                    continue;
+                };
+                let response = this
+                    .native
+                    .call_with_timeout(
+                        "account/rateLimits/read",
+                        json!({"excludeResetCreditDetails":true}),
+                        Duration::from_secs(3),
+                    )
+                    .await;
+                if this.account_revision.load(Ordering::Acquire) != revision {
+                    continue;
+                }
+                if let Ok(response) = response {
+                    for (index, fence) in fences {
+                        let mut endpoint = this.slots[index].endpoint.lock().unwrap();
+                        let changes = endpoint.finish_availability_read(&fence, &response);
+                        if !changes.is_empty() {
+                            this.emit(index, &endpoint, changes, false);
+                        }
+                    }
+                }
+            }
+        });
     }
 
     pub fn capabilities(&self) -> Map<String, Value> {
@@ -238,6 +320,25 @@ impl Runtime {
             Incoming::Notification { method, params } => {
                 if crate::limits::json_depth(&params, 64).is_err() {
                     self.native.close();
+                    return;
+                }
+                if matches!(
+                    method.as_str(),
+                    "account/updated" | "account/login/completed"
+                ) {
+                    self.account_revision.fetch_add(1, Ordering::AcqRel);
+                }
+                if matches!(
+                    method.as_str(),
+                    "account/updated" | "account/login/completed" | "account/rateLimits/updated"
+                ) {
+                    for (index, slot) in self.slots.iter().enumerate() {
+                        let mut endpoint = slot.endpoint.lock().unwrap();
+                        let changes = endpoint.notification(&method, &params);
+                        if !changes.is_empty() {
+                            self.emit(index, &endpoint, changes, false);
+                        }
+                    }
                     return;
                 }
                 if let Some(index) = params["threadId"]
