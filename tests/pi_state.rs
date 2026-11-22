@@ -242,6 +242,29 @@ fn provider_queue_mode_bounds_cover_the_resource_declaration() {
     }
 }
 
+/// agent-v0 7 availability: blocked only between Pi's auto_retry_start and auto_retry_end; declared in caps.
+#[test]
+fn pi_retry_publishes_blocked_until_its_native_end() {
+    let mut a=make();
+    let facts=|a:&Agent|a.facts("p","/w")["data"]["agent"]["availability"].clone();
+    assert_eq!(a.caps()["agent.availability"],json!({"reasons":["_retrying"]}));
+    assert!(json!(a.provider_capabilities())["agent.availability"]["reasons"].as_array().unwrap().contains(&json!("_retrying")));
+    assert_eq!(facts(&a),Value::Null,"unknown until Pi reports");
+    event(&mut a,json!({"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":2000,"errorMessage":"429 rate limit"}));
+    let blocked=facts(&a);
+    assert_eq!((&blocked["state"],&blocked["reason"],&blocked["retry_after_ms"]),(&json!("blocked"),&json!("_retrying"),&json!(2000)));
+    assert_eq!(blocked["native"]["errorMessage"],"429 rate limit");
+    event(&mut a,json!({"type":"auto_retry_end","success":false,"attempt":3,"finalError":"still failing"}));
+    assert_eq!(facts(&a)["state"],"available","Pi's retry end clears, success or not");
+    // A new epoch forgets it.
+    event(&mut a,json!({"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":10,"errorMessage":"overloaded"}));
+    a.new_session_epoch();assert_eq!(facts(&a),Value::Null);
+    // Text alone (a final error with no retry) never blocks.
+    let mut b=make();
+    event(&mut b,json!({"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"rate limit exceeded"}}));
+    assert_eq!(facts(&b),Value::Null,"no inference from error text");
+}
+
 #[test]
 fn modules_are_versioned_descriptor_maps_for_resource_and_provider() {
     let a=make();

@@ -55,6 +55,8 @@ pub struct Agent {
     pub configuration:super::configuration::Configuration,pub commands:super::commands::Commands,
     // A correlated origin is bound to the one message entity its user message_start created (origins.rs): a later
     // entity, even one created by a standalone native message_end, never inherits it.
+    // agent-v0 7 availability: blocked only between Pi's own auto_retry_start and auto_retry_end (its native clear).
+    availability:Option<Value>,
     pub origins:super::origins::Origins,start_origin:Option<super::origins::Entry>,current_origin:Option<(String,super::origins::Entry,Value)>,
     pub requests:super::requests::Requests,ui_cancels:Vec<(String,Value)>,ui_unconfirmed:BTreeSet<String>,pub ui_overflow:bool,
     receipt_order:VecDeque<String>,
@@ -74,7 +76,7 @@ impl Agent {
         let boot=bytes.iter().map(|byte|format!("{byte:02x}")).collect::<String>();
         let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entities:ENTITY_COUNT,max_entity_bytes:ENTITY_TOTAL,snapshot_buffer_bytes:1024*1024,..Default::default()});
         journal.set_coverage(Coverage::Tail);
-        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,tool_principal_env:false,view:None,view_error:None,configuration:Default::default(),commands:Default::default(),origins:Default::default(),start_origin:None,current_origin:None,requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),open:Vec::new(),starting:false,
+        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,tool_principal_env:false,view:None,view_error:None,configuration:Default::default(),commands:Default::default(),availability:None,origins:Default::default(),start_origin:None,current_origin:None,requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),open:Vec::new(),starting:false,
             position:0,serial:0,epoch_number:1,instance,boot,session:None,session_pending:false,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null,launch_cwd:None,usage:None,usage_revision:0};
         agent.refresh();agent
     }
@@ -120,6 +122,7 @@ impl Agent {
             "agent.respond":{"ack":"dispatched","methods":["choice","confirm","text"],"scopes":["operation"],"background_requests":false,"native_timeout":"unrepresentable_positive","max_pending":super::requests::MAX_PENDING,"request_bytes":super::requests::MAX_REQUEST_BYTES},
             "agent.configure":{},"agent.command":{},"agent.session":{"actions":["new"]},
             "agent.stop":{"covers":["foreground","queued"],"waits":"exit"},
+            "agent.availability":{"reasons":["_retrying"]},
             "agent.queue":{"actions":["list","clear"],"ids":"none","removed":{"content":["text"],"media":"unknown"}},
             "items.stream":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"max_viewers":4}});
         if self.tool_principal_env{caps["agent"]["tool_principal"]=json!("env");}caps
@@ -143,6 +146,7 @@ impl Agent {
         let mut facts=json!({"ref":"agent","incarnation":"","kind":"agent","state":if self.exit.is_some(){"finished"}else{"live"},"name":"Pi","cwd":cwd,"exit":self.exit.as_ref().map(|exit|json!({"code":exit.code,"success":exit.success})),
             "status":{"state":phase},
             "data":{"agent":{"v":0,"state":self.state(),"lifecycle":if self.exit.is_some(){"ended"}else{"live"},
+                "availability":if self.exit.is_some(){None}else{self.availability.as_ref()},
                 "host":{"id":format!("{}.child",self.boot),"provider":provider,"instance":self.instance,"incarnation":"","kind":"process","owns_lifecycle":true},
                 "session":if self.session_pending {None}else{self.session.as_ref()},"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":self.queue,"requests":self.request_summaries(),"background":null,
                 "config":self.configuration.options(),"commands":self.commands.facts(),"usage":if self.session_pending || self.configuration.pending{None}else{self.usage.as_ref()},"incomplete":self.incomplete,
@@ -155,7 +159,7 @@ impl Agent {
     }
     pub fn new_session_epoch(&mut self){
         self.invalidate_usage();
-        self.cancel_requests("epoch_changed");self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.open.clear();self.origins.reset();self.start_origin=None;self.current_origin=None;self.run=None;self.completion=None;
+        self.cancel_requests("epoch_changed");self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.availability=None;self.open.clear();self.origins.reset();self.start_origin=None;self.current_origin=None;self.run=None;self.completion=None;
     }
     pub fn ensure_session_epoch(&mut self,prior:&str){if self.epoch()==prior{self.new_session_epoch();if let Some(session)=self.session.clone(){self.store("session","current",session,false);}self.refresh();}}
     pub fn configuration_pending(&mut self,pending:bool){if pending{self.invalidate_usage();}self.configuration.pending=pending;if !pending{self.session_pending=false;}self.configuration.rebuild(&self.signals.current().metadata);self.refresh();}
@@ -362,7 +366,15 @@ impl Agent {
               if !(record["type"]=="message_start" && record["message"]["role"]=="user") {self.origins.other_record();}
               match record["type"].as_str() {
                 Some("extension_ui_request")=>self.ui(record),
-                Some("auto_retry_start"|"auto_retry_end"|"auto_compaction_start"|"auto_compaction_end")=>{if matches!(record["type"].as_str(),Some("auto_compaction_start"|"auto_compaction_end")){self.invalidate_usage();}self.runtime_notice(record);},
+                Some("auto_retry_start"|"auto_retry_end"|"auto_compaction_start"|"auto_compaction_end")=>{
+                    // Pi's own retry class (pi-ai isRetryableAssistantError): blocked until its auto_retry_end.
+                    if record["type"]=="auto_retry_start" {
+                        let mut value=json!({"state":"blocked","reason":"_retrying","native":{"attempt":record["attempt"],"maxAttempts":record["maxAttempts"],
+                            "errorMessage":record["errorMessage"].as_str().map(|text|text.chars().take(1024).collect::<String>())}});
+                        if let Some(delay)=count(&record["delayMs"]){value["retry_after_ms"]=json!(delay);}
+                        self.availability=Some(value);
+                    } else if record["type"]=="auto_retry_end" {self.availability=Some(json!({"state":"available"}));}
+                    if matches!(record["type"].as_str(),Some("auto_compaction_start"|"auto_compaction_end")){self.invalidate_usage();}self.runtime_notice(record);},
                 Some("queue_update")=>{
                     self.origins.queue_update(record);
                     self.queue=super::queue::summary(record);self.queue_version=self.queue_version.wrapping_add(1);
@@ -398,6 +410,8 @@ impl Agent {
                 }
                 Some("agent_start") if self.exit.is_none()=>{if self.run.is_none(){self.run=Some(self.next("run"));self.reason="unknown".into();self.error=None;}},
                 Some("agent_settled") if self.exit.is_none()=>{
+                    // A successful completion is also a native clear.
+                    if record["aborted"]!=true && self.reason=="end_turn" && self.availability.as_ref().is_some_and(|a|a["state"]=="blocked"){self.availability=Some(json!({"state":"available"}));}
                     if let Some(run)=self.run.take(){let reason=if record["aborted"]==true{"cancelled"}else{&self.reason};self.completion=Some(json!({"id":run,"reason":reason,"error":self.error.as_ref().map(|message|json!({"message":message}))}));}
                 }
                 Some("message_start")=>{
