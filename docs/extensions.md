@@ -51,8 +51,9 @@ Options include `--socket`, `--extensions-dir`, `--strict` (warnings fail), and 
 receipt unless requested). Offline mode reads `workspace.json` without changing it. Exit codes are 0 pass,
 1 fail, 77 unverified (no extension observed running), and 2 harness error, including zero declarations.
 Disabled extensions have their metadata and launch paths checked, but do not run tests or fail for broken paths.
-Tests use a private temporary HOME and a scrubbed environment with only PATH and HOME, and time out at 120 seconds.
-This is cooperative isolation, **not a security sandbox**: only run installed tests you trust.
+Tests use a private temporary HOME and a scrubbed environment with only PATH and HOME. The CLI allows 120 seconds
+per extension; the in-app command shares a 20-second tests budget and reports remaining tests as unverified.
+Run the CLI for full tests if that budget is exhausted. This is cooperative isolation, **not a security sandbox**: only run installed tests you trust.
 
 No installed tests means **no coverage**, not a test pass. Bundled tests are not currently installed.
 A healthy status does not prove behaviour, rendering or performance; integration and performance suites are not

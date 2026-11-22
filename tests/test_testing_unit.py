@@ -39,7 +39,7 @@ class HealthChecks(unittest.TestCase):
         self.client.call.side_effect = self.call
 
     def call(self, method, params=None):
-        return {"hello": {"version": "fixture-v1"}, "extension.list": {"extensions": self.facts},
+        return {"hello": {"server": "vqro", "version": "fixture-v1"}, "extension.list": {"extensions": self.facts},
                 "workspace.snapshot": self.snapshot}[method]
 
     def report(self, **kwargs):
@@ -54,7 +54,7 @@ class HealthChecks(unittest.TestCase):
         self.assertEqual(result["source"], "live")
         self.assertEqual([c.args[0] for c in self.client.call.call_args_list],
                          ["hello", "extension.list", "workspace.snapshot"])
-        self.assertEqual(result["fingerprint"]["vqro"], "fixture-v1")
+        self.assertEqual(result["fingerprint"]["vqro"], {"server": "vqro", "version": "fixture-v1"})
         self.assertEqual(result["not_covered"][1], "sample: no tests installed: no coverage")
         self.assertEqual(self.rows(result)["tests/sample"]["status"], "skip")
 
@@ -196,12 +196,25 @@ class HealthChecks(unittest.TestCase):
             directory.mkdir(parents=True)
             if directory.name == "checkout":
                 (directory / ".git").mkdir()
+                (directory / "extensions").mkdir()
+                (directory / "extensions/vqro_ext.py").write_text("# vqro checkout marker\n")
             script = directory / "fixture.py"
             script.write_text("pass\n")
             item = unit.argv_row("x", {"argv": ["python3", str(script)]}, self.extensions)
             self.assertEqual(item["status"], "warn")
             self.assertIn("works only from a dev tree?", item["evidence"])
         self.assertFalse(unit.dev_tree(self.extensions / "sample.py", self.extensions))
+
+    def test_dotfiles_home_is_not_a_dev_tree(self):
+        home = self.root / "home"
+        program = home / ".local/bin/vqro-herdr"
+        program.parent.mkdir(parents=True)
+        (home / ".git").mkdir()
+        program.write_text("fixture")
+        program.chmod(0o700)
+        result = unit.argv_row("herdr", {"argv": [str(program)]}, self.extensions)
+        self.assertEqual(result["status"], "pass")
+        self.assertFalse(unit.dev_tree(program, self.extensions))
 
     def test_log_tail_is_bounded_and_uses_last_match(self):
         log = self.state / "ext-sample.log"
@@ -241,6 +254,34 @@ class HealthChecks(unittest.TestCase):
         self.assertEqual(item["status"], "fail")
         self.assertIn("timeout", item["evidence"])
         self.assertLess(time.monotonic() - start, 3)
+
+    def test_extension_tests_share_one_budget_but_cli_keeps_full_timeouts(self):
+        for name in ("sample", "second", "third"):
+            directory = self.extensions / "tests" / name
+            directory.mkdir(parents=True)
+            (directory / "test_fixture.py").write_text("# test fixture\n")
+            if name != "sample":
+                self.snapshot["entries"]["extension/" + name] = {"version": 1, "value": self.declarations["extension/sample"]}
+                self.facts[name] = dict(self.facts["sample"])
+        clock = [100.0]
+        timeouts = []
+
+        def run(*args, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            clock[0] += 5 if len(timeouts) == 1 else 15
+            return Mock(returncode=0)
+
+        with patch.object(unit.time, "monotonic", side_effect=lambda: clock[0]), patch.object(unit.subprocess, "run", side_effect=run):
+            result = self.report(tests_budget=20)
+            self.assertEqual(timeouts, [20, 15])
+            skipped = self.rows(result)["tests/third"]
+            self.assertEqual(skipped["status"], "unverified")
+            self.assertEqual(skipped["evidence"], "not run: command time budget; run the CLI for full tests")
+            self.assertIn("third: " + skipped["evidence"], result["not_covered"])
+            timeouts.clear()
+            self.report()
+            self.assertEqual(timeouts, [120, 120, 120])
+        self.assertEqual(unit.tests_row("absent", self.extensions, timeout=0)["status"], "skip")
 
     def test_tests_runner_scrubs_all_live_environment(self):
         self.install_test("import os, pathlib, unittest\nclass Tests(unittest.TestCase):\n"
@@ -376,7 +417,7 @@ class HealthChecks(unittest.TestCase):
     def test_extension_commands_publish_and_save_only_when_asked(self):
         handlers = {}
         ext = Mock()
-        ext.info = {"version": "fixture-v1", "state_dir": str(self.state)}
+        ext.info = {"server": "vqro", "version": "fixture-v1", "state_dir": str(self.state)}
         ext.vqro = self.client
 
         def command(name, title):
@@ -395,7 +436,9 @@ class HealthChecks(unittest.TestCase):
             empty = handlers["test.unit.show"]({})
             self.assertEqual(empty["client"]["popup"]["view"], "test-unit.report")
             self.assertFalse((self.state / "test-unit").exists())
-            first = handlers["test.unit"]({"tests": False})
+            with patch.object(unit, "collect", wraps=unit.collect) as collect:
+                first = handlers["test.unit"]({"tests": False})
+                self.assertEqual(collect.call_args.kwargs["tests_budget"], 20)
             self.assertEqual(first["verdict"], "pass")
             self.assertTrue(Path(first["receipt"]).is_file())
             saved = json.loads(Path(first["receipt"]).read_text())

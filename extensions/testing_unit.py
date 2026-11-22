@@ -83,7 +83,9 @@ def dev_tree(path, extensions_dir):
     path = Path(path)
     if not path.is_absolute() or path.is_relative_to(Path(extensions_dir).resolve()):
         return False
-    return ".worktrees" in path.parts or any((parent / ".git").exists() for parent in (path, *path.parents))
+    return ".worktrees" in path.parts or any(
+        (parent / ".git").exists() and (parent / "extensions/vqro_ext.py").is_file()
+        for parent in (path, *path.parents))
 
 
 def argv_row(name, declaration, extensions_dir, *, binary=None, path=None):
@@ -128,6 +130,8 @@ def tests_row(name, extensions_dir, *, enabled=True, timeout=TEST_TIMEOUT):
         return row("tests", name, "skip", "tests disabled by caller")
     if not directory.is_dir() or not any(directory.glob("test_*.py")):
         return row("tests", name, "skip", "no tests installed: no coverage")
+    if timeout <= 0:
+        return row("tests", name, "unverified", "not run: command time budget; run the CLI for full tests")
     # The environment is cooperative isolation, not a security sandbox for arbitrary test code.
     with tempfile.TemporaryDirectory(prefix="vqro-unit-") as home, tempfile.TemporaryFile() as output:
         try:
@@ -146,7 +150,7 @@ def tests_row(name, extensions_dir, *, enabled=True, timeout=TEST_TIMEOUT):
 
 
 def collect(state_dir, extensions_dir, *, client=None, hello=None, offline=False, tests=True,
-            strict=False, timeout=TEST_TIMEOUT, connection_error=None):
+            strict=False, timeout=TEST_TIMEOUT, connection_error=None, tests_budget=None):
     started, started_at = time.monotonic(), utc_now()
     rows, inputs, not_covered = [], [], [NOT_COVERED]
     source = "live" if client is not None and not offline else "offline"
@@ -191,10 +195,14 @@ def collect(state_dir, extensions_dir, *, client=None, hello=None, offline=False
                 continue
             rows.extend([dependency_row(name, observed), argv, log_row(name, state_dir)])
             inputs.append(str(Path(state_dir) / f"ext-{name}.log"))
-            test = tests_row(name, extensions_dir, enabled=tests, timeout=timeout)
+            test_started = time.monotonic()
+            test_timeout = timeout if tests_budget is None else min(timeout, max(0, tests_budget))
+            test = tests_row(name, extensions_dir, enabled=tests, timeout=test_timeout)
+            if tests_budget is not None:
+                tests_budget -= time.monotonic() - test_started
             rows.append(test)
             inputs.append(str(Path(extensions_dir) / "tests" / name))
-            if test["status"] == "skip":
+            if test["status"] in ("skip", "unverified"):
                 not_covered.append(f"{name}: {test['evidence']}")
         return receipt(rows, source=source, started_at=started_at, started=started, fingerprint_value=fp,
                        inputs=inputs, not_covered=not_covered, extension_count=len(declarations), strict=strict)
@@ -231,7 +239,7 @@ def extension_main():
             _, state_dir, extensions_dir = endpoints(cli_parser().parse_args([]))
             state_dir = ext.info.get("state_dir") or state_dir
             result = collect(state_dir, extensions_dir, client=ext.vqro, hello=ext.info,
-                             tests=args.get("tests", True), strict=args.get("strict", False))
+                             tests=args.get("tests", True), strict=args.get("strict", False), tests_budget=20)
             destination = save_receipt(result, state_dir)
             last.update(result=result, receipt=destination)
             ext.publish("test-unit.report", panel(result, destination))

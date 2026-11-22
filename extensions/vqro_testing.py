@@ -89,7 +89,7 @@ def fingerprint(extensions_dir, declarations, hello):
             if path is not None:
                 chunks.extend((str(path).encode(), path.read_bytes() if path.is_file() else b"<missing>"))
         individual[name] = digest(chunks)
-    return {"vqro": hello.get("software", hello.get("version")), "extensions_dir": digest(parts),
+    return {"vqro": {"server": hello.get("server"), "version": hello.get("version")}, "extensions_dir": digest(parts),
             "declarations": digest([canonical(declarations)]), "extensions": individual}
 
 
