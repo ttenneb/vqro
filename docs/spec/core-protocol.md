@@ -664,6 +664,11 @@ stale or undeclared before a native write. The bundled agents extension wraps th
 `agents.configure {id, value, rev?}` and `agents.command {name, text?}`; grants (Control) come later, so for now
 any connected client may use them, as with every other agent op.
 
+Agent resources may also carry read-only `data.agent.usage_limits` observations (agent-v0 §2.3): native-scoped
+limits with provenance and millisecond observation/reset times, not session token totals or inferred availability.
+The core transports these provider facts unchanged; grouping and usage panels are extension/live-view policy.
+Absent limits mean unknown, and unknown scope/source values degrade to displayable opaque labels.
+
 `resource.forget_cached` is a separate core-owned mechanism: it retires **unavailable cached facts only**, with
 fresh durable identity bookkeeping and a `resource.removed` event. Available resources reject with `invalid`;
 a reconnect that wins the race therefore cancels cached forgetting. No backend capability is required, no native

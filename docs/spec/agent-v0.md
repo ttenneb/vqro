@@ -144,6 +144,30 @@ Adapters publish only what the runtime reports, including estimates labelled as 
   consumers preserve the currency and basis and never invent cost from token counts or pricing tables. A runtime
   reporting only the context window publishes `context: {window}` with `used` absent: occupancy stays unknown,
   never derived from last-turn token totals.
+- `usage_limits? [{scope: {kind, account?, native_account_id?, bucket?, unit?},
+  window?: {id, duration_ms?}, used_percent?, resets_at_ms?, remaining?, source, observed_at_ms}]`:
+  read-only runtime/provider limit observations, separate from session token/cost usage. `scope.kind` is an open
+  string (`account`, `organization`, `project`, `workspace`, `model`); unknown kinds remain displayable.
+  `scope.account`, when present, references the configured `data.agent.account.id`, never a guessed native ID.
+  `native_account_id` and `bucket` preserve native pool identity; `unit` identifies the native `remaining` unit
+  (for example `requests` or `tokens`). Consumers must not sum duplicated account/pool observations across agents
+  or treat different API keys as independent capacity. `window.id` is a source-local window name;
+  `duration_ms`, `resets_at_ms` (Unix epoch), and `observed_at_ms` (Unix epoch at adapter observation) are
+  nonnegative integer milliseconds. Percentages are native reported numbers from 0 through 100; remaining is a
+  native reported nonnegative number, never computed from percentages. `source` identifies the native surface,
+  not credentials or a profile path. Scope/source/observed_at_ms are required for each entry; all other fields
+  are optional. Absent data means unknown, not zero, unlimited or available. Sparse notifications preserve
+  previously observed window fields; their timestamps are observations, not a freshness guarantee. Account or
+  observation-epoch changes discard old limits. Limits never imply availability/recovery: only native permission
+  and error evidence control §7. Consumers show age/staleness explicitly; the standard supplies no polling policy.
+
+Codex publishes at most 32 primary/secondary window observations from native `account/rateLimits/updated`
+notifications and the existing bounded quota-blocked `account/rateLimits/read`. It prefers the multi-bucket map
+when supplied (no double-counting its legacy mirror), converts native seconds/minutes to milliseconds with
+checked arithmetic, and omits malformed/overflowing optional values. It does not publish credit balances,
+backend banners, guessed remaining amounts or reset-credit operations. No credentials/profiles are read and
+no new request timer, token refresh or billable probe is introduced. API-header observations require the runtime
+itself to expose documented header facts; generic header capture is not a capability promised by this contract.
 
 Pi's Rust bridge publishes the known controlled-launch working directory as `session.cwd` unless native state
 reports another directory. Its coalesced read-only `get_session_stats` observations supply the native

@@ -8,6 +8,7 @@ mod customization;
 pub mod observation;
 pub mod runtime;
 mod startup;
+mod usage_limits;
 
 use crate::rpc::{RpcError, RpcResult};
 use serde_json::{Map, Value, json};
@@ -249,6 +250,7 @@ pub struct Endpoint {
     availability_retry: Option<Value>,
     availability_generation: u64,
     usage: Option<Value>,
+    usage_limits: usage_limits::UsageLimits,
     run_metadata: Option<Value>,
     next_request: u64,
     pending: BTreeMap<String, Pending>,
@@ -289,6 +291,7 @@ impl Endpoint {
             availability_retry: None,
             availability_generation: 0,
             usage: None,
+            usage_limits: usage_limits::UsageLimits::default(),
             run_metadata: None,
             next_request: 0,
             pending: BTreeMap::new(),
@@ -510,6 +513,9 @@ impl Endpoint {
         }
         if let Some(transform) = &self.input_transform {
             facts["data"]["agent"]["input_transform"] = transform.clone();
+        }
+        if let Some(limits) = self.usage_limits.facts() {
+            facts["data"]["agent"]["usage_limits"] = limits;
         }
         facts
     }
@@ -784,6 +790,9 @@ impl Endpoint {
         if let Some(availability) = &self.availability {
             value["availability"] = availability.clone();
         }
+        if let Some(limits) = self.usage_limits.facts() {
+            value["usage_limits"] = limits;
+        }
         Change::new("state", "current", value)
     }
 
@@ -963,6 +972,15 @@ impl Endpoint {
     pub fn notification(&mut self, method: &str, p: &Value) -> Vec<Change> {
         if self.lifecycle == "ended" {
             return Vec::new();
+        }
+        if method == "account/updated" {
+            let had_limits = self.usage_limits.facts().is_some();
+            self.usage_limits = usage_limits::UsageLimits::default();
+            return if had_limits {
+                vec![self.state_entity()]
+            } else {
+                Vec::new()
+            };
         }
         if let Some(changed) = self.availability_notification(method, p) {
             return if changed {

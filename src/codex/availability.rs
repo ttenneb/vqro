@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 
 impl Endpoint {
     pub(super) fn reset_availability(&mut self) {
+        self.usage_limits = super::usage_limits::UsageLimits::default();
         self.availability = None;
         self.availability_blocks.clear();
         self.availability_retry = None;
@@ -38,7 +39,8 @@ impl Endpoint {
             "account/rateLimits/updated" => {
                 // Even false/null/partial newer metadata fences an older in-flight true read.
                 self.availability_generation = self.availability_generation.saturating_add(1);
-                Some(self.usage_permission(p))
+                let limits_changed = self.usage_limits.observe(p);
+                Some(self.usage_permission(p) || limits_changed)
             }
             // Exact native0.170 signal; no adapter login/credential flow is introduced.
             "account/login/completed" => Some(
@@ -134,8 +136,11 @@ impl Endpoint {
         fence: &(String, u64),
         response: &Value,
     ) -> Vec<Change> {
-        if self.availability_read_fence().as_ref() == Some(fence) && self.usage_permission(response)
-        {
+        if self.availability_read_fence().as_ref() != Some(fence) {
+            return Vec::new();
+        }
+        let limits_changed = self.usage_limits.observe(response);
+        if self.usage_permission(response) || limits_changed {
             vec![self.state_entity()]
         } else {
             Vec::new()
@@ -146,6 +151,49 @@ impl Endpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bounded_read_publishes_limits_without_inventing_recovery() {
+        let mut e = Endpoint::new("e".into(), "inc".into(), "host".into(), "epoch".into());
+        e.set_session(
+            &json!({"id":"s1","status":{"type":"idle"}}),
+            "epoch1".into(),
+        )
+        .unwrap();
+        e.notification(
+            "error",
+            &json!({"threadId":"s1","turnId":"t1","willRetry":false,
+            "error":{"codexErrorInfo":"usageLimitExceeded"}}),
+        );
+        let fence = e.availability_read_fence().unwrap();
+        let response =
+            json!({"ordinaryUsageAllowed":null,"rateLimits":{"primary":{"usedPercent":0}}});
+        assert!(!e.finish_availability_read(&fence, &response).is_empty());
+        assert_eq!(
+            e.facts()["data"]["agent"]["usage_limits"][0]["used_percent"],
+            0
+        );
+        assert_eq!(
+            e.facts()["data"]["agent"]["availability"]["state"],
+            "blocked"
+        );
+        let stale = e.availability_read_fence().unwrap();
+        e.notification(
+            "account/rateLimits/updated",
+            &json!({"ordinaryUsageAllowed":null}),
+        );
+        assert!(
+            e.finish_availability_read(
+                &stale,
+                &json!({"rateLimits":{"primary":{"usedPercent":90}}})
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            e.facts()["data"]["agent"]["usage_limits"][0]["used_percent"],
+            0
+        );
+    }
+
     #[test]
     fn late_permission_never_clears_a_new_block_epoch_or_ended_endpoint() {
         for change in ["block", "epoch", "end", "null_permission"] {
