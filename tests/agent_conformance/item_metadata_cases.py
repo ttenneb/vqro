@@ -69,6 +69,11 @@ def native_ms(value, scale=1):
     return value * scale
 
 
+# The native field carrying a runtime's own tool duration in ms, per wire. Pi 1.5.2: tool_execution_end.durationMs
+# (pi-agent-core types.d.ts:498-500). A wire not listed has none.
+NATIVE_TOOL_DURATION = {'pi': 'durationMs'}
+
+
 def expected_times(kind, native, wire):
     """native is the ACTUAL message/tool/turn payload, not an observation stamp.
 
@@ -89,13 +94,13 @@ def expected_times(kind, native, wire):
     if kind == 'run' and wire == 'codex':
         return {'started_ms': native_ms(native.get('startedAt'), 1000),
                 'ended_ms': native_ms(native.get('completedAt'), 1000)}
-    if kind == 'tool' and wire == 'pi':
-        # Pi 1.5.2 tool_execution_end.durationMs (types.d.ts:498-500): the runtime's elapsed ms, mapped exactly.
-        duration = native_ms(native.get('durationMs'))
+    if kind == 'tool':
+        # Generic for every runtime: duration_ms is the runtime's own tool duration, mapped exactly (a safe non-negative
+        # integer), or absent. A wire with no native tool duration (Codex today) must publish none.
+        field = NATIVE_TOOL_DURATION.get(wire)
+        duration = native_ms(native.get(field)) if field else None
         return {'started_ms': None, 'ended_ms': None,
                 'duration_ms': duration if duration is not None and duration < (1 << 53) else None}
-    if kind == 'tool':
-        return {'started_ms': None, 'ended_ms': None, 'duration_ms': None}  # no native tool duration on this wire
     return {'started_ms': None, 'ended_ms': None}
 
 
