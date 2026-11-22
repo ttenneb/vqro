@@ -9,7 +9,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
-from account_profiles import choose as choose_account, environment as account_environment, provider_argv
+from account_profiles import choose as choose_account, environment as account_environment, provider_argv, runtime_environment
 from agent_launch import initialize_request_route, launch, launch_cwd, runtimes as validate_runtimes, valid_argv
 
 SETTINGS = "doc/settings/pi"
@@ -79,7 +79,7 @@ class Pi:
         launcher = runtime.get("bridge_argv", default_bridge())
         # The local isolated launcher locates its installed package itself. Neither it nor
         # a configured host launcher injects a module path into the agent environment.
-        env = account_environment(account, runtime.get("bridge_env", {}))
+        env = account_environment(account, runtime_environment('pi', runtime))
         # A new agent owns its own logical work, not its launching TUI's undo scope.
         env.setdefault("VQRO_PRINCIPAL", "p:"+uuid.uuid4().hex)
         params = {"bridge": True, "name": "pi-bridge-"+uuid.uuid4().hex[:12], "argv": [*launcher, "--", *native_argv], "env": env}

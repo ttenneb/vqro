@@ -154,6 +154,36 @@ class AccountTests(unittest.TestCase):
         with self.assertRaises(VqroError): self.accounts.sign_in({'account':'work'})
         self.assertEqual(self.spawns(),[])
 
+    def test_normal_pi_sign_in_uses_same_home_as_launch(self):
+        self.core.apply([{'op':'set','key':'doc/settings/pi','value':{'runtimes':[{'name':'pi','argv':['/fake/pi','--mode','rpc'],
+                         'bridge_env':{'HOME':'/fake/pi-home'}}]}}], 'fake')
+        Pi(self.core).new({'account':'normal'})
+        self.accounts.sign_in({'account':'normal','runtime':'pi'})
+        self.assertEqual(self.spawns()[1]['env']['HOME'],self.spawns()[0]['env']['HOME'])
+
+    def test_sign_in_refuses_inference_flags_or_positional_prompts_before_spawn(self):
+        cases=[('pi',['/fake/pi','--mode','rpc','-p','prompt']),
+               ('pi',['/fake/pi','--mode','rpc','--print','prompt']),
+               ('pi',['/fake/pi','prompt','--mode','rpc']),
+               ('pi',['/fake/pi','--mode','json']),
+               ('pi',['/fake/pi','--resume','old-session']),
+               ('codex',['/fake/codex','exec','prompt','app-server']),
+               ('claude',['/fake/claude','-p','prompt'])]
+        for runtime,argv in cases:
+            core=FakeCore('accounts'); accounts=Accounts(core)
+            key='doc/settings/tier1' if runtime=='claude' else 'doc/settings/'+runtime
+            settings={'claude':argv} if runtime=='claude' else {'runtimes':[{'name':runtime,'argv':argv}]}
+            core.apply([{'op':'set','key':key,'value':settings}], 'fake')
+            with self.subTest(runtime=runtime,argv=argv),self.assertRaises(VqroError):
+                accounts.sign_in({'account':'normal','runtime':runtime})
+            self.assertFalse(any(m=='resource.spawn' for m,p in core.calls))
+
+    def test_supported_node_prefix_and_safe_pi_options_are_literal(self):
+        self.core.apply([{'op':'set','key':'doc/settings/pi','value':{'runtimes':[{'name':'pi',
+            'argv':['/fake/node','/fake path/pi.js','--mode','rpc','--provider','openai-codex','--no-extensions']}]}}], 'fake')
+        self.accounts.sign_in({'account':'normal','runtime':'pi'})
+        self.assertEqual(self.spawns()[0]['argv'],['/fake/node','/fake path/pi.js','--provider','openai-codex','--no-extensions'])
+
     def test_registry_bounds_and_literal_paths(self):
         for bad in ('', '~/profile', 'relative/profile', '/path\x00bad'):
             with self.subTest(profile=bad), self.assertRaises(VqroError): self.add(profile=bad)

@@ -13,7 +13,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
-from account_profiles import choose as choose_account, environment as account_environment
+from account_profiles import choose as choose_account, environment as account_environment, runtime_environment
 from agent_launch import initialize_request_route, launch, launch_cwd, runtimes as validate_runtimes
 
 SETTINGS = 'doc/settings/codex'
@@ -70,12 +70,8 @@ class Codex:
         account, popup = choose_account(self.ext, dict(args, runtime=runtime['name'], **({'cwd':cwd} if cwd else {})), 'codex', 'codex.new')
         if popup: return popup
         principal = 'p:' + uuid.uuid4().hex
-        env = dict(runtime.get('bridge_env', {}))
-        # No credential lookup, copy, config generation or native-home access here.
-        # Absent explicit paths, native Codex owns its normal login/profile behavior.
-        if 'codex_home' in runtime: env['CODEX_HOME'] = runtime['codex_home']
-        if 'home' in runtime: env['HOME'] = runtime['home']
-        env = account_environment(account, env)
+        # Shared with native sign-in: profile selectors match without reading a profile.
+        env = account_environment(account, runtime_environment('codex', runtime))
         env['VQRO_PRINCIPAL'] = principal  # never inherit or accept a configured owner/other agent
         params = {'bridge': True, 'name': 'codex-bridge-' + uuid.uuid4().hex[:12],
                   'argv': [*runtime.get('bridge_argv', ['vqro-bridge-codex']), '--slots', '1', '--endpoint-principal', principal,

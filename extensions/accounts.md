@@ -33,7 +33,9 @@ it opens the native interactive Pi terminal on the selected profile; enter `/log
 command, handles a browser token, reads a credential, checks sign-in success or sends a model prompt. The runtime
 owns browser/device flow, token storage and refresh. For multiple configured executable variants, the programmatic
 `accounts.sign_in` command accepts `launcher:<runtime name>`; the UI uses the first configured variant. Verify you
-intend that executable before signing in. The normal-login action honors existing explicit runtime profile selectors.
+intend that executable before signing in. The normal-login action shares the launcher's profile mapping, including explicit HOME/Windows-home/XDG selectors.
+Sign-in accepts only recognized inert native options (and a recognized Node/Bun script prefix); prompt-bearing,
+noninteractive, resume or unknown argv shapes refuse before spawn rather than risk running a model request.
 
 `kind` is declared metadata (`subscription | api_key`), not observed auth. Profile-backed API-key entries can select
 an already configured native login, but importing/storing keys and API-key sign-in are explicitly unsupported in

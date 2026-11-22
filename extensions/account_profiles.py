@@ -51,6 +51,63 @@ def fact(account):
     return dict(fields, sources={k:'vqro:launcher' for k in fields})
 
 
+def runtime_environment(runtime, row):
+    """The launcher's configured env, including explicit normal-profile selectors."""
+    result = dict(row.get('bridge_env', {}))
+    if runtime == 'codex':
+        for field, key in (('codex_home','CODEX_HOME'), ('home','HOME')):
+            if field in row: result[key] = row[field]
+    return result
+
+
+def login_environment(runtime, row):
+    """Same profile namespace as launch; never forward credentials or bridge supervision."""
+    env = runtime_environment(runtime, row)
+    keys = {'HOME','USERPROFILE','HOMEDRIVE','HOMEPATH','XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_STATE_HOME',SELECTORS[runtime]}
+    return {key:value for key,value in env.items() if key in keys}
+
+
+def native_login_argv(runtime, argv):
+    """Recognize inert native CLI options, never convert a prompt-bearing argv into sign-in.
+    Unknown wrapper/option shapes refuse before spawn rather than risk a model turn.
+    """
+    prefix = [argv[0]]
+    rest = list(argv[1:])
+    binary = argv[0].replace('\\','/').rsplit('/',1)[-1].lower().removesuffix('.exe')
+    if binary in ('node','nodejs','bun'):
+        if not rest or rest[0].startswith('-') or not rest[0].endswith(('.js','.mjs','.cjs','.ts')):
+            raise VqroError('native sign-in needs a recognized executable/script prefix','unsupported')
+        prefix.append(rest.pop(0))
+    if runtime == 'codex':
+        if 'app-server' not in rest:
+            raise VqroError('Codex sign-in needs a runtime argv containing app-server','unsupported')
+        rest = rest[:rest.index('app-server')]
+    values = {'pi': {'--provider','--model','--thinking'},
+              'codex': {'-c','--config','-p','--profile','--enable','--disable'},
+              'claude': {'--model','--effort','--settings','--setting-sources'}}[runtime]
+    flags = {'pi': {'--no-extensions','--no-skills','--no-prompt-templates','--no-session','--no-tools'},
+             'codex': set(), 'claude': {'--disable-slash-commands'}}[runtime]
+    out = list(prefix); i = 0
+    while i < len(rest):
+        arg = rest[i]
+        if runtime == 'pi' and arg in ('--mode','--mode=rpc'):
+            if arg == '--mode':
+                if i+1 >= len(rest) or rest[i+1] != 'rpc':
+                    raise VqroError('Pi sign-in only converts native rpc mode to interactive','unsupported')
+                i += 1
+        elif arg in flags: out.append(arg)
+        elif arg in values:
+            if i+1 >= len(rest) or rest[i+1].startswith('-'):
+                raise VqroError('native sign-in option is missing its value','unsupported')
+            out.extend(rest[i:i+2]); i += 1
+        elif any(arg.startswith(option+'=') and arg[len(option)+1:] for option in values if option.startswith('--')):
+            out.append(arg)
+        else:
+            raise VqroError('native sign-in refuses prompts, noninteractive or unrecognized runtime options','unsupported')
+        i += 1
+    return out + (['login'] if runtime == 'codex' else ['auth','login'] if runtime == 'claude' else [])
+
+
 def environment(account, env=None):
     result = dict(env or {})
     # Untrusted runtime settings cannot smuggle a different account fact into a normal launch.

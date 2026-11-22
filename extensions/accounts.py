@@ -7,7 +7,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
-from account_profiles import SETTINGS, SELECTORS, MAX_ACCOUNTS, snapshot, validate, environment, provider_argv
+from account_profiles import SETTINGS, SELECTORS, MAX_ACCOUNTS, snapshot, validate, environment, provider_argv, login_environment, native_login_argv
 from agent_launch import runtimes, valid_argv
 
 COMMANDS = {'pi':'pi.new', 'codex':'codex.new', 'claude':'tier1.claude'}
@@ -79,24 +79,8 @@ class Accounts:
             selected = next((r for r in options if r['name']==launcher), None) if launcher else options[0]
             if selected is None: raise VqroError('native sign-in runtime not found','invalid')
             argv = selected['argv']
-            # Match the launcher's explicit profile selectors, not credentials or arbitrary env.
-            selector = SELECTORS[runtime]
-            if selector in selected.get('bridge_env', {}): env[selector] = selected['bridge_env'][selector]
-            if runtime == 'codex':
-                for field,key in (('codex_home','CODEX_HOME'),('home','HOME')):
-                    if field in selected: env[key] = selected[field]
-        if runtime=='codex':
-            if 'app-server' not in argv: raise VqroError('Codex sign-in needs a runtime argv containing app-server','unsupported')
-            return argv[:argv.index('app-server')] + ['login'], env
-        if runtime=='claude': return [*argv,'auth','login'], env
-        interactive=[]; i=0
-        while i<len(argv):
-            if argv[i]=='--mode':
-                if i+1>=len(argv) or argv[i+1]!='rpc': raise VqroError('Pi native sign-in requires rpc or interactive mode','unsupported')
-                i+=2; continue
-            if argv[i]=='--mode=rpc': i+=1; continue
-            interactive.append(argv[i]); i+=1
-        return interactive, env
+            env = login_environment(runtime, selected)
+        return native_login_argv(runtime, argv), env
 
     def sign_in(self, args):
         rows, revision = snapshot(self.ext)
