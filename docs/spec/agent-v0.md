@@ -314,10 +314,12 @@ concatenated.
   naming `agent.command`). `agent.command` runs it explicitly; the user message the runtime then emits carries
   `invoked {kind: skill | template | command, name}` when the adapter can tie it to that command, so viewers show
   "ran skill X" rather than the expanded text as typed input.
-- **Input that may be transformed.** While the agent's `input_transform.state` is `may` (§4 facts), each receipt
-  carries `may_transform: [<name>…] | "unknown"`: the extensions, hooks or mods that may have changed this input
-  (`"unknown"` when the runtime does not say which, or the complete set cannot be proven), fixed at native dispatch
-  (never recomputed at a later acknowledgement). It reports a possibility, never that the input "was not changed".
+- **Input that may be transformed.** While the agent's `input_transform.state` is `may` (§7, customization), each
+  receipt carries `may_transform`: an array of the transforming items' names only when `input_transform.names_complete`
+  is `true` for that delivery (the runtime names every one), otherwise `"unknown"` (partially known names stay in the
+  agent fact and its UI, never as a receipt list that could read as complete). It is fixed at native dispatch, never
+  recomputed at a later acknowledgement, and never `[]` or "not changed" from an absent or later state. It reports a
+  possibility, never that the input "was not changed".
 - A native acknowledgement maps to `admitted` unless the runtime evidences more; never to `inserted`, a run start or
   completion. `handled` needs an explicit witness; `handled: none` (Pi) means it is never reported.
 - **Start preflight.** An unresolved native start preflight counts as busy; an idle-looking snapshot is not a start
