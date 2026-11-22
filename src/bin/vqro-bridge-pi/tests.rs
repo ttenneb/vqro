@@ -395,11 +395,25 @@ async fn startup_version_child_gets_the_filtered_native_environment(){
     dispose(&shared,&provider).await;
 }
 
-/// Human stopgap (b): the controlled launch keeps extensions and prompt templates off but no longer disables skills.
+/// Customization slice 1 (human Q1 b): Pi launches with its skills, extensions and prompt templates; explicit
+/// interceptor/template/print argv injection is still refused.
 #[test]
-fn controlled_launch_enables_skills_but_not_extensions_or_templates(){
+fn controlled_launch_loads_skills_extensions_and_templates(){
     let argv=controlled(vec!["pi".into()]).unwrap();
-    assert_eq!(argv,["pi","--mode","rpc","--no-extensions","--no-prompt-templates"]);
-    assert!(!argv.iter().any(|arg|arg=="--no-skills"));
+    assert_eq!(argv,["pi","--mode","rpc"]);
+    assert!(!argv.iter().any(|arg|arg.starts_with("--no-")));
     for forbidden in ["-e","--extension=x","--prompt-template=y","-p","--print"] {assert!(controlled(vec!["pi".into(),forbidden.into()]).is_err(),"{forbidden}");}
+}
+
+/// While extensions are loaded, every receipt says the input may have been changed, by items Pi does not name.
+#[tokio::test]
+async fn receipts_say_input_may_be_transformed_by_unknown_extensions(){
+    let root=tempfile::tempdir().unwrap();
+    let fake=format!("{}/tests/fixtures/fake_pi.py",env!("CARGO_MANIFEST_DIR"));
+    let (shared,provider,mut core)=fixture_native(root.path(),&["/usr/bin/python3".into(),fake]).await;
+    shared.native.get().unwrap().call("get_state",json!({}),Duration::from_secs(2)).await.unwrap();
+    let Outcome::Accepted(Some(value))=send(&shared,&provider,&mut core,1,"settle","hello").await else{panic!("not accepted")};
+    assert_eq!(value["receipt"]["may_transform"],"unknown");
+    assert_eq!(shared.agent.lock().unwrap().receipts["d1"]["may_transform"],"unknown");
+    dispose(&shared,&provider).await;
 }

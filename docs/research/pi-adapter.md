@@ -11,7 +11,13 @@ Fake/public-wire evidence and the final installed-Pi1 regression/smoke remain se
 - Sender framing is a user-role attribution, never system/developer authority. Plain user requires a proven human
   owner identity; otherwise declared attributed_user is used or the requested rendering is rejected.
 - Input is array-only text_then_media: at most one leading text block, then images. No concat/reorder/fallback.
-  The literal route disables extension/skill/template discovery and rejects explicit interceptors/templates.
+  Pi loads its skills, extensions and prompt templates (human choice, customization slice 1); explicit -e /
+  --extension / --prompt-template / -p argv is still refused. A send whose text Pi would expand or run (a leading
+  /skill:, or /<name> of an advertised template or extension command; any leading /name while that inventory is
+  unknown) is refused as non-literal: run it with agent.command. With extensions loaded, agent.send.literal is
+  "none", input_transform is "may" (Pi names only command-bearing extensions) and every receipt carries
+  may_transform "unknown"; a launch that itself passes --no-extensions and --no-prompt-templates stays
+  "controlled_launch" with input_transform "none".
 - Snapshots are tail coverage, not complete native history. Shared ItemJournal owns the sole retained entity
   document; native events become puts/appends, with explicit oversized-content omissions.
 

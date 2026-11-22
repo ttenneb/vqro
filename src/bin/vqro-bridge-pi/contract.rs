@@ -8,6 +8,9 @@ pub struct Context<'a> {
     pub caps_rev:u64,pub epoch:&'a str,pub session:Option<&'a str>,
     /// True only when recorded caller identity proves this origin is the human owner.
     pub owner_proven:bool,pub images:bool,pub literal:bool,
+    /// The native slash names Pi would expand or run (prompt templates, extension commands, skills), from its
+    /// get_commands; None while that inventory is unknown or incomplete (then any leading /name is refused).
+    pub slash_names:Option<&'a [String]>,
 }
 #[derive(Debug,Clone)]
 pub struct Send {
@@ -185,6 +188,14 @@ pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
     // owner's plain input can start that way (everyone else's is framed with a sender header first).
     if message.starts_with("/skill:") {
         return Err(reject("unsupported","text starting with /skill: would be expanded by a native skill, not delivered literally; invoke the skill with agent.command"));
+    }
+    // Pi's own rule for templates and extension commands (prompt-templates.js expandPromptTemplate: ^/(\S+)(\s+.*)?$
+    // against the loaded names; agent-session.js _tryExecuteExtensionCommand): a leading /name it knows is expanded or
+    // run, not delivered. Unknown inventory: no leading /name can be proven literal.
+    if let Some(name)=message.strip_prefix('/').map(|rest|rest.split(char::is_whitespace).next().unwrap_or("")).filter(|name|!name.is_empty()) {
+        if context.slash_names.is_none_or(|names|names.iter().any(|known|known==name)) {
+            return Err(reject("unsupported",format!("/{name} would be expanded or run by the native runtime (template or command), not delivered literally; run it with agent.command").as_str()));
+        }
     }
     let mut native=json!({"message":message});
     if !images.is_empty() {native["images"]=json!(images);}

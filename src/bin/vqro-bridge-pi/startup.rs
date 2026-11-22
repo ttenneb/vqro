@@ -59,14 +59,32 @@ impl Startup {
         self.set("skills",json!(skills),"rpc:get_commands");self.fields.insert("skills_scope".into(),json!("available"));
         self.set("prompts",json!(prompts),"rpc:get_commands");
         self.set("commands",json!(commands),"rpc:get_commands");
+        // Extensions: Pi lists only those that register a command, identified by their source path (Pi gives no
+        // extension name, so `name` is that path's file name). Always a partial view: `extensions` is incomplete.
+        let mut extensions:Vec<Value>=vec![];
+        for row in rows.iter().filter(|row|row["source"]=="extension") {
+            let Ok(Some(path))=bounded(&row["sourceInfo"]["path"],PATH) else {continue;};
+            if extensions.iter().any(|e|e["path"]==path.as_str()) {continue;}
+            if extensions.len()>=LIST {break;}
+            let name=path.rsplit('/').next().filter(|n|!n.is_empty() && n.len()<=NAME).unwrap_or("extension").to_string();
+            let mut entry=json!({"name":name,"kind":"extension","path":path,"state":"active",
+                "transforms":["input","tool_calls","system_prompt"]}); // Pi extension API: input, tool_call, before_agent_start
+            if let Ok(Some(scope))=bounded(&row["sourceInfo"]["scope"],64) {if matches!(scope.as_str(),"user"|"project"){entry["scope"]=json!(scope);}}
+            extensions.push(entry);
+        }
+        self.set("extensions",json!(extensions),"rpc:get_commands");self.mark("extensions");
         for field in cut {self.mark(field);}
+    }
+    /// The extension paths Pi reports (command-bearing only): the input_transform names.
+    pub fn extension_paths(&self)->Vec<Value>{
+        self.fields.get("extensions").and_then(Value::as_array).map(|list|list.iter().map(|e|e["path"].clone()).collect()).unwrap_or_default()
     }
     /// An inventory that errored: its field is absent and named incomplete.
     pub fn failed(&mut self,fields:&[&str]){for field in fields {self.fields.remove(*field);self.sources.remove(*field);self.mark(field);}}
     /// Keep the entity within `bound` bytes by cutting the longest list from its end (named incomplete).
     pub fn fit(&mut self,bound:usize){
         while vqro::limits::encoded_bytes(&self.value())>bound {
-            let Some(field)=["skills","prompts","commands"].into_iter().filter(|f|self.fields.get(*f).and_then(Value::as_array).is_some_and(|l|!l.is_empty()))
+            let Some(field)=["skills","prompts","commands","extensions"].into_iter().filter(|f|self.fields.get(*f).and_then(Value::as_array).is_some_and(|l|!l.is_empty()))
                 .max_by_key(|f|vqro::limits::encoded_bytes(&self.fields[*f])) else {break;};
             self.fields.get_mut(field).and_then(Value::as_array_mut).unwrap().pop();self.mark(field);
         }

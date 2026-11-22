@@ -84,7 +84,7 @@ fn controlled(mut argv:Vec<String>)->Result<Vec<String>> {
     // (agent-session.js _expandSkillCommand), which only the owner's own plain input can; every other sender's input is
     // framed with a sender header first (contract.rs), so a skill can never rewrite it. Extensions (which can intercept
     // or rewrite input and tool calls) and prompt templates (which expand any leading `/name`) stay off.
-    argv.extend(["--mode","rpc","--no-extensions","--no-prompt-templates"].map(str::to_string));
+    argv.extend(["--mode","rpc"].map(str::to_string));
     Ok(argv)
 }
 #[tokio::main(flavor="current_thread")]
@@ -96,6 +96,9 @@ async fn main()->Result<()> {
     anyhow::ensure!(!instance.is_empty() && instance.len()<=64 && !name.is_empty() && name.len()<=128,"provider identity exceeds bounds");
     // The runtime's own --version from the exact binary the launcher starts (agent-v0 startup, version_source cli).
     let version_argv=args.native.clone();
+    // A launch that itself disables extensions and prompt templates stays a controlled, literal launch.
+    let has=|flags:&[&str]|args.native.iter().any(|arg|flags.contains(&arg.as_str()));
+    let expanders_on=!(has(&["--no-extensions","-ne"]) && has(&["--no-prompt-templates","-np"]));
     let argv=controlled(args.native)?;
     let cwd=args.cwd.unwrap_or(std::env::current_dir()?).canonicalize()?;
     let signals=admission::Signals::new();
@@ -103,6 +106,7 @@ async fn main()->Result<()> {
     let mut agent=Agent::with_cwd(instance.clone(),signals.clone(),cwd.to_string_lossy().into_owned());
     agent.account=launcher_account::parse(account_raw.as_deref()).map_err(anyhow::Error::msg)?;
     let shared=Arc::new(Shared {agent:Mutex::new(agent),fallback:panel::Fallback::tty(),connected:std::sync::atomic::AtomicBool::new(false),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),metadata_refresh:Notify::new(),cwd:cwd.to_string_lossy().into_owned(),provider_name:name.clone(),instance:instance.clone(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
+    shared.agent.lock().unwrap().expanders_on=expanders_on;shared.agent.lock().unwrap().refresh();
     let weak=Arc::downgrade(&shared);
     let native=Native::spawn(&argv,&cwd,&std::env::vars().collect::<HashMap<_,_>>(),Arc::new(move|event|{
         if let Some(shared)=weak.upgrade(){
@@ -277,7 +281,7 @@ async fn invoke(shared:&Arc<Shared>,provider:&Provider,effect:&EffectRequest)->R
     {
         let agent=shared.agent.lock().unwrap();let current=agent.signals.current();
         let context=contract::Context {caps_rev:agent.caps()["rev"].as_u64().unwrap(),epoch:agent.epoch(),session:if agent.session_pending{None}else{current.metadata["sessionId"].as_str()},owner_proven:false,
-            images:agent.caps()["agent.send"]["content"]["types"].as_array().is_some_and(|types|types.iter().any(|kind|kind=="image")),literal:true};
+            images:agent.caps()["agent.send"]["content"]["types"].as_array().is_some_and(|types|types.iter().any(|kind|kind=="image")),literal:true,slash_names:None};
         if let Err(error)=contract::common(args,&context){return rejected(error.kind,error.message);}
     }
     match effect.op.as_str() {
@@ -327,8 +331,10 @@ async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant,owner_proven:bool
         if agent.configuration.pending{return rejected("busy","native configuration change is unresolved");}
         if args["mode"]=="start" && agent.state()!="idle"{return rejected("busy","endpoint is not evidenced idle");}
         if agent.caps()["agent.send"]["modes"].get(args["mode"].as_str().unwrap_or("")).is_none(){return rejected("unsupported","mode not in current capabilities");}
+        let slash_names=agent.commands.slash_names();
         let context=contract::Context {caps_rev:agent.caps()["rev"].as_u64().unwrap(),epoch:agent.epoch(),session:current.metadata["sessionId"].as_str(),owner_proven,
-            images:agent.caps()["agent.send"]["content"]["types"].as_array().is_some_and(|types|types.iter().any(|kind|kind=="image")),literal:true};
+            images:agent.caps()["agent.send"]["content"]["types"].as_array().is_some_and(|types|types.iter().any(|kind|kind=="image")),literal:true,
+            slash_names:slash_names.as_deref()};
         let prepared=match contract::send(args,&context){Ok(prepared)=>prepared,Err(error)=>return rejected(error.kind,error.message)};
         if agent.receipts.contains_key(&prepared.delivery){return rejected("conflict","delivery already recorded; lookup is not a native insertion key");}
         prepared
@@ -336,6 +342,8 @@ async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant,owner_proven:bool
     shared.agent.lock().unwrap().invalidate_queue();shared.wake();
     let delivery=prepared.delivery;let native_args=prepared.args;let command=prepared.command;let mode=prepared.mode;
     let base=json!({"delivery":delivery,"origin":prepared.origin,"quoted":prepared.quoted,"rendering":prepared.rendering,"cause":prepared.cause,"correlation":prepared.correlation});
+    // With extensions loaded Pi never names them all: the receipt says input may have been changed, by unknown items.
+    let base={let mut base=base;if shared.agent.lock().unwrap().expanders_on{base["may_transform"]=json!("unknown");}base};
     let weak=Arc::downgrade(shared);let d=delivery.clone();let metadata=base.clone();
     let receipt:admission::Receipt=Arc::new(move|id,result|{
         if let Some(shared)=weak.upgrade(){let mut value=metadata.clone();value["native"]=json!({"request":id});

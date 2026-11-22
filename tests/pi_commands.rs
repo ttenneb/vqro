@@ -37,3 +37,10 @@ fn an_advertised_skill_is_invoked_through_agent_command(){
     assert!(matches!(c.prepare("skill:review",Some(&json!("the diff"))).unwrap(),Prepared::Prompt{message} if message=="/skill:review the diff"));
     assert!(matches!(c.prepare("skill:review",None).unwrap(),Prepared::Prompt{message} if message=="/skill:review"));
 }
+#[test]
+fn slash_names_are_unknown_until_a_complete_inventory(){
+    let mut c=Commands::default();assert!(c.slash_names().is_none(),"unknown before get_commands");
+    c.observe(&json!({"commands":[{"name":"review","source":"prompt"},{"name":"skill:x","source":"skill"}]}));
+    assert_eq!(c.slash_names().unwrap(),vec!["review".to_string(),"skill:x".to_string()]);
+    c.observe(&json!({"wrong":[]}));assert!(c.slash_names().is_none(),"incomplete is unknown");
+}

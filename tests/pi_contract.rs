@@ -5,7 +5,7 @@
 #[path="support/frame_metadata.rs"] mod frame_metadata;
 use contract::{Context,send};
 use serde_json::{json,Value};
-fn context()->Context<'static> {Context {caps_rev:1,epoch:"e1",session:Some("s1"),owner_proven:false,images:true,literal:true}}
+fn context()->Context<'static> {Context {caps_rev:1,epoch:"e1",session:Some("s1"),owner_proven:false,images:true,literal:true,slash_names:Some(&[])}}
 fn input()->Value {json!({"v":0,"caps_rev":1,"epoch":"e1","guard":{"session":"s1"},"mode":"start","delivery":"d1",
     "origin":{"principal":"agent:a","actor":"worker","kind":"agent"},"content":[{"type":"text","text":"/literal\nunchanged"}]})}
 fn image()->Value {json!({"type":"image","mime":"image/png","data":"AQ=="})}
@@ -216,4 +216,26 @@ fn secondary_enabled_skills_literal_owner_prefix_refuses_before_dispatch() {
         }
     }
     assert!(unsafe_modes.is_empty(), "literal owner skill prefixes dispatched in {unsafe_modes:?}");
+}
+
+/// Customization slice 1: a leading /name Pi would expand (template) or run (extension command) is refused as
+/// non-literal; with an unknown inventory no leading /name is sent; other text and framed senders pass.
+#[test]
+fn leading_native_slash_names_are_refused_as_non_literal(){
+    let mut args=input();args["origin"]["kind"]=json!("human");args["render"]=json!(["user"]);
+    let names=vec!["review".to_string(),"deploy".to_string(),"skill:x".to_string()];
+    let owner=Context {owner_proven:true,slash_names:Some(&names),..context()};
+    for text in ["/review","/review the diff","/deploy\nnow","/skill:x"] {
+        args["content"]=json!([{"type":"text","text":text}]);
+        let error=send(&args,&owner).err().unwrap();assert_eq!(error.kind,"unsupported","{text}");assert!(error.message.contains("agent.command"));
+    }
+    for text in ["/reviewer","/other thing","review","/ leading space","/"] {
+        args["content"]=json!([{"type":"text","text":text}]);
+        assert_eq!(send(&args,&owner).unwrap().args["message"],text,"{text} is literal");
+    }
+    let unknown=Context {owner_proven:true,slash_names:None,..context()};
+    args["content"]=json!([{"type":"text","text":"/anything"}]);assert_eq!(send(&args,&unknown).err().unwrap().kind,"unsupported");
+    args["content"]=json!([{"type":"text","text":"plain"}]);assert!(send(&args,&unknown).is_ok());
+    let mut other=input();other["content"]=json!([{"type":"text","text":"/review"}]);
+    assert!(send(&other,&Context {slash_names:None,..context()}).unwrap().args["message"].as_str().unwrap().starts_with("from "));
 }

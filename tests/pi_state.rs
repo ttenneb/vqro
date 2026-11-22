@@ -358,7 +358,7 @@ fn startup_entity_carries_only_pis_own_reports_with_sources() {
     assert_eq!(value["skills_scope"],"available","Pi lists skills it can invoke; bodies load later");
     assert_eq!(value["prompts"],json!([{"name":"fix","description":"Fix it","path":"/repo/.pi/prompts/fix.md"}]));
     assert_eq!(value["commands"],json!([{"name":"deploy","kind":"extension"}]),"an over-bound path is cut, never truncated");
-    assert_eq!(value["incomplete"],json!(["commands"]));
+    assert_eq!(value["incomplete"],json!(["extensions","commands"]),"extensions: Pi lists only command-bearing ones");
     assert_eq!(value["sources"]["skills"],"rpc:get_commands");
     for absent in ["instructions","plugins","mcp"] {assert!(value.get(absent).is_none(),"{absent}: Pi does not report it over RPC");}
     // A new epoch carries the same reports; a failed --version leaves the version absent and runtime incomplete.
@@ -369,6 +369,27 @@ fn startup_entity_carries_only_pis_own_reports_with_sources() {
     event(&mut b,json!({"type":"response","id":"c","command":"get_commands","success":true,"data":{"unexpected":[]}}));
     let broken=startup(&b);assert!(broken.get("skills").is_none());
     assert!(broken["incomplete"].as_array().unwrap().iter().any(|f|f=="skills"));
+}
+
+/// Customization slice 1: with extensions loaded, literal is none and input may be transformed (names incomplete);
+/// a launch without extensions/templates stays controlled_launch with input_transform none.
+#[test]
+fn customization_facts_follow_the_launch_and_pis_own_inventory() {
+    let mut a=make();
+    let agent=|a:&Agent|a.facts("p","/w")["data"]["agent"].clone();
+    assert_eq!(a.caps()["agent.send"]["literal"],"none");
+    assert_eq!(a.caps()["agent.customize"]["extension"],json!({"ops":["list"],"effective":"now"}));
+    assert_eq!(agent(&a)["input_transform"],json!({"state":"may","names":[],"names_complete":false}));
+    event(&mut a,json!({"type":"response","id":"c","command":"get_commands","success":true,"data":{"commands":[
+        {"name":"deploy","source":"extension","sourceInfo":{"path":"/home/u/.pi/agent/extensions/deploy.ts","scope":"user"}},
+        {"name":"undeploy","source":"extension","sourceInfo":{"path":"/home/u/.pi/agent/extensions/deploy.ts","scope":"user"}}]}}));
+    assert_eq!(agent(&a)["input_transform"]["names"],json!(["/home/u/.pi/agent/extensions/deploy.ts"]));
+    let startup=entities(&a,"startup").into_iter().find(|r|r["id"]=="current").unwrap()["value"].clone();
+    assert_eq!(startup["extensions"],json!([{"name":"deploy.ts","kind":"extension","path":"/home/u/.pi/agent/extensions/deploy.ts",
+        "state":"active","scope":"user","transforms":["input","tool_calls","system_prompt"]}]));
+    assert!(startup["incomplete"].as_array().unwrap().contains(&json!("extensions")),"Pi lists only command-bearing extensions");
+    let mut b=make();b.expanders_on=false;b.refresh();
+    assert_eq!(b.caps()["agent.send"]["literal"],"controlled_launch");assert_eq!(agent(&b)["input_transform"],json!({"state":"none"}));
 }
 
 #[test]

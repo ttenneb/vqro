@@ -71,6 +71,9 @@ pub struct Agent {
     reason:String,error:Option<String>,exit:Option<Exit>,caps:Value,
     launch_cwd:Option<String>,usage:Option<Value>,usage_revision:u64,
     startup:super::startup::Startup,
+    /// Whether Pi was launched with extensions or prompt templates (input expanders/transformers) loaded: a fact for
+    /// the process's life. Conservative default true; main sets it from the launch argv.
+    pub expanders_on:bool,
 }
 impl Agent {
     pub fn new(instance:String,signals:Arc<Signals>)->Self {
@@ -79,7 +82,7 @@ impl Agent {
         let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entities:ENTITY_COUNT,max_entity_bytes:ENTITY_TOTAL,snapshot_buffer_bytes:1024*1024,..Default::default()});
         journal.set_coverage(Coverage::Tail);
         let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,account:None,tool_principal_env:false,view:None,view_error:None,configuration:Default::default(),commands:Default::default(),availability:None,origins:Default::default(),start_origin:None,current_origin:None,requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),open:Vec::new(),starting:false,
-            position:0,serial:0,epoch_number:1,instance,boot,session:None,session_pending:false,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null,launch_cwd:None,startup:Default::default(),usage:None,usage_revision:0};
+            position:0,serial:0,epoch_number:1,instance,boot,session:None,session_pending:false,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null,launch_cwd:None,startup:Default::default(),expanders_on:true,usage:None,usage_revision:0};
         agent.refresh();agent
     }
     pub fn with_cwd(instance:String,signals:Arc<Signals>,cwd:String)->Self{let mut agent=Self::new(instance,signals);agent.startup.cwd(&cwd);agent.publish_startup();if cwd.len()<=4096{agent.launch_cwd=Some(cwd);}else{agent.incomplete.insert("session.cwd".into());}agent}
@@ -118,13 +121,15 @@ impl Agent {
         }
         let mut caps=json!({"agent":{"v":0,"modules":{"queue":{"v":0},"stop":{"v":0},"config":{"v":0},"sessions":{"v":0}}},"host":{"kind":"process","endpoints":"one"},
             "agent.send":{"modes":modes,"content":{"types":if images {vec!["text","image"]} else {vec!["text"]},"shape":"text_then_media","max_bytes":super::contract::input_bytes()},
-                "literal":"controlled_launch","origin":[{"as":"attributed_user","role":"user","frame":"sender_header"}],
+                "literal":if self.expanders_on{"none"}else{"controlled_launch"},"origin":[{"as":"attributed_user","role":"user","frame":"sender_header"}],
                 "correlation":"none","handled":"none","keys":null,"guards":{"session":"adapter","run":"none"},"receipts":{"retain":256}},
             "agent.interrupt":{"pending":"unknown","scope":"foreground","waits":"none"},"agent.receipt":{},
             "agent.respond":{"ack":"dispatched","methods":["choice","confirm","text"],"scopes":["operation"],"background_requests":false,"native_timeout":"unrepresentable_positive","max_pending":super::requests::MAX_PENDING,"request_bytes":super::requests::MAX_REQUEST_BYTES},
             "agent.configure":{},"agent.command":{},"agent.session":{"actions":["new"]},
             "agent.stop":{"covers":["foreground","queued"],"waits":"exit"},
             "agent.availability":{"reasons":["_retrying"]},
+            // Declaration only (slice 1): Pi lists these over RPC (get_commands) as loaded at launch.
+            "agent.customize":{"skill":{"ops":["list"],"effective":"now"},"template":{"ops":["list"],"effective":"now"},"extension":{"ops":["list"],"effective":"now"}},
             "agent.queue":{"actions":["list","clear"],"ids":"none","removed":{"content":["text"],"media":"unknown"}},
             "items.stream":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"max_viewers":4}});
         if self.tool_principal_env{caps["agent"]["tool_principal"]=json!("env");}caps
@@ -149,6 +154,9 @@ impl Agent {
             "status":{"state":phase},
             "data":{"agent":{"v":0,"state":self.state(),"lifecycle":if self.exit.is_some(){"ended"}else{"live"},
                 "availability":if self.exit.is_some(){None}else{self.availability.as_ref()},
+                // agent-v0 7: whether extensions are loaded is a launch fact for the process's life. With them, Pi names
+                // only the command-bearing ones: "may" with incomplete names; launched without them: "none".
+                "input_transform":if self.expanders_on{json!({"state":"may","names":self.startup.extension_paths(),"names_complete":false})}else{json!({"state":"none"})},
                 "host":{"id":format!("{}.child",self.boot),"provider":provider,"instance":self.instance,"incarnation":"","kind":"process","owns_lifecycle":true},
                 "session":if self.session_pending {None}else{self.session.as_ref()},"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":self.queue,"requests":self.request_summaries(),"background":null,
                 "config":self.configuration.options(),"commands":self.commands.facts(),"usage":if self.session_pending || self.configuration.pending{None}else{self.usage.as_ref()},"incomplete":self.incomplete,
