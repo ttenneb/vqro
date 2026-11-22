@@ -28,6 +28,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
+from account_profiles import choose as choose_account, environment as account_environment, provider_argv, fact as account_fact
 
 HERE = Path(__file__).resolve().parent
 RUN = HERE / "tier1_run.py"
@@ -81,6 +82,8 @@ class Tier1:
         self.ext = ext
         for runtime, title in (("claude", "New Claude agent"), ("pi", "New Pi agent (tier 1)")):
             ext.command("tier1." + runtime, title + " (args: cwd)")(lambda args, runtime=runtime: self.launch(runtime, args))
+        ext.contribute({'view/accounts-choice-tier1-pi':{'kind':'panel','title':'Pi account','items':[]},
+                        'view/accounts-choice-tier1-claude':{'kind':'panel','title':'Claude account','items':[]}})
         ext.on_event(self.changed)
         self.sweep()
 
@@ -90,6 +93,9 @@ class Tier1:
         settings = self.ext.value(SETTINGS, DEFAULTS)
         argv = settings.get(runtime) if isinstance(settings, dict) else None
         argv = argv if valid_argv(argv) else DEFAULTS[runtime]
+        account, popup = choose_account(self.ext, args, runtime, 'tier1.'+runtime)
+        if popup: return popup
+        argv = provider_argv(argv, account)
         nonce, principal = uuid.uuid4().hex, "p:" + uuid.uuid4().hex
         if runtime == "claude":
             hook = find_hook(settings.get("hook") if isinstance(settings, dict) else None)
@@ -109,7 +115,7 @@ class Tier1:
             declaration = pi_declaration()
             argv = [*argv, "-e", str(PI_PLUGIN)]
         params = {"argv": ["python3", str(RUN), "--", *argv], "name": runtime + "-" + nonce,
-                  "env": {"VQRO_PRINCIPAL": principal, "VQRO_TIER1_LAUNCH": nonce}}
+                  "env": account_environment(account, {"VQRO_PRINCIPAL": principal, "VQRO_TIER1_LAUNCH": nonce})}
         cwd = args.get("cwd") or self.ext.layout_folder(args)
         if cwd:
             params["cwd"] = cwd
@@ -120,7 +126,8 @@ class Tier1:
         # wrapper waits for) and, for an agent the owner starts, its request route `human` (coordination-v0 6.2).
         # Both are creations (expect 0): an existing endpoint's configuration is never rewritten.
         ops = [{"op": "set", "key": "doc/agents/terminals/" + rid, "expect": 0,
-                "value": {"pull": declaration, "launch": nonce, "app": runtime}}]
+                "value": {"pull": declaration, "launch": nonce, "app": runtime,
+                          **({'account':account_fact(account)} if account else {})}}]
         caller, owner = self.ext.caller(), self.ext.owner()
         owner_started = bool(caller) and owner is not None and caller.get("principal") == owner
         if owner_started:

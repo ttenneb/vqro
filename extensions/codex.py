@@ -13,6 +13,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
+from account_profiles import choose as choose_account, environment as account_environment
 from agent_launch import initialize_request_route, launch, launch_cwd, runtimes as validate_runtimes
 
 SETTINGS = 'doc/settings/codex'
@@ -39,6 +40,7 @@ class Codex:
                 ext.apply([{'op': 'set', 'key': SETTINGS, 'expect': 0, 'value': DEFAULTS}], 'codex: default runtimes')
         ext.retrying(initialize)
         ext.contribute({
+            'view/accounts-choice-codex-new': {'kind':'panel','title':'Codex account','items':[]},
             'view/codex-runtimes': {'kind': 'panel', 'title': 'Codex runtimes', 'items': []},
             'view/codex-settings': {'kind': 'panel', 'title': 'Codex runtime settings', 'items': []},
         })
@@ -60,16 +62,20 @@ class Codex:
         if selected is None and len(options) > 1:
             self.ext.publish('codex-runtimes', {'title': 'New Codex agent: runtime', 'requires': ['menu'], 'items': [
                 {'text': label(row['name']), 'description': label(' '.join(row['argv'])), 'command': 'codex.new',
-                 'args': {'runtime': row['name'], **({'cwd': cwd} if cwd else {})}} for row in options]})
+                 'args': {'runtime': row['name'], **({'cwd': cwd} if cwd else {}),
+                          **{k:args[k] for k in ('account','_account_revision') if k in args}}} for row in options]})
             return {'client': {'popup': {'view': 'codex-runtimes', 'width': 72}}}
         runtime = next((row for row in options if row['name'] == selected), None) if selected is not None else options[0]
         if runtime is None: raise VqroError('configured Codex runtime not found', 'invalid')
+        account, popup = choose_account(self.ext, dict(args, runtime=runtime['name'], **({'cwd':cwd} if cwd else {})), 'codex', 'codex.new')
+        if popup: return popup
         principal = 'p:' + uuid.uuid4().hex
         env = dict(runtime.get('bridge_env', {}))
         # No credential lookup, copy, config generation or native-home access here.
         # Absent explicit paths, native Codex owns its normal login/profile behavior.
         if 'codex_home' in runtime: env['CODEX_HOME'] = runtime['codex_home']
         if 'home' in runtime: env['HOME'] = runtime['home']
+        env = account_environment(account, env)
         env['VQRO_PRINCIPAL'] = principal  # never inherit or accept a configured owner/other agent
         params = {'bridge': True, 'name': 'codex-bridge-' + uuid.uuid4().hex[:12],
                   'argv': [*runtime.get('bridge_argv', ['vqro-bridge-codex']), '--slots', '1', '--endpoint-principal', principal,

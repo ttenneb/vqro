@@ -9,6 +9,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
+from account_profiles import choose as choose_account, environment as account_environment, provider_argv
 from agent_launch import initialize_request_route, launch, launch_cwd, runtimes as validate_runtimes, valid_argv
 
 SETTINGS = "doc/settings/pi"
@@ -44,6 +45,7 @@ class Pi:
             "menu/pi.new": {"where": "tabbar", "label": "+", "icon_after": True,
                             "icon": {"name": "agent", "nerd": "\U000f06a9", "text": "◆"}, "command": "pi.new", "order": 5},
             "binding/pi.new": {"key": "a", "command": "pi.new", "label": "new Pi agent"},
+            "view/accounts-choice-pi-new": {"kind":"panel","title":"Pi account","items":[]},
             "view/pi-runtimes": {"kind": "panel", "title": "Pi runtimes", "items": []},
             "view/pi-settings": {"kind": "panel", "title": "Pi runtime settings", "items": []},
         })
@@ -65,18 +67,22 @@ class Pi:
         if selected is None and len(options) > 1:
             self.ext.publish("pi-runtimes", {"title": "New Pi agent: runtime", "requires": ["menu"], "items": [
                 {"text": label(r["name"]), "description": label(" ".join(r["argv"])), "command": "pi.new",
-                 "args": {"runtime": r["name"], **({"cwd": cwd} if cwd else {})}} for r in options]})
+                 "args": {"runtime": r["name"], **({"cwd": cwd} if cwd else {}),
+                          **{k:args[k] for k in ('account','_account_revision') if k in args}}} for r in options]})
             return {"client": {"popup": {"view": "pi-runtimes", "width": 72}}}
         runtime = next((r for r in options if r["name"] == selected), None) if selected is not None else options[0]
         if runtime is None:
             raise VqroError("configured runtime not found", "invalid")
+        account, popup = choose_account(self.ext, dict(args, runtime=runtime['name'], **({'cwd':cwd} if cwd else {})), 'pi', 'pi.new')
+        if popup: return popup
+        native_argv = provider_argv(runtime['argv'], account)
         launcher = runtime.get("bridge_argv", default_bridge())
         # The local isolated launcher locates its installed package itself. Neither it nor
         # a configured host launcher injects a module path into the agent environment.
-        env = dict(runtime.get("bridge_env", {}))
+        env = account_environment(account, runtime.get("bridge_env", {}))
         # A new agent owns its own logical work, not its launching TUI's undo scope.
         env.setdefault("VQRO_PRINCIPAL", "p:"+uuid.uuid4().hex)
-        params = {"bridge": True, "name": "pi-bridge-"+uuid.uuid4().hex[:12], "argv": [*launcher, "--", *runtime["argv"]], "env": env}
+        params = {"bridge": True, "name": "pi-bridge-"+uuid.uuid4().hex[:12], "argv": [*launcher, "--", *native_argv], "env": env}
         if cwd:
             params["cwd"] = cwd
         return launch(self.ext, params, brand="Pi", initialize_route=self.initialize_request_route,
