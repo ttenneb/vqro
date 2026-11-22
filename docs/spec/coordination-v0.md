@@ -450,6 +450,13 @@ coordination envelope. It never waits behind inbox records and runs on reserved 
 | `unavailable` | still no end evidence after a declared grace (default 60 s): cached live facts forgotten, tombstone kept | held `agent_absent` | kept in the tombstone |
 | `retired` | a principal's explicit `retire`, recorded `{by, reason}`; native execution unknown | routing off, held `agent_retired` | handles resolve to `retired` |
 
+The current grace sweep covers tracked agents whose resource is absent or `available: false`, checked every
+5 seconds. It does not start a timer solely for native lifecycle `disconnected`/`unknown` on an available resource;
+those remain held `agent_absent`. The shipped Rust Pi bridge and Codex adapter publish lifecycle `live`/`ended`,
+not that combination; Pi/Claude tier-1 plugins report advisory terminal **state**, not agent lifecycle. Core
+`resource.forget_cached` rejects available resources. A future adapter exposing that combination needs an explicit
+policy/mechanism decision, not an assumption that the current grace forgets it.
+
 - **Stop:** `coord.control {action: stop, args: {how: graceful | host_kill}}`, right `stop`. The gate closes first.
   `graceful` invokes `agent.stop`. If it is not declared, vqro offers `host_kill` only through an addressable,
   declared route: the endpoint's `host.resource` is a core resource of the same incarnation whose provider declares a
