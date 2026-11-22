@@ -3,6 +3,12 @@
 D16: build vqro itself, smallest complete and usable first. The north star: an agent can substantially modify its own
 workspace through reliable public primitives, without changing the host or endangering underlying processes.
 
+## Installed-setup unit health report (2026-11-22)
+
+The `test-unit` extension adds on-demand read-only health checks, an offline-capable CLI, scrubbed installed-test
+runs, and bounded fingerprinted receipts; it makes no behavioural, rendering or performance claim.
+See `extensions.md` (Checking your installed setup) and `tests/test_testing_unit.py`.
+
 ## Agents gear popup latency (2026-11-21)
 
 Opening `agents.pane` uses event-fed facts rather than copying every live transcript via a workspace snapshot.

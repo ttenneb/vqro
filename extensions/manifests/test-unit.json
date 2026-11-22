@@ -1,0 +1,8 @@
+{
+  "name":"test-unit", "title":"Unit health report", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"management",
+  "summary":"Read-only health report for your installed extensions.",
+  "description":"Checks observed status, manifests, dependencies, launch paths, logs and installed offline tests only when asked. Publishes a bounded report and a fingerprinted receipt. Turning it off removes the in-app commands; the Python CLI still works, including offline. This report does not prove extension behaviour.",
+  "requires":{"protocol":1,"client_features":["items"]},
+  "provides":["command/test.unit","command/test.unit.show","view/test-unit.report"],
+  "contributes":{"commands":["test.unit","test.unit.show"],"panels":["Unit health report"]}
+}

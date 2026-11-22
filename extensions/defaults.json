@@ -1,5 +1,5 @@
 {
-  "version": 9,
+  "version": 10,
   "extensions": [
     {
       "name": "tabs",
@@ -129,6 +129,12 @@
       ],
       "since": 4,
       "description": "Forgets finished terminals 60 s after no layout shows them (undo within that brings them back; keeps the newest 64 never-shown). Off keeps every finished terminal."
+    },
+    {
+      "name": "test-unit",
+      "since": 10,
+      "argv": ["python3", "testing_unit.py"],
+      "description": "On-demand, read-only installed-extension health report, offline tests and fingerprinted receipts. No behavioural coverage."
     },
     {
       "name": "logs",

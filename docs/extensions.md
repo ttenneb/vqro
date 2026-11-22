@@ -33,6 +33,31 @@ mode. A missing/bad manifest affects information, not whether the program is per
 Wide windows put details beside the list; narrow windows put them below. Settings uses the generic `list_detail`
 panel enhancement in `spec/core-protocol.md`; other extensions can use exactly the same primitive.
 
+## Checking your installed setup
+
+Run `vqro run test.unit` to check observed extension status, crashes, manifests, dependencies, launch paths,
+log tracebacks and any installed `tests/<extension>/test_*.py` suites. `test.unit.show` reopens the last panel.
+There are no background checks. The report only reads core facts; it never restarts or changes extensions.
+Receipts include a fingerprint and coverage gaps, live under `<state dir>/test-unit/` (0600), and retain 20 runs.
+
+When the core or extensions are broken, use the plain CLI:
+
+```sh
+python3 ~/.local/share/vqro/extensions/testing_unit.py --json
+python3 ~/.local/share/vqro/extensions/testing_unit.py --offline --state-dir /path/to/state --no-tests
+```
+
+Options include `--socket`, `--extensions-dir`, `--strict` (warnings fail), and `--out FILE` (CLI writes no
+receipt unless requested). Offline mode reads `workspace.json` without changing it. Exit codes are 0 pass,
+1 fail, 77 unverified (no extension observed running), and 2 harness error, including zero declarations.
+Disabled extensions have their metadata and launch paths checked, but do not run tests or fail for broken paths.
+Tests use a private temporary HOME and a scrubbed environment with only PATH and HOME, and time out at 120 seconds.
+This is cooperative isolation, **not a security sandbox**: only run installed tests you trust.
+
+No installed tests means **no coverage**, not a test pass. Bundled tests are not currently installed.
+A healthy status does not prove behaviour, rendering or performance; integration and performance suites are not
+built yet. `--no-tests` skips even installed tests and records that coverage gap.
+
 ## A manifest is data, never an executable probe
 
 Each bundled extension has UTF-8 JSON at `extensions/manifests/<name>.json`. The supervisor looks for
