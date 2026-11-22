@@ -360,6 +360,16 @@ class AgentsTests(unittest.TestCase):
         self.assertEqual(result["client"], {"close": True})
         self.assertIn("kill accepted", self.core.notices[-1][0])
 
+    def test_auto_stop_kills_host_without_popup_when_graceful_is_undeclared(self):
+        self.stoppable()
+        self.core.resources["r2"]["data"]["agent"] = {"caps": {"host": {"endpoints": "one"}}}
+        provider = self.core.resources["r2"]["provider"]
+        self.core.providers[provider].update(role="runtime", host="r1")
+        result = self.command("stop", resource="r2", how="auto", confirm=True)
+        self.assertEqual(result["outcome"], "accepted")
+        self.assertEqual(self.native(), [("resource.kill", {"resource": "r1"})])
+        self.assertNotIn("agents-stop-r2", self.core.live)
+
     def test_stop_refuses_a_changed_or_ended_host_and_explains_hostless_agents(self):
         self.stoppable()
         with self.assertRaises(VqroError) as caught:
@@ -529,6 +539,91 @@ class AgentV0Tests(unittest.TestCase):
                                                            "args": {"v": 0, "caps_rev": 3, "covers": ["foreground", "queued"]}})])
         self.assertIn("ended only when the runtime reports", self.core.notices[-1][0])
 
+    def test_auto_stop_uses_current_graceful_declaration_without_popup(self):
+        result = self.command("stop", resource="r2", how="auto", confirm=True)
+        self.assertEqual(result["outcome"], "accepted")
+        self.assertEqual(self.native(), [("resource.invoke", {"resource": "r2", "op": "agent.stop",
+                         "args": {"v": 0, "caps_rev": 3, "covers": ["foreground", "queued"]}})])
+        self.assertNotIn("agents-stop-r2", self.core.live)
+
+    def test_auto_stop_requires_confirmation_and_never_opens_popup(self):
+        with self.assertRaises(VqroError) as caught:
+            self.command("stop", resource="r2", how="auto")
+        self.assertIn("not stopped:", str(caught.exception))
+        self.assertEqual(self.native(), [])
+        self.assertNotIn("agents-stop-r2", self.core.live)
+
+    def test_auto_stop_graceful_failure_never_kills_or_replays(self):
+        self.core.fail_effect = "unsupported"
+        with self.assertRaises(VqroError) as caught:
+            self.command("stop", resource="r2", how="auto", confirm=True)
+        self.assertIn("stop not confirmed:", str(caught.exception))
+        self.assertEqual(len(self.native()), 1)
+        self.assertEqual(self.native()[0][1]["op"], "agent.stop")
+        self.assertNotIn("agents-stop-r2", self.core.live)
+
+    def test_auto_stop_effect_rejection_and_transport_loss_are_distinct(self):
+        call = self.core.call
+        cases = [(VqroError("refused", "unavailable", data={"outcome": "rejected"}), "not stopped:"),
+                 (VqroError("lost", "unavailable", data={"outcome": "indeterminate"}), "stop not confirmed:"),
+                 (EOFError("connection closed"), "stop not confirmed:")]
+        for error, prefix in cases:
+            def fail(method, params):
+                if method == "resource.invoke":
+                    raise error
+                return call(method, params)
+            self.core.call = fail
+            with self.assertRaises(VqroError) as caught:
+                self.command("stop", resource="r2", how="auto", confirm=True)
+            self.assertTrue(str(caught.exception).startswith(prefix), str(caught.exception))
+        self.core.call = call
+
+    def test_auto_stop_preserves_uncertain_result_and_wire_evidence(self):
+        call = self.core.call
+        result = {"outcome": "unknown", "effect": "e77", "backend": {"native": "lost"}}
+        def uncertain(method, params):
+            return result if method == "resource.invoke" else call(method, params)
+        self.core.call = uncertain
+        with self.assertRaises(VqroError) as caught:
+            self.command("stop", resource="r2", how="auto", confirm=True)
+        self.assertEqual(caught.exception.data["effect"], "e77")
+        self.assertEqual(caught.exception.data["backend"], result["backend"])
+        wire = {"code": -32000, "data": {"effect": "e88", "outcome": "indeterminate"}}
+        def failed(method, params):
+            if method == "resource.invoke":
+                raise VqroError("lost", "unavailable", data=wire["data"], wire_error=wire)
+            return call(method, params)
+        self.core.call = failed
+        with self.assertRaises(VqroError) as caught:
+            self.command("stop", resource="r2", how="auto", confirm=True)
+        self.assertEqual(caught.exception.data["effect"], "e88")
+        self.assertEqual(caught.exception.wire_error, wire)
+
+    def test_stop_notification_failure_does_not_change_accepted_effect(self):
+        def failed(*args, **kwargs):
+            raise VqroError("notification unavailable", "overloaded")
+        self.agents.ext.notify = failed
+        result = self.command("stop", resource="r2", how="auto", confirm=True)
+        self.assertEqual(result["outcome"], "accepted")
+        self.assertEqual(result["effect"], "e1")
+        self.assertEqual(len(self.native()), 1)
+
+    def test_auto_stop_unknown_is_not_reported_as_not_stopped(self):
+        self.core.fail_effect = "unknown"
+        with self.assertRaises(VqroError) as caught:
+            self.command("stop", resource="r2", how="auto", confirm=True)
+        self.assertIn("stop not confirmed:", str(caught.exception))
+        self.assertNotIn("not stopped:", str(caught.exception))
+        self.assertEqual(len(self.native()), 1)
+
+    def test_auto_stop_without_graceful_or_host_reports_not_stopped(self):
+        del self.core.resources["r2"]["data"]["agent"]["caps"]["agent.stop"]
+        with self.assertRaises(VqroError) as caught:
+            self.command("stop", resource="r2", how="auto", confirm=True)
+        self.assertIn("not stopped:", str(caught.exception))
+        self.assertEqual(self.native(), [])
+        self.assertNotIn("agents-stop-r2", self.core.live)
+
     def test_list_status_uses_v0_lifecycle_and_state(self):
         self.command("list")
         row = self.core.live["agents-list"]["items"][0]
@@ -605,6 +700,79 @@ class AgentV0ConsentTests(unittest.TestCase):
         self.core.resources["r3"] = dict(self.core.resources["r2"], id="r3", name="Not shown when consented")
         self.refused("conflict", "stop", **row["args"])
         self.assertIn("r3", json.dumps(self.core.live["agents-stop-r2"]), "the new agent is disclosed before any kill")
+
+    def test_auto_stop_unavailable_without_rejection_evidence_is_indeterminate(self):
+        self.core.fail_effect = "unavailable"
+        with self.assertRaises(VqroError) as caught:
+            self.command("stop", resource="r2", how="auto", confirm=True)
+        self.assertIn("stop not confirmed:", str(caught.exception))
+
+    def test_capacity_requires_authenticated_exact_launcher_host_binding(self):
+        self.host()
+        del self.facts()["caps"]["agent.stop"]
+        self.facts()["caps"]["host"] = {"endpoints": "one"}
+        for role, host in ((None, None), ("backend", "r1"), ("runtime", None),
+                           ("runtime", "r99"), ("runtime", "r1-replacement")):
+            self.core.providers["v0"].update(role=role, host=host)
+            with self.assertRaises(VqroError) as caught:
+                self.command("stop", resource="r2", how="auto", confirm=True)
+            self.assertIn("not stopped: host may serve other agents", str(caught.exception))
+        self.assertEqual(self.native(), [])
+        self.core.providers["v0"].update(role="runtime", host="r1")
+        # Runtime child/server identity is deliberately not the terminal incarnation binding.
+        self.facts()["host"]["incarnation"] = "native-child-not-terminal"
+        self.command("stop", resource="r2", how="auto", confirm=True)
+        self.assertEqual(self.native(), [("resource.kill", {"resource": "r1"})])
+
+    def test_auto_stop_malformed_capacity_refuses_normally(self):
+        self.host()
+        del self.facts()["caps"]["agent.stop"]
+        self.facts()["caps"]["host"] = "one"
+        with self.assertRaises(VqroError) as caught:
+            self.command("stop", resource="r2", how="auto", confirm=True)
+        self.assertIn("not stopped:", str(caught.exception))
+        self.assertEqual(self.native(), [])
+
+    def test_auto_stop_membership_change_never_opens_popup(self):
+        self.host()
+        del self.facts()["caps"]["agent.stop"]
+        self.facts()["caps"]["host"] = {"endpoints": "one"}
+        self.core.providers["v0"].update(role="runtime", host="r1")
+        served = self.agents.served
+        reads = []
+        def interleaved(hid):
+            reads.append(hid)
+            if len(reads) == 3:
+                self.core.resources["r3"] = dict(self.core.resources["r2"], id="r3")
+            return served(hid)
+        self.agents.served = interleaved
+        with self.assertRaises(VqroError):
+            self.command("stop", resource="r2", how="auto", confirm=True)
+        self.assertEqual(len(reads), 3)
+        self.assertEqual(self.native(), [])
+        self.assertNotIn("agents-stop-r2", self.core.live)
+
+    def test_auto_stop_requires_published_single_endpoint_host(self):
+        self.host()
+        del self.facts()["caps"]["agent.stop"]
+        for host_caps in ({}, {"endpoints": "many"}):
+            self.facts()["caps"]["host"] = host_caps
+            with self.assertRaises(VqroError) as caught:
+                self.command("stop", resource="r2", how="auto", confirm=True)
+            self.assertIn("not stopped: host may serve other agents or lacks a launcher-owned binding; use Stop agent…", str(caught.exception))
+        self.assertEqual(self.native(), [])
+
+    def test_auto_stop_refuses_to_kill_a_shared_host(self):
+        self.host()
+        self.facts()["caps"]["host"] = {"endpoints": "one"}
+        self.core.providers["v0"].update(role="runtime", host="r1")
+        del self.facts()["caps"]["agent.stop"]
+        self.core.resources["r3"] = dict(self.core.resources["r2"], id="r3", name="Other agent")
+        with self.assertRaises(VqroError) as caught:
+            self.command("stop", resource="r2", how="auto", confirm=True)
+        self.assertIn("not stopped: its terminal also runs Other agent", str(caught.exception))
+        self.assertEqual(self.native(), [])
+        self.assertNotIn("agents-stop-r2", self.core.live)
 
     def test_an_unknown_stop_action_never_falls_through_to_a_kill(self):
         self.host()

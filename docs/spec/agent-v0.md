@@ -189,6 +189,14 @@ A new observation epoch or native command ACK alone never proves complete native
   ```
 - `caps.host {kind: terminal | process | server, endpoints: "one" | "many"}` declares whether the adapter's host can
   serve several endpoints (an app-server) or exactly one (a bridge that owns its runtime child).
+  Automatic stop may kill a terminal using an agent's `endpoints: "one"` declaration only when its provider has
+  `role: "runtime"` and its core-published `provider.host` exactly equals both the agent's top-level `host` and
+  the terminal resource id being killed. That provider binding comes from the authenticated bridge token minted
+  by vqro for a launcher-owned terminal, not an adapter-supplied claim. The immutable terminal resource id binds
+  its incarnation: replacement terminals get different ids; kill targets that exact id, never a nearby replacement.
+  `data.agent.host` identifies a native child/server and is not this terminal binding. Missing or mismatched bindings,
+  missing/`many` endpoint capacity, or another observed agent on that terminal refuse automatic host kill; the
+  explicit Stop action remains available. Uncertain effects are reported as stop not confirmed, never replayed.
 - `data.agent.caps.agent.tool_principal: "env"` declares that **each tool-running process** receives
   `VQRO_PRINCIPAL` for its
   own endpoint's launcher-tagged agent principal and `VQRO_SOCKET` for the workspace; absent means this route is

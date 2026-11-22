@@ -1050,6 +1050,55 @@ class Agents:
         return {"resource": r["id"], "view": view(r["id"]), "tab": result, "client": {"close": True, "focus": {"view": view(r["id"])}}}
 
     def stop(self, args):
+        # Close owns consent for auto; unlike the standalone Stop command it must never open a popup.
+        if args.get("how") != "auto":
+            return self.stop_confirmed(args)
+        try:
+            if args.get("confirm") is not True:
+                raise VqroError("close must confirm stopping the agent", "invalid")
+            result = self.stop_confirmed(args)
+            if result.get("outcome") not in ("accepted", "observed"):
+                raise VqroError("stop outcome " + str(result.get("outcome", "unknown")) +
+                                "; check the agent before trying again", "unknown")
+            return result
+        except VqroError as error:
+            uncertain = error.kind in ("unknown", "timeout") or (error.data or {}).get("outcome") == "indeterminate"
+            prefix = "stop not confirmed: " if uncertain else "not stopped: "
+            raise VqroError(prefix + str(error), error.kind, data=error.data, wire_error=error.wire_error) from error
+
+    def stop_effect(self, method, params, auto):
+        try:
+            result = self.ext.vqro.call(method, params)
+        except VqroError as error:
+            if not auto:
+                raise
+            # Kind alone is not evidence: unavailable can mean either side of dispatch.
+            data = error.data if isinstance(error.data, dict) else {}
+            outcome = "rejected" if data.get("outcome") == "rejected" else "indeterminate"
+            evidence = {**data, "outcome": outcome}
+            if error.wire_error is not None:
+                evidence["wire_error"] = error.wire_error
+            raise VqroError(str(error), error.kind, data=evidence, wire_error=error.wire_error) from error
+        except (OSError, EOFError) as error:
+            if not auto:
+                raise
+            raise VqroError(str(error), "unavailable", data={"outcome": "indeterminate"}) from error
+        if auto and result.get("outcome") not in ("accepted", "observed"):
+            outcome = "rejected" if result.get("outcome") == "rejected" else "indeterminate"
+            raise VqroError("stop outcome " + str(result.get("outcome", "unknown")), "effect", data={**result, "outcome": outcome})
+        return result
+
+    def stop_notice(self, message, style):
+        # The effect has already decided the outcome; UI delivery cannot undo it or invite replay.
+        try:
+            self.ext.notify(message, style)
+        except Exception as error:
+            try:
+                self.ext.log("stop notification failed:", error)
+            except Exception:
+                pass
+
+    def stop_confirmed(self, args):
         """End an agent, after confirmation: gracefully when it declares agent.stop (agent v0 section 6.7), or by
         killing its host terminal when that terminal's provider declares terminal.kill.
 
@@ -1061,10 +1110,28 @@ class Agents:
         r = self.agent(args, inspect=True)
         rid, name = r["id"], label(r.get("name") or "Agent")
         how = args.get("how")
-        if args.get("confirm") is True and how not in ("graceful", "host_kill"):
+        auto = how == "auto"
+        if args.get("confirm") is True and how not in ("auto", "graceful", "host_kill"):
             raise VqroError(f"unknown stop action {label(str(how), 40)}; nothing sent", "invalid")
         declared = self.endpoint(r, "stop") if r.get("available") and not ended(r) else None
         host = self.host_kill(r)
+        if auto:
+            # Select once from fresh facts; a graceful refusal never falls back to killing the host.
+            how = "graceful" if declared is not None else "host_kill"
+            if host and how == "host_kill":
+                provider = self.ext.providers.get(r.get("provider")) or {}
+                host_caps = caps(r).get("host")
+                if (not isinstance(host_caps, dict) or host_caps.get("endpoints") != "one"
+                        or provider.get("role") != "runtime" or provider.get("host") != host["id"]
+                        or r.get("host") != host["id"]):
+                    raise VqroError("host may serve other agents or lacks a launcher-owned binding; use Stop agent…", "unsupported")
+            others = [a for a in self.served(host["id"]) if a != rid] if host and how == "host_kill" else []
+            if others:
+                raise VqroError("its terminal also runs " + ", ".join(
+                    label(self.ext.resources[a].get("name") or a) for a in others), "conflict")
+            args = dict(args, caps_rev=caps(r).get("rev"),
+                        covers=(declared or {}).get("covers") if isinstance((declared or {}).get("covers"), list) else [],
+                        host=host["id"] if host else None, serves=self.served(host["id"]) if host else [])
         if args.get("confirm") is not True:
             return self.stop_popup(r, declared, host)
         if how == "graceful":
@@ -1072,15 +1139,16 @@ class Agents:
                 raise VqroError(f"{name} {rid} declares no graceful stop or is unavailable; nothing sent", "unsupported")
             covers = declared.get("covers") if isinstance(declared.get("covers"), list) else []
             if (args.get("caps_rev"), args.get("covers")) != (caps(r).get("rev"), covers):
-                self.stop_popup(r, declared, host)
+                if not auto:
+                    self.stop_popup(r, declared, host)
                 raise VqroError(f"{name} {rid}: what a graceful stop covers changed since you confirmed; confirm again. "
                                 "Nothing sent.", "stale")
             native = {"v": 0, "covers": covers, **({"caps_rev": args["caps_rev"]} if type(args["caps_rev"]) is int else {})}
-            result = self.ext.vqro.call("resource.invoke", {"resource": rid, "op": "agent.stop", "args": native})
+            result = self.stop_effect("resource.invoke", {"resource": rid, "op": "agent.stop", "args": native}, auto)
             outcome = result.get("outcome", "unknown")
             what = {"accepted": "stop accepted; it is ended only when the runtime reports its end",
                     "observed": "the runtime reports it ended"}.get(outcome, outcome+"; watch the agent's status")
-            self.ext.notify(label(f"Stop {name} {rid}: {what}"), "ok" if outcome in ("accepted", "observed") else "warn")
+            self.stop_notice(label(f"Stop {name} {rid}: {what}"), "ok" if outcome in ("accepted", "observed") else "warn")
             return {**result, "client": {"close": True}}
         if host is None:
             gone = host_of(self.ext.resources, r)
@@ -1089,17 +1157,18 @@ class Agents:
             raise VqroError(f"{name} {rid}: its host terminal can't be killed from vqro now; nothing sent.", "unsupported")
         hid = host["id"]
         if args.get("host") != hid or args.get("serves") != self.served(hid):
-            self.stop_popup(r, declared, host)
+            if not auto:
+                self.stop_popup(r, declared, host)
             raise VqroError(f"{name} {rid}: its host terminal or the agents it serves changed since you confirmed; "
                             "confirm again. Nothing sent.", "conflict")
-        result = self.ext.vqro.call("resource.kill", {"resource": hid})
+        result = self.stop_effect("resource.kill", {"resource": hid}, auto)
         outcome = result.get("outcome", "unknown")
         if owns_lifecycle(r):
             what = {"accepted": "kill accepted; the agent is removed once its terminal ends",
                     "observed": "terminal ended"}.get(outcome, outcome+"; watch the agent's status")
         else:
             what = outcome+"; the agent's own end is unknown until its runtime reports it"
-        self.ext.notify(label(f"Stop {name} {rid}: terminal {hid} {what}"), "ok" if outcome in ("accepted", "observed") else "warn")
+        self.stop_notice(label(f"Stop {name} {rid}: terminal {hid} {what}"), "ok" if outcome in ("accepted", "observed") else "warn")
         return {**result, "client": {"close": True}}
 
     def stop_popup(self, r, declared, host):
