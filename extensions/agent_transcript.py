@@ -653,7 +653,7 @@ def senders(entities, names):
 # session, terminal, run, association). Other kinds are "shown generically" (entity_rows), except `_` kinds, which are
 # an implementation's own bookkeeping.
 KNOWN_KINDS = ("message", "tool", "plan", "compaction", "receipt", "state", "run", "terminal", "request", "session",
-               "association")
+               "association", "startup")
 
 
 def generic_kind(kind):
@@ -774,11 +774,128 @@ def summary_text(title, values, fields, tools=None):
     return " · ".join(parts)  # a row with children: clients draw its ▸/▾
 
 
+STARTUP_BYTES = 24 * 1024  # leave the conversation room, even for a large native inventory
+
+
+def startup_row(value):
+    """A retained native startup snapshot, not a turn. Plain disclosure tree; unknown facts stay absent.
+    Native paths are copy-only: links.open is local-host-only and startup declares no safe host route."""
+    if not isinstance(value, dict):
+        return None
+
+    def shown(item, bound=128):
+        return clip(plain(item), bound) if isinstance(item, str) else ""
+
+    sources = value.get("sources") if isinstance(value.get("sources"), dict) else {}
+    incomplete = [shown(f, 64) for f in value.get("incomplete", [])[:32] if isinstance(f, str)] \
+        if isinstance(value.get("incomplete"), list) else []
+    runtime = value.get("runtime") if isinstance(value.get("runtime"), dict) else {}
+    identity = " ".join(filter(None, (shown(runtime.get("name")), shown(runtime.get("version")))))
+    model, cwd = shown(value.get("model")), shown(value.get("cwd"), 4096)
+    scope = value.get("skills_scope")
+    skills_title = "Loaded skills" if scope == "loaded" else "Available skills" if scope == "available" else "Skills"
+    fields = ("instructions", "skills", "prompts", "commands", "plugins", "mcp")
+    inventories = {}
+    for field in fields:
+        entries = value.get(field)
+        if isinstance(entries, list):
+            inventories[field] = [entry for entry in entries[:256] if isinstance(entry, dict)
+                                  and shown(entry.get("path" if field == "instructions" else "name"))]
+            if len(entries) > 256 and field not in incomplete:
+                incomplete.append(field)
+    if not (identity or model or cwd or any(inventories.values()) or incomplete):
+        return None
+    children, cost, cut, has_path = [], 0, False, False
+
+    def add(row):
+        nonlocal cost, cut
+        size = len(json.dumps(row, ensure_ascii=False).encode()) + 2
+        if cost + size > STARTUP_BYTES - 2048:
+            cut = True
+            return
+        children.append(row)
+        cost += size
+
+    def text(body, style="plain"):
+        add({"type": "text", "text": body, "style": style, "wrap": True})
+
+    def source(field, explicit=None):
+        native = shown(explicit if explicit is not None else sources.get(field), 128)
+        if native:
+            label = {"vqro:launch": "vqro launch record", "cli:--version": "runtime --version"}.get(native, native)
+            text("Source: " + label, "dim")
+
+    def path(raw, label="Path"):
+        nonlocal has_path
+        if not isinstance(raw, str) or not raw:
+            return
+        has_path = True
+        add({"id": "startup:path:" + str(len(children)), "text": label + ": " + shown(raw, 512),
+             "style": "link", "copy": clip(raw, 4096), "actions": [{"text": "copy", "command": "client.copy"}]})
+
+    summary = ["Start-up"] + [part for part in (identity, model) if part]
+    if identity:
+        text("Runtime: " + identity, "agent")
+        source("runtime", runtime.get("version_source") or sources.get("runtime"))
+    if model:
+        text("Model at start: " + model, "agent")
+        source("model")
+    if cwd:
+        path(value["cwd"], "Launch folder" if sources.get("cwd") == "vqro:launch" else "Working folder")
+        source("cwd")
+    commands = inventories.get("commands", [])
+    command_title = "Extension commands" if commands and all(e.get("kind") == "extension" for e in commands) else "Commands"
+    plugin_title = "Installed plugins" if sources.get("plugins") == "rpc:plugin/installed" else "Plugins (inventory)"
+    titles = {"instructions": "Loaded instruction sources", "skills": skills_title, "prompts": "Prompt templates",
+              "commands": command_title, "plugins": plugin_title, "mcp": "MCP server status"}
+    for field in fields:
+        entries = inventories.get(field, [])
+        if not entries:
+            continue
+        title = titles[field] + f" · {len(entries)}" + (" (partial)" if field in incomplete else "")
+        add({"type": "header", "text": title, "style": "heading"})
+        source(field)
+        if field in ("instructions", "skills", "commands"):
+            label = {"instructions": "instruction paths", "skills": skills_title.lower(), "commands": command_title.lower()}[field]
+            if len(entries) == 1 and label.endswith("s"):
+                label = label[:-1]
+            summary.append(f"{len(entries)} {label}" + (" (partial)" if field in incomplete else ""))
+        for entry in entries:
+            if field == "instructions":
+                path(entry.get("path"), "Instruction")
+                continue
+            line = shown(entry.get("name"))
+            if field == "plugins":
+                version = shown(entry.get("version"))
+                if version:
+                    line += " · version " + version
+                if type(entry.get("enabled")) is bool:
+                    line += " · " + ("enabled" if entry["enabled"] else "disabled")
+            if field == "mcp" and shown(entry.get("status"), 64):
+                line += " · " + shown(entry["status"], 64)  # runtime's own word, no status inference
+            text(line)
+            path(entry.get("path"))
+            description = shown(entry.get("description"), 1024)
+            if description:
+                text(description, "dim")
+    if incomplete:
+        text("Incomplete start-up details: " + ", ".join(incomplete), "warn")
+    if cut:
+        children.append({"type": "text", "style": "dim", "text": "… more start-up entries not shown here (pane limit)"})
+    if has_path:
+        children.append({"type": "text", "style": "dim", "text": "Paths are copy-only here; a host-safe open route is not reported."})
+    children.append({"type": "text", "style": "control", "text": "Enter expand/collapse · select a path and y copy · Ctrl-g vqro menu"})
+    return {"id": "startup:current", "text": clip(" · ".join(summary), 512), "style": "heading",
+            "children": children, "expanded": False}
+
+
 def rows(entities, names, coverage=None, view=None, cwd=None):
     """Panel rows for an agent's conversation, oldest first, bounded to BUDGET encoded bytes (newest kept).
     `entities` maps (kind, id) to (rev, value) as in vqro_items.ItemView; `view` is view_settings(); `cwd` is the
     agent's reported folder (relative file paths in tool calls resolve against it)."""
     view = view or view_settings()
+    startup = startup_row(entities.get(("startup", "current"), (None, None))[1])
+    budget = BUDGET - (len(json.dumps(startup, ensure_ascii=False).encode()) + 2 if startup else 0)
     compact = view["density"] == "compact"
     receipts = {eid: v.get("stage") for (kind, eid), (_, v) in entities.items()
                 if kind == "receipt" and isinstance(v, dict) and isinstance(v.get("stage"), str)}
@@ -919,12 +1036,12 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
     out, size, dropped = [], 0, 0
     for block in reversed(blocks):
         cost = len(json.dumps(block, ensure_ascii=False).encode())
-        if out and size + cost > BUDGET:
+        if out and size + cost > budget:
             # The block that doesn't fit (a whole agent turn can be large) keeps its newest rows that do.
             part = []
             for row in reversed(block):
                 row_cost = len(json.dumps(row, ensure_ascii=False).encode()) + 2
-                if size + row_cost > BUDGET:
+                if size + row_cost > budget:
                     break
                 part.insert(0, row)
                 size += row_cost
@@ -936,7 +1053,7 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
         size += cost
     # A blank line between blocks: senders and activity read as separate blocks (mockup), not one stream of rows.
     shown = [row for i, block in enumerate(reversed(out)) for row in ([{"type": "text", "text": ""}] if i else []) + block]
-    while len(shown) > 1 and len(json.dumps(shown, ensure_ascii=False).encode()) > BUDGET:
+    while len(shown) > 1 and len(json.dumps(shown, ensure_ascii=False).encode()) > budget:
         del shown[:max(1, len(shown) // 8)]  # one block larger than the budget: keep its newest rows
         dropped = dropped or 1
     if dropped:
@@ -949,4 +1066,4 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
     elif coverage == "tail":
         shown.insert(0, {"type": "text", "style": "dim", "text": "Showing the recent history this agent reported." if timeline
                          else "No messages in the recent history this agent reported."})
-    return shown
+    return ([startup] if startup else []) + shown
