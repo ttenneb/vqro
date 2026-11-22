@@ -106,6 +106,21 @@ def status(resource):
     return label(value.get("state", "unknown")) if isinstance(value, dict) else "unknown"
 
 
+def availability_label(resource):
+    """Only a declared block changes the frame. Retry delay is a reported snapshot, not a ticking clock or clear."""
+    availability = agent_facts(resource).get("availability")
+    if not isinstance(availability, dict) or availability.get("state") != "blocked":
+        return None
+    reason = availability.get("reason")
+    labels = {"rate_limited": "rate limited", "quota": "quota", "auth": "login", "_retrying": "retrying"}
+    reason = labels.get(reason) if isinstance(reason, str) else None
+    text = "blocked" + (" · " + reason if reason else "")
+    delay = availability.get("retry_after_ms")
+    if type(delay) is int and delay >= 0:
+        text += f" · retry in {(delay + 999) // 1000}s"
+    return text
+
+
 def view(rid):
     return "agents-"+rid
 
@@ -812,8 +827,9 @@ class Agents:
         session = agent_facts(r).get("session") if isinstance(agent_facts(r).get("session"), dict) else {}
         folder = session.get("cwd") if isinstance(session.get("cwd"), str) and session["cwd"] else None
         folder = agent_transcript.home_short(folder) if folder else None
-        state = status(r)
-        waiting = state == "blocked" or bool(self.requests_v0(r) if self.v0(r, "respond") else None)
+        blocked = availability_label(r)
+        state = blocked or status(r)
+        waiting = bool(blocked) or state == "blocked" or bool(self.requests_v0(r) if self.v0(r, "respond") else None)
         style = "warn" if waiting or ended(r) or agent_facts(r).get("lifecycle") not in (None, "live") else "ok" if state == "idle" else "info"
         return {"title": " · ".join([name] + ([head(plain(folder), 80)] if folder else [])),
                 "title_right": "● " + state, "title_right_style": style}

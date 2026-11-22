@@ -754,6 +754,40 @@ class AgentPane(unittest.TestCase):
         self.feed(snapshot(CONVERSATION))
         return self.core.live["agents-r2"]["items"]
 
+    def test_frame_shows_only_declared_blocked_availability(self):
+        resource = self.core.resources["r2"]
+        facts = {"v": 0, "lifecycle": "live", "state": "idle"}
+        resource["data"] = {"agent": facts}
+        normal = self.agents.frame(resource)
+        for availability in (None, {}, "blocked", {"state": "available"}, {"state": "future", "reason": "quota"}):
+            facts["availability"] = availability
+            self.assertEqual(self.agents.frame(resource), normal, availability)
+        for reason, label in (("rate_limited", "rate limited"), ("quota", "quota"),
+                              ("auth", "login"), ("_retrying", "retrying"),
+                              ("_future", None), ("error text: quota", None), ([], None), (None, None)):
+            facts["availability"] = {"state": "blocked", "reason": reason,
+                                     "native": {"errorMessage": "do not infer a quota or login reason"}}
+            frame = self.agents.frame(resource)
+            self.assertEqual(frame["title_right"], "● blocked" + (" · " + label if label else ""))
+            self.assertEqual(frame["title_right_style"], "warn")
+            self.assertEqual(frame["title"], normal["title"])
+        facts["availability"] = {"state": "available"}
+        self.assertEqual(self.agents.frame(resource), normal, "only the reported available fact restores the normal frame")
+
+    def test_frame_retry_delay_is_a_static_reported_estimate(self):
+        resource = self.core.resources["r2"]
+        facts = {"v": 0, "lifecycle": "live", "state": "idle"}
+        resource["data"] = {"agent": facts}
+        for delay, seconds in ((0, 0), (1, 1), (999, 1), (1000, 1), (12001, 13)):
+            facts["availability"] = {"state": "blocked", "reason": "_retrying", "retry_after_ms": delay}
+            frame = self.agents.frame(resource)
+            self.assertEqual(frame["title_right"], f"● blocked · retrying · retry in {seconds}s")
+            self.assertEqual(frame, self.agents.frame(resource), "re-rendering never ticks or clears the native block")
+            self.assertEqual(facts["availability"]["state"], "blocked")
+        for invalid in (-1, True, 1000.5, "12000", None):
+            facts["availability"] = {"state": "blocked", "retry_after_ms": invalid}
+            self.assertEqual(self.agents.frame(resource)["title_right"], "● blocked")
+
     def test_no_header_line_one_gear_button_and_the_state_in_the_frame(self):
         """relay-11 (the human): no name line inside the pane, one small ⚙ for settings, bridge terminal and Stop; the
         frame carries name · folder and the state."""
