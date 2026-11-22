@@ -315,8 +315,9 @@ concatenated.
   `invoked {kind: skill | template | command, name}` when the adapter can tie it to that command, so viewers show
   "ran skill X" rather than the expanded text as typed input.
 - **Input that may be transformed.** While the agent's `input_transform.state` is `may` (§7, customization), each
-  receipt carries `may_transform`: an array of the transforming items' names only when `input_transform.names_complete`
-  is `true` for that delivery (the runtime names every one), otherwise `"unknown"` (partially known names stay in the
+  receipt carries `may_transform`: an array of the transforming items' names only when the runtime gives complete native
+  evidence for that delivery (`input_transform.names_complete` is `true` and `names` is non-empty), otherwise
+  `"unknown"` (partially known names stay in the
   agent fact and its UI, never as a receipt list that could read as complete). It is fixed at native dispatch, never
   recomputed at a later acknowledgement, and never `[]` or "not changed" from an absent or later state. It reports a
   possibility, never that the input "was not changed".
