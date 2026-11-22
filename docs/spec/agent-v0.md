@@ -449,7 +449,9 @@ reasoning the runtime exposes for display):
   scraped. Fields:
   - `runtime {name, version?, version_source?}`; `model?` (string); `cwd?` (string);
   - `instructions?: [{path}]` (instruction/context files the runtime says it loaded);
-  - `skills?: [{name, description?, path?}]` with `skills_scope?: loaded | available`;
+  - `skills?: [{name, description?, path?}]` with `skills_scope?: available | loaded`: `available` is the runtime's
+    catalog of skills it can invoke (a skill's body loads only when used); `loaded` only when the runtime reports the
+    skills' content already in the agent's context. Pi's `get_commands` and Codex's `skills/list` are `available`;
   - `prompts?: [{name, description?, path?}]`; `commands?: [{name, description?, path?, kind?}]`;
   - `plugins?: [{name, enabled?, version?, path?}]`; `mcp?: [{name, status}]` (`status` the runtime's own word);
   - `sources?: {<field>: <source>}`: provenance per top-level field, e.g. `"rpc:get_commands"`, `"cli:--version"`,
