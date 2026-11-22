@@ -672,6 +672,23 @@ class AgentPane(unittest.TestCase):
             sent = [p for m, p in self.core.calls if m == 'resource.invoke'][-1]
             self.assertEqual((sent['op'], sent['args']['name']), ('agent.command', 'skill:review'))
 
+    def test_slash_dispatch_preserves_exact_names_and_literal_whitespace(self):
+        r = self.core.resources['r2']
+        self.core.providers['items']['capabilities'].update({'agent.send': {}, 'agent.command': {}})
+        r['data']['agent'] = {'v': 0, 'state': 'idle', 'lifecycle': 'live',
+            'commands': [{'name': 'review'}, {'name': 'skill:review'}],
+            'caps': {'rev': 1, 'agent.send': {'modes': {'start': {}}}, 'agent.command': {}}}
+        self.feed(snapshot({('startup', 'current'): {'commands': [{'name': 'review'}],
+                                                    'skills': [{'name': 'review'}]}}))
+        self.agents.send({'resource': 'r2', 'mode': 'auto', 'text': '/review diff'})
+        sent = [p for m, p in self.core.calls if m == 'resource.invoke'][-1]
+        self.assertEqual(sent['args']['name'], 'review')
+        for literal in ('/ review diff', '/\treview diff', '/\nreview diff'):
+            self.agents.send({'resource': 'r2', 'mode': 'auto', 'text': literal})
+            sent = [p for m, p in self.core.calls if m == 'resource.invoke'][-1]
+            self.assertEqual(sent['op'], 'agent.send')
+            self.assertEqual(sent['args']['content'][0]['text'], literal)
+
     def test_customizations_are_read_only_and_show_native_extension_limits(self):
         self.feed(snapshot({('startup', 'current'): {'extensions': [
             {'name': 'rewrite', 'state': 'active', 'transforms': ['input']}],

@@ -1338,10 +1338,11 @@ class Agents:
         self.ext.fresh()
         r = self.agent(args, "send")
         text, mode = args.get("text"), args.get("mode")
-        if isinstance(text, str) and text.startswith("/"):
+        if isinstance(text, str) and len(text) > 1 and text.startswith("/") and not text[1].isspace():
             parts = text[1:].split(maxsplit=1)
-            name = parts[0] if parts else ""
+            name = parts[0]
             entries = advertised(r, "commands")
+            skill_aliases = {}
             conversation = self.conversations.get(r["id"])
             if conversation is not None:
                 with conversation.lock:
@@ -1356,9 +1357,12 @@ class Agents:
                                     native_name = entry["name"]
                                     if field == "skills" and any(e.get("name") == "skill:" + native_name for e in entries):
                                         native_name = "skill:" + native_name
-                                    if name == entry["name"]:
-                                        name = native_name
+                                    if field == "skills" and native_name != entry["name"]:
+                                        skill_aliases[entry["name"]] = native_name
                                     entries = entries + [{"name": native_name}]
+            # Exact native commands/templates always win over optional short skill aliases.
+            if not any(entry.get("name") == name for entry in entries):
+                name = skill_aliases.get(name, name)
             if name and any(entry.get("name") == name for entry in entries):
                 if not self.supported(r, "command"):
                     raise VqroError("explicit invocation requires agent.command; nothing sent", "unsupported")
