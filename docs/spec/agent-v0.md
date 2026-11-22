@@ -453,12 +453,16 @@ reasoning the runtime exposes for display):
   - `prompts?: [{name, description?, path?}]`; `commands?: [{name, description?, path?, kind?}]`;
   - `plugins?: [{name, enabled?, version?, path?}]`; `mcp?: [{name, status}]` (`status` the runtime's own word);
   - `sources?: {<field>: <source>}`: provenance per top-level field, e.g. `"rpc:get_commands"`, `"cli:--version"`,
-    `"vqro:launch"` (a fact vqro itself recorded, such as the launch folder), `"rpc:initialize"`;
+    `"vqro:launch"` (a fact vqro itself recorded, such as the launch folder), `"rpc:initialize"`. A field that the
+    runtime did not report itself (any `vqro:` fact, such as a launch `cwd`) is published only with its `sources`
+    entry, so it never reads as runtime-reported;
   - `incomplete?: [<field>]`: a list cut to the bounds, or an inventory that errored (then the field is absent);
   - `native?`: bounded extras.
   Bounds: each list ≤ 256 entries; `name` ≤ 128 bytes, `description` ≤ 1 KiB, `path` ≤ 4 KiB, `status`/`kind` ≤ 64
-  bytes; the whole entity within the entity bound. An over-bound list or string is cut and its field named in
-  `incomplete`. Inventories that arrive late update the entity in place (a new `rev`); a new epoch's snapshot
+  bytes; the whole entity within the entity bound. Strings are never shortened: an over-bound `path` or `description`
+  is omitted from its entry, an entry whose `name` is over-bound is omitted, and a list longer than its bound loses
+  entries from its end; each such field is named in `incomplete`. A viewer's own clipped display label is never an
+  open or copy target. Inventories that arrive late update the entity in place (a new `rev`); a new epoch's snapshot
   replaces it. Paths are as the runtime reports them (absolute or as given), on the runtime's own host; they carry
   no evidence of which machine that is. Viewers copy them, and offer to open one only through a route positively known
   to reach that host (never by assuming the viewer's or the core's machine is the runtime's).
