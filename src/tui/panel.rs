@@ -176,13 +176,15 @@ fn lines(item: &Value, width: u16, icons: &Icons) -> u16 {
     1 + item["description"].as_str().map(|_| 1).unwrap_or(0)
 }
 
-/// Height the content wants at `width` (for sizing popups), including the page bar and toolbar rule.
+/// Height the content wants at `width` (for sizing popups), including page/toolbar/facet/column chrome.
 pub fn height(v: &Value, st: &State, width: u16, icons: &Icons) -> u16 {
     let bar:u16 = if page_titles(v).is_empty() { 0 } else { 2 };
     if list_detail(v,st){return bar+28;}
     let rows = rows(v, st);
-    let rule = rows.iter().any(|r| r.pinned) as u16;
-    bar.saturating_add(rule).saturating_add(rows.iter().fold(0u16,|sum,r|sum.saturating_add(row_lines(r,st,width,icons))))
+    // Chrome uses styles only for painting, so the default palette has the same measured widths.
+    let chrome = chrome_lines(v, st, width, &Palette::default());
+    let rule = (chrome == 0 && rows.iter().any(|r| r.pinned)) as u16; // render_list draws one shared rule
+    bar.saturating_add(chrome).saturating_add(rule).saturating_add(rows.iter().fold(0u16,|sum,r|sum.saturating_add(row_lines(r,st,width,icons))))
 }
 
 fn text_style(item: &Value, pal: &Palette) -> Style {
@@ -1015,6 +1017,31 @@ mod tests {
                 "children":[{"text":"readable fallback includes every cell", "columns":["read","target","done"]}]}]});
             let screen = draw(&v, &Icons::default(), 100);
             assert!(screen.iter().any(|l| l.contains("readable fallback includes every cell")), "{v}: {screen:?}");
+        }
+    }
+
+    #[test]
+    fn one_row_popup_height_keeps_facet_column_chrome_from_hiding_the_tool() {
+        for width in [50, 120] {
+            for toolbar in [false, true] {
+                let mut value = json!({"facets":[{"key":"status","label":"Show"},{"key":"tool","label":"Tool"}],
+                    "sorts":[{"key":"name","label":"name"}],
+                    "columns":[{"label":"Tool","width":8},{"label":"What","width":"fill"}],
+                    "items":[{"id":"t1","text":"fallback", "columns":["bash","visible-target"],
+                              "facets":{"status":"completed","tool":"bash"}}]});
+                if toolbar { value["toolbar"] = json!([{"text":"Toolbar","command":"test"}]); }
+                let value = Arc::new(value);
+                let mut state = State::default();
+                let icons = Icons::default();
+                let wanted = height(&value, &state, width, &icons);
+                // draw_popup adds four outer lines, then removes borders and one top padding line.
+                let area = Rect::new(0, 0, width, wanted + 1);
+                let mut buffer = Buffer::empty(area);
+                let hits = render(&mut buffer, area, &value, &mut state, true, &Palette::default(), &icons, None);
+                let screen = (0..area.height).map(|y| (0..width).map(|x| buffer[(x,y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n");
+                assert!(screen.contains("visible-target"), "width={width}, toolbar={toolbar}, wanted={wanted}: {screen}");
+                assert!(hits.rows.iter().any(|(_, i)| state.prepare(&value).rows[*i].id == "t1"), "tool remains clickable");
+            }
         }
     }
 
