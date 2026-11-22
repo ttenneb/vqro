@@ -62,6 +62,14 @@ community clients and observing our own private server's traffic; the Rex binary
 - **Terminal environment.** The owned server starts with a login-session environment (PATH, HOME, LANG, SHELL,
   USER, LOGNAME), not vqro's own variables.
 - **Ownership.** Sizing a terminal makes vqro its Rex owner (like any Rex app that resizes it).
+- **Native robustness (ghostty-audit review, 2026-11-22).** A malformed snapshot could reach an `unreachable` in the
+  formatter's charset path (GR = G0, which VT input never produces): charsets are therefore left out of the repaint
+  (a DEC line-drawing designation left active isn't restored). With that, about 160000 structure-aware fuzz inputs
+  under ReleaseSafe/ReleaseFast were clean apart from **one library decoder bug** (index out of bounds while decoding a
+  hyperlink string, 1 input; to report upstream; fixed by a later pin). **Not yet bounded:** decoded memory can be far
+  larger than the snapshot (blank history about 700x). Rex's own scrollback limit bounds an honest server; a row budget
+  through incremental decoding (`ghostty_snapshot_decoder_ready`/`next`) is the planned follow-up. The snapshot comes
+  from the same user's Rex, so these are robustness issues, not a privilege boundary.
 - **Alpha API.** Pinned to API revision 19; the data format is undocumented and may change. The provider fails a
   stream (never shows garbage) when the snapshot or metadata framing doesn't parse.
 - **Not done (v0):** no data-channel resume, no file upload/download, no Rex Lua actions, no remote Rex hosts

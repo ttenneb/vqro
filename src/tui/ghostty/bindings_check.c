@@ -71,7 +71,7 @@ SAME(offsetof(GhosttyClipboardWrite, ctx), 48); SAME(offsetof(GhosttyClipboardWr
 /* formatter.h, types.h (vqro-rex) */
 SAME(GHOSTTY_FORMATTER_OPT_EMIT, 1); SAME(GHOSTTY_FORMATTER_OPT_TRIM, 3); SAME(GHOSTTY_FORMATTER_OPT_EXTRAS, 5);
 SAME(sizeof(GhosttyFormatterOption), 4); SAME(GHOSTTY_FORMATTER_FORMAT_VT, 1); SAME(sizeof(GhosttyFormatterFormat), 4);
-SAME(GHOSTTY_FORMATTER_EXTRAS_ALL, 0xFFF); SAME(GHOSTTY_FORMATTER_EXTRA_PALETTE, 1 << 0); SAME(sizeof(GhosttyFormatterExtras), 4);
+SAME(GHOSTTY_FORMATTER_EXTRAS_ALL, 0xFFF); SAME(GHOSTTY_FORMATTER_EXTRA_PALETTE, 1 << 0); SAME(GHOSTTY_FORMATTER_EXTRA_CHARSETS, 1 << 11); SAME(sizeof(GhosttyFormatterExtras), 4);
 
 /* The functions bindings.rs declares, with the header's parameter types (a mismatch fails to compile). */
 static GhosttyResult (*const f_new)(const GhosttyAllocator*, GhosttyTerminal*, uint16_t, uint16_t) = ghostty_terminal_new;

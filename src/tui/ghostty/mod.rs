@@ -79,7 +79,11 @@ pub fn snapshot_to_vt(snapshot: &[u8], history_lines: usize) -> Result<Vec<u8>, 
     format_vt(bounded.raw)
 }
 
-/// The terminal's active screen and history as VT (no trimming, every extra except the default palette).
+/// The terminal's active screen and history as VT (no trimming, every extra except the default palette and the
+/// charset designations). Charsets are left out because a malformed snapshot can decode to a charset state VT input
+/// can't produce (GR = G0), which the formatter treats as unreachable: an abort in safe builds, undefined behaviour
+/// in fast ones (ghostty-audit, rex-b9b2b8d2 P1-1). The cost: a G0-G3 designation left active (DEC line drawing)
+/// isn't restored by the repaint.
 fn format_vt(terminal: ffi::GhosttyTerminal) -> Result<Vec<u8>, Error> {
     struct Formatter(ffi::GhosttyFormatter);
     impl Drop for Formatter {
@@ -92,7 +96,7 @@ fn format_vt(terminal: ffi::GhosttyTerminal) -> Result<Vec<u8>, Error> {
     // SAFETY: the caller's live terminal outlives this formatter (dropped at the end of this function).
     unsafe { ffi::ghostty_formatter_terminal_new(ptr::null(), &mut formatter.0, terminal) }.ok()?;
     let (emit, trim, extras): (ffi::GhosttyFormatterFormat, bool, ffi::GhosttyFormatterExtras) =
-        (ffi::GHOSTTY_FORMATTER_FORMAT_VT, false, ffi::GHOSTTY_FORMATTER_EXTRAS_ALL & !ffi::GHOSTTY_FORMATTER_EXTRA_PALETTE);
+        (ffi::GHOSTTY_FORMATTER_FORMAT_VT, false, ffi::GHOSTTY_FORMATTER_EXTRAS_ALL & !ffi::GHOSTTY_FORMATTER_EXTRA_PALETTE & !ffi::GHOSTTY_FORMATTER_EXTRA_CHARSETS);
     // SAFETY: each value points at the type its option documents (formatter.h option table).
     unsafe {
         ffi::ghostty_formatter_set(formatter.0, ffi::GHOSTTY_FORMATTER_OPT_EMIT, (&emit as *const ffi::GhosttyFormatterFormat).cast()).ok()?;
@@ -808,6 +812,10 @@ mod tests {
         assert!(again.len() < full.len() / 10, "{} of {}", again.len(), full.len());
         assert!(snapshot_to_vt(&snapshot[..snapshot.len() - 3], 0).is_err(), "a truncated snapshot is refused");
         assert!(snapshot_to_vt(b"GHOSTSNP\x01\x00junk", 0).is_err());
+        // ghostty-audit P1-1: a CRC-correct mutation of the fixture decodes to charset GR = G0; formatting charsets
+        // would reach the formatter's `unreachable`. It is formatted (or refused) without aborting.
+        let malformed = include_bytes!("../../../tests/fixtures/rex/snapshot-malformed-gr-g0.bin");
+        let _ = snapshot_to_vt(malformed, 100);
     }
 
     /// ghostty-audit P3-1: images are not kept (vqro draws none).
