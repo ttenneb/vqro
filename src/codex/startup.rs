@@ -208,7 +208,9 @@ impl Startup {
                 if let Some(version) = text(&row["localVersion"], 128, &mut partial) {
                     entry["version"] = json!(version);
                 }
-                if matches!(row["source"]["type"].as_str(), Some("local" | "git")) {
+                // Only Local.path is an AbsolutePathBuf in the native source union.
+                // Git.path is a plain optional string, with no native host-path guarantee.
+                if row["source"]["type"].as_str() == Some("local") {
                     if let Some(path) = native_path(&row["source"]["path"], &mut partial) {
                         entry["path"] = json!(path);
                     }
