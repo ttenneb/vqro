@@ -143,7 +143,7 @@ class ViewerPin(unittest.TestCase):
     """Only a viewer bound to trusted source is conformance authority: viewer_revision is a full commit reachable from
     trusted main and every copied *.py equals both its pin and its blob at that commit. Any refusal leaves nothing
     copied or enabled."""
-    REV = "fc916ddd329fdde8433970cc421cd3573abb11ed"  # on main; its extensions/ is the real production viewer
+    REV = "f5af1fc69d179fc97f786f9b8d6fe168eadf7234"  # on main; its extensions/ is the real production viewer
 
     def run_install(self, edit=None, **manifest):
         import asyncio, hashlib, tempfile
