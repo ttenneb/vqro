@@ -51,6 +51,7 @@ pub struct Agent {
     pub incomplete:BTreeSet<String>,
     pub receipts:BTreeMap<String,Value>,
     pub queue:Option<Value>,pub queue_version:u64,
+    pub account:Option<Value>,
     pub tool_principal_env:bool,pub view:Option<String>,pub view_error:Option<String>,
     pub configuration:super::configuration::Configuration,pub commands:super::commands::Commands,
     // A correlated origin is bound to the one message entity its user message_start created (origins.rs): a later
@@ -77,7 +78,7 @@ impl Agent {
         let boot=bytes.iter().map(|byte|format!("{byte:02x}")).collect::<String>();
         let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entities:ENTITY_COUNT,max_entity_bytes:ENTITY_TOTAL,snapshot_buffer_bytes:1024*1024,..Default::default()});
         journal.set_coverage(Coverage::Tail);
-        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,tool_principal_env:false,view:None,view_error:None,configuration:Default::default(),commands:Default::default(),availability:None,origins:Default::default(),start_origin:None,current_origin:None,requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),open:Vec::new(),starting:false,
+        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,account:None,tool_principal_env:false,view:None,view_error:None,configuration:Default::default(),commands:Default::default(),availability:None,origins:Default::default(),start_origin:None,current_origin:None,requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),open:Vec::new(),starting:false,
             position:0,serial:0,epoch_number:1,instance,boot,session:None,session_pending:false,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null,launch_cwd:None,startup:Default::default(),usage:None,usage_revision:0};
         agent.refresh();agent
     }
@@ -152,6 +153,7 @@ impl Agent {
                 "session":if self.session_pending {None}else{self.session.as_ref()},"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":self.queue,"requests":self.request_summaries(),"background":null,
                 "config":self.configuration.options(),"commands":self.commands.facts(),"usage":if self.session_pending || self.configuration.pending{None}else{self.usage.as_ref()},"incomplete":self.incomplete,
                 "items":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"coverage":self.journal.coverage().as_str()}},"views":self.view.iter().collect::<Vec<_>>(),"view_error":self.view_error}});
+        if let Some(account)=&self.account{facts["data"]["agent"]["account"]=account.clone();}
         if self.commands.incomplete{facts["data"]["agent"]["incomplete"].as_array_mut().unwrap().push(json!("commands"));}
         if self.configuration.incomplete {facts["data"]["agent"]["incomplete"].as_array_mut().unwrap().push(json!("config.models_or_levels"));}
         // Optional UI catalogs never displace requests/current state or exceed the64KiB facts contract.

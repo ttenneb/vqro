@@ -1,5 +1,7 @@
 //! Explicitly launched, co-located Codex app-server bridge. One child, many logical endpoint slots.
 //! No model call, implicit installation, credential lookup, native restart or input replay at startup.
+#[path = "launcher_account/mod.rs"]
+mod launcher_account;
 use clap::Parser;
 use serde_json::json;
 use std::io::Read;
@@ -45,6 +47,8 @@ async fn main() {
 }
 
 async fn run(args: Args) -> Result<(), String> {
+    let account_raw = std::env::var("VQRO_ACCOUNT").ok();
+    let launcher_account = launcher_account::parse(account_raw.as_deref()).map_err(str::to_owned)?;
     if !(1..=200).contains(&args.slots) {
         return Err("--slots must be in 1..=200".into());
     }
@@ -114,7 +118,7 @@ async fn run(args: Args) -> Result<(), String> {
     let provider_name = format!("codex-{label}");
     let provider_instance = format!("{label}:{incarnation}");
     let observation = Observation::new(args.slots, incarnation.clone());
-    let runtime = Runtime::with_host_principal(
+    let runtime = Runtime::with_host_metadata(
         native.clone(),
         args.slots,
         incarnation.clone(),
@@ -122,6 +126,7 @@ async fn run(args: Args) -> Result<(), String> {
         provider_instance.clone(),
         Some(observation.observer()),
         endpoint_principal,
+        launcher_account,
     );
     let model = runtime.clone();
     let child_native = native.clone();

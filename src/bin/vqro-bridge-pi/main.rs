@@ -12,6 +12,8 @@ mod panel;
 mod views;
 mod origins;
 mod startup;
+#[path="../launcher_account/mod.rs"]
+mod launcher_account;
 use std::collections::HashMap;
 use std::sync::{Arc,Mutex,OnceLock};
 use std::time::Duration;
@@ -97,7 +99,10 @@ async fn main()->Result<()> {
     let argv=controlled(args.native)?;
     let cwd=args.cwd.unwrap_or(std::env::current_dir()?).canonicalize()?;
     let signals=admission::Signals::new();
-    let shared=Arc::new(Shared {agent:Mutex::new(Agent::with_cwd(instance.clone(),signals.clone(),cwd.to_string_lossy().into_owned())),fallback:panel::Fallback::tty(),connected:std::sync::atomic::AtomicBool::new(false),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),metadata_refresh:Notify::new(),cwd:cwd.to_string_lossy().into_owned(),provider_name:name.clone(),instance:instance.clone(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
+    let account_raw=std::env::var("VQRO_ACCOUNT").ok();
+    let mut agent=Agent::with_cwd(instance.clone(),signals.clone(),cwd.to_string_lossy().into_owned());
+    agent.account=launcher_account::parse(account_raw.as_deref()).map_err(anyhow::Error::msg)?;
+    let shared=Arc::new(Shared {agent:Mutex::new(agent),fallback:panel::Fallback::tty(),connected:std::sync::atomic::AtomicBool::new(false),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),metadata_refresh:Notify::new(),cwd:cwd.to_string_lossy().into_owned(),provider_name:name.clone(),instance:instance.clone(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
     let weak=Arc::downgrade(&shared);
     let native=Native::spawn(&argv,&cwd,&std::env::vars().collect::<HashMap<_,_>>(),Arc::new(move|event|{
         if let Some(shared)=weak.upgrade(){

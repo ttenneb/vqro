@@ -45,6 +45,7 @@ pub struct Runtime {
     observer: Option<Observer>,
     incarnation: String,
     launcher_principal: Option<String>,
+    launcher_account: Option<Value>,
     account_revision: AtomicU64,
     availability_completed: tokio::sync::mpsc::Sender<AvailabilityRead>,
     availability_results: Mutex<Option<tokio::sync::mpsc::Receiver<AvailabilityRead>>>,
@@ -115,6 +116,14 @@ impl Runtime {
         observer: Option<Observer>,
         launcher_principal: Option<String>,
     ) -> Arc<Self> {
+        Self::with_host_metadata(native, count, incarnation, provider, instance, observer, launcher_principal, None)
+    }
+
+    /// Account is validated non-secret bridge launch configuration, not native auth readback.
+    pub fn with_host_metadata(
+        native: Peer, count: usize, incarnation: String, provider: String, instance: String,
+        observer: Option<Observer>, launcher_principal: Option<String>, launcher_account: Option<Value>,
+    ) -> Arc<Self> {
         assert!((1..=200).contains(&count));
         let launcher_principal = launcher_principal.filter(|principal| {
             count == 1
@@ -150,6 +159,7 @@ impl Runtime {
             observer,
             incarnation,
             launcher_principal,
+            launcher_account,
             account_revision: AtomicU64::new(0),
             availability_completed,
             availability_results: Mutex::new(Some(availability_results)),
@@ -357,6 +367,16 @@ impl Runtime {
     fn published_facts(&self, mut facts: Value) -> Value {
         if let Some(principal) = &self.launcher_principal {
             facts["data"]["agent"]["principal"] = json!(principal);
+        }
+        if let Some(account) = &self.launcher_account {
+            facts["data"]["agent"]["account"] = account.clone();
+            if let (Some(id), Some(limits)) = (account.get("id"), facts["data"]["agent"]["usage_limits"].as_array_mut()) {
+                for limit in limits {
+                    if let Some(scope) = limit.get_mut("scope").and_then(Value::as_object_mut) {
+                        scope.insert("account".into(), id.clone());
+                    }
+                }
+            }
         }
         if self.observer.is_none() {
             facts["data"]["agent"]["caps"]

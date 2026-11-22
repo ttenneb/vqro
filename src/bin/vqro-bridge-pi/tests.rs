@@ -3,6 +3,21 @@ use super::*;
 #[path="../../../tests/support/frame_metadata.rs"] mod frame_metadata;
 use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader,DuplexStream,ReadHalf,WriteHalf};
 #[test]
+fn configured_account_is_launch_metadata_not_native_auth_state(){
+    let mut agent=Agent::new("fixture".into(),admission::Signals::new());
+    assert!(agent.facts("fixture","/fake")["data"]["agent"].get("account").is_none());
+    let account=json!({"id":"work","label":"Work","kind":"subscription","sources":{"id":"vqro:launcher","label":"vqro:launcher","kind":"vqro:launcher"}});
+    agent.account=launcher_account::parse(Some(&account.to_string())).unwrap();
+    assert_eq!(agent.facts("fixture","/fake")["data"]["agent"]["account"],account);
+    agent.new_session_epoch();
+    assert_eq!(agent.facts("fixture","/fake")["data"]["agent"]["account"],account);
+    let mut command=tokio::process::Command::new("not-executed");
+    native::native_env(&mut command,&HashMap::from([("VQRO_ACCOUNT".into(),account.to_string()),("PI_CODING_AGENT_DIR".into(),"/fake/profile".into())]));
+    let env:HashMap<_,_>=command.as_std().get_envs().map(|(k,v)|(k.to_string_lossy().into_owned(),v.map(|v|v.to_string_lossy().into_owned()))).collect();
+    assert!(!env.contains_key("VQRO_ACCOUNT"));
+    assert_eq!(env["PI_CODING_AGENT_DIR"].as_deref(),Some("/fake/profile"));
+}
+#[test]
 fn stop_reply_preserves_requested_coverage_without_claiming_wider_effects(){
     let covers=vec![json!("foreground")];
     for exit in [None,Some(native::Exit {code:Some(0),success:true})]{
