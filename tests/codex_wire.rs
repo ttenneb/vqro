@@ -181,6 +181,73 @@ async fn open_runtime(
     (runtime, drain)
 }
 
+async fn configured_host_cardinality_case(slots: usize, expected: &str) {
+    let (_root, child, peer, incoming) = fixture(false).await;
+    let (runtime, drain) = open_runtime(peer.clone(), incoming, slots).await;
+    assert_eq!(runtime.capabilities()["host"]["kind"], json!(["server"]));
+    assert_eq!(
+        runtime.capabilities()["host"]["endpoints"],
+        json!([expected])
+    );
+    let check = |facts: Vec<Value>| {
+        for fact in facts {
+            assert_eq!(
+                fact["data"]["agent"]["caps"]["host"],
+                json!({"kind":"server","endpoints":expected})
+            );
+            assert_eq!(fact["data"]["agent"]["host"]["kind"], "server");
+        }
+    };
+    assert_eq!(runtime.facts().len(), slots);
+    assert!(
+        runtime
+            .facts()
+            .iter()
+            .all(|f| f["data"]["agent"]["session"].is_null())
+    );
+    check(runtime.facts());
+    check(vec![runtime.fact("endpoint-1").unwrap()]);
+    let initial_dirty = runtime.take_dirty_facts();
+    assert_eq!(initial_dirty.len(), slots);
+    check(initial_dirty);
+    // One live session must not turn a configured shared host into a single-endpoint host.
+    runtime
+        .invoke(
+            "endpoint-1",
+            "inc",
+            "agent.session",
+            json!({"v":0,"action":"new"}),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .facts()
+            .iter()
+            .filter(|f| f["data"]["agent"]["session"].is_object())
+            .count(),
+        1
+    );
+    check(runtime.facts());
+    check(vec![runtime.fact("endpoint-1").unwrap()]);
+    let dirty = runtime.take_dirty_facts();
+    assert!(!dirty.is_empty());
+    check(dirty);
+    cleanup(child, peer).await;
+    drain.await.unwrap();
+}
+
+#[tokio::test]
+async fn one_configured_slot_publishes_one_in_registration_and_all_fact_paths() {
+    configured_host_cardinality_case(1, "one").await;
+}
+
+#[tokio::test]
+async fn many_configured_slots_remain_many_with_zero_or_one_live_session() {
+    configured_host_cardinality_case(3, "many").await;
+}
+
 #[tokio::test]
 async fn runtime_slots_share_host_and_switch_sessions_without_changing_ref() {
     use vqro::provider_client::Outcome;

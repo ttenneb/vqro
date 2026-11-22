@@ -323,8 +323,14 @@ impl Runtime {
         }
     }
 
+    fn host_endpoints(&self) -> &'static str {
+        // Slots are fixed at construction, even when no session (or only one) is active.
+        if self.slots.len() == 1 { "one" } else { "many" }
+    }
+
     pub fn capabilities(&self) -> Map<String, Value> {
         let mut caps = provider_capabilities();
+        caps["host"]["endpoints"] = json!([self.host_endpoints()]);
         // An intermediate build without C3 is deliberately not an observed/conformant adapter.
         // Do not advertise an item channel until a real bounded producer has been attached.
         if self.observer.is_none() {
@@ -365,6 +371,7 @@ impl Runtime {
     }
 
     fn published_facts(&self, mut facts: Value) -> Value {
+        facts["data"]["agent"]["caps"]["host"]["endpoints"] = json!(self.host_endpoints());
         if let Some(principal) = &self.launcher_principal {
             facts["data"]["agent"]["principal"] = json!(principal);
         }
