@@ -35,7 +35,8 @@ struct Projection {
 }
 
 fn control(kind: &str, value: &Value) -> bool {
-    matches!(kind, "state" | "session") || (kind == "request" && value["status"] == "pending")
+    matches!(kind, "state" | "session" | "startup")
+        || (kind == "request" && value["status"] == "pending")
 }
 fn protected(kind: &str, value: &Value) -> bool {
     control(kind, value)

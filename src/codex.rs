@@ -6,6 +6,7 @@ mod availability;
 pub mod configuration;
 pub mod observation;
 pub mod runtime;
+mod startup;
 
 use crate::rpc::{RpcError, RpcResult};
 use serde_json::{Map, Value, json};
@@ -233,6 +234,7 @@ pub struct Endpoint {
     pub lifecycle: String,
     pub caps_rev: u64,
     model: Option<Value>,
+    startup: startup::Startup,
     model_choices: Vec<Value>,
     config_rev: u64,
     config_pending: bool,
@@ -271,6 +273,7 @@ impl Endpoint {
             lifecycle: "live".into(),
             caps_rev: 1,
             model: None,
+            startup: startup::Startup::default(),
             model_choices: Vec::new(),
             config_rev: 1,
             config_pending: false,
@@ -781,6 +784,15 @@ impl Endpoint {
         response: &Value,
         epoch: String,
     ) -> Result<Vec<Change>, RpcError> {
+        self.set_session_response_from(response, epoch, "rpc:thread/start")
+    }
+
+    pub fn set_session_response_from(
+        &mut self,
+        response: &Value,
+        epoch: String,
+        source: &str,
+    ) -> Result<Vec<Change>, RpcError> {
         let _changes = self.set_session(&response["thread"], epoch)?;
         if let Some(cwd) = reported_string(&response["cwd"], 4096) {
             self.cwd = Some(cwd);
@@ -792,7 +804,9 @@ impl Endpoint {
             }
             self.model = Some(model);
         }
+        let startup = self.capture_startup(response, source);
         Ok(vec![
+            startup,
             Change::new("session", "current", self.session_info()),
             self.state_entity(),
         ])

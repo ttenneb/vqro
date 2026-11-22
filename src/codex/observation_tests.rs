@@ -47,6 +47,38 @@ fn native_first_delta_creates_a_typed_base_and_final_put_keeps_position() {
 }
 
 #[test]
+fn startup_survives_tail_pressure_updates_in_place_and_resets_per_epoch() {
+    let mut p = Projection::new("e".into());
+    assert!(p.put("startup", "current", json!({"model":"start"}), true));
+    for n in 0..1000 {
+        assert!(p.put("message", &format!("m{n}"), json!({"role":"assistant","content":[{"type":"text","text":"x".repeat(1000)}],"final":true}), true));
+    }
+    assert_eq!(
+        p.journal
+            .entity("startup", "current")
+            .expect("startup is retained, not a tail message")
+            .1["model"],
+        "start"
+    );
+    assert!(p.put(
+        "startup",
+        "current",
+        json!({"model":"start","skills":[]}),
+        true
+    ));
+    assert_eq!(p.journal.entity("startup", "current").unwrap().0, 2);
+    let mut view = ItemView::new();
+    let mut cursor = p.journal.open(None);
+    drain(&mut cursor, &mut p, &mut view);
+    assert_eq!(
+        view.entity("startup", "current").unwrap().1["model"],
+        "start"
+    );
+    p.reset("next");
+    assert!(p.journal.entity("startup", "current").is_none());
+}
+
+#[test]
 fn tail_eviction_preserves_state_pending_requests_and_active_item_positions() {
     let mut p = Projection::new("e".into());
     p.put("state", "current", json!({"state":"requires_action"}), true);

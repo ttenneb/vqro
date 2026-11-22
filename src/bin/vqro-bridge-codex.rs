@@ -179,6 +179,7 @@ async fn run(args: Args) -> Result<(), String> {
     };
     let result = match init {
         Ok(init) => {
+            runtime.initialize_startup(&init);
             native.notify("initialized", json!({}));
             if runtime
                 .initialize_models(tokio::time::Instant::now() + Duration::from_secs(5))

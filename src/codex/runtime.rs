@@ -1,5 +1,7 @@
 //! Provider-facing orchestration. Native event draining and controls never wait on an admission.
 //! The shared SDK item producer is supplied as a callback; no second item reducer lives here.
+mod startup;
+
 use super::{Change, Endpoint, SendContext, configuration, provider_capabilities};
 use crate::provider_client::{Outcome, ProviderError};
 use crate::rpc::{Incoming, IncomingReceiver, Peer, RpcError};
@@ -20,6 +22,14 @@ struct AvailabilityRead {
     response: Value,
 }
 
+struct StartupRead {
+    index: usize,
+    thread: String,
+    epoch: String,
+    field: &'static str,
+    response: Option<Value>,
+}
+
 struct Slot {
     endpoint: Mutex<Endpoint>,
     admission: Arc<AsyncMutex<()>>,
@@ -38,6 +48,10 @@ pub struct Runtime {
     account_revision: AtomicU64,
     availability_completed: tokio::sync::mpsc::Sender<AvailabilityRead>,
     availability_results: Mutex<Option<tokio::sync::mpsc::Receiver<AvailabilityRead>>>,
+    startup_completed: tokio::sync::mpsc::Sender<StartupRead>,
+    startup_results: Mutex<Option<tokio::sync::mpsc::Receiver<StartupRead>>>,
+    startup_reads: Arc<Semaphore>,
+    startup_initialized: AtomicBool,
 }
 
 enum Fault {
@@ -110,6 +124,7 @@ impl Runtime {
         let (changed, _) = watch::channel(0);
         let host = format!("codex:{incarnation}");
         let (availability_completed, availability_results) = tokio::sync::mpsc::channel(1);
+        let (startup_completed, startup_results) = tokio::sync::mpsc::channel(1);
         let runtime = Arc::new(Self {
             native,
             slots: (0..count)
@@ -138,6 +153,10 @@ impl Runtime {
             account_revision: AtomicU64::new(0),
             availability_completed,
             availability_results: Mutex::new(Some(availability_results)),
+            startup_completed,
+            startup_results: Mutex::new(Some(startup_results)),
+            startup_reads: Arc::new(Semaphore::new(4)),
+            startup_initialized: AtomicBool::new(false),
         });
         for (index, slot) in runtime.slots.iter().enumerate() {
             let endpoint = slot.endpoint.lock().unwrap();
@@ -248,6 +267,12 @@ impl Runtime {
             .unwrap()
             .take()
             .expect("one native event drain");
+        let mut startup = self
+            .startup_results
+            .lock()
+            .unwrap()
+            .take()
+            .expect("one startup result drain");
         loop {
             tokio::select! {
                 biased;
@@ -255,6 +280,19 @@ impl Runtime {
                     Some(message) => self.incoming(message),
                     None => break,
                 },
+                result = startup.recv() => {
+                    let Some(result) = result else { break; };
+                    loop {
+                        match incoming.try_recv() {
+                            Ok(message) => self.incoming(message),
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return,
+                        }
+                    }
+                    let mut endpoint = self.slots[result.index].endpoint.lock().unwrap();
+                    let changes = endpoint.finish_startup_inventory(&result.thread, &result.epoch, result.field, result.response.as_ref());
+                    if !changes.is_empty() { self.emit(result.index, &endpoint, changes, false); }
+                }
                 result = completed.recv() => {
                     let Some(result) = result else { break; };
                     loop {
@@ -847,7 +885,7 @@ impl Runtime {
     }
 
     async fn session(
-        &self,
+        self: &Arc<Self>,
         index: usize,
         args: &Value,
         deadline: Instant,
@@ -942,10 +980,20 @@ impl Runtime {
         let mut endpoint = self.slots[index].endpoint.lock().unwrap();
         let next_epoch = unique_epoch(&self.incarnation);
         let changes = endpoint
-            .set_session_response(&result, next_epoch)
+            .set_session_response_from(
+                &result,
+                next_epoch,
+                if action == "new" {
+                    "rpc:thread/start"
+                } else {
+                    "rpc:thread/resume"
+                },
+            )
             .map_err(Fault::Unknown)?;
         let session = endpoint.session_info();
         self.emit(index, &endpoint, changes, true);
+        drop(endpoint);
+        self.start_startup_reads(index);
         Ok(Outcome::Observed(Some(json!({"session":session}))))
     }
 }
