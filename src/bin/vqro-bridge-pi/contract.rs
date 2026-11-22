@@ -179,6 +179,13 @@ pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
     if !owner_human {if let Some(quoted)=&quoted {
         message=format!("Quoted provenance (asserted, not the effective sender): {}\n{message}",quoted["label"].as_str().unwrap());
     }}
+    // Literal input (agent-v0 3.2): Pi expands input that starts with /skill:<name> into that skill's file before it
+    // starts or queues it (agent-session.js _preparePrompt / _queueUserInput -> _expandSkillCommand). Such text would not
+    // reach the model as written, so it is refused here; a skill is invoked explicitly with agent.command. Only the
+    // owner's plain input can start that way (everyone else's is framed with a sender header first).
+    if message.starts_with("/skill:") {
+        return Err(reject("unsupported","text starting with /skill: would be expanded by a native skill, not delivered literally; invoke the skill with agent.command"));
+    }
     let mut native=json!({"message":message});
     if !images.is_empty() {native["images"]=json!(images);}
     match mode.as_str() {"admit"|"settle"=>{native["streamingBehavior"]=json!("followUp");},"boundary"=>{native["streamingBehavior"]=json!("steer");},_=>{}}

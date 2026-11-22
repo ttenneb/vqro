@@ -30,3 +30,10 @@ fn cycle_result_projects_no_native_credential_fields_and_requires_reported_shape
     assert_eq!(safe["model"]["id"],"m");assert!(!safe.to_string().contains("fixture-secret"));assert!(!safe.to_string().contains("headers"));assert!(commands::observed_result("cycle_model",&native));assert!(!commands::observed_result("cycle_model",&json!({})));
     let compact=json!({"summary":"Native summary","firstKeptEntryId":"entry","tokensBefore":123});assert!(commands::observed_result("compact",&compact));assert_eq!(commands::safe_result("compact",&compact),compact);assert!(!commands::observed_result("compact",&json!({})));
 }
+/// Skills stay invocable explicitly: agent.command on Pi's advertised skill:<name> sends /skill:<name> [args].
+#[test]
+fn an_advertised_skill_is_invoked_through_agent_command(){
+    let mut c=Commands::default();c.observe(&json!({"commands":[{"name":"skill:review","description":"Review code","source":"skill"}]}));
+    assert!(matches!(c.prepare("skill:review",Some(&json!("the diff"))).unwrap(),Prepared::Prompt{message} if message=="/skill:review the diff"));
+    assert!(matches!(c.prepare("skill:review",None).unwrap(),Prepared::Prompt{message} if message=="/skill:review"));
+}

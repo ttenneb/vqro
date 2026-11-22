@@ -636,3 +636,10 @@ fn pruning_or_omission_downgrades_full_history_but_new_empty_session_recovers(){
     native_session(&mut a,"fresh",json!(0));assert_eq!(coverage(&a),"tail");native_session(&mut a,"next",json!(0));assert_eq!(coverage(&a),"all_retained");
     message(&mut a,&"x".repeat(100000),"stop");assert_eq!(coverage(&a),"tail");native_session(&mut a,"after-omission",json!(0));assert_eq!(coverage(&a),"all_retained");
 }
+#[test]
+fn zz_tmp_r100_repro() {
+    let mut a=Agent::with_cwd("x".into(),Signals::new(),"/home/u/proj".into());
+    println!("after with_cwd: {}", String::from_utf8(a.journal.snapshot()).unwrap());
+    event(&mut a,json!({"type":"response","id":"n1","command":"get_state","success":true,"data":{"model":{"id":"gpt-6-luna","name":"GPT-6 Luna"},"thinkingLevel":"low","isStreaming":false,"isCompacting":false,"steeringMode":"one-at-a-time","followUpMode":"one-at-a-time","sessionId":"01a2","messageCount":0,"pendingMessageCount":0}}));
+    println!("after get_state: {}", String::from_utf8(a.journal.snapshot()).unwrap());
+}

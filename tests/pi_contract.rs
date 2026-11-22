@@ -174,3 +174,24 @@ fn generic_causality_pin_preserves_bounded_unknowns_and_requires_known_qualifier
     args["cause"]=json!({"kind":"delivery","id":"id","provenance":"asserted","extra":"x".repeat(4100)});refusal(&args,&context(),"invalid");
     let nested=(0..65).fold(Value::Null,|v,_|json!([v]));args["cause"]=json!({"kind":"_future","id":"id","provenance":"asserted","extra":nested});refusal(&args,&context(),"invalid");
 }
+
+/// Skills on (stopgap b): an owner's plain text starting with /skill: would be replaced by the skill file in Pi
+/// (_expandSkillCommand), so agent.send refuses it as non-literal; any other sender's text is framed and passes as is.
+#[test]
+fn skill_prefixed_owner_text_is_refused_as_non_literal(){
+    let mut args=input();args["origin"]["kind"]=json!("human");args["render"]=json!(["user"]);
+    let owner=Context {owner_proven:true,..context()};
+    for text in ["/skill:review","/skill:review please check","/skill:unknown-skill x"] {
+        args["content"]=json!([{"type":"text","text":text}]);
+        let error=send(&args,&owner).err().unwrap();
+        assert_eq!(error.kind,"unsupported","{text}");assert!(error.message.contains("agent.command"),"{text}: {}",error.message);
+    }
+    for text in [" /skill:review","say /skill:review","/skills are fine","/literal"] {
+        args["content"]=json!([{"type":"text","text":text}]);
+        assert_eq!(send(&args,&owner).unwrap().args["message"],text,"{text} is delivered literally");
+    }
+    // A non-owner's text is framed with a sender header first, so Pi never sees it as a skill invocation.
+    let mut other=input();other["content"]=json!([{"type":"text","text":"/skill:review"}]);
+    let sent=send(&other,&context()).unwrap();
+    assert!(sent.args["message"].as_str().unwrap().starts_with("from ")&&sent.args["message"].as_str().unwrap().ends_with("\n\n/skill:review"));
+}
