@@ -13,7 +13,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vqro_ext import Extension, VqroError, node_at, replace_at, views_in  # noqa: E402
 
-from vqro_views import terminal_target, title
+from vqro_views import busy, confirm_popup, ended, graceful, stop, terminal_target, title, view_resource
 
 ext = Extension("panes", event_types=["entries", "resource", "resource.removed"])
 
@@ -79,9 +79,64 @@ def new_shell(key, ver, cwd=None):
     return r, f"term-{r['id']}"
 
 
-@ext.command("panes.close", "Close a pane (its program keeps running; closing the only pane opens a new shell)")
+CLOSE_CONFIRM = "panes.close-confirm"
+
+
+@ext.command("panes.close", "Close a pane and stop its program (asks first while something is running; args: keep = "
+             "close only, the program keeps running; closing the only pane opens a new shell)")
 def close(args):
+    """Close ends what it closes (human feedback batch 6): the pane's program stops and the pane closes, in one
+    step. While a program is running (`vqro_views.busy`: anything but a plain shell, a working or blocked agent)
+    a popup asks first: stop and close, keep it running and close only the pane, or cancel. A program another pane
+    still shows, or one already ended, is left alone. A program that won't stop leaves the pane open, and the popup
+    says why."""
+    if args.get("cancel"):
+        return {"client": {"close": True}}
     ctx, key, ver, root = target(args)
+    root = copy.deepcopy(root)
+    view = ctx.get("view")
+    rid = view_resource(ext, view) if view else None
+    elsewhere = [v for k, e in ext.entries.items() if k.startswith("layout/") for v in views_in(e["value"])]
+    if view in elsewhere:
+        elsewhere.remove(view)  # this pane
+    still_shown = any(view_resource(ext, v) == rid for v in elsewhere)
+    ending = rid if rid and not ended(ext.resources.get(rid)) and not still_shown and not args.get("keep") else None
+    agent = (ext.resources.get(ending) or {}).get("kind") == "agent" if ending else False
+    # An agent pane uses agent-standard-coord's wording, OKed by the human (batch 6).
+    confirm = dict(title_="Close pane?", command="panes.close", args={},
+                   stop_label="Stop and close" if agent else "Close and stop it",
+                   keep_label="Keep running, just close the pane" if agent else "Keep it running, close the pane")
+    if ending and not args.get("stop"):
+        why = busy(ext, ending)
+        if why:
+            if agent:
+                queued = len((((ext.resources.get(ending) or {}).get("data") or {}).get("agent") or {}).get("queue") or [])
+                why += " Closing stops it" + (f"; {queued} queued message{'s' if queued != 1 else ''} will not be sent" if queued else "") \
+                    + "." + ("" if graceful(ext, ending) else " vqro will kill its terminal.")
+            return confirm_popup(ext, CLOSE_CONFIRM, reasons=[why], **confirm)
+    if ending:
+        try:
+            stop(ext, ending)
+        except VqroError as error:
+            return confirm_popup(ext, CLOSE_CONFIRM, reasons=[], problem=f"Couldn't stop it: {error}", **confirm)
+        # Stopping changes the layout too, later (the tabs extension marks a tab ended once the exit is seen), so
+        # close the pane in the layout as it is now, as long as it still shows the same view there; a write that
+        # lands between reading and closing is retried on the newer layout.
+        def attempt():
+            now = copy.deepcopy(ext.value(key))
+            if now is None or (node_at(now, ctx["path"]) or {}).get("view") != view:
+                raise VqroError("stopped it, but the pane moved meanwhile; close it again", "invalid")
+            return remove_pane(args, ctx, key, ext.version(key), now)
+        ext.fresh()
+        reply = ext.retrying(attempt) or {"client": {}}
+    else:
+        reply = remove_pane(args, ctx, key, ver, root) or {"client": {}}
+    if args.get("stop") or args.get("keep"):
+        reply["client"]["close"] = True  # from the popup
+    return reply if reply["client"] else None
+
+
+def remove_pane(args, ctx, key, ver, root):
     path = ctx["path"]
     shell = None
     parent = node_at(root, path[:-1]) if path else None
@@ -121,6 +176,7 @@ def close(args):
         raise
     if shell:
         return {"client": {"focus": {"view": view_id}}}
+    return None
 
 
 # ---- rearranging panes (all one layout transaction with compare-and-set) -----------------------------------
@@ -388,13 +444,14 @@ ext.contribute({
     "menu/panes.break": {"where": "pane", "label": "Move to a new tab", "command": "panes.break", "order": 30},
     "menu/panes.move": {"where": "pane", "label": "Move to tab…", "command": "panes.move", "order": 31},
     "menu/panes.show": {"where": "pane", "label": "Show another resource", "command": "panes.show", "pick": "resource", "when": {"kind": "terminal"}, "order": 35},
-    "menu/panes.close": {"where": "pane", "label": "Close pane (program keeps running)", "command": "panes.close", "order": 40},
-    "menu/panes.kill": {"where": "pane", "label": "Kill program", "command": "panes.kill", "when": {"live": True, "kind": "terminal"}, "order": 50},
+    # Close ends what it closes (human feedback batch 6): one item, asking first while something runs. Keeping a
+    # program running is the popup's choice; panes.kill stays a command.
+    "menu/panes.close": {"where": "pane", "label": "Close", "command": "panes.close", "order": 40},
     "binding/panes.menu": {"key": "m", "command": "client.menu", "args": {"where": "pane"}, "label": "pane menu"},
     # h/v follow the layout's split names: "h" puts panes side by side, "v" stacks them.
     "binding/panes.split-h": {"key": "h", "command": "panes.split", "args": {"dir": "right"}, "label": "split side by side"},
     "binding/panes.split-v": {"key": "v", "command": "panes.split", "args": {"dir": "down"}, "label": "split stacked"},
-    "binding/panes.close": {"key": "x", "command": "panes.close", "label": "close pane (program keeps running)"},
+    "binding/panes.close": {"key": "x", "command": "panes.close", "label": "close pane (stops its program; asks while it runs)"},
     "binding/panes.zoom": {"key": "z", "command": "client.zoom", "label": "zoom pane (toggle)"},
     "binding/panes.scroll": {"key": "[", "command": "client.scroll", "label": "scroll back and search (terminal)"},
     "binding/panes.last": {"key": ";", "command": "client.focus", "args": {"dir": "last"}, "label": "last pane"},

@@ -9,7 +9,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vqro_ext import Extension, VqroError, first_tabs, node_at, views_in  # noqa: E402
-from vqro_views import ended, terminal_target, title, view_resource
+from vqro_views import busy, confirm_popup, ended, stop, terminal_target, title, view_resource
 
 ext = Extension("tabs", event_types=["entries", "resource", "resource.removed"])
 
@@ -147,12 +147,64 @@ class Shell:
             ext.notify(f"New shell {self.resource['id']} started but not shown ({error.kind}); open it from the sidebar", "warn")
 
 
-@ext.command("tabs.close", "Close a tab (its programs keep running; closing the last tab opens a new shell)")
+CLOSE_CONFIRM = "tabs.close-confirm"
+
+
+@ext.command("tabs.close", "Close a tab and stop its programs (asks first while something is running; args: keep = "
+             "close only, they keep running; closing the last tab opens a new shell)")
 def close_tab(args):
+    """Close ends what it closes (human feedback batch 6), like panes.close: the tab's programs stop and the tab
+    closes. One popup lists everything still running first. Programs another tab still shows, and ended ones, are
+    left alone; if one won't stop, nothing closes and the popup says why."""
+    if args.get("cancel"):
+        return {"client": {"close": True}}
     key, ver, root, tabs, i = tab_target(args)
     if not 0 <= i < len(tabs["tabs"]):
         raise VqroError("that tab is gone", "conflict")
-    shell = Shell()
+    closing = views_in(tabs["tabs"][i]["node"])
+    others = [v for k, e in ext.entries.items() if k.startswith("layout/") for v in views_in(e["value"])]
+    for v in closing:
+        if v in others:
+            others.remove(v)
+    still = {view_resource(ext, v) for v in others}
+    ending = [] if args.get("keep") else list(dict.fromkeys(
+        rid for rid in (view_resource(ext, v) for v in closing) if rid and rid not in still and not ended(ext.resources.get(rid))))
+    name = tabs["tabs"][i].get("title") or "tab"
+    confirm = dict(title_=f"Close tab \"{name}\"?", command="tabs.close", args={},
+                   stop_label="Close and stop them", keep_label="Keep them running, close the tab")
+    if ending and not args.get("stop"):
+        reasons = [why for why in (busy(ext, rid) for rid in ending) if why]
+        if reasons:
+            return confirm_popup(ext, CLOSE_CONFIRM, reasons=reasons, **confirm)
+    for rid in ending:
+        try:
+            stop(ext, rid)
+        except VqroError as error:
+            return confirm_popup(ext, CLOSE_CONFIRM, reasons=[], problem=f"Couldn't stop {rid}: {error}", **confirm)
+    shell = Shell()  # shared by retries: one new shell at most
+    try:
+        return remove_tab(args, key, ver, root, tabs, i, shell) if not ending else close_after_stop(args, closing, shell)
+    except VqroError as error:
+        shell.orphaned(error)  # only says something when a new shell was started but not shown
+        raise
+
+
+def close_after_stop(args, closing, shell):
+    # Stopping changes the layout too, later (this extension marks a tab ended once the exit is seen), so close the
+    # tab in the layout as it is now, as long as the same tab is still there; a write that lands between reading
+    # and closing is retried on the newer layout.
+    def attempt():
+        ctx = dict(args.get("context") or {})
+        ctx["layout_version"] = ext.version(f"layout/{ctx.get('layout')}")
+        key, ver, root, tabs, i = tab_target(dict(args, context=ctx))
+        if not 0 <= i < len(tabs["tabs"]) or views_in(tabs["tabs"][i]["node"]) != closing:
+            raise VqroError("stopped its programs, but the tab moved meanwhile; close it again", "invalid")
+        return remove_tab(args, key, ver, root, tabs, i, shell)
+    ext.fresh()
+    return ext.retrying(attempt)
+
+
+def remove_tab(args, key, ver, root, tabs, i, shell):
     removed = views_in(tabs["tabs"].pop(i)["node"])
     if not tabs["tabs"]:
         if ver is not None and ext.version(key) != ver:
@@ -163,15 +215,11 @@ def close_tab(args):
         tabs["active"] = min(a - 1 if a >= i and a > 0 else a, len(tabs["tabs"]) - 1)
     ops = shell.ops([root]) + [{"op": "set", "key": key, "value": root, "expect": ver}]
     ops += orphan_view_deletes(removed, {key: root})
-    try:
-        result = ext.apply(ops, "tabs: close")
-    except VqroError as error:
-        shell.orphaned(error)
-        raise
-    if shell.resource is not None:
-        return dict(result or {}, client={"focus": {"view": f"term-{shell.resource['id']}"}})
-    return result
-
+    result = ext.apply(ops, "tabs: close")
+    client = {"focus": {"view": f"term-{shell.resource['id']}"}} if shell.resource is not None else {}
+    if args.get("stop") or args.get("keep"):
+        client["close"] = True  # from the popup
+    return dict(result or {}, client=client) if client else result
 
 @ext.command("tabs.rename", "Rename a tab (args: text)")
 def rename_tab(args):
@@ -367,6 +415,7 @@ ext.contribute({
     # An icon alone: the label stays empty so a set's `add` glyph replaces the `+`.
     "menu/tabs.new": {"where": "tabbar", "label": "", "icon": {"name": "add", "text": "+"}, "command": "tabs.open", "order": 0},
     # Right-click menus hold only what the mouse can finish (human feedback batch 5): renaming stays on the r key.
+    # Close ends what it closes (batch 6): its programs stop, after a popup while something runs.
     "menu/tabs.close": {"where": "tab", "label": "Close tab", "command": "tabs.close", "order": 10},
     # The tab bar keeps only "+"; other actions live in menus and the command list.
     "menu/tabs.close-ended": {"where": "tab", "label": "Close ended tabs", "command": "tabs.close_ended", "order": 30},

@@ -137,7 +137,8 @@ class StopE2E(base.E2E):
             name, version, root = self.layout()
             tabs = node_at(root, path)['tabs']
             last = len(tabs) == 1
-            self.call('command.invoke', {'name': 'tabs.close', 'args': {'context': {
+            # `keep`: close only (batch 6's "keep running"); the default stops them (below, and test_close_kill.py).
+            self.call('command.invoke', {'name': 'tabs.close', 'args': {'keep': True, 'context': {
                 'layout': name, 'layout_version': version, 'tab_path': path, 'tab_index': 0}}})
             closed += 1
             if last:
@@ -150,13 +151,16 @@ class StopE2E(base.E2E):
         shell = self.resource(value['resource'])
         assert value['kind'] == 'terminal' and shell['state'] == 'live' and shell['id'] not in before, (value, shell)
         still = {r['id'] for r in self.snapshot()['resources'] if r['kind'] == 'terminal' and r['state'] == 'live'}
-        assert before <= still, 'closing tabs killed a program'
-        # The only pane of the last tab: same replacement through panes.close.
-        self.call('command.invoke', {'name': 'panes.close', 'args': {'context': {
+        assert before <= still, 'closing tabs with keep killed a program'
+        # The only pane of the last tab, closed the default way (batch 6): its plain shell stops without asking, and
+        # the tabs extension marking the tab ended meanwhile does not make the close conflict.
+        reply = self.call('command.invoke', {'name': 'panes.close', 'args': {'context': {
             'layout': name, 'layout_version': version, 'path': path+[0], 'view': view}}})
+        assert 'popup' not in ((reply or {}).get('client') or {}), reply
         name, version, root = self.layout()
         tabs = node_at(root, path)['tabs']
         assert len(tabs) == 1 and tabs[0]['node'].get('view') not in (None, view), tabs
+        self.wait(lambda: self.resource(shell['id']) is None or self.resource(shell['id'])['state'] != 'live', 'closing stopped the shell')
         self.log.append({'close_last': 'PASS', 'tabs_closed': closed, 'replacement': shell['id'],
                          'pane_replacement': tabs[0]['node']['view']})
 

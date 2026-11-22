@@ -256,19 +256,20 @@ class ResourceViews(unittest.TestCase):
         core.apply([{"op": "set", "key": "view/term-r1", "value": {"kind": "terminal", "resource": "r1"}},
                     {"op": "set", "key": "layout/main", "value": {"view": "term-r1"}}], "fixture")
         core.shells = ["r7", "r8"]
-        result = module["close"]({"context": {"layout": "main", "layout_version": core.version("layout/main"), "path": [], "view": "term-r1"}})
+        # `keep`: close only (the popup's "keep it running"); stopping is tested in test_close_kill.
+        result = module["close"]({"keep": True, "context": {"layout": "main", "layout_version": core.version("layout/main"), "path": [], "view": "term-r1"}})
         self.assertEqual(core.value("layout/main"), {"view": "term-r7"})
         self.assertIsNone(core.value("view/term-r1"))
-        self.assertEqual(result["client"], {"focus": {"view": "term-r7"}})
+        self.assertEqual(result["client"], {"focus": {"view": "term-r7"}, "close": True})
         core.apply([{"op": "set", "key": "layout/main", "value": {"tabs": [{"title": "t", "node": {"view": "term-r7"}}], "active": 0}}], "fixture")
-        module["close"]({"context": {"layout": "main", "layout_version": core.version("layout/main"), "path": [0], "view": "term-r7"}})
+        module["close"]({"keep": True, "context": {"layout": "main", "layout_version": core.version("layout/main"), "path": [0], "view": "term-r7"}})
         self.assertEqual(core.value("layout/main"), {"tabs": [{"title": "sh", "node": {"view": "term-r8"}}], "active": 0})
         self.assertEqual(core.value("view/term-r8")["resource"], "r8")
-        self.assertFalse(any(method == "resource.kill" for method, _ in core.calls), "closing never kills the old program")
+        self.assertFalse(any(method == "resource.kill" for method, _ in core.calls), "keep: closing only, never kills")
         # An ordinary close (two tabs) spawns nothing.
         core.apply([{"op": "set", "key": "layout/main", "value": {"tabs": [{"title": "a", "node": {"view": "term-r8"}},
                     {"title": "b", "node": {"view": "term-r1"}}], "active": 0}}], "fixture")
-        module["close"]({"context": {"layout": "main", "layout_version": core.version("layout/main"), "path": [1], "view": "term-r1"}})
+        module["close"]({"keep": True, "context": {"layout": "main", "layout_version": core.version("layout/main"), "path": [1], "view": "term-r1"}})
         self.assertEqual([t["title"] for t in core.value("layout/main")["tabs"]], ["a"])
         self.assertEqual(sum(method == "resource.spawn" for method, _ in core.calls), 2)
 

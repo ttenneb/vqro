@@ -189,7 +189,7 @@ def term_row(rid, r, where=False):
         "command": "sidebar.show", "args": {"resource": rid},
         "menu": [
             {"label": "Show", "command": "sidebar.show", "args": {"resource": rid}},
-            *([{"label": "Kill program", "command": "sidebar.kill", "args": {"resource": rid}}]
+            *([{"label": "Stop", "command": "sidebar.kill", "args": {"resource": rid}}]
               if r.get("kind", "terminal") == "terminal" and live else []),
             # Agents declaring data.agent config/commands (agent v0 6.3); the agents extension owns the popup.
             *([{"label": "Agent settings…", "command": "agents.config", "args": {"resource": rid}}]

@@ -61,8 +61,9 @@ class Core:
             rid = f"r{self.next_id}"; self.next_id += 1
             self.resources[rid] = {"id": rid, "kind": "terminal", "argv": ["sh"], "state": "live", **params}
             return {"outcome": "observed", "resource": dict(self.resources[rid])}
-        if method == "resource.kill":
-            raise AssertionError("never kills")
+        if method == "resource.kill":  # closing a pane or tab ends its program (batch 6)
+            self.resources[params["resource"]]["state"] = "finished"
+            return {"outcome": "observed"}
         return {}
 
     def retrying(self, fn, attempts=3):
