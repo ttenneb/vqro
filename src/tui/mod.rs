@@ -127,7 +127,9 @@ enum Overlay {
     Palette { query: String, sel: usize },
     /// A menu built from `menu/*` entries for a place (pane, tab, ...), at the pointer.
     /// `query` filters it once it is long (see `SEARCHABLE`); `sel` indexes the filtered rows.
-    Menu { items: Vec<Item>, ctx: Value, sel: usize, at: Position, query: String },
+    /// `mouse`: opened by a click (a right-click menu), so it shows no "type to filter" line until something is
+    /// typed (human feedback batch 5: right-click menus are for the mouse).
+    Menu { items: Vec<Item>, ctx: Value, sel: usize, at: Position, query: String, mouse: bool },
     /// One line of text for an item that declared `input`.
     Input { prompt: String, text: String, item: Item, ctx: Value, multi: Option<Editor> },
     /// Choose a resource for an item that declared `pick: "resource"`. Filtered like `Menu`.
@@ -170,6 +172,8 @@ struct Item {
     /// A multi-line prompt (feature multiline), and its size limit in bytes.
     multiline: bool,
     max_bytes: Option<u64>,
+    /// Menus draw a thin rule where consecutive items' `group` differs (e.g. a pane's own items, then an agent's).
+    group: Option<String>,
 }
 
 
@@ -188,6 +192,7 @@ impl Item {
             label_context: v["label_context"].as_str().map(String::from),
             multiline: v["multiline"] == true,
             max_bytes: v["max_bytes"].as_u64(),
+            group: v["group"].as_str().map(String::from),
         }
     }
 }
@@ -230,6 +235,8 @@ struct Hit {
     /// A panel's `title_actions` drawn in its frame: (where, the panel's view, the action).
     title_actions: Vec<(Rect, String, Value)>,
     overlay: Option<(Rect, Rect, usize)>,
+    /// When a menu draws group rules: which item each line of the list is (`None`: a rule).
+    overlay_lines: Vec<Option<usize>>,
 }
 
 #[derive(Clone)]
@@ -1529,14 +1536,16 @@ impl App {
                     label_context: None,
                     multiline: o["multiline"] == true || item["multiline"] == true,
                     max_bytes: item["max_bytes"].as_u64(),
+                    group: None,
                 }
             })
             .collect();
         if items.is_empty() || item["command"].as_str().is_none() {
             return;
         }
+        // A select's options (a left click or Enter), not a right-click menu: long lists keep their filter line.
         let at = at.unwrap_or_default();
-        self.open_over(Overlay::Menu { items, ctx, sel: 0, at, query: String::new() });
+        self.open_over(Overlay::Menu { items, ctx, sel: 0, at, query: String::new(), mouse: false });
     }
 
     /// A row's own actions (`menu`), shown like any other menu.
@@ -1554,8 +1563,9 @@ impl App {
         if items.is_empty() {
             return;
         }
+        let mouse = at.is_some();
         let at = at.or_else(|| self.hit.leaves.get(self.focus).map(|(_, o, _)| Position { x: o.x + 2, y: o.y + 2 })).unwrap_or_default();
-        self.open_over(Overlay::Menu { items, ctx, sel: 0, at, query: String::new() });
+        self.open_over(Overlay::Menu { items, ctx, sel: 0, at, query: String::new(), mouse });
     }
 
     fn on_filter_key(&mut self, k: KeyEvent) {
@@ -2170,6 +2180,8 @@ impl App {
         let mut ctx = json!({
             "layout": layout, "layout_version": version, "path": path,
             "view": view, "kind": v["kind"], "resource": resource, "resource_kind": resource_kind, "live": live, "title": self.view_title(view),
+            // Lets a menu offer "Zoom" or "Unzoom" (`when: {"zoomed": true}`).
+            "zoomed": self.zoomed.is_some(),
         });
         // Drawn through its fallback (D29): commands still address the pane's own view.
         if let Some(shown) = self.shown_view(view).0.filter(|s| s != view) { ctx["shown_view"] = json!(shown); }
@@ -2340,8 +2352,9 @@ impl App {
                     self.message = format!("no {place} menu items (are their extensions on?)");
                     return;
                 }
+                let mouse = at.is_some();
                 let at = at.or_else(|| self.hit.leaves.get(self.focus).map(|(_, o, _)| Position { x: o.x + 1, y: o.y + 1 })).unwrap_or_default();
-                self.open_over(Overlay::Menu { items, ctx, sel: 0, at, query: String::new() });
+                self.open_over(Overlay::Menu { items, ctx, sel: 0, at, query: String::new(), mouse });
             }
             "client.prefix" => self.overlay = Some(Overlay::Prefix { sel: 0 }),
             "client.zoom" => {
@@ -2612,8 +2625,10 @@ impl App {
             match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     if list.contains(pos) {
-                        let i = offset + (pos.y - list.y) as usize;
-                        if i < self.overlay_len() {
+                        // With group rules drawn, a line is an item or a rule (`overlay_lines`).
+                        let line = (pos.y - list.y) as usize;
+                        let i = if self.hit.overlay_lines.is_empty() { Some(offset + line) } else { self.hit.overlay_lines.get(line).copied().flatten() };
+                        if let Some(i) = i.filter(|&i| i < self.overlay_len()) {
                             if let Some(sel) = self.overlay_sel() {
                                 *sel = i;
                             }
@@ -3571,6 +3586,8 @@ impl App {
     /// Menus, prompts, pickers, the prefix menu and the palette (everything but popups).
     fn draw_menu_overlay(&mut self, f: &mut Frame, area: Rect, pal: &Palette, icons: &Icons) {
         // `all`: every row of a filtered list, so its size doesn't jump while typing.
+        self.hit.overlay_lines.clear();
+        let mut breaks: Vec<usize> = Vec::new();
         let (title, items, sel, query, all) = match &self.overlay {
             Some(Overlay::Popup { .. }) => return,
             None => {
@@ -3595,13 +3612,16 @@ impl App {
                 let (title, query) = pick_title(" pick a terminal ", keep.len(), rows.len(), query);
                 (title, keep.into_iter().map(|i| rows[i].clone()).collect(), *sel, query, rows)
             }
-            Some(Overlay::Menu { items, sel, query, .. }) => {
+            Some(Overlay::Menu { items, sel, query, mouse, .. }) => {
                 // Filter on the labels; draw menu_lines (icons, padding).
                 let rows = menu_lines(items, icons);
                 let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
                 let keep = filter_rows(&labels, query);
-                let (title, query) = pick_title(" ", keep.len(), labels.len(), query);
-                (title, keep.into_iter().filter_map(|i| rows.get(i).cloned()).collect(), *sel, query, rows)
+                let (title, line) = pick_title(" ", keep.len(), labels.len(), query);
+                // A right-click menu shows no filter line until something is typed.
+                let (title, line) = if *mouse && query.is_empty() { (" ".to_string(), None) } else { (title, line) };
+                if query.is_empty() { breaks = group_breaks(items); }
+                (title, keep.into_iter().filter_map(|i| rows.get(i).cloned()).collect(), *sel, line, rows)
             }
             Some(Overlay::Input { .. }) => {
                 // Typed in the status bar; clicking anywhere else cancels.
@@ -3612,6 +3632,9 @@ impl App {
         let items: Vec<String> = items;
         let w = area.width.min(64);
         let h = (all.len().max(items.len()) as u16 + 2 + query.is_some() as u16).min(area.height).max(3);
+        // Group rules only when the whole menu fits, so a line on screen is always one item or one rule.
+        if (items.len() + breaks.len()) as u16 + 2 > area.height { breaks.clear(); }
+        let h = (h + breaks.len() as u16).min(area.height);
         let rect = if matches!(self.overlay, Some(Overlay::Prefix { .. }) | Some(Overlay::Palette { .. })) {
             // Anchored above the prompt line it belongs to.
             let w = if matches!(self.overlay, Some(Overlay::Prefix { .. })) { w.min(44) } else { w };
@@ -3636,6 +3659,22 @@ impl App {
             }
             None => inner,
         };
+        if !breaks.is_empty() {
+            // Items and rules as lines; the selected item highlighted by hand (no scrolling: it all fits).
+            let rule = "─".repeat(list_area.width as usize);
+            let mut lines = Vec::new();
+            self.hit.overlay_lines.clear();
+            for (i, text) in items.into_iter().enumerate() {
+                if breaks.contains(&i) { lines.push(Line::styled(rule.clone(), pal.border(false))); self.hit.overlay_lines.push(None); }
+                let style = if i == sel { pal.selected() } else { pal.style(None) };
+                lines.push(Line::styled(format!("{text:<width$}", width = list_area.width as usize), style));
+                self.hit.overlay_lines.push(Some(i));
+            }
+            f.render_widget(Paragraph::new(lines), list_area);
+            self.hit.overlay = Some((rect, list_area, 0));
+            return;
+        }
+        self.hit.overlay_lines.clear();
         let mut state = ListState::default();
         state.select(Some(sel));
         let list = List::new(items.into_iter().map(ListItem::new).collect::<Vec<_>>()).style(pal.style(None)).highlight_style(pal.selected());
@@ -3841,6 +3880,11 @@ fn pick_title(title: &str, kept: usize, total: usize, query: &str) -> (String, O
     let name = title.trim();
     let name = if name.is_empty() { String::new() } else { format!("{name} · ") };
     (format!(" {name}{kept} of {total} · {hint} "), Some(query.to_string()))
+}
+
+/// Indices of the items a group rule goes above: where an item's `group` differs from the one before it.
+fn group_breaks(items: &[Item]) -> Vec<usize> {
+    (1..items.len()).filter(|&i| items[i].group != items[i - 1].group).collect()
 }
 
 fn menu_lines(items: &[Item], icons: &Icons) -> Vec<String> {
@@ -5604,6 +5648,48 @@ mod tests {
         assert_eq!(app.overlay_len(), 24);
         app.on_key(key(KeyCode::Esc));
         assert!(app.overlay.is_none());
+    }
+
+    #[tokio::test]
+    async fn right_click_menus_show_no_filter_line_until_typed_and_rule_between_groups() {
+        // Human feedback batch 5: a right-click menu is for the mouse.
+        let (mut app, _) = app();
+        let menu: Vec<Value> = (0..12).map(|i| json!({"label": format!("Item {i:02}"), "command": format!("x.i{i}"),
+            "group": if i < 9 { Value::Null } else { json!("agent") }})).collect();
+        let row = json!({"menu": menu});
+        let screen = |app: &mut App| {
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 30)).unwrap();
+            terminal.draw(|f| app.draw(f)).unwrap();
+            let b = terminal.backend().buffer().clone();
+            (0..30u16).map(|y| (0..80u16).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>()
+        };
+        app.row_menu(&row, json!({}), Some(Position { x: 2, y: 2 }));
+        let lines = screen(&mut app);
+        assert!(!lines.join("\n").contains("type to filter"), "{lines:#?}");
+        // One rule, between the pane's items and the agent's; a click under it reaches the right item.
+        let y09 = lines.iter().position(|l| l.contains("Item 09")).unwrap();
+        assert!(lines[y09 - 1].contains("──") && lines[y09 - 2].contains("Item 08"), "{lines:#?}");
+        let x = lines[y09].find("Item 09").unwrap() as u16;
+        app.on_mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y09 as u16, modifiers: KeyModifiers::NONE });
+        assert!(app.message.contains("x.i9"), "the item under the pointer ran: {}", app.message);
+        // Clicking the rule runs nothing.
+        app.row_menu(&row, json!({}), Some(Position { x: 2, y: 2 }));
+        screen(&mut app);
+        app.message.clear();
+        app.on_mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y09 as u16 - 1, modifiers: KeyModifiers::NONE });
+        assert!(app.message.is_empty() && app.overlay.is_some(), "{}", app.message);
+        // Typing still filters, and then shows what was typed.
+        app.on_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        assert!(screen(&mut app).join("\n").contains("> 1"));
+        // Opened from the keyboard, the filter line shows as before.
+        app.overlay = None;
+        app.row_menu(&row, json!({}), None);
+        assert!(screen(&mut app).join("\n").contains("type to filter"));
+        // A select's long option list is no right-click menu: clicked open, it keeps the line.
+        app.overlay = None;
+        let options: Vec<Value> = (0..12).map(|i| json!({"label": format!("Model {i:02}"), "value": i})).collect();
+        app.options_menu(&json!({"command": "x.model", "options": options}), json!({}), Some(Position { x: 2, y: 2 }));
+        assert!(screen(&mut app).join("\n").contains("type to filter"));
     }
 
     #[tokio::test]

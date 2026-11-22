@@ -918,10 +918,16 @@ other namespaces are never touched. Extensions that contribute over several call
 reconcile later with their full set (`exclusive=True`). Other runtimes should follow the same rule.
 
 - `menu/<id>`: `{where: "pane"|"tab"|"tabbar"|"status", label, icon?, command, args?, input?, prefill?, pick?: "resource", when?,
-  order?, icon_after?}`. `icon` (see Icons) is drawn before the label; an empty label shows the icon alone;
+  order?, icon_after?, group?}`. `icon` (see Icons) is drawn before the label; an empty label shows the icon alone;
   `icon_after: true` draws it right after the label with no space, for compact inline buttons (`+◆`; clients
   without it draw the icon before). `input` makes the client prompt for text (passed as `args.text`); `pick` makes it offer a choice (`args.picked`);
-  `when` is matched field by field against the invocation context.
+  `when` is matched field by field against the invocation context. `group` (also on a row's `menu` items): a menu
+  draws a thin rule where consecutive items' `group` differs, e.g. a pane's own items, then an agent's (`group:
+  "agent"`); clients without it draw no rule. **Pane, tab and row menus are right-click menus: they hold only actions
+  the mouse can finish** (close, zoom, split, move, pick from a list, stop with a confirming click), never one that
+  then asks for typing (`input`); put those on keys and in the command list (human decision, batch 5). Clients
+  show a right-click menu without the "type to filter" line until something is typed; opened from the keyboard,
+  long menus keep it.
 - `binding/<id>`: `{key, command, args?, where?, label?, priority?, input?, prefill?, pick?, hidden?, when?, repeat?}`. `key` is a prefix key
   (`"n"`, `"Left"`, see Keys) or a gesture (`"mouse.right"`, `"mouse.middle"`) with `where` = `"pane"` or `"tab"`.
   `"mouse.drag"` with `where: "tab"`: a left press on a tab chip released over another chip of the same bar runs
@@ -952,7 +958,8 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
   override their parent row's explicit prefill. For example pane rename asks for `{"context":"title"}`, while
   tab rename uses `{"context":"tab_title"}`; ordinary agent prompts provide none.
 - Clients add `args.context` when invoking from a place: `{layout, layout_version, path, view, kind, resource,
-  resource_kind, live, title, tab_title?}` for a pane (`resource` is the view's `resource` field, for terminal views
+  resource_kind, live, title, tab_title?, zoomed?}` for a pane (`zoomed`: whether this window shows the pane zoomed,
+  from clients that support `client.zoom`; menus use it for Zoom / Unzoom) (`resource` is the view's `resource` field, for terminal views
   and any other view that names the resource it shows, such as agent panels; `resource_kind` is that resource's
   `kind`, or null), `{layout, layout_version, tab_path, tab_index, tab_title}` for a tab. A pane context invoked at a
   position over a link in a terminal (a right-click menu, `mouse.link`) adds `link` `{kind: "url"|"path", text,

@@ -231,7 +231,8 @@ export class App {
     const r = typeof v.resource === "string" ? this.ws.resources.get(v.resource) : null;
     const w = this.win.context(this.ws);
     const ctx: Json = { layout: w.layout, layout_version: w.layout_version, path: leaf.path, view: leaf.view, kind: v.kind ?? null,
-      resource: v.resource ?? null, resource_kind: r?.kind ?? null, live: r?.state === "live", title: this.viewTitle(leaf.view), tab_title: null };
+      resource: v.resource ?? null, resource_kind: r?.kind ?? null, live: r?.state === "live", title: this.viewTitle(leaf.view), tab_title: null,
+      zoomed: this.zoomed !== null };
     let n = this.layoutRoot();
     for (let d = 0; d < leaf.path.length && n; d++) {
       if (n.tabs) { ctx.tab_path = leaf.path.slice(0, d); ctx.tab_index = leaf.path[d]; ctx.tab_title = n.tabs[leaf.path[d]]?.title ?? null; }
