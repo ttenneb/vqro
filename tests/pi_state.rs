@@ -355,7 +355,7 @@ fn startup_entity_carries_only_pis_own_reports_with_sources() {
     assert_eq!(value["runtime"],json!({"name":"Pi","version":"1.5.2","version_source":"cli:--version"}));
     assert_eq!((&value["model"],&value["sources"]["model"]),(&json!("gpt-x"),&json!("rpc:get_state")));
     assert_eq!(value["skills"],json!([{"name":"review","description":"Review code","path":"/home/u/.pi/skills/review/SKILL.md"}]));
-    assert_eq!(value["skills_scope"],"loaded");
+    assert_eq!(value["skills_scope"],"available","Pi lists skills it can invoke; bodies load later");
     assert_eq!(value["prompts"],json!([{"name":"fix","description":"Fix it","path":"/repo/.pi/prompts/fix.md"}]));
     assert_eq!(value["commands"],json!([{"name":"deploy","kind":"extension"}]),"an over-bound path is cut, never truncated");
     assert_eq!(value["incomplete"],json!(["commands"]));

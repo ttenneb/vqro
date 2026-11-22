@@ -36,7 +36,7 @@ impl Startup {
         if self.fields.contains_key("model") {return;}
         match bounded(&data["model"]["id"],NAME) {Ok(Some(id))=>self.set("model",json!(id),"rpc:get_state"),Ok(None)=>{},Err(())=>self.mark("model")}
     }
-    /// get_commands: skills (loaded), prompt templates and extension commands, with their sourceInfo paths.
+    /// get_commands: skills available for invocation (their bodies load later, so scope "available"), prompt templates and extension commands, with their sourceInfo paths.
     pub fn commands(&mut self,rows:&[Value]){
         let (mut skills,mut prompts,mut commands)=(vec![],vec![],vec![]);
         let mut cut=vec![];
@@ -56,7 +56,7 @@ impl Startup {
             if source=="extension"{entry["kind"]=json!("extension");}
             list.push(entry);
         }
-        self.set("skills",json!(skills),"rpc:get_commands");self.fields.insert("skills_scope".into(),json!("loaded"));
+        self.set("skills",json!(skills),"rpc:get_commands");self.fields.insert("skills_scope".into(),json!("available"));
         self.set("prompts",json!(prompts),"rpc:get_commands");
         self.set("commands",json!(commands),"rpc:get_commands");
         for field in cut {self.mark(field);}

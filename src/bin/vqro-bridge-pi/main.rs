@@ -49,10 +49,11 @@ fn native_failure(error:native::Error)->Result<Outcome,ProviderError> {
 }
 /// Run the launched binary once with only `--version` (bounded time and output); never delays readiness. A failure
 /// leaves the version absent and `runtime` incomplete.
-async fn startup_version(shared:Arc<Shared>,argv:Vec<String>,cwd:std::path::PathBuf){
+async fn startup_version(shared:Arc<Shared>,argv:Vec<String>,cwd:std::path::PathBuf,env:HashMap<String,String>){
     let Some((program,rest))=argv.split_first() else {return;};
     use tokio::io::AsyncReadExt;
     let mut command=tokio::process::Command::new(program);
+    native::native_env(&mut command,&env); // same filtering as the RPC child: no bootstrap credential, no Herdr identity
     command.args(rest).arg("--version").current_dir(&cwd).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null()).kill_on_drop(true);
     // Read at most 4 KiB + 1 while reading (never buffer an unbounded stream), all within 5 s; then reap the child.
@@ -115,7 +116,7 @@ async fn main()->Result<()> {
         // No reply at all (timeout, protocol): the startup inventories are unknown, named incomplete.
         Err(_)=>shared.agent.lock().unwrap().startup_failed(&["skills","prompts","commands"]),
     }
-    tokio::spawn(startup_version(shared.clone(),version_argv,cwd.clone()));
+    tokio::spawn(startup_version(shared.clone(),version_argv,cwd.clone(),std::env::vars().collect()));
     tokio::spawn(refresh_usage(shared.clone(),native.clone()));
     shared.metadata_refresh.notify_one();
     let (metadata_native,metadata_shared)=(native.clone(),shared.clone());

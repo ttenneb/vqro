@@ -346,10 +346,10 @@ async fn user_messages_carry_the_bridge_origin_only_under_evidence(){
 #[tokio::test]
 async fn startup_version_is_the_launched_binarys_own_output(){
     let root=tempfile::tempdir().unwrap();let (shared,provider,_core)=fixture(root.path(),true).await;
-    startup_version(shared.clone(),vec!["/bin/echo".into(),"pi 9.9.9".into()],root.path().into()).await;
+    startup_version(shared.clone(),vec!["/bin/echo".into(),"pi 9.9.9".into()],root.path().into(),HashMap::new()).await;
     let value=|shared:&Arc<Shared>|shared.agent.lock().unwrap().journal.entity("startup","current").map(|(_,v)|v.clone()).unwrap();
     assert_eq!(value(&shared)["runtime"],json!({"name":"Pi","version":"pi 9.9.9 --version","version_source":"cli:--version"}));
-    startup_version(shared.clone(),vec!["/bin/false".into()],root.path().into()).await;
+    startup_version(shared.clone(),vec!["/bin/false".into()],root.path().into(),HashMap::new()).await;
     assert!(value(&shared)["incomplete"].as_array().unwrap().iter().any(|f|f=="runtime"));
     dispose(&shared,&provider).await;
 }
@@ -359,10 +359,23 @@ async fn startup_version_is_the_launched_binarys_own_output(){
 async fn startup_version_reads_a_bounded_amount_of_output(){
     let root=tempfile::tempdir().unwrap();let (shared,provider,_core)=fixture(root.path(),true).await;
     let started=Instant::now();
-    startup_version(shared.clone(),vec!["/bin/sh".into(),"-c".into(),"exec yes".into()],root.path().into()).await; // floods stdout
+    startup_version(shared.clone(),vec!["/bin/sh".into(),"-c".into(),"exec yes".into()],root.path().into(),HashMap::new()).await; // floods stdout
     assert!(started.elapsed()<Duration::from_secs(4),"stopped at the byte bound, not at the timeout");
     let value=shared.agent.lock().unwrap().journal.entity("startup","current").map(|(_,v)|v.clone()).unwrap();
     assert!(value["incomplete"].as_array().unwrap().iter().any(|f|f=="runtime"));
     assert!(value["runtime"].get("version").is_none());
+    dispose(&shared,&provider).await;
+}
+
+/// lead-secondary's control on c237ee66: the --version child gets the native child's filtered environment, never the
+/// bridge's bootstrap credential or Herdr control identity.
+#[tokio::test]
+async fn startup_version_child_gets_the_filtered_native_environment(){
+    let root=tempfile::tempdir().unwrap();let (shared,provider,_core)=fixture(root.path(),true).await;
+    let env:HashMap<String,String>=[("VQRO_BRIDGE_TOKEN","review-only-no-authority"),("HERDR_PANE_ID","p1"),("VQRO_SOCKET","/s.sock"),("PATH","/usr/bin:/bin")]
+        .into_iter().map(|(k,v)|(k.to_string(),v.to_string())).collect();
+    startup_version(shared.clone(),vec!["/bin/sh".into(),"-c".into(),"echo \"${VQRO_BRIDGE_TOKEN:-none}/${HERDR_PANE_ID:-none}/${VQRO_SOCKET:-none}\"".into()],root.path().into(),env).await;
+    let value=shared.agent.lock().unwrap().journal.entity("startup","current").map(|(_,v)|v.clone()).unwrap();
+    assert_eq!(value["runtime"]["version"],"none/none//s.sock","{value}");
     dispose(&shared,&provider).await;
 }

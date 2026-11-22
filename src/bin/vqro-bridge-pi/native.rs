@@ -123,14 +123,22 @@ impl Drop for Ticket {
 
 #[derive(Clone)]
 pub struct Native { inner: Arc<Inner> }
+/// The environment any native Pi child gets (the RPC runtime and the --version read alike): the bridge's environment
+/// cleared, with no Herdr control identity and no vqro bootstrap credential; only the public VQRO_SOCKET and
+/// VQRO_PRINCIPAL pass.
+pub fn native_env(command:&mut Command,env:&HashMap<String,String>) {
+    command.env_clear();
+    for (key,value) in env {
+        if !key.starts_with("HERDR_") && (!key.starts_with("VQRO_") || matches!(key.as_str(),"VQRO_SOCKET"|"VQRO_PRINCIPAL")) { command.env(key,value); }
+    }
+}
+
 impl Native {
     pub async fn spawn(argv: &[String], cwd: &std::path::Path, env: &HashMap<String,String>, observe: Observe) -> Result<Self, Error> {
         let Some(program) = argv.first() else { return Err(Error::new("invalid", "explicit Pi argv is required")); };
         let mut command = Command::new(program);
-        command.args(&argv[1..]).current_dir(cwd).env_clear();
-        for (key,value) in env {
-            if !key.starts_with("HERDR_") && (!key.starts_with("VQRO_") || matches!(key.as_str(),"VQRO_SOCKET"|"VQRO_PRINCIPAL")) { command.env(key,value); }
-        }
+        command.args(&argv[1..]).current_dir(cwd);
+        native_env(&mut command,env);
         command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
         let mut child = command.spawn().map_err(|e| Error::new("backend",format!("start native Pi: {e}")))?;
         let stdin = child.stdin.take().unwrap();
