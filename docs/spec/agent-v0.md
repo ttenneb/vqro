@@ -118,6 +118,22 @@ rights, proves no tool-process attribution and does not declare `agent.tool_prin
 their own standing/evidence (§2.4). Coordination already reads this endpoint fact separately from the core's
 terminal-launch `resource.principal` marker; neither should be guessed when absent.
 
+**Optional configured account.** `data.agent.account? {id, label, provider?, kind, sources}` names the account/profile
+selected by the launcher, not an authenticated user, verified subscription, billing result or remaining allowance.
+`id` is an opaque launcher-registry identifier (1–64 characters), distinct from a provider's native account/workspace
+ID; `label` is a printable display name (1–128 characters), and optional `provider` is the configured provider ID
+(1–64 characters). `kind` is the configured `subscription | api_key` choice, open for forward compatibility: unknown
+kinds render as unknown, not subscription. `sources` maps each supplied field (`id`, `label`, `provider`, `kind`) to
+its evidence source; launcher-configured fields carry `"vqro:launcher"`. These fields are launch configuration, not
+native authentication readback, and do not change when someone signs in/out inside the runtime. A consumer must not
+use them as proof of live credential identity or entitlement. No token, credential, native profile contents or
+profile path belongs in this fact. The bundled launchers pass only this bounded metadata to their bridges; an
+implicit **Use my normal login** launch omits the account fact because its actual account/kind was not inspected.
+Usage-limit observations may reference this configured `account.id` without equating it with a native account ID.
+Tier-1 terminals retain the same configured metadata in their launcher declaration; they do not thereby become
+agent-v0 structured endpoints. Registry, account choice, profile selectors and native sign-in UI are replaceable
+extension policy, not core authentication or a runtime-account-switching capability.
+
 **Optional view facts.** All fields below are optional; absent means unknown, never zero, empty or inferred.
 Adapters publish only what the runtime reports, including estimates labelled as such by the runtime:
 - `session.cwd?`: string, as reported by the runtime, not the viewer's or bridge process's working directory.
