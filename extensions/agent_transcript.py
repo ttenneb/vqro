@@ -919,7 +919,7 @@ def startup_row(value):
         children.append({"type": "text", "style": "dim", "text": "Paths are copy-only here; a host-safe open route is not reported."})
     children.append({"type": "text", "style": "control", "text": "Enter expand/collapse · select a path and y copy · Ctrl-g vqro menu"})
     return {"id": "startup:current", "text": clip(" · ".join(summary), 512), "style": "heading",
-            "children": children, "expanded": False}
+            "children": children, "expanded": True}
 
 
 def rows(entities, names, coverage=None, view=None, cwd=None):

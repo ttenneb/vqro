@@ -17,11 +17,11 @@ class StartupCard(unittest.TestCase):
         entities.update(messages or {})
         return transcript.rows(entities, transcript.Names({"r1": {"name": "Pi"}}, "r1"), "all_retained")
 
-    def test_first_collapsed_card_updates_in_place_and_absence_is_absence(self):
+    def test_first_expanded_card_updates_in_place_and_absence_is_absence(self):
         first = self.rows({"runtime": {"name": "Pi", "version": "1.5.2", "version_source": "cli:--version"},
                            "model": "model-a"})
         self.assertEqual(first[0]["id"], "startup:current")
-        self.assertFalse(first[0]["expanded"])
+        self.assertTrue(first[0]["expanded"])
         self.assertIn("Pi 1.5.2", first[0]["text"])
         updated = self.rows({"runtime": {"name": "Pi"}, "skills": [{"name": "review"}],
                              "skills_scope": "loaded"}, revision=2)
@@ -29,6 +29,19 @@ class StartupCard(unittest.TestCase):
         self.assertEqual(sum(r.get("id") == "startup:current" for r in updated), 1)
         for absent in (None, {}, {"native": {"secret": "must never be rendered"}}, "bad"):
             self.assertFalse(any(r.get("id") == "startup:current" for r in self.rows(absent)))
+
+    def test_user_collapse_survives_updates_and_is_local_to_the_pane(self):
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "extensions" / "clients"))
+        import vqro_client_model as client
+        first = {"items": self.rows({"model": "first-model"})}
+        self.assertTrue(client.rows(first)[0]["expanded"], "a fresh pane starts open")
+        collapsed = {"startup:current": False}  # existing client's per-pane user choice
+        self.assertFalse(client.rows(first, open=collapsed)[0]["expanded"])
+        updated = {"items": self.rows({"model": "updated-model", "skills": [{"name": "late"}]}, revision=2)}
+        kept = client.rows(updated, open=collapsed)
+        self.assertFalse(kept[0]["expanded"], "republishing the expanded default never overrides a user's collapse")
+        self.assertFalse(any(r["item"].get("text") == "Model at start: updated-model" for r in kept))
+        self.assertTrue(client.rows(updated, open={})[0]["expanded"], "another pane has its own expansion state")
 
     def test_retained_stream_updates_one_card_and_new_epoch_replaces_it(self):
         from vqro_items import ItemView
