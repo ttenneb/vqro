@@ -67,6 +67,11 @@ class ItemMetadataTests(unittest.TestCase):
                                ({'durationMs': 7}, {'duration_ms': 7, 'started_ms': 1})):  # no invented start
             with self.subTest(native=native, public=public), self.assertRaises(CheckFailed):
                 check_times('tool', native, public, 'pi')
+        # lead-secondary's control on ec04745f: Codex reports no tool duration, so any duration_ms there is invented.
+        check_times('tool', {}, {}, 'codex')
+        for value in (1234, -1, 'invented'):
+            with self.subTest(codex=value), self.assertRaises(CheckFailed):
+                check_times('tool', {}, {'duration_ms': value}, 'codex')
 
     def test_invalid_native_time_does_not_become_evidence(self):
         for value in (None, True, False, -1, 2.0, '1234', U64_MAX + 1):

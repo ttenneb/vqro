@@ -94,6 +94,8 @@ def expected_times(kind, native, wire):
         duration = native_ms(native.get('durationMs'))
         return {'started_ms': None, 'ended_ms': None,
                 'duration_ms': duration if duration is not None and duration < (1 << 53) else None}
+    if kind == 'tool':
+        return {'started_ms': None, 'ended_ms': None, 'duration_ms': None}  # no native tool duration on this wire
     return {'started_ms': None, 'ended_ms': None}
 
 

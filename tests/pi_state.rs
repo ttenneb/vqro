@@ -265,6 +265,18 @@ fn pi_retry_publishes_blocked_until_its_native_end() {
     assert_eq!(facts(&b),Value::Null,"no inference from error text");
 }
 
+/// lead-secondary's control on ec04745f: Pi's small native duration survives a tool entity whose content is omitted.
+#[test]
+fn native_duration_survives_omitted_oversize_tool_content() {
+    let mut a=make();
+    event(&mut a,json!({"type":"tool_execution_start","toolCallId":"large","toolName":"bash","args":{}}));
+    event(&mut a,json!({"type":"tool_execution_end","toolCallId":"large","toolName":"bash","isError":false,"durationMs":1234,
+        "result":{"content":[{"type":"text","text":"x".repeat(state::ENTITY_BYTES+1024)}]}}));
+    let value=entities(&a,"tool").last().unwrap()["value"].clone();
+    assert!(value.get("incomplete").is_some(),"the content was omitted: {value}");
+    assert_eq!(value["duration_ms"],1234,"known small native duration must not disappear when output is omitted");
+}
+
 /// Pi's own tool_execution_end.durationMs becomes duration_ms; nothing else is timed, and nothing is invented.
 #[test]
 fn pi_tool_duration_is_the_native_duration_ms() {

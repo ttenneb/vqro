@@ -354,7 +354,12 @@ impl Agent {
             value["content"]=project_content(&result["content"]);
             let mut extras=result.as_object().cloned().unwrap_or_default();extras.remove("content");value["native"]=json!(extras);
         }
-        if vqro::limits::encoded_bytes(&value)>ENTITY_BYTES {self.incomplete.insert("items".into());value=json!({"position":value["position"],"title":record["toolName"],"status":status,"incomplete":["input","content"]});}
+        if vqro::limits::encoded_bytes(&value)>ENTITY_BYTES {
+            self.incomplete.insert("items".into());
+            let duration=value.get("duration_ms").cloned(); // small native metadata survives the omission, like status
+            value=json!({"position":value["position"],"title":record["toolName"],"status":status,"incomplete":["input","content"]});
+            if let Some(duration)=duration {value["duration_ms"]=duration;}
+        }
         self.store("tool",&id,value,true);
         if matches!(status,"completed"|"failed"|"cancelled"){self.tools.remove(native);}
     }
