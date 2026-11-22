@@ -604,6 +604,11 @@ dialogs remain answerable; nothing is auto-approved.
   `names` are the transforming items as the runtime identifies them (its name, or its native key where it has no
   name); `names_complete: false` (or absent) means others may exist that the runtime does not name. Absent means
   unknown; `none` is never derived from a missing, partial or failed inventory.
+  Freshness: `none` and `names_complete: true` must hold *now*, proven either by something that cannot change
+  during the agent's life (for example the launch configuration: Pi started without extensions) or by an inventory
+  the runtime invalidates when it changes. An inventory read once, with no change notification, is history: it may
+  name items, but it never supports `none` or a complete list later; the state is then `may` (names incomplete) or
+  absent. No per-send read or polling is required: an adapter that cannot prove freshness simply says less.
 - Caps `agent.customize {<kind>: {ops: [list | enable | disable | install | remove | reload …], effective: now |
   next_turn | next_launch}}` for kinds `skill`, `template`, `extension`, `mcp_server`: what the runtime natively
   supports. A declaration is not an action; vqro never emulates an op the runtime lacks. An adapter declares only ops
