@@ -316,7 +316,8 @@ concatenated.
   "ran skill X" rather than the expanded text as typed input.
 - **Input that may be transformed.** While the agent's `input_transform.state` is `may` (§4 facts), each receipt
   carries `may_transform: [<name>…] | "unknown"`: the extensions, hooks or mods that may have changed this input
-  (`"unknown"` when the runtime does not say which). It reports a possibility, never that the input "was not changed".
+  (`"unknown"` when the runtime does not say which, or the complete set cannot be proven), fixed at native dispatch
+  (never recomputed at a later acknowledgement). It reports a possibility, never that the input "was not changed".
 - A native acknowledgement maps to `admitted` unless the runtime evidences more; never to `inserted`, a run start or
   completion. `handled` needs an explicit witness; `handled: none` (Pi) means it is never reported.
 - **Start preflight.** An unresolved native start preflight counts as busy; an idle-looking snapshot is not a start
@@ -597,11 +598,14 @@ dialogs remain answerable; nothing is auto-approved.
 **Customization (input transforms and management).** Optional, from native evidence only:
 - `data.agent.input_transform {state: none | may, names?: [<name>…], names_complete?: bool}`: `none` only when the
   runtime runs no code that can change input (for example Pi launched without extensions); `may` when it does.
-  `names` are the transforming items the runtime reports; `names_complete: false` (or absent) means others may exist
-  that the runtime does not name. Absent means unknown.
+  `names` are the transforming items as the runtime identifies them (its name, or its native key where it has no
+  name); `names_complete: false` (or absent) means others may exist that the runtime does not name. Absent means
+  unknown; `none` is never derived from a missing, partial or failed inventory.
 - Caps `agent.customize {<kind>: {ops: [list | enable | disable | install | remove | reload …], effective: now |
   next_turn | next_launch}}` for kinds `skill`, `template`, `extension`, `mcp_server`: what the runtime natively
-  supports. A declaration is not an action; vqro never emulates an op the runtime lacks.
+  supports. A declaration is not an action; vqro never emulates an op the runtime lacks. An adapter declares only ops
+  whose timing it knows (for example just `list` / `now`); ops with different timings may be declared separately
+  later.
 
 **Availability (live but blocked).** An optional fact next to `lifecycle`:
 `availability {state: available | blocked, reason?, retry_after_ms?, native?}`, declared in caps as
