@@ -110,7 +110,22 @@ impl Control {
         let mut pong = None;
         let mut lagged = false;
         let why = loop {
-            let message = match reader.next(&mut pong).await {
+            // Keep the same in-flight read future: WebSocket frame parsing is not cancellation-safe.
+            // A freed queue slot must deliver the pending lag marker even if Rex sends nothing else.
+            let next = {
+                let next = reader.next(&mut pong);
+                tokio::pin!(next);
+                loop {
+                    tokio::select! {
+                        result = &mut next => break result,
+                        permit = events.reserve(), if lagged => {
+                            if let Ok(permit) = permit { permit.send(Event::Lagged); }
+                            lagged = false;
+                        }
+                    }
+                }
+            };
+            let message = match next {
                 Ok(Some(Message::Text(t))) => t,
                 Ok(Some(Message::Binary(_))) => break "binary message on the control channel".to_string(),
                 Ok(None) => {
@@ -205,5 +220,31 @@ impl Control {
     pub async fn close(&self) {
         let _ = self.writer.lock().await.close().await;
         self.fail("closed by vqro-rex".into());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod regression_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn lag_marker_arrives_after_drain_without_another_server_event() {
+        let (client, mut server) = tokio::net::UnixStream::pair().unwrap();
+        let (read, write) = client.into_split();
+        let control = Control { writer:Arc::new(tokio::sync::Mutex::new(ws::Writer::new(write))),
+            pending:Arc::new(Mutex::new(HashMap::new())), next_id:Arc::new(AtomicU64::new(1)),
+            closed:Arc::new(tokio::sync::watch::channel(None).0), welcome:Value::Null, timeout:Duration::from_secs(1) };
+        let (tx, mut rx) = mpsc::channel(1);
+        let task = tokio::spawn(control.read_loop(ws::Reader::new(read, vec![], MAX_MESSAGE), tx));
+        let payload = json!({"type":"event","payload":{}}).to_string();
+        let mut frame = vec![0x81, payload.len() as u8];
+        frame.extend_from_slice(payload.as_bytes());
+        server.write_all(&[frame.clone(),frame].concat()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(matches!(rx.recv().await, Some(Event::Event(_))));
+        assert!(matches!(tokio::time::timeout(Duration::from_millis(100), rx.recv()).await,
+            Ok(Some(Event::Lagged))), "no subsequent event may be needed to signal loss");
+        task.abort();
     }
 }

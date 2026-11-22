@@ -36,7 +36,7 @@ pub fn socket(dir: &Path) -> PathBuf {
     dir.join("server.sock")
 }
 
-/// A `rex` command for the owned server: environment cleared except what a login session needs, `REX_RUNTIME_DIR`
+/// A `rex` command for the owned server: environment cleared except selected inherited variables, `REX_RUNTIME_DIR`
 /// set, and never autostarting a server anywhere else.
 pub fn rex(bin: &Path, dir: &Path) -> std::process::Command {
     let mut cmd = std::process::Command::new(bin);
@@ -54,8 +54,8 @@ pub fn rex(bin: &Path, dir: &Path) -> std::process::Command {
 }
 
 /// Start the owned server if nothing answers on its socket. `rex server start` is idempotent and keeps the server
-/// running after its last session (exit-empty false). Its terminals inherit this environment (the same variables a
-/// login session has), not vqro's own (`VQRO_*`, `HERDR_*`).
+/// running after its last session (exit-empty false). Its terminals inherit selected PATH/HOME/locale/shell/user
+/// variables from this process, not a freshly acquired login environment or vqro's own (`VQRO_*`, `HERDR_*`).
 pub fn ensure(bin: &Path, dir: &Path) -> Result<(), String> {
     if std::os::unix::net::UnixStream::connect(socket(dir)).is_ok() {
         return Ok(());
@@ -115,7 +115,8 @@ pub async fn command(args: &[String]) -> Result<(), String> {
     if before["running"] != true {
         return Err("no reachable vqro-owned rex server; nothing stopped".into());
     }
-    let instance = before["instance"].as_str().unwrap_or_default().to_string();
+    let instance = before["instance"].as_str().filter(|s| !s.is_empty())
+        .ok_or("rex returned no non-empty instance id; nothing stopped")?.to_string();
     let expected = match expected {
         Some(e) => e,
         None => {
@@ -125,13 +126,45 @@ pub async fn command(args: &[String]) -> Result<(), String> {
             input.trim().to_string()
         }
     };
-    if expected != instance || status(&bin, &dir)?["instance"] != instance {
+    let current = status(&bin, &dir)?;
+    let current = current["instance"].as_str().filter(|s| !s.is_empty())
+        .ok_or("rex returned no non-empty instance id on recheck; nothing stopped")?;
+    if expected != instance || current != instance {
         return Err("instance did not match (or the server changed); nothing stopped".into());
     }
+    // Best-effort check, NOT an atomic conditional stop: Rex's native stop is unconditional. A server
+    // replaced after this status read can be stopped instead. No conditional-stop API is evidenced.
     let out = rex(&bin, &dir).args(["server", "stop"]).output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!("rex server stop failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
     println!("{}", json!({"stopped": true, "instance": instance}));
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod regression_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn stop_refuses_empty_instance_on_either_read() {
+        for empty_first in [true, false] {
+            let root = PathBuf::from(format!("/tmp/rxstop-{}-{empty_first}", std::process::id()));
+            std::fs::create_dir_all(root.join("rex")).unwrap();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(socket(&root.join("rex"))).unwrap();
+            let bin = root.join("rex-cli");
+            let first = if empty_first { "" } else { "instance" };
+            // Fake CLI only; the socket never speaks to Rex. Second read always returns an empty id.
+            std::fs::write(&bin, format!("#!/bin/sh\ncd '{}' || exit 1\ncase \"$*\" in\n*server\\ stop*) touch stopped;;\n*) if test -e read; then id=''; else id='{first}'; touch read; fi; printf '{{\"instance_id\":\"%s\",\"session_count\":0}}' \"$id\";;\nesac\n", root.display())).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let result = command(&["stop".into(), "--state-dir".into(), root.to_str().unwrap().into(),
+                "--rex".into(), bin.to_str().unwrap().into(), "--expect-instance".into(), first.into()]).await;
+            let stopped = root.join("stopped").exists();
+            drop(listener);
+            std::fs::remove_dir_all(&root).unwrap();
+            assert!(result.is_err() && !stopped, "empty_first={empty_first}: must refuse before native stop");
+        }
+    }
 }

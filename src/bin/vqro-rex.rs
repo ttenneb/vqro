@@ -31,6 +31,9 @@ use vqro::rex::{self, control, data, Control, Event};
 
 #[path = "vqro-rex/server.rs"]
 mod owned_server;
+#[cfg(all(test, unix))]
+#[path = "vqro-rex/regression_tests.rs"]
+mod regression_tests;
 
 const TERMINAL: &str = "com.superlogical.terminal";
 const FLAVOR: &str = "com.superlogical.terminal.shell";
@@ -149,8 +152,14 @@ fn cwd_from_pwd(pwd: &str) -> Option<String> {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&path[i + 1..i + 3], 16) {
-                out.push(v);
+            let hex = |byte: u8| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            };
+            if let (Some(hi), Some(lo)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push(hi * 16 + lo);
                 i += 3;
                 continue;
             }
@@ -175,42 +184,81 @@ impl App {
         Ok(())
     }
 
-    /// Facts for a block seen for the first time (later changes come from its events).
-    async fn first_facts(&self, session: &str, b: &Value) -> Value {
+    /// Refresh stored event-derived facts too: a reconcile repairs dropped events. Failed or malformed
+    /// queries retain prior facts, never invent an exit or erase a previously observed status.
+    async fn refresh_facts(&self, session: &str, b: &Value, old: Option<Value>) -> Value {
         let id = b["block_id"].as_str().unwrap_or_default();
-        let title = self.block_call(session, id, "title", json!({})).await.ok()
-            .and_then(|t| t["title"].as_str().filter(|s| !s.is_empty()).map(String::from));
-        let pwd = self.block_call(session, id, "pwd", json!({})).await.ok()
-            .and_then(|p| p["pwd"].as_str().and_then(cwd_from_pwd));
-        let status = self.block_call(session, id, "program_status", json!({})).await.ok()
-            .map(|s| status_from_records(s["records"].as_array().map(Vec::as_slice).unwrap_or_default())).unwrap_or(Value::Null);
-        let process = self.block_call(session, id, "process", json!({})).await.unwrap_or(Value::Null);
-        let cwd = pwd.or_else(|| process["foreground"]["cwd"].as_str().or(process["child"]["cwd"].as_str()).map(String::from));
-        let exit = process["last_exit"].as_object().map(|e| json!({"reason": "exited", "exit_code": e.get("exit_code")}));
-        let argv = self.state.lock().unwrap().argv.get(id).cloned();
-        json!({
-            "ref": id, "incarnation": self.run, "kind": "terminal",
-            "state": if exit.is_some() { "finished" } else { "live" },
-            "name": b["label"].as_str().filter(|s| !s.is_empty()),
-            "title": title, "cwd": cwd, "argv": argv.unwrap_or_default(), "status": status, "exit": exit,
-            "data": {"session": session, "window": b["window_id"], "placement": b["placement"], "host": b["host_id"],
-                     "flavor": b["flavor"], "program": process["child"]["name"]},
-        })
+        let argv = self.state.lock().unwrap().argv.get(id).cloned().unwrap_or_default();
+        let mut facts = old.unwrap_or_else(|| json!({"ref":id,"incarnation":self.run,"kind":"terminal",
+            "state":"live","argv":argv,"data":{}}));
+        facts["name"] = json!(b["label"].as_str().filter(|s| !s.is_empty()));
+        for key in ["window_id", "placement", "host_id", "flavor"] {
+            let field = match key { "window_id" => "window", "host_id" => "host", other => other };
+            facts["data"][field] = b[key].clone();
+        }
+        facts["data"]["session"] = json!(session);
+        let mut pwd_observed = false;
+        for method in ["title", "pwd", "program_status", "process"] {
+            let value = match self.block_call(session, id, method, json!({})).await {
+                Ok(v) => v,
+                Err(e) => { eprintln!("vqro-rex: refresh {id} {method}: {e}; keeping prior facts"); continue; }
+            };
+            match method {
+                "title" if value.get("title").is_some_and(|v| v.is_string() || v.is_null()) =>
+                    facts["title"] = json!(value["title"].as_str().filter(|s| !s.is_empty())),
+                "pwd" => if let Some(cwd) = value["pwd"].as_str().and_then(cwd_from_pwd) {
+                    facts["cwd"] = json!(cwd);
+                    pwd_observed = true;
+                },
+                "program_status" => if let Some(records) = value["records"].as_array() {
+                    facts["status"] = status_from_records(records);
+                },
+                "process" if value.is_object() => {
+                    facts["data"]["program"] = value["child"]["name"].clone();
+                    facts["data"]["foreground"] = value["foreground"]["name"].clone();
+                    if !pwd_observed {
+                        if let Some(cwd) = value["foreground"]["cwd"].as_str().or(value["child"]["cwd"].as_str()) {
+                            facts["cwd"] = json!(cwd);
+                        }
+                    }
+                    if let Some(exit) = value["last_exit"].as_object() {
+                        facts["state"] = json!("finished");
+                        facts["exit"] = json!({"reason":"exited","exit_code":exit.get("exit_code")});
+                    }
+                }
+                _ => eprintln!("vqro-rex: malformed {id} {method}; keeping prior facts"),
+            }
+        }
+        facts
     }
 
     /// List every session's blocks and publish the differences. The first call is the full sync.
     async fn reconcile(self: &Arc<Self>, first: bool) -> Result<(), String> {
         let _one = self.reconciling.lock().await;
         let list = self.control.call("session.list", json!({})).await.map_err(|e| e.to_string())?;
+        let sessions = list["sessions"].as_array().ok_or("session.list returned no sessions array; keeping prior facts")?;
+        let listed: HashSet<String> = sessions.iter().map(|s| s["session_id"].as_str().filter(|s| !s.is_empty())
+            .map(String::from).ok_or("session.list returned an invalid session id; keeping prior facts")).collect::<Result<_, _>>()?;
+        let mut complete = HashSet::new();
         let mut seen: BTreeMap<String, (String, Value)> = BTreeMap::new();
-        for s in list["sessions"].as_array().cloned().unwrap_or_default() {
-            let (Some(id), label) = (s["session_id"].as_str(), s["label"].as_str().unwrap_or_default()) else { continue };
+        for s in sessions {
+            let id = s["session_id"].as_str().unwrap();
+            let label = s["label"].as_str().unwrap_or_default();
             if let Err(e) = self.attach(id, label).await {
                 eprintln!("vqro-rex: attach {id}: {e}");
                 continue;
             }
-            let Ok(blocks) = self.control.call("session.list_blocks", json!({"session_id": id})).await else { continue };
-            for b in blocks["blocks"].as_array().cloned().unwrap_or_default() {
+            let blocks = match self.control.call("session.list_blocks", json!({"session_id": id})).await {
+                Ok(v) => v,
+                Err(e) => { eprintln!("vqro-rex: list_blocks {id}: {e}; keeping prior facts"); continue; }
+            };
+            let Some(blocks) = blocks["blocks"].as_array().filter(|blocks| blocks.iter().all(|b|
+                b["block_id"].as_str().is_some_and(|s| !s.is_empty()) && b["creator_name"].is_string())) else {
+                eprintln!("vqro-rex: malformed list_blocks {id}; keeping prior facts");
+                continue;
+            };
+            complete.insert(id.to_string());
+            for b in blocks {
                 if b["creator_name"] != TERMINAL {
                     continue;
                 }
@@ -219,34 +267,24 @@ impl App {
                 }
             }
         }
+        if first && complete.len() != listed.len() {
+            return Err("incomplete initial session observation; refusing absence-based full sync".into());
+        }
         let known: HashSet<String> = self.state.lock().unwrap().blocks.keys().cloned().collect();
         let mut upserts = Vec::new();
         for (bid, (session, b)) in &seen {
-            if known.contains(bid) {
-                // Label, window and placement can change; the rest follows events.
-                let facts = {
-                    let mut st = self.state.lock().unwrap();
-                    let block = st.blocks.get_mut(bid).unwrap();
-                    let mut f = block.facts.clone();
-                    f["name"] = json!(b["label"].as_str().filter(|s| !s.is_empty()));
-                    f["data"]["window"] = b["window_id"].clone();
-                    f["data"]["placement"] = b["placement"].clone();
-                    f["data"]["session"] = json!(session);
-                    block.session = session.clone();
-                    if f == block.facts { None } else { block.facts = f.clone(); Some(f) }
-                };
-                upserts.extend(facts);
-            } else {
-                let facts = self.first_facts(session, b).await;
-                self.state.lock().unwrap().blocks.insert(bid.clone(), Block { session: session.clone(), facts: facts.clone() });
-                upserts.push(facts);
-            }
+            let old = self.state.lock().unwrap().blocks.get(bid).map(|b| b.facts.clone());
+            let facts = self.refresh_facts(session, b, old.clone()).await;
+            self.state.lock().unwrap().blocks.insert(bid.clone(), Block { session:session.clone(), facts:facts.clone() });
+            if old.as_ref() != Some(&facts) { upserts.push(facts); }
         }
         let mut gone = Vec::new();
         {
             let mut st = self.state.lock().unwrap();
+            st.sessions.retain(|id, _| listed.contains(id));
             for bid in known {
-                if !seen.contains_key(&bid) {
+                let session = &st.blocks[&bid].session;
+                if !seen.contains_key(&bid) && (!listed.contains(session) || complete.contains(session)) {
                     st.blocks.remove(&bid);
                     st.argv.remove(&bid);
                     for n in st.streams.remove(&bid).unwrap_or_default() {
@@ -327,7 +365,11 @@ impl App {
     async fn refresh_status(self: &Arc<Self>, bid: &str) {
         let Some(session) = self.state.lock().unwrap().blocks.get(bid).map(|b| b.session.clone()) else { return };
         let Ok(s) = self.block_call(&session, bid, "program_status", json!({})).await else { return };
-        let status = status_from_records(s["records"].as_array().map(Vec::as_slice).unwrap_or_default());
+        let Some(records) = s["records"].as_array() else {
+            eprintln!("vqro-rex: malformed program_status {bid}; keeping prior status");
+            return;
+        };
+        let status = status_from_records(records);
         let facts = {
             let mut st = self.state.lock().unwrap();
             let Some(block) = st.blocks.get_mut(bid) else { return };
@@ -412,9 +454,9 @@ impl App {
         if let Err(e) = self.reconcile(false).await {
             eprintln!("vqro-rex: reconcile after spawn: {e}");
         }
-        let facts = self.state.lock().unwrap().blocks.get(&bid).map(|b| b.facts.clone());
-        Ok(Outcome::Observed(Some(json!({"facts": facts.unwrap_or_else(|| json!({"ref": bid, "incarnation": self.run,
-            "kind": "terminal", "state": "finished", "exit": {"reason": "exited"}}))}))))
+        let facts = self.state.lock().unwrap().blocks.get(&bid).map(|b| b.facts.clone())
+            .ok_or_else(|| ProviderError::new("backend", format!("terminal created: ref {bid}; follow-up lifecycle observation unavailable; outcome unknown, do not retry spawn")))?;
+        Ok(Outcome::Observed(Some(json!({"facts": facts}))))
     }
 
     async fn kill(self: &Arc<Self>, bid: Option<&str>, incarnation: &str) -> Result<Outcome, ProviderError> {
@@ -453,7 +495,10 @@ impl App {
     /// Size the terminal for this viewer: claim the block (Rex follows its owner's size), then resize.
     async fn size(&self, session: &str, bid: &str, cols: u16, rows: u16) -> Result<(), control::Error> {
         self.control.call("session.own_block", json!({"session_id": session, "block_ids": [bid], "mode": "take"})).await?;
+        // Ownership already changed. Even a definite resize refusal is not a no-effect result for this
+        // two-step operation; disclose that partial effect instead of emitting a rejected stream.error.
         self.block_call(session, bid, "resize", json!({"columns": cols, "rows": rows})).await.map(|_| ())
+            .map_err(|e| control::Error::Lost(format!("ownership acquired; resize outcome unavailable: {e}")))
     }
 
     async fn open(self: Arc<Self>, open: OpenRequest) {
@@ -625,7 +670,15 @@ impl App {
                     }
                     Some(StreamCommand::Resize(cols, rows)) => {
                         if let Err(e) = self.size(&session, &bid, cols, rows).await {
-                            let _ = stream.error(&ProviderError::new("backend", e.to_string())).await;
+                            match e {
+                                control::Error::Rejected { .. } => { let _ = stream.error(&ProviderError::new("backend", e.to_string())).await; }
+                                control::Error::Lost(_) | control::Error::Timeout => {
+                                    eprintln!("vqro-rex: resize outcome unknown: {e}");
+                                    // stream.error always means rejected, regardless of kind. A backend gap
+                                    // reports lost certainty without asserting that ownership/resize had no effect.
+                                    let _ = stream.gap("backend_dropped").await;
+                                }
+                            }
                         }
                     }
                     Some(StreamCommand::Close) => {

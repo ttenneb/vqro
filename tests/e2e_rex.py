@@ -273,7 +273,7 @@ finally:
                     left.append(pid)
             except OSError:
                 pass
-    check("the user's own Rex runtime directory was not created or touched", os.path.exists(USER_REX) == user_rex_before)
+    check("default Rex runtime directory existence unchanged (not an access audit)", os.path.exists(USER_REX) == user_rex_before)
     if not check("nothing left running", not left, " ".join(left)):
         for pid in left:
             try:
