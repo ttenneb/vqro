@@ -652,6 +652,65 @@ class AgentPane(unittest.TestCase):
         self.agents.later = lambda delay, rid: self.timers.append((delay, rid))
         self.agents.flush_conversations()
 
+    def test_composer_invokes_only_exact_advertised_names(self):
+        r = self.core.resources['r2']
+        self.core.providers['items']['capabilities'].update({'agent.send': {}, 'agent.command': {}})
+        r['data']['agent'] = {'v': 0, 'state': 'idle', 'lifecycle': 'live', 'caps': {'rev': 1,
+            'agent.send': {'modes': {'start': {}}}, 'agent.command': {}}}
+        self.feed(snapshot({('startup', 'current'): {'prompts': [{'name': 'review'}]}}))
+        self.core.calls.clear()
+        self.agents.send({'resource': 'r2', 'mode': 'auto', 'text': '/review this diff'})
+        calls = [p for m, p in self.core.calls if m == 'resource.invoke']
+        self.assertEqual(calls[-1]['op'], 'agent.command')
+        self.assertEqual(calls[-1]['args'], {'v': 0, 'name': 'review', 'args': 'this diff'})
+        self.agents.send({'resource': 'r2', 'mode': 'auto', 'text': '/reviewer this diff'})
+        self.assertEqual([p for m, p in self.core.calls if m == 'resource.invoke'][-1]['op'], 'agent.send')
+        r['data']['agent']['commands'] = [{'name': 'skill:review'}]
+        self.feed(snapshot({('startup', 'current'): {'skills': [{'name': 'review'}]}}))
+        for typed in ('/review plan', '/skill:review plan'):
+            self.agents.send({'resource': 'r2', 'mode': 'auto', 'text': typed})
+            sent = [p for m, p in self.core.calls if m == 'resource.invoke'][-1]
+            self.assertEqual((sent['op'], sent['args']['name']), ('agent.command', 'skill:review'))
+
+    def test_customizations_are_read_only_and_show_native_extension_limits(self):
+        self.feed(snapshot({('startup', 'current'): {'extensions': [
+            {'name': 'rewrite', 'state': 'active', 'transforms': ['input']}],
+            'incomplete': ['extensions'], 'sources': {'extensions': 'rpc:get_commands'}}}))
+        resource = self.core.resources['r2']
+        self.assertTrue(self.agents.has_settings(resource))
+        panel = self.agents.settings_panel(resource)
+        shown = json.dumps(panel)
+        for expected in ('Customizations', 'rewrite', 'active', 'input', 'partial', 'rpc:get_commands'):
+            self.assertIn(expected, shown)
+        self.assertFalse(any('command' in row for row in panel['items']))
+
+    def test_frame_discloses_incomplete_transform_names_as_unknown(self):
+        resource = self.core.resources['r2']
+        resource['data']['agent'] = {'input_transform': {'state': 'may', 'names': ['rewrite']}}
+        self.assertIn('input may be changed by: rewrite and others', self.agents.frame(resource)['title'])
+        resource['data']['agent']['input_transform']['names_complete'] = True
+        self.assertIn('input may be changed by: rewrite', self.agents.frame(resource)['title'])
+        resource['data']['agent']['input_transform'] = {'state': 'may'}
+        self.assertIn('by: extensions (not named)', self.agents.frame(resource)['title'])
+        resource['data']['agent']['input_transform'] = {'state': 'none'}
+        self.assertNotIn('input may', self.agents.frame(resource)['title'])
+
+    def test_receipt_transform_and_invocation_labels_survive_card_fallback(self):
+        entities = dict(CONVERSATION)
+        entities[('receipt', 'd:1')] = {'stage': 'inserted', 'may_transform': 'unknown'}
+        entities[('message', 'm1')] = dict(entities[('message', 'm1')], invoked={'kind': 'template', 'name': 'review'})
+        names = agent_transcript.Names(self.core.resources, 'r2')
+        rows = agent_transcript.rows({k: (1, v) for k, v in entities.items()}, names)
+        for shown in (json.dumps(rows), json.dumps(base(rows))):
+            self.assertIn('may have been changed by extensions (unknown which)', shown)
+            self.assertIn('ran template review', shown)
+        notes = [r for r in rows if r.get('id') == 'transform:m1']
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]['style'], 'dim')
+        entities[('receipt', 'd:1')]['may_transform'] = ['rewrite']
+        named = json.dumps(agent_transcript.rows({k: (1, v) for k, v in entities.items()}, names))
+        self.assertIn('may have been changed by rewrite', named)
+
     def elapse(self):
         """The backoff waits pass: fire every pending delayed reattach."""
         timers, self.timers = self.timers, []

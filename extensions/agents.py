@@ -831,7 +831,16 @@ class Agents:
         state = blocked or status(r)
         waiting = bool(blocked) or state == "blocked" or bool(self.requests_v0(r) if self.v0(r, "respond") else None)
         style = "warn" if waiting or ended(r) or agent_facts(r).get("lifecycle") not in (None, "live") else "ok" if state == "idle" else "info"
-        return {"title": " · ".join([name] + ([head(plain(folder), 80)] if folder else [])),
+        transform = agent_facts(r).get("input_transform")
+        note = []
+        if isinstance(transform, dict) and transform.get("state") == "may":
+            names = agent_transcript.transform_names(transform.get("names"))
+            if names == "extensions (unknown which)":
+                names = "extensions (not named)"
+            elif transform.get("names_complete") is not True:
+                names += " and others"
+            note = ["input may be changed by: " + names]
+        return {"title": " · ".join([name] + ([head(plain(folder), 80)] if folder else []) + note),
                 "title_right": "● " + state, "title_right_style": style}
 
     def request_presentation(self, r, waiting):
@@ -1009,8 +1018,21 @@ class Agents:
                              self.has_settings(r), self.can_stop(r))
                             for r in self.ext.resources.values() if r.get("kind") == "agent"))
 
+    def customization_rows(self, r):
+        conversation = self.conversations.get(r["id"])
+        if conversation is None:
+            return []
+        with conversation.lock:
+            startup = conversation.view.entities.get(("startup", "current"), (None, None))[1]
+            if not isinstance(startup, dict):
+                return []
+            inventory = {k: v for k, v in startup.items() if k in (
+                "skills", "skills_scope", "prompts", "commands", "plugins", "mcp", "extensions", "sources", "incomplete")}
+            row = agent_transcript.startup_row(inventory, hint=False)
+        return row.get("children", []) if row else []
+
     def has_settings(self, r):
-        return bool((self.supported(r, "configure") and advertised(r, "config")) or (self.supported(r, "command") and advertised(r, "commands")))
+        return bool(self.customization_rows(r) or (self.supported(r, "configure") and advertised(r, "config")) or (self.supported(r, "command") and advertised(r, "commands")))
 
     def guarded(self, fn):
         def command(args):
@@ -1316,6 +1338,36 @@ class Agents:
         self.ext.fresh()
         r = self.agent(args, "send")
         text, mode = args.get("text"), args.get("mode")
+        if isinstance(text, str) and text.startswith("/"):
+            parts = text[1:].split(maxsplit=1)
+            name = parts[0] if parts else ""
+            entries = advertised(r, "commands")
+            conversation = self.conversations.get(r["id"])
+            if conversation is not None:
+                with conversation.lock:
+                    startup = conversation.view.entities.get(("startup", "current"), (None, {}))[1]
+                    if isinstance(startup, dict):
+                        for field in ("commands", "prompts", "skills"):
+                            inventory = startup.get(field)
+                            if isinstance(inventory, list):
+                                for entry in inventory:
+                                    if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                                        continue
+                                    native_name = entry["name"]
+                                    if field == "skills" and any(e.get("name") == "skill:" + native_name for e in entries):
+                                        native_name = "skill:" + native_name
+                                    if name == entry["name"]:
+                                        name = native_name
+                                    entries = entries + [{"name": native_name}]
+            if name and any(entry.get("name") == name for entry in entries):
+                if not self.supported(r, "command"):
+                    raise VqroError("explicit invocation requires agent.command; nothing sent", "unsupported")
+                native = {"v": 0, "name": name}
+                if len(parts) > 1:
+                    native["args"] = parts[1]
+                result = self.ext.vqro.call("resource.invoke", {"resource": r["id"], "op": "agent.command", "args": native})
+                self.ext.notify(label("/" + name + ": " + str(result.get("outcome", "unknown"))), "dim")
+                return {**result, "client": {"close": True}}
         if mode is None:
             return self.choose_mode(r, text if isinstance(text, str) and text.strip() else None)
         if not isinstance(text, str) or not text.strip():
@@ -1632,6 +1684,11 @@ class Agents:
             if isinstance(entry.get("input"), dict):
                 row["input"] = label(entry["input"].get("hint") or entry["name"], 120)
             items.append(row)
+        customizations = self.customization_rows(r)
+        if customizations:
+            items.append({"type": "header", "text": "Customizations", "style": "heading"})
+            items.append({"type": "text", "text": "Read-only native inventory; absent details are not reported.", "style": "dim"})
+            items.extend(customizations)
         if not items:
             items = [{"type": "text", "text": "This agent declares no settings or commands."}]
         if not r.get("available") or ended(r):

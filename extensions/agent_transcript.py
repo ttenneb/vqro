@@ -264,16 +264,31 @@ class Names:
         return {"you": "You", "user": "User (no origin)", "human:undeclared": "Human (undeclared)"}.get(key, plain(key.split(":", 1)[-1]))
 
 
+def transform_names(names):
+    """Only complete native names; missing/invalid evidence stays unknown."""
+    if isinstance(names, list) and names and all(isinstance(n, str) and n for n in names):
+        return clip(", ".join(plain(n) for n in names[:256]), 512)
+    return "extensions (unknown which)"
+
+
 def message_rows(eid, value, names, receipts, show_time=True, fold=None, thinking="show", fields=("time",)):
     sender, style, _ = names.sender(value)
     head = [sender]
     if show_time and when(value.get("at_ms")):
         head.append(when(value["at_ms"]))
     delivery = value.get("delivery")
+    transform_note = None
     if isinstance(delivery, str) and delivery in receipts:
-        stage = RECEIPT.get(receipts[delivery], "delivery status unknown")
+        receipt = receipts[delivery]
+        stage = RECEIPT.get(receipt.get("stage") if isinstance(receipt, dict) else receipt, "delivery status unknown")
         if stage:
             head.append(stage)
+        if isinstance(receipt, dict):
+            if "may_transform" in receipt:
+                transform_note = "may have been changed by " + transform_names(receipt["may_transform"])
+    invoked = value.get("invoked")
+    if isinstance(invoked, dict) and invoked.get("kind") in ("skill", "template", "command") and isinstance(invoked.get("name"), str):
+        head.append("ran " + invoked["kind"] + " " + clip(plain(invoked["name"]), 128))
     if value.get("final") is False:
         head.append("writing…")
     # The sender line is selectable and copies the whole message (client.copy, bound to y in the pane).
@@ -297,6 +312,8 @@ def message_rows(eid, value, names, receipts, show_time=True, fold=None, thinkin
     if fold and len(body) > fold:  # long messages fold (compact view, other senders); the sender and quote stay
         body = body[:fold] + [{"id": "f:" + eid, "text": f"{len(body) - fold} more {plural(len(body) - fold)}", "style": "dim",
                                "children": body[fold:], "expanded": False}]
+    if transform_note:
+        rows.append({"type": "text", "id": "transform:" + eid, "style": "dim", "text": transform_note})
     return rows + body
 
 
@@ -321,7 +338,8 @@ def framed(eid, value, plain_rows, own=False, fold=OTHER_FOLD):
              **({} if own else {"frame": True}),
              **({"copy": head["copy"]} if head.get("copy") else {}), **({"style": head["style"]} if head.get("style") not in (None, "bold") else {}),
              "requires": ["message", "card"] + (["fold"] if fold else []) if own else ["message", "fold"],
-             "fallback": plain_rows}]
+             "fallback": [r for r in plain_rows if not str(r.get("id", "")).startswith("transform:")]}] + [
+                 r for r in plain_rows if str(r.get("id", "")).startswith("transform:")]
 
 
 PRIMARY = {"bash": "command", "shell": "command", "read": "path", "edit": "path", "write": "path", "grep": "pattern",
@@ -777,7 +795,7 @@ def summary_text(title, values, fields, tools=None):
 STARTUP_BYTES = 24 * 1024  # leave the conversation room, even for a large native inventory
 
 
-def startup_row(value):
+def startup_row(value, hint=True):
     """A retained native startup snapshot, not a turn. Plain disclosure tree; unknown facts stay absent.
     Native paths are copy-only: links.open is local-host-only and startup declares no safe host route."""
     if not isinstance(value, dict):
@@ -802,7 +820,7 @@ def startup_row(value):
             incomplete.append("cwd")
     scope = value.get("skills_scope")
     skills_title = "Loaded skills" if scope == "loaded" else "Available skills" if scope == "available" else "Skills"
-    fields = ("instructions", "skills", "prompts", "commands", "plugins", "mcp")
+    fields = ("instructions", "skills", "prompts", "commands", "plugins", "mcp", "extensions")
     inventories = {}
     for field in fields:
         entries = value.get(field)
@@ -880,7 +898,7 @@ def startup_row(value):
     command_title = "Extension commands" if commands and all(e.get("kind") == "extension" for e in commands) else "Commands"
     plugin_title = "Installed plugins" if sources.get("plugins") == "rpc:plugin/installed" else "Plugins (inventory)"
     titles = {"instructions": "Loaded instruction sources", "skills": skills_title, "prompts": "Prompt templates",
-              "commands": command_title, "plugins": plugin_title, "mcp": "MCP server status"}
+              "commands": command_title, "plugins": plugin_title, "mcp": "MCP server status", "extensions": "Extensions"}
     for field in fields:
         entries = inventories.get(field, [])
         if not entries:
@@ -904,6 +922,13 @@ def startup_row(value):
                     line += " · version " + version
                 if type(entry.get("enabled")) is bool:
                     line += " · " + ("enabled" if entry["enabled"] else "disabled")
+            if field == "extensions":
+                for fact in ("kind", "scope", "state"):
+                    if shown(entry.get(fact), 64):
+                        line += " · " + shown(entry[fact], 64)
+                transforms = entry.get("transforms")
+                line += " · " + (", ".join("may change " + t.replace("_", " ") for t in transforms if t in ("input", "tool_calls", "system_prompt")) or ("changes none" if not transforms else "changes unknown")
+                                              if isinstance(transforms, list) else "changes unknown")
             if field == "mcp" and shown(entry.get("status"), 64):
                 line += " · " + shown(entry["status"], 64)  # runtime's own word, no status inference
             text(line)
@@ -917,7 +942,8 @@ def startup_row(value):
         children.append({"type": "text", "style": "dim", "text": "… more start-up entries not shown here (pane limit)"})
     if has_path:
         children.append({"type": "text", "style": "dim", "text": "Paths are copy-only here; a host-safe open route is not reported."})
-    children.append({"type": "text", "style": "control", "text": "Enter expand/collapse · select a path and y copy · Ctrl-g vqro menu"})
+    if hint:
+        children.append({"type": "text", "style": "control", "text": "Enter expand/collapse · select a path and y copy · Ctrl-g vqro menu"})
     return {"id": "startup:current", "text": clip(" · ".join(summary), 512), "style": "heading",
             "children": children, "expanded": True}
 
@@ -930,7 +956,7 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
     startup = startup_row(entities.get(("startup", "current"), (None, None))[1])
     budget = BUDGET - (len(json.dumps(startup, ensure_ascii=False).encode()) + 2 if startup else 0)
     compact = view["density"] == "compact"
-    receipts = {eid: v.get("stage") for (kind, eid), (_, v) in entities.items()
+    receipts = {eid: v for (kind, eid), (_, v) in entities.items()
                 if kind == "receipt" and isinstance(v, dict) and isinstance(v.get("stage"), str)}
     timeline = sorted(((v.get("position"), kind, eid, v) for (kind, eid), (_, v) in entities.items()
                        if isinstance(v, dict) and type(v.get("position")) is int
