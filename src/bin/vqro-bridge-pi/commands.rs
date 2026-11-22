@@ -3,7 +3,7 @@ use serde_json::{json,Value};
 use super::admission::Refusal;
 pub const MAX_COMMANDS:usize=64;
 #[derive(Default)]
-pub struct Commands {native:Vec<Value>,pub incomplete:bool,observed:bool}
+pub struct Commands {native:Vec<Value>,pub incomplete:bool,observed:bool,slash:Vec<String>}
 pub enum Prepared {NewSession,Rpc {name:String,command:&'static str,args:Value},Prompt {message:String}}
 pub fn observed_result(command:&str,data:&Value)->bool{match command{
     "cycle_model"=>data.is_null() || (data["model"]["provider"].is_string() && data["model"]["id"].is_string()),
@@ -21,11 +21,14 @@ pub fn safe_result(command:&str,data:&Value)->Value{
 fn error(kind:&'static str,message:&str)->Refusal{Refusal {kind,message:message.into()}}
 impl Commands {
     pub fn observe(&mut self,data:&Value){
-        self.native.clear();self.incomplete=false;self.observed=true;
+        self.native.clear();self.slash.clear();self.incomplete=false;self.observed=true;
         let Some(rows)=super::contract::rows(data,"commands")else{self.incomplete=true;return;};
         if rows.len()>MAX_COMMANDS{self.incomplete=true;}
         for row in rows.iter().take(MAX_COMMANDS){
             let Some(name)=row["name"].as_str().filter(|name|!name.is_empty() && name.len()<=128 && !name.chars().any(|c|c.is_whitespace() || c.is_control()))else{self.incomplete=true;continue;};
+            // Every native name Pi would expand or run, including one that shares a built-in's name (a template
+            // called `compact`): the literal-send refusal set must not lose it.
+            if !self.slash.iter().any(|known|known==name){self.slash.push(name.into());}
             if ["new_session","cycle_model","compact"].contains(&name) || self.native.iter().any(|row|row["name"]==name){continue;}
             let mut value=json!({"name":name,"input":{"hint":"Arguments (optional)"}});
             if let Some(description)=row["description"].as_str(){let end=description.char_indices().map(|(at,_)|at).take_while(|at|*at<=300).last().unwrap_or(0);let end=if description.len()<=300{description.len()}else{end};value["description"]=json!(&description[..end]);if end<description.len(){self.incomplete=true;}}
@@ -34,7 +37,7 @@ impl Commands {
     }
     /// Every native slash name Pi would expand or run, or None while the inventory is unknown or incomplete.
     pub fn slash_names(&self)->Option<Vec<String>>{
-        (self.observed && !self.incomplete).then(||self.native.iter().filter_map(|row|row["name"].as_str().map(str::to_string)).collect())
+        (self.observed && !self.incomplete).then(||self.slash.clone())
     }
     pub fn facts(&self)->Vec<Value>{
         let mut rows=vec![json!({"name":"new_session","description":"Start a fresh native Pi conversation."}),json!({"name":"cycle_model","description":"Switch to the next available native model."}),json!({"name":"compact","description":"Summarise the conversation (one native model operation).","input":{"hint":"Custom instructions (optional)"}})];rows.extend(self.native.iter().cloned());rows

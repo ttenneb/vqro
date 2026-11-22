@@ -80,10 +80,9 @@ fn controlled(mut argv:Vec<String>)->Result<Vec<String>> {
     for arg in &argv[1..] {
         anyhow::ensure!(!(arg=="-e" || arg.starts_with("--extension") || arg.starts_with("--prompt-template") || arg=="-p" || arg=="--print"),"literal route forbids explicit interceptors/templates/print mode");
     }
-    // Skills stay enabled (human stopgap (b)): a skill only expands input that starts with `/skill:<name>`
-    // (agent-session.js _expandSkillCommand), which only the owner's own plain input can; every other sender's input is
-    // framed with a sender header first (contract.rs), so a skill can never rewrite it. Extensions (which can intercept
-    // or rewrite input and tool calls) and prompt templates (which expand any leading `/name`) stay off.
+    // Pi loads its skills, extensions and prompt templates (customization slice 1, human Q1 b). Literal sends are
+    // protected in contract::send (no leading /name Pi would expand or run) and labelled (literal none,
+    // input_transform may, receipt may_transform); explicit interceptor/template/print argv stays refused above.
     argv.extend(["--mode","rpc"].map(str::to_string));
     Ok(argv)
 }

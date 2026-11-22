@@ -44,3 +44,14 @@ fn slash_names_are_unknown_until_a_complete_inventory(){
     assert_eq!(c.slash_names().unwrap(),vec!["review".to_string(),"skill:x".to_string()]);
     c.observe(&json!({"wrong":[]}));assert!(c.slash_names().is_none(),"incomplete is unknown");
 }
+#[test]
+fn a_native_template_sharing_a_builtin_name_stays_in_the_refusal_set(){
+    // as-reviewer on da412b4c: a native template called `compact` is not advertised as a command (the built-in wins),
+    // but Pi would still expand "/compact", so a literal send of it must be refused.
+    let mut c=Commands::default();c.observe(&json!({"commands":[{"name":"compact","source":"prompt"},{"name":"review","source":"prompt"}]}));
+    let names=c.slash_names().unwrap();assert!(names.contains(&"compact".to_string()) && names.contains(&"review".to_string()));
+    let ctx=contract::Context {caps_rev:1,epoch:"e1",session:Some("s1"),owner_proven:true,images:true,literal:true,slash_names:Some(&names)};
+    let args=json!({"v":0,"caps_rev":1,"epoch":"e1","guard":{"session":"s1"},"mode":"start","delivery":"d1","render":["user"],
+        "origin":{"principal":"p","actor":"p","kind":"human"},"content":[{"type":"text","text":"/compact now"}]});
+    assert_eq!(contract::send(&args,&ctx).err().unwrap().kind,"unsupported");
+}

@@ -388,6 +388,12 @@ fn customization_facts_follow_the_launch_and_pis_own_inventory() {
     assert_eq!(startup["extensions"],json!([{"name":"deploy.ts","kind":"extension","path":"/home/u/.pi/agent/extensions/deploy.ts",
         "state":"active","scope":"user","transforms":["input","tool_calls","system_prompt"]}]));
     assert!(startup["incomplete"].as_array().unwrap().contains(&json!("extensions")),"Pi lists only command-bearing extensions");
+    // as-reviewer P3: an extension whose file name is over the bound is omitted, never given an invented name.
+    let mut c=make();
+    event(&mut c,json!({"type":"response","id":"c","command":"get_commands","success":true,"data":{"commands":[
+        {"name":"x","source":"extension","sourceInfo":{"path":format!("/e/{}","n".repeat(200))}}]}}));
+    let s=entities(&c,"startup").into_iter().find(|r|r["id"]=="current").unwrap()["value"].clone();
+    assert_eq!(s["extensions"],json!([]));assert!(s["incomplete"].as_array().unwrap().contains(&json!("extensions")));
     let mut b=make();b.expanders_on=false;b.refresh();
     assert_eq!(b.caps()["agent.send"]["literal"],"controlled_launch");assert_eq!(agent(&b)["input_transform"],json!({"state":"none"}));
 }

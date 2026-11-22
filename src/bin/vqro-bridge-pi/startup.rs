@@ -66,7 +66,8 @@ impl Startup {
             let Ok(Some(path))=bounded(&row["sourceInfo"]["path"],PATH) else {continue;};
             if extensions.iter().any(|e|e["path"]==path.as_str()) {continue;}
             if extensions.len()>=LIST {break;}
-            let name=path.rsplit('/').next().filter(|n|!n.is_empty() && n.len()<=NAME).unwrap_or("extension").to_string();
+            // No invented name: an extension whose file name is empty or over the bound is omitted (field incomplete).
+            let Some(name)=path.rsplit('/').next().filter(|n|!n.is_empty() && n.len()<=NAME).map(str::to_string) else {continue;};
             let mut entry=json!({"name":name,"kind":"extension","path":path,"state":"active",
                 "transforms":["input","tool_calls","system_prompt"]}); // Pi extension API: input, tool_call, before_agent_start
             if let Ok(Some(scope))=bounded(&row["sourceInfo"]["scope"],64) {if matches!(scope.as_str(),"user"|"project"){entry["scope"]=json!(scope);}}
