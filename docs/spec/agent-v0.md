@@ -309,6 +309,14 @@ concatenated.
   launched without template expanders or input interceptors; Pi, whose per-call `expandPromptTemplates: false` is
   ignored) or `none`, and rejects text it cannot send literally; it never escapes or rewrites it. Explicit commands
   use `agent.command` (§6.3).
+- **Text the runtime would expand** (a skill or prompt-template invocation such as Pi's `/skill:x` or `/<template>`,
+  by the runtime's own rule against its advertised names) is refused by `agent.send` as non-literal (`unsupported`,
+  naming `agent.command`). `agent.command` runs it explicitly; the user message the runtime then emits carries
+  `invoked {kind: skill | template | command, name}` when the adapter can tie it to that command, so viewers show
+  "ran skill X" rather than the expanded text as typed input.
+- **Input that may be transformed.** While the agent's `input_transform.state` is `may` (§4 facts), each receipt
+  carries `may_transform: [<name>…] | "unknown"`: the extensions, hooks or mods that may have changed this input
+  (`"unknown"` when the runtime does not say which). It reports a possibility, never that the input "was not changed".
 - A native acknowledgement maps to `admitted` unless the runtime evidences more; never to `inserted`, a run start or
   completion. `handled` needs an explicit witness; `handled: none` (Pi) means it is never reported.
 - **Start preflight.** An unresolved native start preflight counts as busy; an idle-looking snapshot is not a start
@@ -454,6 +462,11 @@ reasoning the runtime exposes for display):
     skills' content already in the agent's context. Pi's `get_commands` and Codex's `skills/list` are `available`;
   - `prompts?: [{name, description?, path?}]`; `commands?: [{name, description?, path?, kind?}]`;
   - `plugins?: [{name, enabled?, version?, path?}]`; `mcp?: [{name, status}]` (`status` the runtime's own word);
+  - `extensions?: [{name, kind?: extension | plugin | mod | hook, path?, scope?: user | project | session,
+    state?: available | installed | enabled | active, transforms?: [input | tool_calls | system_prompt]}]`: code
+    that runs inside the runtime (Pi extensions, Codex hooks/plugins, Claude hooks/mods), only as the runtime reports
+    it; `transforms` is what that kind of item can change by the runtime's own documentation, absent = unknown. An
+    adapter that sees only part of them (Pi lists only extensions that register commands) says so in `incomplete`;
   - `sources?: {<field>: <source>}`: provenance per top-level field, e.g. `"rpc:get_commands"`, `"cli:--version"`,
     `"vqro:launch"` (a fact vqro itself recorded, such as the launch folder), `"rpc:initialize"`. A field that the
     runtime did not report itself (any `vqro:` fact, such as a launch `cwd`) is published only with its `sources`
@@ -580,6 +593,15 @@ dialogs remain answerable; nothing is auto-approved.
   A reconnect never undoes `ended`.
 - What vqro does with a disconnected or ended endpoint (retention, tombstones, retire, handover) is coordination
   (`coordination-v0.md` §6).
+
+**Customization (input transforms and management).** Optional, from native evidence only:
+- `data.agent.input_transform {state: none | may, names?: [<name>…], names_complete?: bool}`: `none` only when the
+  runtime runs no code that can change input (for example Pi launched without extensions); `may` when it does.
+  `names` are the transforming items the runtime reports; `names_complete: false` (or absent) means others may exist
+  that the runtime does not name. Absent means unknown.
+- Caps `agent.customize {<kind>: {ops: [list | enable | disable | install | remove | reload …], effective: now |
+  next_turn | next_launch}}` for kinds `skill`, `template`, `extension`, `mcp_server`: what the runtime natively
+  supports. A declaration is not an action; vqro never emulates an op the runtime lacks.
 
 **Availability (live but blocked).** An optional fact next to `lifecycle`:
 `availability {state: available | blocked, reason?, retry_after_ms?, native?}`, declared in caps as
