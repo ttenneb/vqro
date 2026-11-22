@@ -167,7 +167,7 @@ fn deadline() -> tokio::time::Instant {
 
 async fn open_runtime(
     peer: Peer,
-    mut incoming: IncomingReceiver,
+    incoming: IncomingReceiver,
     slots: usize,
 ) -> (
     std::sync::Arc<vqro::codex::runtime::Runtime>,
@@ -176,9 +176,7 @@ async fn open_runtime(
     let runtime = vqro::codex::runtime::Runtime::new(peer, slots, "inc".into(), None);
     let reader = runtime.clone();
     let drain = tokio::spawn(async move {
-        while let Some(message) = incoming.recv().await {
-            reader.incoming(message);
-        }
+        reader.drain_native(incoming).await;
     });
     (runtime, drain)
 }

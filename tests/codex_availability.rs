@@ -230,14 +230,12 @@ async fn wire(permission: Value) -> Wire {
     let (a, b) = tokio::io::duplex(65536);
     let (ar, aw) = tokio::io::split(a);
     let (br, bw) = tokio::io::split(b);
-    let (peer, mut incoming) = Peer::spawn(ar, aw);
+    let (peer, incoming) = Peer::spawn(ar, aw);
     let (native, mut requests) = Peer::spawn(br, bw);
     let runtime = Runtime::new(peer, 1, "inc".into(), None);
     let drain = runtime.clone();
     let reader = tokio::spawn(async move {
-        while let Some(i) = incoming.recv().await {
-            drain.incoming(i);
-        }
+        drain.drain_native(incoming).await;
     });
     let calls = Arc::new(Mutex::new(Vec::new()));
     let trace = calls.clone();
@@ -246,7 +244,6 @@ async fn wire(permission: Value) -> Wire {
     let read_notice = Arc::new(tokio::sync::Notify::new());
     let read_seen = read_notice.clone();
     let server_peer = native.clone();
-    let account_runtime = Arc::downgrade(&runtime);
     let server = tokio::spawn(async move {
         while let Some(i) = requests.recv().await {
             if let Incoming::Request {
@@ -272,22 +269,13 @@ async fn wire(permission: Value) -> Wire {
                     continue;
                 }
                 if response["_fixture_account_change"] == true {
-                    account_runtime
-                        .upgrade()
-                        .unwrap()
-                        .incoming(Incoming::Notification {
-                            method: "account/updated".into(),
-                            params: json!({"authMode":"chatgpt"}),
-                        });
+                    server_peer.notify("account/updated", json!({"authMode":"chatgpt"}));
                 }
                 if let Some(permission) = response.get("_fixture_permission_change") {
-                    account_runtime
-                        .upgrade()
-                        .unwrap()
-                        .incoming(Incoming::Notification {
-                            method: "account/rateLimits/updated".into(),
-                            params: json!({"ordinaryUsageAllowed":permission,"rateLimits":{}}),
-                        });
+                    server_peer.notify(
+                        "account/rateLimits/updated",
+                        json!({"ordinaryUsageAllowed":permission,"rateLimits":{}}),
+                    );
                 }
                 server_peer.respond(id, Ok(response));
             }
@@ -527,6 +515,25 @@ async fn read_timeout_stays_blocked_and_never_resends_input() {
             "account/rateLimits/read"
         ]
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_peer_wire_order_fences_the_old_read_on_two_workers() {
+    for permission in [json!(false), Value::Null].into_iter().cycle().take(256) {
+        let w = wire(json!({"ordinaryUsageAllowed":true,"_fixture_permission_change":permission}))
+            .await;
+        w.native
+            .notify("error", error(json!("usageLimitExceeded"), json!(false)));
+        w.read_notice.notified().await;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            w.runtime.facts()[0]["data"]["agent"]["availability"]["state"],
+            "blocked",
+            "wire-ordered newer {permission} must fence old true"
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]

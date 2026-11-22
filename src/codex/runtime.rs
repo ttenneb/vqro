@@ -2,7 +2,7 @@
 //! The shared SDK item producer is supplied as a callback; no second item reducer lives here.
 use super::{Change, Endpoint, SendContext, configuration, provider_capabilities};
 use crate::provider_client::{Outcome, ProviderError};
-use crate::rpc::{Incoming, Peer, RpcError};
+use crate::rpc::{Incoming, IncomingReceiver, Peer, RpcError};
 use serde_json::{Map, Value, json};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,6 +13,12 @@ use tokio::time::Instant;
 pub type Observer = Arc<dyn Fn(usize, &str, Vec<Change>, bool) + Send + Sync>;
 const NATIVE_LIMIT: Duration = Duration::from_secs(300);
 const AVAILABILITY_READ_INTERVAL: Duration = Duration::from_secs(60);
+
+struct AvailabilityRead {
+    revision: u64,
+    fences: Vec<(usize, (String, u64))>,
+    response: Value,
+}
 
 struct Slot {
     endpoint: Mutex<Endpoint>,
@@ -30,6 +36,8 @@ pub struct Runtime {
     incarnation: String,
     launcher_principal: Option<String>,
     account_revision: AtomicU64,
+    availability_completed: tokio::sync::mpsc::Sender<AvailabilityRead>,
+    availability_results: Mutex<Option<tokio::sync::mpsc::Receiver<AvailabilityRead>>>,
 }
 
 enum Fault {
@@ -101,6 +109,7 @@ impl Runtime {
         });
         let (changed, _) = watch::channel(0);
         let host = format!("codex:{incarnation}");
+        let (availability_completed, availability_results) = tokio::sync::mpsc::channel(1);
         let runtime = Arc::new(Self {
             native,
             slots: (0..count)
@@ -127,6 +136,8 @@ impl Runtime {
             incarnation,
             launcher_principal,
             account_revision: AtomicU64::new(0),
+            availability_completed,
+            availability_results: Mutex::new(Some(availability_results)),
         });
         for (index, slot) in runtime.slots.iter().enumerate() {
             let endpoint = slot.endpoint.lock().unwrap();
@@ -206,20 +217,62 @@ impl Runtime {
                         Duration::from_secs(3),
                     )
                     .await;
-                if this.account_revision.load(Ordering::Acquire) != revision {
-                    continue;
-                }
+                let completed = this.availability_completed.clone();
+                drop(_permit);
+                drop(this);
                 if let Ok(response) = response {
-                    for (index, fence) in fences {
-                        let mut endpoint = this.slots[index].endpoint.lock().unwrap();
-                        let changes = endpoint.finish_availability_read(&fence, &response);
-                        if !changes.is_empty() {
-                            this.emit(index, &endpoint, changes, false);
-                        }
+                    // Do not apply on this RPC-response task: earlier native notifications may
+                    // already be queued for the native event drain but not yet observed there.
+                    if completed
+                        .send(AvailabilityRead {
+                            revision,
+                            fences,
+                            response,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
                     }
                 }
             }
         });
+    }
+
+    /// Production native drain. Notifications and read completions have one application point;
+    /// notifications queued before a read reply must invalidate its fence before it can publish.
+    pub async fn drain_native(self: &Arc<Self>, mut incoming: IncomingReceiver) {
+        let mut completed = self
+            .availability_results
+            .lock()
+            .unwrap()
+            .take()
+            .expect("one native event drain");
+        loop {
+            tokio::select! {
+                biased;
+                message = incoming.recv() => match message {
+                    Some(message) => self.incoming(message),
+                    None => break,
+                },
+                result = completed.recv() => {
+                    let Some(result) = result else { break; };
+                    loop {
+                        match incoming.try_recv() {
+                            Ok(message) => self.incoming(message),
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return,
+                        }
+                    }
+                    if self.account_revision.load(Ordering::Acquire) != result.revision { continue; }
+                    for (index, fence) in result.fences {
+                        let mut endpoint = self.slots[index].endpoint.lock().unwrap();
+                        let changes = endpoint.finish_availability_read(&fence, &result.response);
+                        if !changes.is_empty() { self.emit(index, &endpoint, changes, false); }
+                    }
+                }
+            }
+        }
     }
 
     pub fn capabilities(&self) -> Map<String, Value> {

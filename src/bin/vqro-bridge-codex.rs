@@ -98,7 +98,7 @@ async fn run(args: Args) -> Result<(), String> {
     let mut child = command
         .spawn()
         .map_err(|e| format!("cannot launch explicit app-server argv: {e}"))?;
-    let (native, mut native_messages) =
+    let (native, native_messages) =
         Peer::spawn(child.stdout.take().unwrap(), child.stdin.take().unwrap());
     native
         .set_max_record_bytes(1 << 20)
@@ -149,9 +149,7 @@ async fn run(args: Args) -> Result<(), String> {
     });
     let model = runtime.clone();
     let native_drain = tokio::spawn(async move {
-        while let Some(message) = native_messages.recv().await {
-            model.incoming(message);
-        }
+        model.drain_native(native_messages).await;
     });
     // This detached OS thread is intentionally not Tokio's uncancellable stdin blocking-pool task:
     // native exit must let the process exit even while the terminal's stdin remains open.
