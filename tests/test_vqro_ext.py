@@ -569,6 +569,7 @@ time.sleep(30)
         ext_dir = str(pathlib.Path(__file__).resolve().parents[1] / "extensions")
         child = subprocess.Popen([sys.executable, "-c", self.CHILD, ext_dir], env={"PATH": os.environ.get("PATH", ""), "VQRO_SOCKET": path},
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        conn = None
         try:
             srv.settimeout(10); conn, _ = srv.accept()
             state = {"seq": 1, "version": 1, "value": {"tabs": []}, "conflicts": 4, "applied": None}
@@ -620,8 +621,11 @@ time.sleep(30)
             alive = child.poll() is None
         finally:
             child.kill(); out = child.communicate()[0].decode(errors="replace")
+            if conn is not None:
+                conn.close()
             srv.close()
             import shutil; shutil.rmtree(d, ignore_errors=True)
+        self.assertEqual(conn.fileno(), -1, "the accepted core socket is owned by this fixture too")
         self.assertTrue(flooded)
         self.assertNotIn("notification recovery failed", out)
         self.assertTrue(alive, "the extension must not exit over a write conflict:\n" + out)

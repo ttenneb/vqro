@@ -82,9 +82,10 @@ class ScriptedCore:
         return alive, out
 
     def close(self):
-        if getattr(self, "child", None) and self.child.poll() is None:
-            self.child.kill()
-            self.child.wait()
+        if getattr(self, "child", None):
+            if self.child.poll() is None:
+                self.child.kill()
+            self.child.communicate(timeout=5)  # reap and close every captured pipe, including after wait()
         try:
             self.conn and self.conn.close()
         except OSError:
@@ -211,6 +212,7 @@ ext.run()
         finally:
             core.close()
         self.assertEqual(rc, 0)
+        self.assertTrue(core.child.stdout.closed, "wait() alone does not close a captured pipe")
 
     def test_normal_interpreter_exit_with_a_lifetime_pipe_is_not_a_fatal_error(self):
         # Soak 2: "Fatal Python error: _enter_buffered_busy: could not acquire lock for <stdin>".
@@ -220,9 +222,13 @@ ext.run()
             rc = child.wait(timeout=10)  # stdin stays open: the lifetime thread is mid-read at shutdown
             err = child.stderr.read().decode()
         finally:
-            child.stdin.close()
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=5)  # closes stdin/stderr even when wait/read raises
         self.assertNotIn("Fatal Python error", err)
         self.assertEqual(rc, 0)
+        self.assertTrue(child.stdin.closed)
+        self.assertTrue(child.stderr.closed)
 
 
 if __name__ == "__main__":
