@@ -84,6 +84,23 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.engine.dispatch_one()["state"], "accepted")
         self.assertEqual([op for _, op, _ in self.ledger], ["agent.send"], "one attempt, no replay")
 
+    def test_blocked_after_claim_before_invoke_is_held_not_sent(self):
+        # lead-secondary's sequence on bd70c577: claim while available, the fact turns blocked, then the claimed
+        # attempt runs. Nothing is submitted; the mail is held agent_blocked and goes once after the native clear.
+        sent = self.send()
+        self.resume()
+        claimed = self.engine.claim_one()
+        self.assertIsNotNone(claimed)
+        agent = self.resources["r1"]["data"]["agent"]
+        agent["availability"] = {"state": "blocked", "reason": "_retrying"}
+        self.engine.execute_claim(claimed)
+        self.assertEqual(self.ledger, [])
+        held = self.engine.get(sent["delivery"])
+        self.assertEqual((held["state"], held["reason"]), ("held", "agent_blocked"))
+        agent["availability"] = {"state": "available"}
+        self.assertEqual(self.engine.dispatch_one()["state"], "accepted")
+        self.assertEqual([op for _, op, _ in self.ledger], ["agent.send"])
+
     def test_absent_or_unknown_availability_is_not_blocked(self):
         # Negative controls: an absent fact, an unknown state, a non-object or an unknown reason without a blocked
         # state never hold; only state == "blocked" does.

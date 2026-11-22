@@ -1163,6 +1163,11 @@ class Coordinator:
                     reason = "no_grant"
                 elif not outcomes and record.get("expires_at_ms") is not None and self.clock() >= record["expires_at_ms"]:
                     reason = "expired"
+                elif (not outcomes and isinstance(facts.get("availability"), dict)
+                      and facts["availability"].get("state") == "blocked"):
+                    # Blocked after the claim, before anything was submitted: held, never sent (a started
+                    # composition tail is not interrupted here; nothing submitted is resent).
+                    reason = "agent_blocked"
                 if reason:
                     return self._finish_attempt(record, outcomes, {"outcome": "rejected", "error": {"kind": reason}}, partial=bool(outcomes), coordinated=True)
                 # Persist each composition step before issuing it. A restart never runs a tail.
@@ -1255,7 +1260,7 @@ class Coordinator:
             kind = (native.get("error") or {}).get("kind")
             if outcome == "indeterminate" or partial:
                 record.update(state="unknown" if outcome == "indeterminate" else "partial", reason="partial_recipe" if partial else "native_unknown")
-            elif outcome == "rejected" and kind in ("busy", "stale", "paused", "no_grant", "stale_guard", "awaiting_route"):
+            elif outcome == "rejected" and kind in ("busy", "stale", "paused", "no_grant", "stale_guard", "awaiting_route", "agent_blocked"):
                 record.update(state="held", reason={"busy": "agent_busy", "stale": "stale_guard"}.get(kind, kind))
                 if kind in ("stale", "stale_guard"):
                     record["review_required"] = "stale_guard"
