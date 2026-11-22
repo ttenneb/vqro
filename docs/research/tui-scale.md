@@ -3,9 +3,9 @@
 ## Reproduction
 
 ```sh
-CARGO_TARGET_DIR=~/.local/share/herdr/scratch/prim-slice1-target cargo build --release --bin prim
+CARGO_TARGET_DIR=<private-notes> cargo build --release --bin prim
 env -i HOME="$HOME" PATH=/usr/bin:/bin python3 tests/e2e_tui_scale.py \
-  ~/.local/share/herdr/scratch/prim-slice1-target --duration 30 --receipt /path/to/receipt.json
+  <private-notes> --duration 30 --receipt /path/to/receipt.json
 ```
 
 The opt-in probe uses a private `--fake` core, the real sidebar extension, three real TUI terminal views and an
@@ -61,7 +61,7 @@ promise or evidence beyond this profile/terminal size.
   shape cache keys, coalescing bursts, publication races and failure bookkeeping. Sidebar unit tests fail on the
   baseline. Private real-hc TUI smoke passes all five checks, including30MB flood/reconnect/recovery quit/cleanup.
 
-Evidence: `~/.local/share/herdr/scratch/prim-independent-review/tui-scale-before-corrected.json`,
+Evidence: `<private-notes>`,
 `tui-scale-final-corrected.json`, `tui-sidebar-before.log`, `tui-scale-tests-final.log`,
 `tui-scale-python-final.log`, `tui-scale-smoke-final.log`. The full all-suite check was not rerun by this owner;
 its new probe step and the affected suites were run independently. Parent owns integration/install.

@@ -98,7 +98,7 @@ server; not yet against the real core, whose section 9 side is still being built
 ## Reproduce
 
 ```sh
-T=$HOME/.local/share/herdr/scratch/prim-scale-target
+T=<private-notes>
 env -i HOME=$HOME PATH=$PATH CARGO_TARGET_DIR=$T cargo test --test provider_client
 env -i HOME=$HOME PATH=$PATH CARGO_TARGET_DIR=$T cargo test --test tmux_provider -- --ignored
 ```

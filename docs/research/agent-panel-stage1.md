@@ -43,7 +43,7 @@ apples replacement for the80-minute real200-bridge soak's60KiB/s result. At200 a
 contributes only11,384 bytes over the whole sample, versus289,484 before. Native output/status contribute
 61,639/25,779 bytes; the bridge-to-core full output leg is still present when the transcript actually changes.
 
-Receipt: `~/.local/share/herdr/scratch/prim-agent-ux/panel-traffic/stage1-bandwidth.json`; raw logs and four private
+Receipt: `<private-notes>`; raw logs and four private
 run receipts are adjacent. Baseline program/agents files are generated from `79a3134`. Reproduction:
 
 ```
@@ -60,8 +60,8 @@ dependency invalidation/cycle/terminal/read-only tests, queue-only no-transcript
 restart/resume, history, providers, drift, scale and scoped no-leftover processes. Prompt latency instrumentation
 now observes the composed status source, not a nonexistent mirror containing "Running".
 
-- Receipt: `~/.local/share/herdr/scratch/prim-agent-ux/panel-traffic/stage1-check-receipt.json`
-- Logs: `~/.local/share/herdr/scratch/prim-agent-ux-target/check-logs/20261118-005302/`
+- Receipt: `<private-notes>`
+- Logs: `<private-notes>`
 - Memory fix remains a separate commit and its sustained memory gate also passed with two-view publication.
 
 No install, live endpoint, human process or model was touched. Existing running bridges retain loaded code:

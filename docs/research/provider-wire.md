@@ -39,7 +39,7 @@ All budgets pass:
 | Flood observer share | 99.33% |
 | Missed events / restart failures / leaked processes | 0 / 0 / 0 |
 
-Receipts and complete logs: `~/.local/share/herdr/scratch/prim-independent-review/wire-{before,tests-final,
+Receipts and complete logs: `<private-notes>,tests-final,
  tmux-final,scale-external-final}.log`, `wire-scale-external-final.json`.
 
 ## Boundaries

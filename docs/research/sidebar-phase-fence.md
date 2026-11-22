@@ -44,8 +44,8 @@ marker/restoration frames also carried real detail. Phase `seconds` covers workl
   reproduced it. Parent confirmed the independent test-only fix `5a9bbbf`, requested no further rerun here,
   integrated this sidebar fix, and owns the combined main gate. No unrelated admission code/test was edited.
 
-Evidence: `~/.local/share/herdr/scratch/prim-agent-ux/sidebar-fence/` (`green-1.json` records the actual pending
+Evidence: `<private-notes>` (`green-1.json` records the actual pending
 startup frame; `green-{2..6}.json`, `unit.log`, `full-gate.log`, `admission-rerun.log`, `check-receipt.json`).
-Full logs: `~/.local/share/herdr/scratch/prim-agent-ux-target/check-logs/20261117-202216/`.
+Full logs: `<private-notes>`.
 All owned test processes were stopped; no install/live session changes. Estimate 22 agent minutes (12 work,
 10 tests); actual about 30 (19 work, 11 builds/tests), including diagnosis of the unrelated integration failure.

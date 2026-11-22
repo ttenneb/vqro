@@ -57,6 +57,6 @@ against a 200 ms guard, with an 8,403,967 B file. This smaller fixture has one p
 than the probe's full 600-view/350-layout seed. All 21 full steps passed at `2c561a1`: 236 default
 Rust tests (25 ignored), 142 Python tests, native suites, UI/scale gates, and scoped no-leftovers.
 
-Local evidence: `~/.local/share/herdr/scratch/prim-independent-review/history-probe/`
+Local evidence: `<private-notes>`
 (source, frozen before/final binaries, build and run logs), `history-check-full.json`, and
 `history-check-full.log`. Protocol semantics: `docs/spec/core-protocol.md`, Undo horizon and history storage.

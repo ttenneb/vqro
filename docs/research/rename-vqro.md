@@ -44,7 +44,7 @@ compatibility reads are shipped. New native markers use the new name only.
   records. It migrated successfully with identity/credential files byte-identical and transaction metadata intact.
   Both private copies were deleted after owner/no-active-user checks; no copied declaration was executed.
 - The ordinary post-rename Rust suite and 215 pre-migration Python cases passed before adding the migration tests.
-  Final full-gate receipt and logs are kept separately under `~/.local/share/herdr/scratch/rename-vqro/`.
+  Final full-gate receipt and logs are kept separately under `<private-notes>`.
 
 No install, live mutation, push or merge was performed. Linux/Python 3.14 is verified; native Windows transport and
 Windows/macOS runtime verification remain the project's pre-existing limitations, not new portability claims.

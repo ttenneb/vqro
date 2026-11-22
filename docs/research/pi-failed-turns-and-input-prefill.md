@@ -55,11 +55,11 @@ TUI prefill), **158 Python tests**, fake Pi CLI/TUI, 600-terminal/200-agent side
 scale/TUI budgets and scoped no leftover processes. Environments were empty/private, builds used the existing
 per-agent target at nice 10 with eight-core affinity.
 
-- Receipt: `~/.local/share/herdr/scratch/prim-agent-ux-target/check-receipt.json`
-- Final logs: `~/.local/share/herdr/scratch/prim-agent-ux-target/check-logs/20261117-194847/`
-- Final physical UI receipt/screens: `~/.local/share/herdr/scratch/ep-2ykmqep5/`
+- Receipt: `<private-notes>`
+- Final logs: `<private-notes>`
+- Final physical UI receipt/screens: `<private-notes>`
   (`ui-failed-turn.txt` shows the error, Failed status and retry 4/4).
-- Red/green evidence: `~/.local/share/herdr/scratch/prim-agent-ux/soak/model-error-{red,green}.log`,
+- Red/green evidence: `<private-notes>,green}.log`,
   `prefill-{red,green}.log`, and `prefill-ui.log`.
 
 Failed-turn work was estimated at 25 agent minutes and completed in about 17 (11 work, 6 tests). The separately

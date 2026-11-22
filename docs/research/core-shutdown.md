@@ -11,7 +11,7 @@ record. This fixes the missing-finished-event path with an attachment open; unkn
 Native event DATA credit follows a FIFO consumed barrier, off the session loop. `prim-herdr` acknowledges after
 bounded publication; native core acknowledges after facts adoption. This is not a real-backend stall claim.
 
-Evidence in `~/.local/share/herdr/scratch/prim-independent-review/`:
+Evidence in `<private-notes>`:
 - `shutdown-before.log`: baseline f069d0c fails unknown `core.shutdown`.
 - `kill-before.log`: baseline returns accepted rather than observed with open attach and omitted finished event.
 - `event-credit-before.log`: disabling credit prevents the finite-window fixture reaching finished (timeout).

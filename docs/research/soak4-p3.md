@@ -40,4 +40,4 @@ traces, their exact cause remains unverified. These two reproduced failure paths
 that inference as proven or blindly retrying arbitrary exceptions.
 
 Evidence: red/green logs and full-gate receipt in
-`~/.local/share/herdr/scratch/prim-pi1-check/s4/`; final results are in the task closeout report. No model calls.
+`<private-notes>`; final results are in the task closeout report. No model calls.

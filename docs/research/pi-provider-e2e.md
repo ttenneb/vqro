@@ -75,8 +75,8 @@ the legitimate EOF route; its outcome remains dispatched. See `native-input-tran
 - 71 Python tests pass with warnings treated as errors, including the new native-exit CLI regression.
 - 134 Rust tests pass, zero warnings;15 opt-in tests remain ignored in ordinary cargo test.
 - Repeated fake and real metadata E2Es pass with clean teardown. Real Pi uses no agent effects or model calls.
-- Final installed-binary fake E2E: `~/.local/share/herdr/scratch/ep-9bnij3qr/receipt.json`.
-- Final installed-binary real Pi metadata E2E: `~/.local/share/herdr/scratch/ep-vzhpy4ay/receipt.json`.
+- Final installed-binary fake E2E: `<private-notes>`.
+- Final installed-binary real Pi metadata E2E: `<private-notes>`.
 - Source-build repeats: `ep-yhwb804h`, `ep-7qzv2cfk` (fake), `ep-24t9fzkd` (real metadata), under the same scratch parent.
 - Historical pre-decision terminal.input probe: `ep-yegs6ffq/receipt.json`; exit1, cleanup PASS. Current probe passes with the explicit stream/effect declaration.
 - Native PTY exit regression before fix: `ep-nvg2y8tk/receipt.json`; signal6 instead of exit23, cleanup PASS.

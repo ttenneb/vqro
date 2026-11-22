@@ -54,7 +54,7 @@ assert fresh core-assigned provider generations, not a guessed change in the bac
 The matrix passed on unchanged production `e1b0b37`. It is now part of `scripts/check.sh full` as the Linux-only
 `fd_lifecycle` opt-in suite. Platform-specific `/proc` instrumentation does not alter the transport contract.
 
-Evidence: `~/.local/share/herdr/scratch/prim-fd-leak/`: `soak-owner-before.json`, `soak-owner-before.log`, frozen
+Evidence: `<private-notes>`: `soak-owner-before.json`, `soak-owner-before.log`, frozen
 `soak-peer-before.py` and class-only repro `soak-owner-probe.py`; `matrix-final.log` records all independent phases.
 The original long-soak report/series remain under the scale review scratch. A corrected-driver long soak is the
 appropriate next check for any residual slow trend, not an idle timeout that evicts legitimate quiet peers.

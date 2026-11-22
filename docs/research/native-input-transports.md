@@ -15,5 +15,5 @@ literal EOT still traverses the attached stream. A raw wire fixture proves the f
 the provider when forbidden, effect:true still forwards with an unchanged dispatched outcome, and stream:false
 rejects before notification. The initial two native tests failed backend versus unsupported before the guard.
 
-Logs: `~/.local/share/herdr/scratch/prim-independent-review/native-input-{before,focused,final,tmux}.log`.
+Logs: `<private-notes>,focused,final,tmux}.log`.
 Full suite and explicit private prim-tmux socket E2E pass; no real hc, live core, Pi/model call or installation.

@@ -73,7 +73,7 @@ The stale `prim.shutdown` implementation-pending text is removed: it is the impl
 ## Verification / isolation
 
 Focused complete cargo tests and 208 Python tests pass; the authoritative release gate is `scripts/check.sh full`.
-Local red/green evidence is under `~/.local/share/herdr/scratch/final-fuzz-p2/`: `half-before.log`, `half-green.log`,
+Local red/green evidence is under `<private-notes>`: `half-before.log`, `half-green.log`,
 `commands-revert-before.log`, `revert-before.log`, `pi-before.log`, `scoped-before.log`, `rust-focused.log`,
 `scoped-green.log`, `python-focused.log`, `cargo-first.log`, and the final full receipt. Tests use private fake
 backends/cores/state or the established private native fixtures, env-clear processes and no model calls. No live

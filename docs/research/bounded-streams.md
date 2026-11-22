@@ -42,7 +42,7 @@ races, and preservation of the existing connection-generation fence.
 Command (with all `HERDR_*` absent via `env -i HOME=... PATH=...`):
 
 ```
-CARGO_TARGET_DIR=~/.local/share/herdr/scratch/prim-slice1-target \
+CARGO_TARGET_DIR=<private-notes> \
   cargo test --release --test scale -- --ignored --exact scale_load --nocapture
 ```
 
@@ -75,7 +75,7 @@ baseline at about 520 MiB after 30 seconds. The final harness shut its core down
 leaked processes; earlier harness teardown leaked two noop sleeps, which the parent removed before the fixed
 teardown was rebased.
 
-Detailed receipts/logs live under `~/.local/share/herdr/scratch/prim-independent-review/`:
+Detailed receipts/logs live under `<private-notes>`:
 `slice2a-scale-final.json`, `slice2a-scale-final.log`, `slice2a-tests.log`,
 `slice2a-before-timeout.log`, and `slice2a-before-flood.log`.
 
@@ -102,4 +102,4 @@ best effort through `socket2`; Linux doubles it). The default scale profile, fir
 Draining viewers are unaffected: 99.9% of flood bytes delivered, observer echo p99 about 2 ms. What remains, about
 0.5 s, is one flood line already being written plus the events queued ahead of the echo. Getting below that would
 need stream data to share priority with events, which is a different trade-off. Receipts: `first-echo-before-3697c40.json`,
-`first-echo-after-35dd1b3.json` under `~/.local/share/herdr/scratch/prim-scale/`.
+`first-echo-after-35dd1b3.json` under `<private-notes>`.

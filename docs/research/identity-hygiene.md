@@ -68,7 +68,7 @@ reaped-name generation/old-route fencing. Public managed-token fixtures exercise
 original-invoker SDK behavior; collision tests cover both overwrite and clear.
 
 Full release authority is `scripts/check.sh full`, with local receipts under
-`~/.local/share/herdr/scratch/prim-independent-review/identity-full-{first,final}.json`. The first run was 18/19:
+`<private-notes>,final}.json`. The first run was 18/19:
 Agents UI timed out opening the requests popup; an identical isolated retry passed, with no extension crash/RPC
 failure. Failure receipt `ep-kf4ghhyl/receipt.json` and retry `ep-4mr7d7h5/receipt.json` are retained in scratch. No
 gate was skipped or relaxed: use the final full receipt for merge acceptance, not the standalone retry.

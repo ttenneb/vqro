@@ -112,7 +112,7 @@ cover opaque bodies, synchronous extra blocks, native automatic pause, and manua
 
 ```sh
 W=/home/bennettgarcia/Projects/.worktrees/prim/tmux-client
-T=$HOME/.local/share/herdr/scratch/prim-slice2b-target
+T=<private-notes>
 env -i HOME=$HOME PATH=$PATH CARGO_TARGET_DIR=$T cargo test --manifest-path "$W/Cargo.toml"
 env -i HOME=$HOME PATH=$PATH CARGO_TARGET_DIR=$T cargo test --manifest-path "$W/Cargo.toml" --test tmux -- --ignored
 ```

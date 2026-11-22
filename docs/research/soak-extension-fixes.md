@@ -30,7 +30,7 @@ No live sessions/install or provider registry/reclamation code changed.
   coalesce for 500 ms and unchanged visible pages are not republished; page choices are derived extension state,
   not history. This intentionally reduces data delivery, not resource retention or program lifetime.
 
-Red failures and green logs are under `~/.local/share/herdr/scratch/prim-agent-ux/soak/`:
+Red failures and green logs are under `<private-notes>`:
 `bridge-red.log`, `filter-red.log`, `queue-red.log`, `sidebar-red.log`, `agents-red.log`, and corresponding green
 logs. Tests cover explicit refusals, missing resume credentials, transport/lost-reply recovery, view filters on
 live/replayed/removal events, in-flight byte charging, snapshot fencing, failed recovery, targeted publications,
@@ -62,7 +62,7 @@ Sidebar and Tabs stayed running with zero crashes in both arms. A filtered subsc
 bytes while receiving matching native-agent content. This is a focused two-minute A/B, not a claim of a new
 multi-hour execution soak; contention can affect frequency.
 
-Receipts: `~/.local/share/herdr/scratch/prim-agent-ux/soak/sidebar-{before,after}-30s.json`.
+Receipts: `<private-notes>,after}-30s.json`.
 Reproduce with clean environment and the private binary:
 
 ```
@@ -79,9 +79,9 @@ The first run exposed a pre-existing assumption in the UI harness that any sideb
 its newly created agent. Waiting for the actual coalesced agent row corrected that race; the physical mouse and
 keyboard-focus assertions remain intact and pass.
 
-- Receipt: `~/.local/share/herdr/scratch/prim-agent-ux-target/check-receipt.json`
-- Logs: `~/.local/share/herdr/scratch/prim-agent-ux-target/check-logs/20261117-191827/`
-- Extra private TUI receipt: `~/.local/share/herdr/scratch/prim-agent-ux/soak/ep-3ong4oi6/receipt.json`
+- Receipt: `<private-notes>`
+- Logs: `<private-notes>`
+- Extra private TUI receipt: `<private-notes>`
 
 All test processes were stopped. Small receipts/logs remain for review. Estimated 60 agent minutes (40 work,
 20 tests/wait); actual about 39 minutes (24 work, 15 builds/tests). No registry cap, terminal retention or real

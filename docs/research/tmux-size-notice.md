@@ -45,5 +45,5 @@ in prim.
 
 Focused native tmux provider/lifetime suite:9/9. Core readiness integration, TUI render regression, settings unit
 tests and both physical provider E2Es passed. Full gate receipt is recorded in the task closeout report under
-`~/.local/share/herdr/scratch/prim-pi1-check/tsn/`; initial failure evidence is retained there too. Tests use the
+`<private-notes>`; initial failure evidence is retained there too. Tests use the
 existing per-agent Cargo target, offline -j8, nice10 and eight-CPU affinity; the full gate owns its cgroup.

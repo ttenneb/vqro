@@ -15,7 +15,7 @@ contract; external registration, sync chunks, bridge tokens, stream offsets/limi
   Existing layout entries are not changed; views of retired ids show gone until explicitly rebound or reset.
   This migration was approved by the coordinator; no live prim state exists on the development machine.
 - Herdr uses `hello.core.id` as instance, never pid/uptime. Evidence: local 0.1.21 schema
-  `~/.local/share/herdr/scratch/hc-schema/hc-0.1.21-schema.json`, `CoreInfo.id` (permanent until state is wiped).
+  `<private-notes>`, `CoreInfo.id` (permanent until state is wiped).
   `Terminal.created_ms` supplies the incarnation; this identifies a terminal, not an emulated process lineage.
   No hc command was run. Fake instances are random per start; conformance tests inject stable identities.
 - Disconnect keeps facts with `available: false, stale: true`. A same-instance inventory restores ids; a new
@@ -50,5 +50,5 @@ The rebased checkpoint suite passed without warnings (57 unit and 29 integration
 profile passed every budget at the checkpoint: 600 terminals, 200 status publishers, eight floods, two adapters,
 stalled and slow readers; RSS peak 47.96 MiB, slow echo p99 42.70 ms, max 343.70 ms, zero leaked processes.
 This includes main's event-volume, status-phase, first-echo and extension-lifetime fixes. Final logs and receipt are
-recorded separately in `~/.local/share/herdr/scratch/prim-independent-review/reshape-tests-final.log` and
+recorded separately in `<private-notes>` and
 `reshape-scale-final.json`; the final delivery report identifies the exact tested commits.

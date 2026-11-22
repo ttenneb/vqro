@@ -50,5 +50,5 @@ Committed unit tests cover SPDX choices/precedence/exception rejection, original
 deterministic ordering, labelled fallbacks without invented holders, crate-path escape rejection, exact root
 licence/manifest metadata, stale/missing inventory, and policy rejection even for unbuilt optional packages.
 Red/green, inventory receipt, official text and full-gate receipt:
-`~/.local/share/herdr/scratch/prim-pi1-check/lic/`. Final counts/outcomes are in the task closeout report.
+`<private-notes>`. Final counts/outcomes are in the task closeout report.
 External runtime/backend terms remain a separate open question, not resolved or relicensed by this decision.

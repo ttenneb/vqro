@@ -52,5 +52,5 @@ probes, both phase limits, all-sample retention, missing/no-client and startup-o
 bounds and short timeouts. The old all-probes-as-steady behavior fails the startup/boundary regressions.
 
 Raw attribution evidence is preserved at
-`~/.local/share/herdr/scratch/prim-independent-review/slow-scale/report.md` and `distribution.json`.
+`<private-notes>` and `distribution.json`.
 This startup allowance is an empirical guard for this fixed profile, not a universal transport bound.

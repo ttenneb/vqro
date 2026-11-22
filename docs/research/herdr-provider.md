@@ -54,7 +54,7 @@ in-test fake core and a private herdr-core 0.1.21; not yet against the real core
 ## Reproduce
 
 ```sh
-T=$HOME/.local/share/herdr/scratch/prim-scale-target
+T=<private-notes>
 env -i HOME=$HOME PATH=$PATH CARGO_TARGET_DIR=$T cargo test --test herdr_provider -- --ignored --test-threads=1
 ```
 

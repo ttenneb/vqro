@@ -44,9 +44,9 @@ opt-ins, private retention/undo integration, fake Pi CLI/TUI, target-scale/sideb
 leftover processes. Builds used the existing private per-agent target, clean environments, nice 10 and eight-core
 affinity. No live install, sessions, core or backend was touched.
 
-- Receipt: `~/.local/share/herdr/scratch/prim-agent-ux/soak-p3/check-receipt.json`
-- Logs: `~/.local/share/herdr/scratch/prim-agent-ux-target/check-logs/20261117-210333/`
-- Red/green evidence: `~/.local/share/herdr/scratch/prim-agent-ux/soak-p3/`
+- Receipt: `<private-notes>`
+- Logs: `<private-notes>`
+- Red/green evidence: `<private-notes>`
   (`tabs-{red,green}.log`, `crashes-{red,green}.log`, `settings-{red,green}.log`, `retention-green.log`,
   `crashes-integration.log`, `full-gate.log`).
 

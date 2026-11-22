@@ -48,17 +48,17 @@ these small local timings; no guarantee or model-time inference is made.
 
 ## Verification and retained evidence
 
-`CARGO_TARGET_DIR=~/.local/share/herdr/scratch/prim-agent-ux-target`, clean environment, nice 10 and eight-core
+`CARGO_TARGET_DIR=<private-notes>`, clean environment, nice 10 and eight-core
 CPU affinity. `scripts/check.sh full` passed **19/19**, including zero-warning build, cargo tests, **142 Python
 units**, all opt-in providers, fake Pi CLI/TUI, scale/TUI budgets and scoped no-leftover-processes check.
 
-- Full receipt: `~/.local/share/herdr/scratch/prim-agent-ux-target/check-receipt.json`
-- Full logs: `~/.local/share/herdr/scratch/prim-agent-ux-target/check-logs/20261117-183035/`
-- Baseline timing receipt: `~/.local/share/herdr/scratch/ep-tfal8twt/receipt.json` (run intentionally exposed an
+- Full receipt: `<private-notes>`
+- Full logs: `<private-notes>`
+- Baseline timing receipt: `<private-notes>` (run intentionally exposed an
   incorrect test expectation that provider disconnection means gone; corrected to unavailable).
-- Standalone after receipt: `~/.local/share/herdr/scratch/ep-dyiu5161/receipt.json`
-- Final full-gate UI receipt/screens: `~/.local/share/herdr/scratch/ep-nz0ahoyr/`
-- Extra mouse-focus regression receipt/screens: `~/.local/share/herdr/scratch/prim-agent-ux/ep-oog3m8wk/`
+- Standalone after receipt: `<private-notes>`
+- Final full-gate UI receipt/screens: `<private-notes>`
+- Extra mouse-focus regression receipt/screens: `<private-notes>`
 
 TUI checks physically launch via prefix, activate Bridge terminal, click the sidebar agent, then verify the
 focused pane's keyboard menu contains Prompt/Abort. They assert one agent tab and no terminal view of an agent,

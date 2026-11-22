@@ -98,7 +98,7 @@ Set a private short `PRIM_SCALE_RUN_DIR`, a receipt path via `PRIM_SCALE_RECEIPT
 `CARGO_TARGET_DIR`; run via `env -i HOME=$HOME PATH=$PATH ...`. The knobs are read only by the scale
 harness/test child, never `prim serve`.
 
-Raw receipts/logs are under `~/.local/share/herdr/scratch/prim-independent-review/`:
+Raw receipts/logs are under `<private-notes>`:
 `commit-scale-{normal,slow,baseline-normal,baseline-slow}.{json,log}`; deterministic red/green logs
 are `commit-off-lock-{red,green}.log` and `commit-metadata-red.log`. Integrated receipts/logs are
 `commit-scale-integrated-{0,80}.{json,log}` and `commit-off-lock-integrated-{cargo,python}.log`.

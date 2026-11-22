@@ -10,6 +10,6 @@ Migration: existing local refs/instances are unchanged with the same explicit pr
 
 Evidence: A2 tests failed on sys.executable/core module-path injection before the fix. Provider name and spaced argv tests failed on hostname/split_whitespace. Remote tests failed on alias rename/reuse and unknown machine identity before the fix; all now pass. Additional coverage checks ignored alias-only updates, session distinction, local compatibility, durable tombstones and spaced PATH/install paths.
 
-Final scoped quick gate: PASS4/4, zero warnings,109 Python tests; all ordinary Rust tests pass. Relevant real-private herdr provider4/4 and tmux provider6/6 opt-ins pass. Receipt: ~/.local/share/herdr/scratch/prim-independent-review/platform-quick-receipt.json (systemd-user run scope, not heuristic). The earlier quick scan was contaminated by another agent's prim-scale-target smoke processes; those processes were not touched. Rebased to scoped checking and reran cleanly.
+Final scoped quick gate: PASS4/4, zero warnings,109 Python tests; all ordinary Rust tests pass. Relevant real-private herdr provider4/4 and tmux provider6/6 opt-ins pass. Receipt: <private-notes> (systemd-user run scope, not heuristic). The earlier quick scan was contaminated by another agent's prim-scale-target smoke processes; those processes were not touched. Rebased to scoped checking and reran cleanly.
 
 No live install, remote connection, credential copy or model/provider call. Actual Windows/macOS runtime testing remains unverified; this is not a claim of full platform readiness.

@@ -27,7 +27,7 @@ Recovery corrections:
 
 ## Evidence
 
-Scratch evidence root: `~/.local/share/herdr/scratch/prim-independent-review/`.
+Scratch evidence root: `<private-notes>`.
 - `qa3-before.log`: baseline `6e9f168` fails eight new integration cases, including wrong-backend dispatch,
   touching a simulated ambient endpoint and accepting a forged supervised name.
 - `qa3-green.log`: 100 unit and 12 focused integration tests pass, zero warnings.

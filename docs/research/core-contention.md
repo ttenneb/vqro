@@ -56,6 +56,6 @@ panels/actions and clears their live content; referenced views and user panels r
 reconnect cancellation, explicit finished-only command safety, ownership/reference-safe cleanup, immutable snapshot
 fencing, bounded registration admission,200 cached retire/reap cycles and monotonic resource identities.
 
-Evidence: `~/.local/share/herdr/scratch/prim-core-contention/` (`profile-before.log`, `profile-after.log`,
+Evidence: `<private-notes>` (`profile-before.log`, `profile-after.log`,
 `credential-before.log`, frozen `baseline-prim`, `storm-red.log`, `storm-green.log`, `retention-red.log`).
 Protocol: `docs/spec/core-protocol.md`. Full gate includes `core_storm`; the standalone profile is opt-in release.

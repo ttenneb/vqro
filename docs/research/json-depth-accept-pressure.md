@@ -37,7 +37,7 @@ ownership, caller effect deadlines and input/no-replay semantics are unchanged.
 
 ## Red/green evidence
 
-Private binaries/receipts are under `~/.local/share/herdr/scratch/prim-final-store-limits/`:
+Private binaries/receipts are under `<private-notes>`:
 
 - `deep-red-green.json` / `baseline-deep-brick.log` / `fixed-deep-brick.log`: exact reviewer
   `prim-final-rereview/run/deep_brick.py`; baseline accepts then cannot restart, fixed rejects then restarts.

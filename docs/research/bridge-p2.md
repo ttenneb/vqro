@@ -67,7 +67,7 @@ Interpreter memory is **not** fixed, and fake-runtime numbers are not real-model
 bridge process-per-runtime design is unchanged. Linux/Python 3.14 was exercised; macOS/Windows execution remains
 unverified. No pidfd, Unix signal or other OS-specific exit mechanism was added to the client.
 
-Local evidence under `~/.local/share/herdr/scratch/prim-bridge-p2/`: `import-before.log`, `env-before.log`,
+Local evidence under `<private-notes>`: `import-before.log`, `env-before.log`,
 `idle-before-test.log`, `idle-{before,after}.jsonl`, `load-after.jsonl`, `python-final.log`, `provider-final.log` and
 `full-final.json`. Full release acceptance is the final `scripts/check.sh full` receipt, not these focused tests.
 The reviewer harness logs may report a fake-core BrokenPipe while its clients close; all measured bridges and

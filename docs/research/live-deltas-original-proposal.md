@@ -116,7 +116,7 @@ Full prototype gate completed26/26 at00:15EST on a553bdc (199Python tests, Rust/
 Closeout report is docs/research/agent-panel-traffic.md atdd9e807; P3 remains separately ready in79a3134.
 The critique's once/publication diff and compact log are not implemented; mirror/composition/status split still
 need the human's choice. Do not substitute newer live content under an older replay sequence when compacting.
-Final handoff text is ~/.local/share/herdr/scratch/prim-agent-ux/panel-traffic/final-message.txt; forced-mailbox
+Final handoff text is <private-notes>; forced-mailbox
 final send was definitively rejected agent_blocked at00:22EST, so no delivery is claimed. No protocol acceptance,
 merge or install is implied. Design
 review/human choice is still pending. Progress sends at23:28 and23:53 were rejected because coordinator pane

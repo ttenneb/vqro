@@ -17,7 +17,7 @@ suffix fallback; ensure_core, build identification and re-exec share it. Running
 while the TUI separately compares installed metadata to detect replacement. CLI stdout uses fallible writes and
 exits quietly for BrokenPipe instead of panicking.
 
-Evidence in `~/.local/share/herdr/scratch/prim-independent-review/`:
+Evidence in `<private-notes>`:
 - `safe-stdout-before.log`: actual BrokenPipe panic before the fix; deterministic private-endpoint test is green.
 - `safe-replace-before.log`: a private copy of the old installed image reproduces unlinked-inode restart failure.
   New smoke copies only into its private root, replaces that copy, and checks core restart, re-exec image and input.

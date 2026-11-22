@@ -23,7 +23,7 @@ No live installation or sessions were touched.
 
 ## Verification and rendered capture
 
-Evidence root: `~/.local/share/herdr/scratch/prim-independent-review/`.
+Evidence root: `<private-notes>`.
 - `extensions-focused-final.log`: loader/API/renderer/input tests, including budget rejection, disabled/failed/
   safe metadata, cached refresh, responsive geometry, fallback, wrapped scrolling, paging/chip focus, and recovery.
 - `extensions-tui-final.log`: private real TUI + herdr/tmux harness, **17/17**. Search/count, row selection without

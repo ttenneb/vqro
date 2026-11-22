@@ -34,6 +34,6 @@ legitimate long commands. No CLI replay was added. Too-large and nontransient fa
   `/proc` confirms the running image is the replacement inode. Quitting while admission remains refused is responsive. Only read/subscription requests repeated.
 
 Receipts, raw/captured screens, scripts and red/green logs:
-`~/.local/share/herdr/scratch/prim-pi1-check/f2/`. Full-gate outcome is in the task closeout report/receipt.
+`<private-notes>`. Full-gate outcome is in the task closeout report/receipt.
 All tests use private state/endpoints, env-i,8CPU/nice10/offline-j8. No live install/session/backend effects,
 credentials or model calls; physical copy/endpoint fixtures were removed after cleanup.

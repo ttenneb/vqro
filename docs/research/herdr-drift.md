@@ -62,7 +62,7 @@ second cache path too. Normal resource updates, kill observations and effect out
   the consumed-credit integration test passed. The release authority is `scripts/check.sh full`, including the new
   `e2e-herdr-drift` step; use its final receipt, not focused results, for merge acceptance.
 
-Local evidence under `~/.local/share/herdr/scratch/prim-herdr-drift/`:
+Local evidence under `<private-notes>`:
 `before/{frames.jsonl,result.json}`, `fixture-before.log`, `spawn-before.log`, `unit-green.log`,
 `focused-final.log`, `instant/result.json`, `instant-after/result.json`, `load-final.{json,log}` and the final full
 receipt/logs. The tap/probe are scratch diagnostics; the permanent tests do not depend on them.

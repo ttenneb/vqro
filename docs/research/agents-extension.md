@@ -21,10 +21,10 @@ Bridge content now uses semantic status badges and observed active/settled/abort
 - UI is closed before the harness's manual core restart to avoid racing the TUI's auto-start. The command/bridge restart path is tested, not an additional TUI-reconnect claim.
 - Input transport probe now expects declared `{stream:true,effect:false}` and exact unsupported/rejected before dispatch. No hidden terminal.send/keys/attach compensation. Existing stream EOF remains dispatched.
 
-Final PTY/package-layout receipt: `~/.local/share/herdr/scratch/ep-jmmbw4b8/receipt.json`.
+Final PTY/package-layout receipt: `<private-notes>`.
 Earlier PTY repeat: `ep-peiwf01u/receipt.json`; extension-command runs: `ep-ojr2t47j`, `ep-50ek8em3`.
 Captures in each PTY root: `ui-new-binding.txt`, `ui-agent-ready.txt`, `ui-prompt-input.txt`, `ui-working.txt`, `ui-queues.txt`, `ui-requests.txt`, `ui-confirm-options.txt`, `ui-transcript.txt`.
-Quick gate receipt: `~/.local/share/herdr/scratch/prim-independent-review/agents-quick-receipt.json`.
+Quick gate receipt: `<private-notes>`.
 
 All services/terminals/config/state/runtime/socket roots are private, environment-allowlisted, network-isolated, and cleaned with PID/birth checks. Tmux uses a private socket and /dev/null config. No installed/live services, credentials or real sessions changed. Scratch evidence retained.
 

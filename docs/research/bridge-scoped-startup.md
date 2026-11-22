@@ -58,11 +58,11 @@ Final `scripts/check.sh full` at `9bffb37`: **23/23 PASS**, zero-warning build, 
 provider opt-ins, both Pi CLI/TUI gates now run above1MiB, sidebar/history/scale/TUI checks, scoped no leftovers.
 All tests used clean private environments, fake Pi only, nice10 and eight-core build/gate affinity.
 
-- Receipt: `~/.local/share/herdr/scratch/prim-agent-ux/bridge-snapshot/check-receipt.json`
-- Final logs: `~/.local/share/herdr/scratch/prim-agent-ux-target/check-logs/20261117-221005/`
-- Old bridge red receipt: `~/.local/share/herdr/scratch/prim-agent-ux/ep-z4hm9y2u/receipt.json`
-- Final large-workspace TUI receipt/screens: `~/.local/share/herdr/scratch/ep-9xnomfyq/`
-- Targeted red/green logs: `~/.local/share/herdr/scratch/prim-agent-ux/bridge-snapshot/`
+- Receipt: `<private-notes>`
+- Final logs: `<private-notes>`
+- Old bridge red receipt: `<private-notes>`
+- Final large-workspace TUI receipt/screens: `<private-notes>`
+- Targeted red/green logs: `<private-notes>`
 
 No install or human session/process was changed. Existing running bridges retain their loaded code; shipping
 new core/extensions does not hot-rewrite a backend-owned bridge. New agents use the fix. Initial estimate was30

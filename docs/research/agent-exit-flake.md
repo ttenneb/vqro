@@ -32,9 +32,9 @@ second generic health check. Producer/bridge code and exit status behavior are u
   3/6 failed with the exact gone timeout; after: 6/6 pass. Affinity of no existing/human process was changed.
   Workers have a bounded lifetime and were stopped/waited in finally. Tests remain network/state/config/socket
   isolated and use fake Pi; the installed/live prim was never invoked or changed.
-- Before matrix: `~/.local/share/herdr/scratch/exit-pressure-gt4g6r6c/pressure.json`.
-- After matrix: `~/.local/share/herdr/scratch/exit-pressure-nfvnku71/pressure.json`.
-- Reproduction controller retained at `~/.local/share/herdr/scratch/prim-independent-review/agent-exit-pressure.py`;
+- Before matrix: `<private-notes>`.
+- After matrix: `<private-notes>`.
+- Reproduction controller retained at `<private-notes>`;
   it runs tests/pi_provider_e2e.py --agents-ui against the private build with explicit environment allowlists.
 - Exact per-trial scratch roots, timings, stderr and return codes are retained in those pressure matrices.
 
@@ -42,8 +42,8 @@ second generic health check. Producer/bridge code and exit status behavior are u
 
 `scripts/check.sh full` at `8526a10`: **18/18 PASS**, zero warnings, no leftover processes. Includes all unit tests,
 provider/transport opt-ins, provider/agent TUI E2Es and both scale suites. Receipt:
-`~/.local/share/herdr/scratch/prim-independent-review/agent-exit-full-receipt.json`.
-Logs: `~/.local/share/herdr/scratch/prim-pi1-target/check-logs/20261117-152838/`.
+`<private-notes>`.
+Logs: `<private-notes>`.
 
 No cutover/install, live-session effects, real model/provider calls or credentials copied. This fixes an accepted
 retirement record racing transport cleanup; it does not invent retirement for a producer that never sent one.
