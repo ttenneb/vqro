@@ -87,23 +87,30 @@ def capacities(rows, candidates):
     """Minimum fresh reported percentage headroom, NOT an availability/entitlement guarantee.
     Positive counts without a denominator are incomparable and never ranked as percentages.
     """
-    ids={a['id'] for a in candidates};samples={ident:{} for ident in ids};clock=now_ms()
+    ids={a['id'] for a in candidates};samples={ident:{} for ident in ids};clock=now_ms();unknown=set()
     for resource in rows:
         ident=configured_id(resource)
         if ident not in ids or not live(resource): continue
-        limits=facts(resource).get('usage_limits')
+        native=facts(resource);incomplete=native.get('incomplete',[])
+        if not isinstance(incomplete,list) or any(not isinstance(field,str) or field=='usage_limits'
+                or field.startswith(('usage_limits.','usage_limits[')) for field in incomplete):
+            unknown.add(ident)  # cut constraints are unknown, never a positive partial subset
+        limits=native.get('usage_limits')
+        if limits is not None and not isinstance(limits,list): unknown.add(ident)
         for row in limits if isinstance(limits,list) else []:
-            if not isinstance(row,dict): continue
+            if not isinstance(row,dict): unknown.add(ident);continue
             scope=row.get('scope');observed=row.get('observed_at_ms');source=row.get('source')
-            if not isinstance(scope,dict) or scope.get('kind')!='account' or scope.get('account')!=ident: continue
-            if not isinstance(source,str) or not source or len(source)>128 or not number(observed) \
-                    or observed>clock or clock-observed>MAX_AGE_MS: continue
-            reset=row.get('resets_at_ms')
-            if reset is not None and (not number(reset) or reset<=clock): continue
+            if not isinstance(scope,dict) or scope.get('kind')!='account' or scope.get('account')!=ident:
+                unknown.add(ident);continue
+            if not isinstance(source,str) or not source or len(source)>128 or not number(observed):
+                unknown.add(ident);continue  # cannot order/replace an unidentified constraint
             key=json.dumps([source,scope,row.get('window')],sort_keys=True,separators=(',',':'))
-            used=row.get('used_percent');remaining=row.get('remaining')
+            used=row.get('used_percent');remaining=row.get('remaining');reset=row.get('resets_at_ms')
             headroom=max(0,100-used) if number(used) else None
             if number(remaining) and remaining==0: headroom=0
+            if observed>clock or clock-observed>MAX_AGE_MS or (reset is not None and (not number(reset) or reset<=clock)):
+                headroom=None  # retain the unresolved window instead of inventing spare capacity by dropping it
+            if remaining is not None and not number(remaining): headroom=None
             old=samples[ident].get(key)
             if old is None or observed>old[0]: samples[ident][key]=(observed,headroom)
             elif observed==old[0]:
@@ -112,7 +119,7 @@ def capacities(rows, candidates):
     blocked_ids={configured_id(row) for row in rows if blocked(row)}
     for ident,windows in samples.items():
         values=[sample[1] for sample in windows.values()]
-        result[ident]=min(values) if values and None not in values and ident not in blocked_ids else None
+        result[ident]=min(values) if values and None not in values and ident not in blocked_ids|unknown else None
     return result
 
 

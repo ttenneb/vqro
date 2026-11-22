@@ -105,6 +105,38 @@ class CapacityPolicy(unittest.TestCase):
         explicit,_=profiles.choose(self.core,{'account':'paid'},'pi','pi.new')
         self.assertEqual(explicit['id'],'paid')
 
+    def test_incomplete_and_mixed_unknown_windows_never_become_partial_capacity(self):
+        base=resource('target',self.b,10)
+        incomplete=copy.deepcopy(base);incomplete['data']['agent']['incomplete']=['usage_limits']
+        cases=[incomplete]
+        template=base['data']['agent']['usage_limits'][0]
+        for changes in [{'observed_at_ms':NOW-60_001,'used_percent':100},
+                        {'resets_at_ms':NOW-1},{'observed_at_ms':NOW+10000},
+                        {'source':''},{'used_percent':None,'remaining':50}]:
+            row=copy.deepcopy(base)
+            row['data']['agent']['usage_limits'].append(dict(template,window={'id':'week'},**changes))
+            cases.append(row)
+        for row in cases:
+            with self.subTest(row=row):self.assertIsNone(policy.capacities([row],[self.b])['b'])
+        replaced=copy.deepcopy(cases[1])
+        replaced['data']['agent']['usage_limits'].append(dict(template,window={'id':'week'},used_percent=20))
+        self.assertEqual(policy.capacities([replaced],[self.b])['b'],80)  # newer authoritative SAME window
+        incomplete['data']['agent']['incomplete']=[]
+        self.assertEqual(policy.capacities([incomplete],[self.b])['b'],90)
+
+    def test_auto_restart_does_not_use_incomplete_limit_set(self):
+        self.settings(blocked='auto_restart');self.blocked()
+        self.core.resources['target']=resource('target',self.b,10)
+        self.core.resources['target']['data']['agent']['incomplete']=['usage_limits']
+        self.accounts.handle_blocked('old');self.assertEqual(self.core.launches,[])
+
+    def test_capacity_picker_does_not_drop_a_stale_restrictive_window(self):
+        self.settings(new_agents='most_remaining_capacity');self.blocked()
+        self.core.resources['target']=resource('target',self.b,10)
+        limits=self.core.resources['target']['data']['agent']['usage_limits']
+        limits.append(dict(limits[0],window={'id':'week'},used_percent=100,observed_at_ms=NOW-60_001))
+        account,popup=self.choose();self.assertIsNone(account);self.assertIn('popup',popup['client'])
+
     def test_round_robin_cas_failure_does_not_start_anything(self):
         self.settings(new_agents='round_robin');apply=self.core.apply
         def fail_cursor(ops,note):

@@ -68,8 +68,11 @@ Accounts offers `doc/settings/accounts-policy` (ordinary undoable workspace conf
 - `most_remaining_capacity` ranks **reported percentage headroom**, taking the smallest remaining percentage
   across each account's reported windows. A row must be account-scoped to the launcher's configured ID, sourced,
   observed within60 seconds, not future-dated and not expired. Counts without a denominator, unknown windows,
-  stale/expired/unsourced reports never become spare capacity. A native known-blocked live account is excluded.
-  No positive comparable result means ask; reset times never manufacture a fresh100%. This is a comparison of
+  stale/expired/unsourced reports never become spare capacity. An incomplete limit list or ANY unresolved relevant
+  window makes the whole account unknown: a fresh positive subset is not enough. A newer authoritative comparable
+  report can replace the same window; stale windows are retained as unknown, not silently discarded. A native
+  known-blocked live account is excluded. No positive comparable result means ask; reset times never manufacture
+  a fresh100%. This is a comparison of
   reported fractions, **not** equal token allocations, entitlement, authenticated identity or permission to run.
 - `round_robin` rotates eligible configured profiles in registry order, excluding known live blocked accounts.
   Unknown capacity is not called available; this mode is rotation, not a capacity inference. The transactional
