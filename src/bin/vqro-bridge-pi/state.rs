@@ -69,6 +69,7 @@ pub struct Agent {
     pub session:Option<Value>,pub session_pending:bool,pub run:Option<String>,pub completion:Option<Value>,
     reason:String,error:Option<String>,exit:Option<Exit>,caps:Value,
     launch_cwd:Option<String>,usage:Option<Value>,usage_revision:u64,
+    startup:super::startup::Startup,
 }
 impl Agent {
     pub fn new(instance:String,signals:Arc<Signals>)->Self {
@@ -77,10 +78,10 @@ impl Agent {
         let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entities:ENTITY_COUNT,max_entity_bytes:ENTITY_TOTAL,snapshot_buffer_bytes:1024*1024,..Default::default()});
         journal.set_coverage(Coverage::Tail);
         let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,tool_principal_env:false,view:None,view_error:None,configuration:Default::default(),commands:Default::default(),availability:None,origins:Default::default(),start_origin:None,current_origin:None,requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),open:Vec::new(),starting:false,
-            position:0,serial:0,epoch_number:1,instance,boot,session:None,session_pending:false,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null,launch_cwd:None,usage:None,usage_revision:0};
+            position:0,serial:0,epoch_number:1,instance,boot,session:None,session_pending:false,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null,launch_cwd:None,startup:Default::default(),usage:None,usage_revision:0};
         agent.refresh();agent
     }
-    pub fn with_cwd(instance:String,signals:Arc<Signals>,cwd:String)->Self{let mut agent=Self::new(instance,signals);if cwd.len()<=4096{agent.launch_cwd=Some(cwd);}else{agent.incomplete.insert("session.cwd".into());}agent}
+    pub fn with_cwd(instance:String,signals:Arc<Signals>,cwd:String)->Self{let mut agent=Self::new(instance,signals);agent.startup.cwd(&cwd);agent.publish_startup();if cwd.len()<=4096{agent.launch_cwd=Some(cwd);}else{agent.incomplete.insert("session.cwd".into());}agent}
     pub fn usage_revision(&self)->u64{self.usage_revision}
     fn invalidate_usage(&mut self){self.usage_revision=self.usage_revision.wrapping_add(1);self.usage=None;}
     pub fn usage_result(&mut self,epoch:&str,revision:u64,data:Option<&Value>){
@@ -157,9 +158,14 @@ impl Agent {
         for field in ["commands","config"]{if vqro::limits::encoded_bytes(&facts["data"])>60*1024{facts["data"]["agent"][field]=json!([]);facts["data"]["agent"]["incomplete"].as_array_mut().unwrap().push(json!(field));}}
         facts
     }
+    /// The startup entity (agent-v0 4): one per epoch, updated in place as Pi's own reports arrive.
+    pub fn publish_startup(&mut self){self.startup.fit(ENTITY_BYTES);let value=self.startup.value();self.store("startup","current",value,false);}
+    pub fn startup_version(&mut self,output:&str){self.startup.version(output);self.publish_startup();}
+    pub fn startup_failed(&mut self,fields:&[&str]){self.startup.failed(fields);self.publish_startup();}
     pub fn new_session_epoch(&mut self){
         self.invalidate_usage();
         self.cancel_requests("epoch_changed");self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.availability=None;self.open.clear();self.origins.reset();self.start_origin=None;self.current_origin=None;self.run=None;self.completion=None;
+        self.publish_startup(); // same process, same native reports: the new epoch carries them again
     }
     pub fn ensure_session_epoch(&mut self,prior:&str){if self.epoch()==prior{self.new_session_epoch();if let Some(session)=self.session.clone(){self.store("session","current",session,false);}self.refresh();}}
     pub fn configuration_pending(&mut self,pending:bool){if pending{self.invalidate_usage();}self.configuration.pending=pending;if !pending{self.session_pending=false;}self.configuration.rebuild(&self.signals.current().metadata);self.refresh();}
@@ -388,10 +394,14 @@ impl Agent {
                     if self.queue.is_none(){self.incomplete.insert("queue".into());}else{self.incomplete.remove("queue");}
                 }
                 Some("response") if record["command"]=="prompt"=>self.origins.prompt_response(record),
-                Some("response") if record["command"]=="get_commands" && record["success"]==true=>{self.commands.observe(&record["data"]);},
+                Some("response") if record["command"]=="get_commands" && record["success"]==true=>{
+                    self.commands.observe(&record["data"]);
+                    match super::contract::rows(&record["data"],"commands") {Some(rows)=>{let rows=rows.clone();self.startup.commands(&rows);self.publish_startup();},None=>self.startup_failed(&["skills","prompts","commands"])}
+                },
                 Some("response") if record["command"]=="get_available_models" && record["success"]==true=>{self.configuration.observe_models(&record["data"]);self.configuration.rebuild(&self.signals.current().metadata);},
                 Some("response") if record["command"]=="get_available_thinking_levels" && record["success"]==true=>{self.configuration.observe_levels(&record["data"]);self.configuration.rebuild(&self.signals.current().metadata);},
                 Some("response") if record["command"]=="get_state" && record["success"]==true=>{
+                    if record["data"].get("model").is_some(){self.startup.state(&record["data"]);self.publish_startup();}
                     self.configuration.rebuild(&self.signals.current().metadata);
                     if let Some(count)=record["data"]["pendingMessageCount"].as_u64(){
                         if count==0 {self.queue=Some(json!([]));self.queue_version=self.queue_version.wrapping_add(1);}

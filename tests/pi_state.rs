@@ -8,6 +8,7 @@
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/commands.rs"] mod commands;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/panel.rs"] mod panel;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/origins.rs"] mod origins;
+#[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/startup.rs"] mod startup;
 #[path="../src/bin/vqro-bridge-pi/state.rs"] mod state;
 use admission::Signals;
 use native::{Event,Exit};
@@ -294,6 +295,42 @@ fn pi_tool_duration_is_the_native_duration_ms() {
         event(&mut a,end);
         assert!(tool(&a,name).get("duration_ms").is_none(),"{name}");
     }
+}
+
+/// agent-v0 startup (id current): only Pi's own reports, each with its source; absent stays absent.
+#[test]
+fn startup_entity_carries_only_pis_own_reports_with_sources() {
+    let startup=|a:&Agent|entities(a,"startup").into_iter().find(|r|r["id"]=="current").unwrap()["value"].clone();
+    let mut a=Agent::with_cwd("private".into(),Signals::new(),"/work/repo".into());
+    let first=startup(&a);
+    assert_eq!((&first["runtime"],&first["cwd"],&first["sources"]["cwd"]),(&json!({"name":"Pi"}),&json!("/work/repo"),&json!("vqro:launch")));
+    for absent in ["model","skills","instructions","plugins","mcp"] {assert!(first.get(absent).is_none(),"{absent} not reported yet");}
+    event(&mut a,json!({"type":"response","id":"s","command":"get_state","success":true,"data":{"sessionId":"s1","isStreaming":false,"isCompacting":false,
+        "steeringMode":"all","followUpMode":"all","model":{"provider":"p","id":"gpt-x","input":["text"]}}}));
+    event(&mut a,json!({"type":"response","id":"c","command":"get_commands","success":true,"data":{"commands":[
+        {"name":"skill:review","description":"Review code","source":"skill","sourceInfo":{"path":"/home/u/.pi/skills/review/SKILL.md","scope":"user"}},
+        {"name":"fix","description":"Fix it","source":"prompt","sourceInfo":{"path":"/repo/.pi/prompts/fix.md"}},
+        {"name":"deploy","source":"extension","sourceInfo":{"path":"x".repeat(5000)}},
+        {"name":"odd","source":"something-else"}]}}));
+    a.startup_version("1.5.2\n");
+    let value=startup(&a);
+    assert_eq!(value["runtime"],json!({"name":"Pi","version":"1.5.2","version_source":"cli:--version"}));
+    assert_eq!((&value["model"],&value["sources"]["model"]),(&json!("gpt-x"),&json!("rpc:get_state")));
+    assert_eq!(value["skills"],json!([{"name":"review","description":"Review code","path":"/home/u/.pi/skills/review/SKILL.md"}]));
+    assert_eq!(value["skills_scope"],"loaded");
+    assert_eq!(value["prompts"],json!([{"name":"fix","description":"Fix it","path":"/repo/.pi/prompts/fix.md"}]));
+    assert_eq!(value["commands"],json!([{"name":"deploy","kind":"extension"}]),"an over-bound path is cut, never truncated");
+    assert_eq!(value["incomplete"],json!(["commands"]));
+    assert_eq!(value["sources"]["skills"],"rpc:get_commands");
+    for absent in ["instructions","plugins","mcp"] {assert!(value.get(absent).is_none(),"{absent}: Pi does not report it over RPC");}
+    // A new epoch carries the same reports; a failed --version leaves the version absent and runtime incomplete.
+    a.new_session_epoch();assert_eq!(startup(&a)["model"],"gpt-x");
+    let mut b=Agent::with_cwd("private".into(),Signals::new(),"/w".into());b.startup_failed(&["runtime"]);
+    let failed=startup(&b);assert_eq!((&failed["runtime"],&failed["incomplete"]),(&json!({"name":"Pi"}),&json!(["runtime"])));
+    // An unusable get_commands reply: the lists are absent and incomplete, not empty.
+    event(&mut b,json!({"type":"response","id":"c","command":"get_commands","success":true,"data":{"unexpected":[]}}));
+    let broken=startup(&b);assert!(broken.get("skills").is_none());
+    assert!(broken["incomplete"].as_array().unwrap().iter().any(|f|f=="skills"));
 }
 
 #[test]

@@ -11,6 +11,7 @@ mod commands;
 mod panel;
 mod views;
 mod origins;
+mod startup;
 use std::collections::HashMap;
 use std::sync::{Arc,Mutex,OnceLock};
 use std::time::Duration;
@@ -46,6 +47,20 @@ fn rejected(kind:impl Into<String>,message:impl Into<String>)->Result<Outcome,Pr
 fn native_failure(error:native::Error)->Result<Outcome,ProviderError> {
     if error.may_have_acted {Err(ProviderError::new("backend",error.to_string()))}else{rejected(error.kind,error.message)}
 }
+/// Run the launched binary once with only `--version` (bounded time and output); never delays readiness. A failure
+/// leaves the version absent and `runtime` incomplete.
+async fn startup_version(shared:Arc<Shared>,argv:Vec<String>,cwd:std::path::PathBuf){
+    let Some((program,rest))=argv.split_first() else {return;};
+    let mut command=tokio::process::Command::new(program);
+    command.args(rest).arg("--version").current_dir(&cwd).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).kill_on_drop(true);
+    let output=tokio::time::timeout(Duration::from_secs(5),command.output()).await;
+    let mut agent=shared.agent.lock().unwrap();
+    match output {
+        Ok(Ok(out)) if out.status.success() && out.stdout.len()<=4096=>agent.startup_version(&String::from_utf8_lossy(&out.stdout)),
+        _=>agent.startup_failed(&["runtime"]),
+    }
+    drop(agent);shared.wake();
+}
 fn controlled(mut argv:Vec<String>)->Result<Vec<String>> {
     anyhow::ensure!(!argv.is_empty(),"explicit native argv required");
     for arg in &argv[1..] {
@@ -61,6 +76,8 @@ async fn main()->Result<()> {
     let token=std::env::var("VQRO_BRIDGE_TOKEN").context("runtime bootstrap credential is required")?;
     let instance=args.instance.unwrap_or_else(fresh);let name=args.name.unwrap_or_else(||format!("pi-{instance}"));
     anyhow::ensure!(!instance.is_empty() && instance.len()<=64 && !name.is_empty() && name.len()<=128,"provider identity exceeds bounds");
+    // The runtime's own --version from the exact binary the launcher starts (agent-v0 startup, version_source cli).
+    let version_argv=args.native.clone();
     let argv=controlled(args.native)?;
     let cwd=args.cwd.unwrap_or(std::env::current_dir()?).canonicalize()?;
     let signals=admission::Signals::new();
@@ -85,6 +102,7 @@ async fn main()->Result<()> {
     if let Ok(reply)=native.call("get_commands",json!({}),Duration::from_secs(3)).await {
         if !reply.success || contract::rows(&reply.data,"commands").is_none(){shared.agent.lock().unwrap().incomplete.insert("commands".into());}
     }
+    tokio::spawn(startup_version(shared.clone(),version_argv,cwd.clone()));
     tokio::spawn(refresh_usage(shared.clone(),native.clone()));
     shared.metadata_refresh.notify_one();
     let (metadata_native,metadata_shared)=(native.clone(),shared.clone());

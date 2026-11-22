@@ -341,3 +341,15 @@ async fn user_messages_carry_the_bridge_origin_only_under_evidence(){
     assert!(last(&shared,"from before a restart").get("origin").is_none());
     dispose(&shared,&provider).await;
 }
+
+/// The version is the launched binary's own --version output, first line, bounded; failure leaves it absent.
+#[tokio::test]
+async fn startup_version_is_the_launched_binarys_own_output(){
+    let root=tempfile::tempdir().unwrap();let (shared,provider,_core)=fixture(root.path(),true).await;
+    startup_version(shared.clone(),vec!["/bin/echo".into(),"pi 9.9.9".into()],root.path().into()).await;
+    let value=|shared:&Arc<Shared>|shared.agent.lock().unwrap().journal.entity("startup","current").map(|(_,v)|v.clone()).unwrap();
+    assert_eq!(value(&shared)["runtime"],json!({"name":"Pi","version":"pi 9.9.9 --version","version_source":"cli:--version"}));
+    startup_version(shared.clone(),vec!["/bin/false".into()],root.path().into()).await;
+    assert!(value(&shared)["incomplete"].as_array().unwrap().iter().any(|f|f=="runtime"));
+    dispose(&shared,&provider).await;
+}
