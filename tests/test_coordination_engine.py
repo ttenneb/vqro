@@ -70,6 +70,33 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(self.engine.dispatch_one())
         self.assertEqual(self.engine.get(sent["delivery"])["state"], "accepted")
 
+    def test_blocked_agent_holds_and_resumes_on_the_fact_change(self):
+        # agent-v0 availability: held agent_blocked only while the runtime reports blocked; nothing is resent.
+        agent = self.resources["r1"]["data"]["agent"]
+        agent["availability"] = {"state": "blocked", "reason": "_retrying", "retry_after_ms": 2000}
+        sent = self.send()
+        self.resume()
+        self.assertIsNone(self.engine.dispatch_one())
+        self.assertEqual(self.ledger, [])
+        held = self.engine.get(sent["delivery"])
+        self.assertEqual((held["state"], held["reason"]), ("held", "agent_blocked"))
+        agent["availability"] = {"state": "available"}
+        self.assertEqual(self.engine.dispatch_one()["state"], "accepted")
+        self.assertEqual([op for _, op, _ in self.ledger], ["agent.send"], "one attempt, no replay")
+
+    def test_absent_or_unknown_availability_is_not_blocked(self):
+        # Negative controls: an absent fact, an unknown state, a non-object or an unknown reason without a blocked
+        # state never hold; only state == "blocked" does.
+        for availability in (None, {"state": "degraded"}, "blocked", {"reason": "rate_limited"}):
+            with self.subTest(availability=availability):
+                self.setUp()
+                agent = self.resources["r1"]["data"]["agent"]
+                if availability is not None:
+                    agent["availability"] = availability
+                self.send()
+                self.resume()
+                self.assertEqual(self.engine.dispatch_one()["state"], "accepted")
+
     def test_crash_after_claim_becomes_unknown_and_never_resends(self):
         sent = self.send()
         self.resume()

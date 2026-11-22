@@ -92,6 +92,7 @@ current state; they carry no per-token stream position.
 "data": {"agent": {"v": 0,
   "state": "running",                  // idle | running | requires_action | unknown
   "lifecycle": "live",                 // §7
+  "availability": null,                // optional, §7: live but blocked (rate limit, quota, auth); absent = unknown
   "host": {"id": "t3", "provider": "herdr", "instance": "…", "incarnation": "…", "kind": "terminal",
            "owns_lifecycle": true, "resource": "r12"},
   "completion": null,                  // last {id, reason, error?}; ids never reused
@@ -554,6 +555,21 @@ dialogs remain answerable; nothing is auto-approved.
   A reconnect never undoes `ended`.
 - What vqro does with a disconnected or ended endpoint (retention, tombstones, retire, handover) is coordination
   (`coordination-v0.md` §6).
+
+**Availability (live but blocked).** An optional fact next to `lifecycle`:
+`availability {state: available | blocked, reason?, retry_after_ms?, native?}`, declared in caps as
+`agent.availability {reasons: [...]}`. Absent means unknown; consumers never infer `blocked`.
+- An adapter publishes `blocked` only from the runtime's own report, and only if the runtime also gives a native clear
+  (an "available again" or end signal, or the end of the turn the block is in). A block that would clear only when the
+  next prompt arrives is not published (a coordinator holding that prompt would wait forever); it may be displayed.
+- `reason` maps the runtime's own class 1:1 (`rate_limited`, `quota`, `auth`, `overloaded`, or a `_`-prefixed
+  runtime-specific class such as Pi's `_retrying`), never derived from error text. Unknown reasons still mean blocked.
+  An unknown `state` is unknown, i.e. treated as absent.
+- `retry_after_ms` (relative) only when the runtime gives one; it is shown and never clears the block.
+- `blocked` clears on that native clear, a successful completion, or a new incarnation or epoch; never on a timer.
+  `native` carries the runtime's own words, bounded.
+- Coordination holds mail for a blocked agent (`agent_blocked`, `coordination-v0.md`) and resumes it when the fact
+  changes; nothing is retried or replayed.
 
 ## 8. Bounds
 

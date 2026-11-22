@@ -362,10 +362,13 @@ Results use one **coordination envelope** `{state, reason?, attempt?: {id, steps
 - **Fairness and quotas.** Within equal priority and one lane, round-robin prevents one sender from starving
   another. Quotas per sender per target and per sender overall (open records and bytes; `send_new` counts too)
   reject over the limit with `quota` `(pending K2 for numbers)`.
-- **Hold reasons** (always shown): `paused`, `agent_busy`, `agent_absent`, `agent_ended`, `agent_retired`,
+- **Hold reasons** (always shown): `paused`, `agent_busy`, `agent_absent`, `agent_blocked`, `agent_ended`, `agent_retired`,
   `session_changed`, `stale_guard`, `unsupported_mode`, `unsupported_content`, `too_large_for_consumer`,
   `origin_unsupported`, `integration_unavailable`, `no_grant`,
   `quota`, `awaiting_route`, `handover_pending`, `claim_unconfirmed`, `ordering_unknown`.
+- **`agent_blocked`:** held while the target's `availability.state` is `blocked` (`agent-v0.md` §7, the runtime's
+  own report). It resumes by itself when the fact changes; it adds no attempt, retry or replay (D10). An absent fact
+  or an unknown `state` is not blocked.
 - **Mode resolution:** the native mode if declared. `start` with `busy: reject` waits for idle. `settle` without native
   settle waits for idle and goes as `start`, `held_by: vqro`. `boundary` without native support stays held. `preempt`
   without native support only through §5.7.

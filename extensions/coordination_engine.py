@@ -953,6 +953,11 @@ class Coordinator:
             return "agent_absent"
         if lifecycle in ("stopping", "disconnected", "unknown"):
             return "agent_absent"
+        # agent-v0 availability: held only while the runtime itself reports blocked; absent or unknown is not blocked.
+        # It resumes by itself when the fact changes; no retry, no replay (D10).
+        availability = native.get("availability")
+        if isinstance(availability, dict) and availability.get("state") == "blocked":
+            return "agent_blocked"
         if resource.get("incarnation", "") != record["to"]["incarnation"]:
             return "awaiting_route"
         if record.get("expires_at_ms") is not None and self.clock() >= record["expires_at_ms"]:
