@@ -192,6 +192,20 @@ class CapacityPolicy(unittest.TestCase):
         self.accounts.changed('entries',{'changes':[{'key':'doc/unrelated'}]});self.assertEqual(self.accounts.pending,set())
         self.accounts.changed('resource',{'id':'old'});self.assertEqual(self.accounts.pending,set())
 
+    def test_completeness_and_availability_declaration_changes_reschedule_work(self):
+        self.settings(blocked='auto_restart');self.blocked()
+        target=resource('target',self.b,10);target['data']['agent']['incomplete']=['usage_limits']
+        self.core.resources['target']=target
+        self.accounts.changed('resource',{'id':'target'});self.accounts.pending.clear()
+        target['data']['agent']['incomplete']=[]
+        self.accounts.changed('resource',{'id':'target'});self.assertEqual(self.accounts.pending,{'old'})
+        self.accounts.pending.clear();self.accounts.observations.clear()
+        native=self.core.resources['old']['data']['agent']
+        native['caps']['agent.availability']={'reasons':[]}
+        self.accounts.changed('resource',{'id':'old'});self.assertEqual(self.accounts.pending,set())
+        native['caps']['agent.availability']={'reasons':['quota']}
+        self.accounts.changed('resource',{'id':'old'});self.assertEqual(self.accounts.pending,{'old'})
+
     def test_fresh_flag_survives_runtime_picker(self):
         from pi import Pi
         core=Core();launcher=Pi(core)

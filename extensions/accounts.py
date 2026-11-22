@@ -280,9 +280,11 @@ class Accounts:
                 rid=data.get('id');row=self.ext.resources.get(rid,{})
                 native=policy.facts(row);availability=native.get('availability')
                 availability=availability if isinstance(availability,dict) else {}
-                limits=native.get('usage_limits')
+                limits=native.get('usage_limits');caps=native.get('caps')
+                declared=caps.get('agent.availability') if isinstance(caps,dict) else None
                 signature=[row.get('incarnation'),native.get('epoch'),row.get('available'),native.get('lifecycle'),
-                           policy.configured_id(row),availability.get('state'),availability.get('reason'),limits]
+                           policy.configured_id(row),availability.get('state'),availability.get('reason'),
+                           limits,native.get('incomplete'),declared]
                 if self.observations.get(rid)==signature: return
                 if len(self.observations)>=256: self.observations.pop(next(iter(self.observations)))
                 self.observations[rid]=signature
