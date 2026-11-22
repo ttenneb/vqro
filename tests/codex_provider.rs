@@ -245,6 +245,27 @@ fn send(delivery: &str) -> Value {
     json!({"v":0,"mode":"admit","delivery":delivery,"content":[{"type":"text","text":"literal /no-command\nline2"}],"origin":{"principal":"p:test","actor":"actor:test","kind":"agent","agent":"r7"}})
 }
 
+// Session ACK does not wait for optional startup catalogs. In this fixture the collector's
+// last request is mcpServerStatus/list, which the fake rejects (so there is no next page).
+// Establish the request boundary before a zero-IPC assertion; do not filter any later calls.
+async fn native_after_startup_requests(root: &tempfile::TempDir) -> String {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let trace = std::fs::read_to_string(root.path().join("native.jsonl")).unwrap();
+            if trace.lines().any(|line| {
+                serde_json::from_str::<Value>(line)
+                    .ok()
+                    .is_some_and(|row| row["method"] == "mcpServerStatus/list")
+            }) {
+                return trace;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("fixture startup request sequence did not finish")
+}
+
 #[tokio::test]
 async fn injectable_frame_metadata_is_rejected_before_any_native_ipc() {
     let root = tempfile::tempdir().unwrap();
@@ -260,7 +281,7 @@ async fn injectable_frame_metadata_is_rejected_before_any_native_ipc() {
         1000,
     )
     .await;
-    let before = std::fs::read_to_string(root.path().join("native.jsonl")).unwrap();
+    let before = native_after_startup_requests(&root).await;
     for (index, (label, mut args)) in frame_metadata::invalid_inputs(&send("invalid-frame"))
         .into_iter()
         .enumerate()
@@ -385,7 +406,7 @@ async fn provider_wire_binds_omitted_identity_and_rejects_spoofing_before_native
         1000,
     )
     .await;
-    let native_before = std::fs::read_to_string(root.path().join("native.jsonl")).unwrap();
+    let native_before = native_after_startup_requests(&root).await;
     for (index, field) in ["principal", "actor", "initiator"].into_iter().enumerate() {
         let mut args = send(&format!("forged-{index}"));
         args["origin"][field] = json!("not-the-recorded-caller");
@@ -639,7 +660,7 @@ async fn future_model_readback_case(extra: &[&str], status: &str, actual: Option
         1000,
     )
     .await;
-    let before = std::fs::read_to_string(root.path().join("native.jsonl")).unwrap();
+    let before = native_after_startup_requests(&root).await;
     let configured = core
         .effect(
             "intent",
