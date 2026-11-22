@@ -56,7 +56,7 @@ impl Startup {
         if total <= BYTES {
             return;
         }
-        let mut sizes: Vec<_> = ["instructions", "skills", "plugins", "mcp"]
+        let mut sizes: Vec<_> = ["instructions", "skills", "plugins", "mcp", "extensions"]
             .into_iter()
             .map(|field| (field, crate::limits::encoded_bytes(&self.value[field])))
             .collect();
@@ -121,6 +121,36 @@ impl Startup {
         }
         self.bound();
     }
+    fn hook_inventory(&mut self, hooks: &super::customization::Hooks) {
+        if let Some(entries) = &hooks.entries {
+            self.value["extensions"] = json!(entries);
+            self.source("extensions", "rpc:hooks/list");
+        } else {
+            self.value.as_object_mut().unwrap().remove("extensions");
+            if let Some(sources) = self.value["sources"].as_object_mut() {
+                sources.remove("extensions");
+            }
+        }
+        if hooks.partial {
+            self.incomplete("extensions");
+        }
+        self.bound();
+    }
+
+    pub(super) fn customization_caps(&self) -> Value {
+        let mut caps = json!({});
+        for (kind, fields) in [
+            ("skill", &["skills"][..]),
+            ("extension", &["extensions", "plugins"][..]),
+            ("mcp_server", &["mcp"][..]),
+        ] {
+            if fields.iter().any(|field| self.value.get(*field).is_some()) {
+                caps[kind] = json!({"ops":["list"],"effective":"now"});
+            }
+        }
+        caps
+    }
+
     fn inventory(&mut self, field: &str, response: Option<&Value>, cwd: Option<&str>) {
         let source = match field {
             "skills" => "rpc:skills/list",
@@ -273,7 +303,11 @@ impl Endpoint {
         Change::new("startup", "current", self.startup.value.clone())
     }
     pub(super) fn capture_startup(&mut self, response: &Value, source: &str) -> Change {
+        let previous_caps = self.startup.customization_caps();
         self.startup.capture(response, source);
+        if previous_caps != self.startup.customization_caps() {
+            self.caps_rev = self.caps_rev.saturating_add(1);
+        }
         self.startup_change()
     }
     pub fn finish_startup_inventory(
@@ -290,8 +324,20 @@ impl Endpoint {
         {
             return Vec::new();
         }
-        let cwd = self.startup.value["cwd"].as_str().map(str::to_owned);
-        self.startup.inventory(field, response, cwd.as_deref());
+        let previous_caps = self.startup.customization_caps();
+        if field == "hooks" {
+            let hooks = super::customization::project(response);
+            if hooks.input_may {
+                self.observe_input_transform(&hooks.names);
+            }
+            self.startup.hook_inventory(&hooks);
+        } else {
+            let cwd = self.startup.value["cwd"].as_str().map(str::to_owned);
+            self.startup.inventory(field, response, cwd.as_deref());
+        }
+        if previous_caps != self.startup.customization_caps() {
+            self.caps_rev = self.caps_rev.saturating_add(1);
+        }
         vec![self.startup_change()]
     }
 }

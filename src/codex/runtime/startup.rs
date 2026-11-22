@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-const FIELDS: [&str; 3] = ["skills", "plugins", "mcp"];
+const FIELDS: [&str; 4] = ["hooks", "skills", "plugins", "mcp"];
 
 impl Runtime {
     pub fn initialize_startup(&self, response: &Value) {
@@ -96,6 +96,7 @@ async fn read(native: &Peer, method: &str, params: Value) -> Option<Value> {
 
 async fn catalog(native: &Peer, field: &str, thread: &str, cwd: Option<&str>) -> Option<Value> {
     match field {
+        "hooks" => read(native, "hooks/list", json!({"threadId":thread})).await,
         "skills" => {
             read(
                 native,

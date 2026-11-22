@@ -4,6 +4,7 @@
 //! the existing bounded `rpc::Peer`; this module only validates and reduces native observations.
 mod availability;
 pub mod configuration;
+mod customization;
 pub mod observation;
 pub mod runtime;
 mod startup;
@@ -235,6 +236,7 @@ pub struct Endpoint {
     pub caps_rev: u64,
     model: Option<Value>,
     startup: startup::Startup,
+    input_transform: Option<Value>,
     model_choices: Vec<Value>,
     config_rev: u64,
     config_pending: bool,
@@ -274,6 +276,7 @@ impl Endpoint {
             caps_rev: 1,
             model: None,
             startup: startup::Startup::default(),
+            input_transform: None,
             model_choices: Vec::new(),
             config_rev: 1,
             config_pending: false,
@@ -461,6 +464,12 @@ impl Endpoint {
                 .remove("config");
             caps.as_object_mut().unwrap().remove("agent.configure");
         }
+        let customize = self.startup.customization_caps();
+        if customize.as_object().is_some_and(|m| !m.is_empty()) {
+            caps["agent.customize"] = customize;
+        } else {
+            caps.as_object_mut().unwrap().remove("agent.customize");
+        }
         caps["rev"] = json!(self.caps_rev);
         let items = caps["agent"]["items"].clone();
         let requests: Vec<_> = self
@@ -498,6 +507,9 @@ impl Endpoint {
                 "items":items}}});
         if let Some(availability) = &self.availability {
             facts["data"]["agent"]["availability"] = availability.clone();
+        }
+        if let Some(transform) = &self.input_transform {
+            facts["data"]["agent"]["input_transform"] = transform.clone();
         }
         facts
     }
@@ -704,7 +716,20 @@ impl Endpoint {
         native: Option<Value>,
         args: &Value,
     ) -> Change {
+        // Freeze native possibility evidence on first dispatch, including its absence.
+        // Later catalog replies/ACKs never backdate it; caller-supplied labels are ignored.
+        let transform = if let Some(previous) = self.receipts.get(delivery) {
+            previous.get("may_transform").cloned()
+        } else {
+            self.input_transform
+                .as_ref()
+                .filter(|v| v["state"] == "may")
+                .map(|_| json!("unknown"))
+        };
         let mut receipt = json!({"delivery":delivery,"stage":stage});
+        if let Some(transform) = transform {
+            receipt["may_transform"] = transform;
+        }
         if let Some(native) = native {
             receipt["native"] = native;
         }
@@ -867,6 +892,7 @@ impl Endpoint {
         self.config_diagnostic = None;
         self.config_rev = self.config_rev.saturating_add(1);
         self.epoch = epoch;
+        self.input_transform = None;
         self.reset_availability();
         self.title = thread
             .get("name")

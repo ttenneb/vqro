@@ -17,6 +17,11 @@
     "guards": {"session": "adapter", "run": "runtime"},
     "receipts": {"retain": 256}
   },
+  "agent.customize": {
+    "skill": {"ops": ["list"], "effective": "now"},
+    "extension": {"ops": ["list"], "effective": "now"},
+    "mcp_server": {"ops": ["list"], "effective": "now"}
+  },
   "agent.availability": {"reasons": ["rate_limited", "quota", "auth", "_retrying"]},
   "agent.interrupt": {"pending": "unknown", "scope": "foreground", "waits": "none"},
   "agent.receipt": {},

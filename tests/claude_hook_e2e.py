@@ -34,7 +34,11 @@ def check(name, ok, detail=""):
         fails.append(name)
 
 
-AGENT = h.agent(json.loads(subprocess.run([a.hook, "declaration"], capture_output=True, text=True, check=True).stdout)["pull"])  # the launcher writes what the plugin declares
+declaration = json.loads(subprocess.run([a.hook, "declaration"], capture_output=True, text=True, check=True).stdout)
+check("tier-1 declaration invents no native customization inventory or no-transform guarantee",
+      "agent.customize" not in declaration and "input_transform" not in declaration and "extensions" not in declaration,
+      declaration)
+AGENT = h.agent(declaration["pull"])  # the launcher writes what the plugin declares
 CTX = ["context"]  # senders accept context insertion
 transcript = os.path.join(root, "transcript.jsonl")
 write_text(transcript, "")
@@ -356,12 +360,15 @@ if a.inbox == "fake":
 # 10. status reports with view facts Claude Code reports itself: cwd from the hook input, model from the transcript
 transcript_add({"type": "assistant", "uuid": "m-1", "message": {"role": "assistant", "model": "claude-fixture-1",
                 "stop_reason": "end_turn", "content": [{"type": "text", "text": "ok"}]}})
-hook("UserPromptSubmit", {"prompt": "facts"})
+hook("UserPromptSubmit", {"prompt": "facts", "extensions": [{"name": "unreported-forged"}],
+                          "input_transform": {"state": "none"}, "agent.customize": {"extension": {"ops": ["install"]}}})
 if a.inbox == "fake":
     seen = [s["state"] for s in h.statuses() if s.get("terminal") == AGENT and s.get("app") == "claude"]
     check("status (agents.status, K3 shape): unknown at start, running on a prompt/tool, idle at Stop",
           {"unknown", "running", "idle"} <= set(seen) and all(isinstance(s.get("seq"), int) for s in h.statuses()), seen)
     last = h.statuses()[-1].get("facts") or {}
+    check("tier-1 ignores unreported customization payload fields rather than declaring none or native management",
+          all(key not in last for key in ("extensions", "input_transform", "agent.customize")), last)
     check("status carries reported view facts only: cwd and the transcript's model; no usage invented",
           last.get("session", {}).get("cwd") == root and last["session"].get("model") == {"id": "claude-fixture-1"}
           and "usage" not in last, last)

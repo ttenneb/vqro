@@ -380,7 +380,7 @@ impl Runtime {
         if reset
             || changes
                 .iter()
-                .any(|c| matches!(c.kind.as_str(), "state" | "session" | "request"))
+                .any(|c| matches!(c.kind.as_str(), "state" | "session" | "request" | "startup"))
         {
             self.slots[index].dirty.store(true, Ordering::Release);
         }
