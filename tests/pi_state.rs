@@ -297,6 +297,20 @@ fn pi_tool_duration_is_the_native_duration_ms() {
     }
 }
 
+/// as-reviewer R2/R3 on f50a03d3: the start-up model is the first observation; a failed get_commands is incomplete.
+#[test]
+fn startup_model_is_the_first_observation_and_failed_inventories_are_incomplete() {
+    let startup=|a:&Agent|entities(a,"startup").into_iter().find(|r|r["id"]=="current").unwrap()["value"].clone();
+    let mut a=Agent::with_cwd("private".into(),Signals::new(),"/w".into());
+    let state=|model:&str|json!({"type":"response","id":"s","command":"get_state","success":true,"data":{"sessionId":"S","isStreaming":false,
+        "isCompacting":false,"steeringMode":"all","followUpMode":"all","model":{"id":model}}});
+    event(&mut a,state("modelA"));event(&mut a,state("modelB"));
+    assert_eq!(startup(&a)["model"],"modelA","start-up model is not rewritten by later get_state");
+    event(&mut a,json!({"type":"response","id":"c","command":"get_commands","success":false,"error":"boom"}));
+    let value=startup(&a);
+    for field in ["skills","prompts","commands"] {assert!(value.get(field).is_none() && value["incomplete"].as_array().unwrap().contains(&json!(field)),"{field}: {value}");}
+}
+
 /// Startup strings are never shortened (spec e8232d24): an over-bound path/description is omitted from its entry, an
 /// over-bound name omits the entry, an over-long list loses entries from its end; each field is named incomplete.
 #[test]

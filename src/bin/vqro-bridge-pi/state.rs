@@ -394,6 +394,7 @@ impl Agent {
                     if self.queue.is_none(){self.incomplete.insert("queue".into());}else{self.incomplete.remove("queue");}
                 }
                 Some("response") if record["command"]=="prompt"=>self.origins.prompt_response(record),
+                Some("response") if record["command"]=="get_commands" && record["success"]!=true=>self.startup_failed(&["skills","prompts","commands"]),
                 Some("response") if record["command"]=="get_commands" && record["success"]==true=>{
                     self.commands.observe(&record["data"]);
                     match super::contract::rows(&record["data"],"commands") {Some(rows)=>{let rows=rows.clone();self.startup.commands(&rows);self.publish_startup();},None=>self.startup_failed(&["skills","prompts","commands"])}

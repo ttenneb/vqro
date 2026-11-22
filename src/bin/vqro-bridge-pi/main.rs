@@ -51,13 +51,24 @@ fn native_failure(error:native::Error)->Result<Outcome,ProviderError> {
 /// leaves the version absent and `runtime` incomplete.
 async fn startup_version(shared:Arc<Shared>,argv:Vec<String>,cwd:std::path::PathBuf){
     let Some((program,rest))=argv.split_first() else {return;};
+    use tokio::io::AsyncReadExt;
     let mut command=tokio::process::Command::new(program);
-    command.args(rest).arg("--version").current_dir(&cwd).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).kill_on_drop(true);
-    let output=tokio::time::timeout(Duration::from_secs(5),command.output()).await;
+    command.args(rest).arg("--version").current_dir(&cwd).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null()).kill_on_drop(true);
+    // Read at most 4 KiB + 1 while reading (never buffer an unbounded stream), all within 5 s; then reap the child.
+    let read=async {
+        let mut child=command.spawn().ok()?;
+        let mut stdout=child.stdout.take()?;let mut buffer=Vec::new();
+        (&mut stdout).take(4097).read_to_end(&mut buffer).await.ok()?;
+        if buffer.len()>4096 {let _=child.kill().await;return None;}
+        let status=child.wait().await.ok()?;
+        status.success().then_some(buffer)
+    };
+    let output=tokio::time::timeout(Duration::from_secs(5),read).await.ok().flatten();
     let mut agent=shared.agent.lock().unwrap();
     match output {
-        Ok(Ok(out)) if out.status.success() && out.stdout.len()<=4096=>agent.startup_version(&String::from_utf8_lossy(&out.stdout)),
-        _=>agent.startup_failed(&["runtime"]),
+        Some(out)=>agent.startup_version(&String::from_utf8_lossy(&out)),
+        None=>agent.startup_failed(&["runtime"]),
     }
     drop(agent);shared.wake();
 }
@@ -99,8 +110,10 @@ async fn main()->Result<()> {
         anyhow::bail!("native Pi did not report startup state");
     }
     // Real Pi uses a commands/models container, older fixtures may return the array directly.
-    if let Ok(reply)=native.call("get_commands",json!({}),Duration::from_secs(3)).await {
-        if !reply.success || contract::rows(&reply.data,"commands").is_none(){shared.agent.lock().unwrap().incomplete.insert("commands".into());}
+    match native.call("get_commands",json!({}),Duration::from_secs(3)).await {
+        Ok(reply)=>{if !reply.success || contract::rows(&reply.data,"commands").is_none(){shared.agent.lock().unwrap().incomplete.insert("commands".into());}}
+        // No reply at all (timeout, protocol): the startup inventories are unknown, named incomplete.
+        Err(_)=>shared.agent.lock().unwrap().startup_failed(&["skills","prompts","commands"]),
     }
     tokio::spawn(startup_version(shared.clone(),version_argv,cwd.clone()));
     tokio::spawn(refresh_usage(shared.clone(),native.clone()));

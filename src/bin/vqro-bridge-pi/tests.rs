@@ -353,3 +353,16 @@ async fn startup_version_is_the_launched_binarys_own_output(){
     assert!(value(&shared)["incomplete"].as_array().unwrap().iter().any(|f|f=="runtime"));
     dispose(&shared,&provider).await;
 }
+
+/// as-reviewer R1 on f50a03d3: a --version that floods stdout is read only up to the bound, then given up.
+#[tokio::test]
+async fn startup_version_reads_a_bounded_amount_of_output(){
+    let root=tempfile::tempdir().unwrap();let (shared,provider,_core)=fixture(root.path(),true).await;
+    let started=Instant::now();
+    startup_version(shared.clone(),vec!["/bin/sh".into(),"-c".into(),"exec yes".into()],root.path().into()).await; // floods stdout
+    assert!(started.elapsed()<Duration::from_secs(4),"stopped at the byte bound, not at the timeout");
+    let value=shared.agent.lock().unwrap().journal.entity("startup","current").map(|(_,v)|v.clone()).unwrap();
+    assert!(value["incomplete"].as_array().unwrap().iter().any(|f|f=="runtime"));
+    assert!(value["runtime"].get("version").is_none());
+    dispose(&shared,&provider).await;
+}

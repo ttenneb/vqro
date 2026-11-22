@@ -30,8 +30,10 @@ impl Startup {
             _=>self.mark("runtime"),
         }
     }
-    /// get_state: the model's own id.
+    /// get_state: the model's own id at start. The first observation is kept: later get_state replies (the model
+    /// changing during the session) are the live session facts, not the start-up record.
     pub fn state(&mut self,data:&Value){
+        if self.fields.contains_key("model") {return;}
         match bounded(&data["model"]["id"],NAME) {Ok(Some(id))=>self.set("model",json!(id),"rpc:get_state"),Ok(None)=>{},Err(())=>self.mark("model")}
     }
     /// get_commands: skills (loaded), prompt templates and extension commands, with their sourceInfo paths.
