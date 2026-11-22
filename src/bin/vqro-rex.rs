@@ -829,11 +829,11 @@ async fn run() -> Result<(), String> {
         Some(s) => (s, None),
         None => {
             let dir = owned_server::dir(None, false).await?;
-            {
+            let socket = {
                 let _lock = owned_server::lock(&dir).await?;
-                owned_server::ensure(&a.rex, &dir)?;
-            }
-            (owned_server::socket(&dir), Some(dir))
+                owned_server::ensure(&a.rex, &dir)?
+            };
+            (socket, Some(dir))
         }
     };
     loop {
@@ -842,7 +842,7 @@ async fn run() -> Result<(), String> {
         // don't restart an owned server someone stopped on purpose.
         loop {
             let lock = match &owned_dir { Some(dir) => Some(owned_server::lock(dir).await?), None => None };
-            let reachable = std::os::unix::net::UnixStream::connect(&socket).is_ok();
+            let reachable = rex::transport::connect(&socket).await.is_ok();
             drop(lock);
             if reachable { break; }
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -873,7 +873,7 @@ async fn registration(a: &Args, endpoint: &str, socket: &Path, owned_dir: Option
     let mut config = Config::new(name, instance, capabilities());
     config.software = json!({"name": "rex", "version": version.as_ref().and_then(|v| v["version"].as_str()).unwrap_or_default(),
         "api_revision": control.welcome["api_revision"]});
-    let core = tokio::net::UnixStream::connect(endpoint).await.map_err(|e| format!("cannot reach the core: {e}"))?;
+    let core = vqro::transport::connect(endpoint).await.map_err(|e| format!("cannot reach the core: {e}"))?;
     let (provider, mut requests) = Provider::connect(core, config).await.map_err(|e| e.to_string())?;
     let app = Arc::new(App {
         provider: provider.clone(),

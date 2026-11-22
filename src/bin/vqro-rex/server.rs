@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-/// The runtime directory (sockets) of the owned server: `<vqro state>/rex`. Rex puts `server.sock` there when
-/// `REX_RUNTIME_DIR` names it; its saved sessions go to `<vqro state>/rex/state`.
+/// The owned server's runtime directory: `<vqro state>/rex`. Unix Rex puts `server.sock` there;
+/// Windows Rex derives an isolated pipe suffix from it. Saved sessions go to `<vqro state>/rex/state`.
 pub async fn dir(explicit: Option<PathBuf>, standalone: bool) -> Result<PathBuf, String> {
     let state = if let Some(path) = explicit.or_else(|| std::env::var_os("VQRO_STATE_DIR").map(PathBuf::from)) {
         path
@@ -26,12 +26,14 @@ pub async fn dir(explicit: Option<PathBuf>, standalone: bool) -> Result<PathBuf,
     }
     let dir = state.join("rex");
     // Unix socket paths are limited (about 104 bytes on macOS); Rex adds `login-server.sock` too.
+    #[cfg(unix)]
     if dir.join("login-server.sock").as_os_str().len() >= 100 {
         return Err("vqro state directory is too long for rex's sockets; use a shorter VQRO_STATE_DIR".into());
     }
     Ok(dir)
 }
 
+#[cfg(unix)]
 pub fn socket(dir: &Path) -> PathBuf {
     dir.join("server.sock")
 }
@@ -65,11 +67,20 @@ pub async fn lock(dir: &Path) -> Result<std::fs::File, String> {
 pub fn rex(bin: &Path, dir: &Path) -> std::process::Command {
     let mut cmd = std::process::Command::new(bin);
     cmd.env_clear();
-    for k in ["PATH", "HOME", "LANG", "SHELL", "USER", "LOGNAME"] {
+    #[cfg(unix)]
+    let keys = &["PATH", "HOME", "LANG", "SHELL", "USER", "LOGNAME"][..];
+    // Select inherited Windows profile/tool lookup variables, never provider/core credentials or endpoint
+    // selectors. This does not acquire a fresh login environment.
+    #[cfg(windows)]
+    let keys = &["PATH", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "APPDATA",
+        "ProgramData", "ProgramFiles", "ProgramFiles(x86)", "SystemRoot", "WINDIR", "ComSpec", "TEMP", "TMP",
+        "USERNAME", "USERDOMAIN", "LANG"][..];
+    for k in keys {
         if let Some(v) = std::env::var_os(k) {
             cmd.env(k, v);
         }
     }
+    #[cfg(unix)]
     if std::env::var_os("PATH").is_none() {
         cmd.env("PATH", "/usr/bin:/bin");
     }
@@ -77,12 +88,20 @@ pub fn rex(bin: &Path, dir: &Path) -> std::process::Command {
     cmd
 }
 
-/// Start the owned server if nothing answers on its socket. `rex server start` is idempotent and keeps the server
-/// running after its last session (exit-empty false). Its terminals inherit selected PATH/HOME/locale/shell/user
-/// variables from this process, not a freshly acquired login environment or vqro's own (`VQRO_*`, `HERDR_*`).
-pub fn ensure(bin: &Path, dir: &Path) -> Result<(), String> {
-    if std::os::unix::net::UnixStream::connect(socket(dir)).is_ok() {
-        return if marked(dir) { Ok(()) } else {
+/// Start the owned server if needed, with the caller holding its coordination lock. `rex server start` keeps
+/// running after its last session (on Windows, until stopped or signed out). Terminals inherit selected process
+/// variables, not a fresh login environment or vqro's own (`VQRO_*`, `HERDR_*`). Windows endpoint discovery uses
+/// Rex's reported value, never a guessed pipe. The marker/reachability are not authentication against same-user replacement.
+pub fn ensure(bin: &Path, dir: &Path) -> Result<PathBuf, String> {
+    #[cfg(unix)]
+    if vqro::rex::transport::connect_sync(&socket(dir)).is_ok() {
+        return if marked(dir) { Ok(socket(dir)) } else {
+            Err("existing Rex endpoint is not marked vqro-owned; use --rex-socket for an external server".into())
+        };
+    }
+    #[cfg(windows)]
+    if let Some(endpoint) = reported_endpoint(bin, dir)? {
+        return if marked(dir) { Ok(endpoint) } else {
             Err("existing Rex endpoint is not marked vqro-owned; use --rex-socket for an external server".into())
         };
     }
@@ -100,31 +119,66 @@ pub fn ensure(bin: &Path, dir: &Path) -> Result<(), String> {
         }
     }
     for _ in 0..50 {
-        if std::os::unix::net::UnixStream::connect(socket(dir)).is_ok() {
+        #[cfg(unix)]
+        if vqro::rex::transport::connect_sync(&socket(dir)).is_ok() {
             if should_mark { std::fs::write(dir.join("vqro-owned"), OWNED_MARKER).map_err(|e| e.to_string())?; }
-            return Ok(());
+            return Ok(socket(dir));
+        }
+        #[cfg(windows)]
+        if let Some(endpoint) = reported_endpoint(bin, dir)? {
+            if should_mark { std::fs::write(dir.join("vqro-owned"), OWNED_MARKER).map_err(|e| e.to_string())?; }
+            return Ok(endpoint);
         }
         std::thread::sleep(Duration::from_millis(100));
     }
     Err("rex server start reported success but its socket does not answer".into())
 }
 
-fn status(bin: &Path, dir: &Path) -> Result<Value, String> {
-    if std::os::unix::net::UnixStream::connect(socket(dir)).is_err() {
-        return Ok(json!({"running": false, "socket": socket(dir)}));
+/// Never derive the pipe SID or REX_RUNTIME_DIR suffix: Rex is the authority on its endpoint.
+#[cfg(windows)]
+fn reported_endpoint(bin: &Path, dir: &Path) -> Result<Option<PathBuf>, String> {
+    let out = rex(bin, dir).args(["server", "status", "--json"]).output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Ok(None);
     }
+    let value: Value = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
+    endpoint_from_status(&value).map(Some)
+}
+
+#[cfg(any(windows, test))]
+fn endpoint_from_status(value: &Value) -> Result<PathBuf, String> {
+    let endpoint = value["endpoint"].as_str().filter(|s| !s.is_empty()).ok_or("rex server status returned no endpoint")?;
+    Ok(vqro::rex::transport::endpoint(Path::new(endpoint)))
+}
+
+fn status(bin: &Path, dir: &Path) -> Result<Value, String> {
+    #[cfg(unix)]
+    let socket = socket(dir);
+    #[cfg(unix)]
+    if vqro::rex::transport::connect_sync(&socket).is_err() {
+        return Ok(json!({"running": false, "socket": socket}));
+    }
+    #[cfg(windows)]
+    let socket = match reported_endpoint(bin, dir)? {
+        Some(endpoint) => endpoint,
+        None => return Ok(json!({"running": false})),
+    };
     let out = rex(bin, dir).args(["api", "call", "server.status", "{}"]).output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!("rex server.status failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
     let s: Value = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
-    Ok(json!({"running": true, "socket": socket(dir), "instance": s["instance_id"], "sessions": s["session_count"],
+    Ok(json!({"running": true, "socket": socket, "instance": s["instance_id"], "sessions": s["session_count"],
               "version": s["version"]}))
 }
 
 /// Count a complete control snapshot before stop, not an atomic promise about clients arriving afterwards.
-async fn inventory(dir: &Path) -> Result<(usize, usize), String> {
-    let (control, _events) = vqro::rex::Control::connect(&socket(dir), "vqro-rex-stop-inventory", Duration::from_secs(10)).await.map_err(|e| e.to_string())?;
+async fn inventory(bin: &Path, dir: &Path) -> Result<(usize, usize), String> {
+    #[cfg(unix)]
+    let endpoint = { let _ = bin; socket(dir) };
+    #[cfg(windows)]
+    let endpoint = reported_endpoint(bin, dir)?.ok_or("owned Rex server is not reachable for inventory")?;
+    let (control, _events) = vqro::rex::Control::connect(&endpoint, "vqro-rex-stop-inventory", Duration::from_secs(10)).await.map_err(|e| e.to_string())?;
     let result = async {
         let list = control.call("session.list", json!({})).await.map_err(|e| e.to_string())?;
         let sessions = list["sessions"].as_array().ok_or("invalid session.list before stop")?;
@@ -193,7 +247,7 @@ pub async fn command(args: &[String]) -> Result<(), String> {
     if expected != instance || current != instance {
         return Err("instance did not match (or the server changed); nothing stopped".into());
     }
-    let (sessions, terminals) = inventory(&dir).await?;
+    let (sessions, terminals) = inventory(&bin, &dir).await?;
     let warning = "Clients outside vqro may attach/create after this check and would be stopped too; native stop is unconditional.";
     eprintln!("Checked {sessions} sessions, {terminals} terminals in the owned server. {warning}");
     // The file lock excludes vqro attach/create calls only. External clients and same-user replacement
@@ -275,5 +329,31 @@ mod regression_tests {
         assert!(!root.join("invoked").exists(), "unmarked fake server must never be administered");
         drop(listener);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_endpoint_is_reported_not_derived() {
+        assert_eq!(endpoint_from_status(&json!({"endpoint": "unix:///private/rex/server.sock"})).unwrap(),
+            Path::new("/private/rex/server.sock"));
+        let pipe = r"\\.\pipe\rex-S-1-5-21-example-private";
+        assert_eq!(endpoint_from_status(&json!({"endpoint": pipe})).unwrap(), Path::new(pipe));
+        for value in [json!({}), json!({"endpoint": ""}), json!({"endpoint": 42})] {
+            assert!(endpoint_from_status(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn owned_command_has_private_runtime_and_no_inherited_credentials() {
+        let cmd = rex(Path::new("rex"), Path::new("private-runtime"));
+        let vars: std::collections::BTreeMap<_, _> = cmd.get_envs().collect();
+        assert_eq!(vars.get(std::ffi::OsStr::new("REX_RUNTIME_DIR")),
+            Some(&Some(std::ffi::OsStr::new("private-runtime"))));
+        assert!(!vars.keys().any(|key| key.to_string_lossy().starts_with("VQRO_") || key.to_string_lossy().starts_with("HERDR_")));
+        assert_eq!(cmd.get_args().collect::<Vec<_>>(), vec![std::ffi::OsStr::new("--autostart=false")]);
     }
 }

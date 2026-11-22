@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 
 use super::ws::{self, Message};
@@ -55,7 +54,7 @@ type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, Error>>>>
 
 #[derive(Clone)]
 pub struct Control {
-    writer: Arc<tokio::sync::Mutex<ws::Writer<tokio::net::unix::OwnedWriteHalf>>>,
+    writer: Arc<tokio::sync::Mutex<ws::Writer<super::transport::WriteHalf>>>,
     pending: Pending,
     next_id: Arc<AtomicU64>,
     closed: Arc<tokio::sync::watch::Sender<Option<String>>>,
@@ -67,9 +66,9 @@ impl Control {
     /// Connect and say hello. `events` receives every event the server sends this connection.
     pub async fn connect(socket: &Path, name: &str, timeout: Duration) -> Result<(Control, mpsc::Receiver<Event>), Error> {
         let lost = |e: std::io::Error| Error::Lost(e.to_string());
-        let mut stream = tokio::time::timeout(timeout, UnixStream::connect(socket)).await.map_err(|_| Error::Timeout)?.map_err(lost)?;
+        let mut stream = tokio::time::timeout(timeout, super::transport::connect(socket)).await.map_err(|_| Error::Timeout)?.map_err(lost)?;
         let leftover = tokio::time::timeout(timeout, ws::handshake(&mut stream, "/api/control", PROTOCOL)).await.map_err(|_| Error::Timeout)?.map_err(lost)?;
-        let (read, write) = stream.into_split();
+        let (read, write) = tokio::io::split(stream);
         let mut reader = ws::Reader::new(read, leftover, MAX_MESSAGE);
         let mut writer = ws::Writer::new(write);
         let hello = json!({"type": "hello", "api_revision": API_REVISION,
@@ -106,7 +105,7 @@ impl Control {
         Ok((control, events_rx))
     }
 
-    async fn read_loop(self, mut reader: ws::Reader<tokio::net::unix::OwnedReadHalf>, events: mpsc::Sender<Event>) {
+    async fn read_loop(self, mut reader: ws::Reader<super::transport::ReadHalf>, events: mpsc::Sender<Event>) {
         let mut pong = None;
         let mut lagged = false;
         let why = loop {
@@ -231,7 +230,7 @@ mod regression_tests {
     #[tokio::test]
     async fn lag_marker_arrives_after_drain_without_another_server_event() {
         let (client, mut server) = tokio::net::UnixStream::pair().unwrap();
-        let (read, write) = client.into_split();
+        let (read, write) = tokio::io::split(client);
         let control = Control { writer:Arc::new(tokio::sync::Mutex::new(ws::Writer::new(write))),
             pending:Arc::new(Mutex::new(HashMap::new())), next_id:Arc::new(AtomicU64::new(1)),
             closed:Arc::new(tokio::sync::watch::channel(None).0), welcome:Value::Null, timeout:Duration::from_secs(1) };

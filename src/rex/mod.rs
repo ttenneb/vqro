@@ -4,19 +4,19 @@
 pub mod control;
 pub mod data;
 pub mod ws;
+pub mod transport;
 
 use std::path::Path;
 use std::time::Duration;
 
 use serde_json::json;
-use tokio::net::UnixStream;
 
 pub use control::{Control, Error, Event};
 
 /// An open terminal data channel: Rex's VT stream for one block, after the snapshot.
 pub struct DataChannel {
-    pub reader: ws::Reader<tokio::net::unix::OwnedReadHalf>,
-    pub writer: ws::Writer<tokio::net::unix::OwnedWriteHalf>,
+    pub reader: ws::Reader<transport::ReadHalf>,
+    pub writer: ws::Writer<transport::WriteHalf>,
     pub nonce: u64,
 }
 
@@ -27,9 +27,9 @@ pub async fn open_data(socket: &Path, control: &Control, session: &str, block: &
     let ticket = ticket["ticket"].as_str().ok_or("data.connect returned no ticket")?.to_string();
     let hello = data::hello(&ticket)?;
     tokio::time::timeout(timeout, async {
-        let mut stream = UnixStream::connect(socket).await.map_err(|e| e.to_string())?;
+        let mut stream = transport::connect(socket).await.map_err(|e| e.to_string())?;
         let leftover = ws::handshake(&mut stream, "/api/data", data::PROTOCOL).await.map_err(|e| e.to_string())?;
-        let (read, write) = stream.into_split();
+        let (read, write) = tokio::io::split(stream);
         let mut reader = ws::Reader::new(read, leftover, data::MAX_SNAPSHOT);
         let mut writer = ws::Writer::new(write);
         writer.binary(&hello).await.map_err(|e| e.to_string())?;

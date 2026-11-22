@@ -138,6 +138,31 @@ community clients and observing our own private server's traffic; the Rex binary
 - Powerless fake-control/fake-core tests cover all six review findings; a separate unit control proves lag delivery
   after queue drain. No real Rex server is needed for these regression controls.
 
+## Windows transport (2026-11-22)
+
+- Control and data channels use the shared `vqro::transport::connect` (`ClientStream`, Tokio split halves),
+  not a second named-pipe implementation. Rex-specific `unix://` normalization is in `src/rex/transport.rs`;
+  raw Unix paths and Windows pipe names pass through. The provider's core connection uses that same shared
+  connector without normalization (D22: the core endpoint is opaque).
+- [Rex's Windows running guide](https://www.superlogical.com/rex/docs/windows/running.md) documents one personal
+  server per account, no shared/login server; `rex server start` needs no administrator, keeps running when empty,
+  and ends when explicitly stopped or the account signs out. vqro does not install a service or sign-in entry.
+- The guide documents `\\\\.\\pipe\\rex-<SID>` and a suffix when `REX_RUNTIME_DIR` is set. vqro **does not derive**
+  either: owned Windows servers use the private runtime directory and `rex server status --json`'s `endpoint`.
+  The Unix socket path-length restriction applies only on Unix. The owned command retains a small platform-specific
+  login environment allowlist, never inherited vqro/Herdr endpoint or credential variables.
+- Verified on a private Linux server (Rex snapshot.2506/API 19): `server start --json` and `server status --json`
+  both report a top-level `endpoint` (`unix://...`), and `--state-dir` plus `REX_RUNTIME_DIR` isolates the server;
+  that probe was explicitly stopped. Windows CLI JSON shape, isolated pipe selection, startup flags/environment,
+  sign-out lifetime and real control/data handshakes remain **unverified at runtime**: no Windows host is available.
+  Cross-compilation alone cannot establish those behaviours.
+- Checks after rebasing onto the corrected Rex provider plus integrated Windows transport:
+  Linux `cargo test --lib rex::` (7) and `cargo test --bin vqro-rex` (30) pass. The corrected provider's
+  private-server `tests/e2e_rex.py TARGET` passes all 27 checks.
+  `cargo check --target x86_64-pc-windows-gnu --all-targets` passes, including the complete provider
+  and owned-server Windows code. An earlier module-only dependency check was blocked by then-unmigrated
+  core/client Unix imports; that limitation is resolved by the integrated Windows transport.
+
 ## Evidence
 
 - `tests/e2e_rex.py` (gate step `e2e-rex`, SKIP without Rex): owned server under the private root; capabilities;
