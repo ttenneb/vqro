@@ -2185,6 +2185,13 @@ impl App {
         });
         // Drawn through its fallback (D29): commands still address the pane's own view.
         if let Some(shown) = self.shown_view(view).0.filter(|s| s != view) { ctx["shown_view"] = json!(shown); }
+        // A panel's `menu_context` (live, changes without transactions) joins the context as `menu.<key>`, so a
+        // menu item can show only while it applies (`when: {"menu.agent_working": true}`).
+        if self.view_kind(view) == "panel" {
+            if let Some(extra) = self.panel_value(view)["menu_context"].as_object() {
+                for (k, x) in extra.iter().filter(|(_, x)| !x.is_object() && !x.is_array()) { ctx[format!("menu.{k}")] = x.clone(); }
+            }
+        }
         // The innermost tab holding this pane, so tab commands work from the keyboard too.
         if let Some((_, mut root)) = self.active_layout() {
             for depth in (0..path.len()).rev() {
@@ -5648,6 +5655,24 @@ mod tests {
         assert_eq!(app.overlay_len(), 24);
         app.on_key(key(KeyCode::Esc));
         assert!(app.overlay.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_panels_menu_context_joins_its_pane_context_for_when() {
+        // pane-batch2 / agent-standard-coord (batch 5): agent menu items show only while they apply, from live content.
+        let (mut app, _) = app();
+        app.ws.entries.insert("workspace/active".into(), json!({"layout": "main"}));
+        app.ws.entries.insert("layout/main".into(), json!({"view": "p"}));
+        app.ws.entries.insert("view/p".into(), json!({"kind":"panel","items":[{"text":"x"}],"menu_context":{"agent_working":true,"queued":2,"nested":{"no":1}}}));
+        app.ws.entries.insert("menu/abort".into(), json!({"where":"pane","label":"Abort","command":"client.zoom","when":{"menu.agent_working":true}}));
+        app.ws.entries.insert("menu/clear".into(), json!({"where":"pane","label":"Clear queue","command":"client.zoom","when":{"menu.agent_queued":true}}));
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let ctx = app.ctx_leaf(0);
+        assert_eq!((ctx["menu.agent_working"].clone(), ctx["menu.queued"].clone()), (json!(true), json!(2)));
+        assert!(ctx.get("menu.nested").is_none(), "only plain values");
+        let labels: Vec<String> = app.menu_items("pane", &ctx).into_iter().map(|i| i.label).collect();
+        assert_eq!(labels, vec!["Abort"]);
     }
 
     #[tokio::test]

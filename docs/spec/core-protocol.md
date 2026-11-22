@@ -927,7 +927,10 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
   the mouse can finish** (close, zoom, split, move, pick from a list, stop with a confirming click), never one that
   then asks for typing (`input`); put those on keys and in the command list (human decision, batch 5). Clients
   show a right-click menu without the "type to filter" line until something is typed; opened from the keyboard,
-  long menus keep it.
+  long menus keep it. **State-dependent items:** a panel's content may carry `menu_context: {key: scalar}`
+  (published live, so it changes without transactions); clients add each to that pane's context as `menu.<key>`,
+  so an item can show only while it applies (`when: {"menu.agent_working": true}`). Clients without it never
+  match such a `when`, so those items stay hidden.
 - `binding/<id>`: `{key, command, args?, where?, label?, priority?, input?, prefill?, pick?, hidden?, when?, repeat?}`. `key` is a prefix key
   (`"n"`, `"Left"`, see Keys) or a gesture (`"mouse.right"`, `"mouse.middle"`) with `where` = `"pane"` or `"tab"`.
   `"mouse.drag"` with `where: "tab"`: a left press on a tab chip released over another chip of the same bar runs

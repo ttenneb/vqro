@@ -188,6 +188,10 @@ class TextClient:
             ctx.update(tab_path=tab_path, tab_index=tab_index, tab_title=(tabs[tab_index] or {}).get("title"))
         if self.shown_of(view) != view:
             ctx["shown_view"] = self.shown_of(view)
+        # A panel's live `menu_context` joins as `menu.<key>` (core-protocol.md, menus).
+        extra = (self.panel_value(view) or {}).get("menu_context") if (self.ws.entries.get(f"view/{self.shown_of(view)}") or {}).get("kind") == "panel" else None
+        if isinstance(extra, dict):
+            ctx.update({f"menu.{k}": x for k, x in extra.items() if not isinstance(x, (dict, list))})
         return ctx
 
     def show(self):

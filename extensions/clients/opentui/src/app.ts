@@ -240,6 +240,10 @@ export class App {
     }
     const shown = this.shownView(leaf.view);
     if (shown && shown !== leaf.view) ctx.shown_view = shown;
+    // A panel's live `menu_context` joins as `menu.<key>` (core-protocol.md, menus).
+    const extra = (shown ?? leaf.view) && this.ws.entries.get(`view/${shown ?? leaf.view}`)?.kind === "panel" ? this.panelValue(leaf.view)?.menu_context : null;
+    if (extra && typeof extra === "object" && !Array.isArray(extra))
+      for (const [k, x] of Object.entries(extra)) if (x === null || typeof x !== "object") ctx[`menu.${k}`] = x;
     return ctx;
   }
 
