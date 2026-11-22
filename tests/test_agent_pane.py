@@ -164,7 +164,7 @@ class TranscriptRows(unittest.TestCase):
     def test_senders_come_from_the_recorded_origin_in_order(self):
         headers = [r["text"] for r in self.rows() if str(r.get("id", "")).startswith("m:")]
         self.assertEqual(headers[0].split(" · ")[0], "Human (undeclared)", "as recorded, never inferred to be the viewer")
-        self.assertIn("in the conversation", headers[0], "the delivery's receipt stage")
+        self.assertNotIn("in the conversation", headers[0], "normal delivery adds no receipt jargon")
         self.assertEqual(headers[1:], ["Pi", "Message from vqro-lead (agent r7)", "Pi · writing…"], "thinking has no label of its own")
         self.assertIn("┊ Config change, not code.", [r.get("text") for r in self.rows()])
         texts = [r.get("text") for r in self.rows()]
@@ -216,9 +216,25 @@ class TranscriptRows(unittest.TestCase):
         self.assertNotIn("System", texts)
         sent = {**empty, ("message", "u1"): {"position": 3, "role": "user", "content": [], "final": True, "delivery": "d:1"},
                 ("receipt", "d:1"): {"delivery": "d:1", "stage": "inserted"}}
-        self.assertTrue(any("in the conversation" in (t or "") for t in [r.get("text") for r in self.rows(sent)]),
-                        "an empty message with a delivery receipt keeps its line")
+        self.assertTrue(any(r.get("id") == "m:u1" for r in self.rows(sent)),
+                        "an empty message with a delivery receipt keeps its line, without a redundant suffix")
         self.assertIn("Pi · writing…", texts, "a message still arriving keeps its line")
+
+    def test_receipt_labels_are_plain_and_do_not_claim_uncertain_delivery(self):
+        names = agent_transcript.Names({"r2": {"name": "Pi"}}, "r2", owner="owner")
+        value = {"role": "user", "origin": {"principal": "owner"}, "delivery": "d", "content": text("hi")}
+        for stage in ("admitted", "accepted", "inserted"):
+            row = agent_transcript.message_rows("u", value, names, {"d": stage})[0]
+            self.assertEqual(row["text"], "You")
+        for stage, words in (("recorded", "waiting to send"), ("held", "queued"), ("queued", "queued"),
+                             ("dispatched", "sent; not confirmed"), ("rejected", "not delivered"),
+                             ("unknown", "delivery not confirmed"), ("indeterminate", "delivery not confirmed"),
+                             ("handled", "handled by a command"), ("supplied", "provided as context"),
+                             ("read", "included in a model request"), ("_future", "delivery status unknown")):
+            row = agent_transcript.message_rows("u", value, names, {"d": stage})[0]
+            self.assertEqual(row["text"], "You · " + words)
+            if stage != "rejected":
+                self.assertNotIn("not delivered", row["text"], "only a definite rejection says not delivered")
 
     def test_no_origin_is_never_you_and_another_human_is_named(self):
         bare = {("message", "m"): {"position": 1, "role": "user", "content": text("hi"), "final": True}}

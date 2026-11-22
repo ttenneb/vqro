@@ -15,9 +15,11 @@ ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-
 ACTORS = {"agents": "agents UI"}  # recorded actor -> how it reads in a label
 ROLE_LABEL = {"thought": "Thinking", "coordination": "Coordination", "system": "System"}
 TOOL_ICON = {"pending": "…", "running": "…", "completed": "✓", "failed": "✗", "cancelled": "⊘"}
-RECEIPT = {"recorded": "recorded", "held": "held", "admitted": "admitted", "queued": "queued",
-           "inserted": "in the conversation", "handled": "handled", "supplied": "supplied", "read": "read",
-           "unknown": "unknown"}
+# Normal acknowledgement/insertion needs no label. Other stages retain evidence and uncertainty in plain words.
+RECEIPT = {"recorded": "waiting to send", "held": "queued", "admitted": None, "accepted": None,
+           "inserted": None, "queued": "queued", "dispatched": "sent; not confirmed",
+           "handled": "handled by a command", "supplied": "provided as context", "read": "included in a model request",
+           "rejected": "not delivered", "unknown": "delivery not confirmed", "indeterminate": "delivery not confirmed"}
 MARKDOWN_ROW_BYTES = 60 * 1024  # under the 64 KiB per formatted row (core-protocol "Formatted text")
 LINE_BYTES = 4096  # one row; longer lines are cut with a mark (display only, never a request's question)
 TOOL_LINES = 12  # lines of a tool's output shown before "… N more lines" (redesign mockup)
@@ -261,7 +263,9 @@ def message_rows(eid, value, names, receipts, show_time=True, fold=None, thinkin
         head.append(when(value["at_ms"]))
     delivery = value.get("delivery")
     if isinstance(delivery, str) and delivery in receipts:
-        head.append(RECEIPT.get(receipts[delivery], plain(str(receipts[delivery]))))
+        stage = RECEIPT.get(receipts[delivery], "delivery status unknown")
+        if stage:
+            head.append(stage)
     if value.get("final") is False:
         head.append("writing…")
     # The sender line is selectable and copies the whole message (client.copy, bound to y in the pane).
