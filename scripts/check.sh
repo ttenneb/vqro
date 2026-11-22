@@ -74,7 +74,7 @@ snapshot() {
   python3 - "$RUN" <<'PY'
 import os, sys
 roots = [b"/tmp/pt", b"/tmp/pe2", b"/tmp/ppd", b"/tmp/pps", b"/tmp/pst", b"/tmp/pke", b"/tmp/phc", b"/tmp/pft", b"/tmp/ppe", b"/tmp/pev", b"/tmp/pscale", b"/tmp/vqro-tmux",
-         b"/tmp/pnf", b"/tmp/pws", b"/tmp/ptw", sys.argv[1].encode()]
+         b"/tmp/pnf", b"/tmp/pws", b"/tmp/ptw", b"/tmp/prex", sys.argv[1].encode()]
 socks = {}
 for line in open("/proc/net/unix").read().splitlines()[1:]:
     f = line.split()
@@ -353,6 +353,7 @@ if [ "$MODE" = full ]; then
   step history-budget history_budget
   step libghostty-release-safe libghostty_release_safe
   step e2e-providers "${CLEAN[@]}" python3 tests/e2e_providers.py "$TARGET"
+  step e2e-rex "${CLEAN[@]}" python3 tests/e2e_rex.py "$TARGET"  # optional: SKIP without /usr/bin/rex
   step e2e-coordination-review "${CLEAN[@]}" python3 tests/e2e_coordination_review.py --binary "$TARGET/debug/vqro"
   step e2e-tui-providers "${CLEAN[@]}" python3 tests/e2e_tui_providers.py "$TARGET"
   step e2e-tui-paste-dropdown "${CLEAN[@]}" python3 tests/e2e_tui_paste_dropdown.py "$TARGET"

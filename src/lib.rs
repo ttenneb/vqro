@@ -32,6 +32,7 @@ pub mod tui;
 pub mod ui_launch;
 pub mod ui_model;
 pub mod tmux;
+pub mod rex;
 
 #[cfg(test)]
 #[path = "../tests/support/timing.rs"]

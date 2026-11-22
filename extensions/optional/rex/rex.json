@@ -1,0 +1,8 @@
+{
+  "name":"rex", "title":"Rex backend", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"provider",
+  "summary":"Use Rex (Superlogical's multiplexer) as a terminal backend. Optional; needs Rex installed.",
+  "description":"Runs vqro-rex and exposes Rex terminals as resources: live output, a screen repaint on attach, input, resize, exit codes and stored program status. By default it starts a separate vqro-owned Rex server under vqro's state directory; with --rex-socket it uses an existing Rex server (yours) and never starts or stops it. Turning it off disconnects the provider, not the Rex server or its programs; stop the owned server with vqro-rex server stop. Rex is proprietary alpha software, installed separately. Rex has no per-terminal environment (a spawn with env is refused) and takes text (UTF-8) input only.",
+  "requires":{"protocol":1},
+  "provides":["ability/vqro.terminals","ability/vqro.resource.forget"],
+  "contributes":{"commands":["Provider operations: spawn, kill, attach, resize and supported terminal operations"],"settings":["extension/rex","vqro-rex arguments"]}
+}

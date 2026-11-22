@@ -102,6 +102,11 @@ ignored. Backend-specific extras are namespaced (`dev.herdr.machines`).
 | `identity` | `{refs_survive_backend_restart}` | true | false |
 | `remote.machines` | informational | yes (`on`) | absent; one provider per host |
 
+`terminal.input {bytes}` (optional) says which input bytes the backend takes: absent or `"any"`, or `"utf8"` when it
+takes text only (Rex: `vqro-rex`); a stream refuses other input with an error and never alters it. The optional Rex
+provider declares `terminal.spawn {env: false}`, `terminal.exit {exit_code: true}`, `status.osc7501 {stored: true}`,
+`identity {refs_survive_backend_restart: true}` and a repaint from Rex's own snapshot (`research/rex.md`).
+
 Extensions read `providers[*].capabilities` and degrade: hide status chips when `status.osc7501` is absent, mark them
 possibly stale when `lossy`. Panels can name capabilities in `requires` as today.
 

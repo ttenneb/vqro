@@ -618,3 +618,15 @@ extension and native backend services scrub it; no human-shell inheritance or pe
   native private-herdr user-shell scrub1 and Python3helper/handshake tests passed (zero warnings).
 - Final actual-candidate full gate, independent review and K1 PartB G11 reprobe still pending; no qualification
   or install claim. See docs/research/host-tool-context.md and the new core/provider protocol paragraphs.
+
+## Rex backend, optional extension (2026-11-22)
+
+Human request: Rex (Superlogical) as another backend like herdr-core and tmux; build now, both servers with a
+vqro-owned default, a separate optional extension, reverse engineering allowed where needed.
+- `vqro-rex` (Rust, `src/bin/vqro-rex.rs`, `src/rex/`): a minimal WebSocket client over Rex's Unix socket, the
+  control channel (requests, events) and the terminal data channel. Live raw output after a labelled repaint made from
+  Rex's Ghostty snapshot by libghostty (`tui::snapshot_to_vt`; `+snapshot,+formatter` features, review pending).
+- Optional: `extensions/optional/rex/` (manifest, README with the declaration); not in `defaults.json`. Installer
+  copies the binary and the optional files. Gate step `e2e-rex` (SKIP without Rex): 26/26 on private servers.
+- Limits: no per-terminal env (spawn with env rejected), UTF-8 input only, Rex's alpha API pinned to revision 19.
+  `research/rex.md`.
