@@ -528,6 +528,7 @@ def group_row(steps, cwd=None):
     run = tools[0][0]
     table = [{"text": "Table", "command": "agents.tools", "args": {"run": run}}]  # this turn's tools as a table
     return {"id": "g:" + run, "text": "Activity · " + " · ".join(summary), "badges": badges,
+            "suffix_position": "after_text",
             "actions": table, "menu": [{"label": "Tools of this turn as a table…", **{k: table[0][k] for k in ("command", "args")}}],
             "child_table": {"columns": ACTIVITY_COLUMNS, "max_width": 112},
             "children": children, "expanded": False}

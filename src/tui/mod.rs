@@ -4316,6 +4316,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn after_text_row_action_runs_at_its_compact_drawn_position() {
+        for (label, badges) in [("Activity · 1 tool", json!([{"text":"✓ bash","style":"ok"}])), ("A", json!([]))] {
+            let (mut app, _) = app();
+            app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","items":[
+                {"text":label,"suffix_position":"after_text","badges":badges,
+                 "actions":[{"text":"copy","command":"client.copy","args":{"text":"copied"}}]}]}}}}));
+            app.leaves = vec!["p".into()];
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(180, 6)).unwrap();
+            let mut line = String::new();
+            terminal.draw(|f| {
+                app.draw_view(f, "p", Rect::new(0, 0, 180, 6), true, &Palette::default(), &Icons::new(None, false));
+                let b = f.buffer_mut(); line = (0..180).map(|x| b[(x, 1)].symbol().to_string()).collect();
+            }).unwrap();
+            let at = line.find("[copy]").unwrap_or_else(|| panic!("{label}: {line}"));
+            let x = icons::width(&line[..at]);
+            assert!(x < 50, "{line}");
+            app.panel_click("p", "p", Position { x: x + 1, y: 1 }, MouseButton::Left, json!({}));
+            assert!(app.message.starts_with("copy: sent 6 characters"), "{}", app.message);
+        }
+    }
+
+    #[tokio::test]
     async fn a_composer_without_a_send_button_and_a_select_control() {
         let (mut app, _) = app();
         app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","items":[

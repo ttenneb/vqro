@@ -483,6 +483,7 @@ class TranscriptRows(unittest.TestCase):
         self.assertEqual(header["detail"].rstrip(), "Actions")
         self.assertTrue(all(c.get("align") == "right" for c in group["child_table"]["columns"][3:]))
         self.assertEqual(group["id"], "g:t1", "the run is named by its first tool")
+        self.assertEqual(group["suffix_position"], "after_text", "summary chips stay beside their Activity label")
         self.assertEqual(group["actions"], [{"text": "Table", "command": "agents.tools", "args": {"run": "t1"}}])
         self.assertEqual(group["menu"][0]["command"], "agents.tools")
         runs = agent_transcript.tool_runs({k: (1, v) for k, v in CONVERSATION.items()})

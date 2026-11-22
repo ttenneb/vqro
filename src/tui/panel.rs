@@ -592,6 +592,9 @@ impl ColumnLayout {
         let (line, spans) = join_cell_spans(cells, &self.widths, &self.aligns);
         let mut out = r.clone();
         out.item["text"] = Value::String(format!("{}{line}", " ".repeat(lead)));
+        // Client-internal padded column extent: after_text suffixes align even when the last cell is short.
+        out.item["_column_extent"] = Value::from(lead + self.widths.iter().sum::<usize>()
+            + self.widths.iter().filter(|&&w| w > 0).count().saturating_sub(1));
         // `column_styles` (parallel to `columns`): a semantic style per cell, drawn over the row's text; clients
         // without it draw the cells in the row's style.
         let styled: Vec<Value> = r.item["column_styles"].as_array().into_iter().flatten().zip(&spans)
@@ -858,6 +861,19 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
             }
             // Right side: inline buttons (`actions`, feature actions), then detail, then badges before it.
             let mut right = row.right().saturating_sub(1);
+            if item["suffix_position"] == "after_text" {
+                let actions = item["actions"].as_array().into_iter().flatten()
+                    .filter(|a| a["command"].is_string()).filter_map(|a| a["text"].as_str())
+                    .fold(0u16, |n, t| n.saturating_add(icons::width(t).saturating_add(3)));
+                let badges = item["badges"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str())
+                    .fold(0u16, |n, t| n.saturating_add(icons::width(t).saturating_add(3)));
+                let detail = item["detail"].as_str().filter(|s| !s.is_empty())
+                    .map(|t| icons::width(t).saturating_add(1)).unwrap_or(0);
+                let text_width = item["_column_extent"].as_u64().map(|n| n.min(u16::MAX as u64) as u16)
+                    .unwrap_or_else(|| icons::width(text));
+                right = right.min(x.saturating_add(text_width.max(12)).saturating_add(1)
+                    .saturating_add(actions).saturating_add(badges).saturating_add(detail));
+            }
             for (ai, a) in item["actions"].as_array().into_iter().flatten().enumerate().collect::<Vec<_>>().into_iter().rev() {
                 let Some(t) = a["text"].as_str().filter(|_| a["command"].is_string()) else { continue };
                 let label = format!("[{t}]");
@@ -1018,6 +1034,30 @@ mod tests {
             let screen = draw(&v, &Icons::default(), 100);
             assert!(screen.iter().any(|l| l.contains("readable fallback includes every cell")), "{v}: {screen:?}");
         }
+    }
+
+    #[test]
+    fn after_text_suffix_is_local_compact_and_narrow_rows_keep_the_right_layout() {
+        let mut value = json!({"items":[{"text":"Activity · 1 tool","badges":[{"text":"✓ bash","style":"ok"}],
+            "detail":"detail","actions":[{"text":"Table","command":"tools"}]}]});
+        let icons = Icons::default();
+        let right = draw(&value, &icons, 180);
+        value["items"][0]["suffix_position"] = json!("after_text");
+        let inline = draw(&value, &icons, 180);
+        let line = inline.iter().find(|l| l.contains("Activity")).unwrap();
+        assert!(line.find("[Table]").unwrap() < 60, "{line}");
+        assert!(line.find("✓ bash").unwrap() < line.find("detail").unwrap());
+        assert!(line.find("detail").unwrap() < line.find("[Table]").unwrap());
+        assert_ne!(inline, right);
+        let narrow = draw(&value, &icons, 24);
+        value["items"][0]["suffix_position"] = json!("future");
+        assert_eq!(draw(&value, &icons, 24), narrow);
+        assert_eq!(draw(&value, &icons, 180), right, "unknown value keeps today's layout");
+        let table = json!({"columns":[{"width":8},{"width":12}], "items":[
+            {"text":"fallback","columns":["read","a"],"suffix_position":"after_text","actions":[{"text":"copy","command":"client.copy"}]},
+            {"text":"fallback","columns":["read","longer"],"suffix_position":"after_text","actions":[{"text":"copy","command":"client.copy"}]}]});
+        let table = draw(&table, &icons, 100);
+        assert_eq!(table[0].find("[copy]"), table[1].find("[copy]"), "last padded cell keeps the action column aligned");
     }
 
     #[test]

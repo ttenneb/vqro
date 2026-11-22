@@ -1204,6 +1204,13 @@ New row types, components and view kinds are progressive enhancements: every cli
 - **Row `actions`** (feature `actions`): `[{text, command, args?, input?}]`. These are drawn right-aligned in the
   row as `[text]` buttons, before its detail and badges. A click runs the action in the row's context. Put the same
   entries in the row's `menu` for clients without the feature.
+  Optional row `suffix_position: "after_text"` puts its badges, detail and actions immediately after the text
+  (left-to-right: text, badges, detail, actions), instead of at the far right. Any other/absent value retains the
+  right anchor. The text keeps today's minimum room; when space is short this becomes the same placement and
+  truncation as the right-anchored row. With `columns`, after-text means after the last padded cell, keeping
+  suffixes aligned across the table. Action hit rectangles use the drawn positions. This adds no feature or
+  `requires`; older clients, text and OpenTUI ignore it and keep their existing placement/readable fallback.
+  It does not affect `chips` rows (which have their own `align`). The Rust TUI implements it.
 - **"↓ Latest · End"**: the client draws it at the bottom right of a following list (`follow: true`) scrolled away
   from its newest rows. A click or End goes back and follows again. Panels need nothing for it.
 - Clients without these show chips in order with their full labels, the plain title, and no buttons (the menu
