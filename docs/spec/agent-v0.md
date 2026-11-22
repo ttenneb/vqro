@@ -308,7 +308,9 @@ concatenated.
   settings as a side effect. It declares `literal`: `always`, `controlled_launch` (literal only when the runtime is
   launched without template expanders or input interceptors; Pi, whose per-call `expandPromptTemplates: false` is
   ignored) or `none`, and rejects text it cannot send literally; it never escapes or rewrites it. Explicit commands
-  use `agent.command` (§6.3).
+  use `agent.command` (§6.3). `none` is declared while the runtime runs code that may change input (for example Pi
+  with its extensions loaded): the adapter still refuses what the runtime itself would expand or run (below), and
+  reports possible transforms through `input_transform` and each receipt's `may_transform` instead of refusing them.
 - **Text the runtime would expand** (a skill or prompt-template invocation such as Pi's `/skill:x` or `/<template>`,
   by the runtime's own rule against its advertised names) is refused by `agent.send` as non-literal (`unsupported`,
   naming `agent.command`). `agent.command` runs it explicitly; the user message the runtime then emits carries
