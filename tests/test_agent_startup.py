@@ -111,6 +111,24 @@ class StartupCard(unittest.TestCase):
         self.assertIn("pane limit", json.dumps(rows[0]).lower())
         self.assertTrue(any("body" in r.get("text", "") for r in rows[1:]), "startup never crowds out all conversation")
 
+    def test_overbound_native_paths_are_omitted_never_shortened_into_copy_targets(self):
+        oversized = "/" + "x" * 4096
+        card = self.rows({"cwd": oversized, "sources": {"cwd": "vqro:launch"},
+                          "instructions": [{"path": oversized}],
+                          "skills": [{"name": "retained-name", "path": oversized}]})[0]
+        encoded = json.dumps(card)
+        self.assertNotIn("x" * 100, encoded, "not even a misleading truncated path prefix is published")
+        self.assertIn("retained-name", encoded)
+        self.assertIn("Incomplete", encoded)
+        self.assertFalse(any("copy" in row for row in card["children"]))
+        exact = "/" + "界" * 1000
+        valid = self.rows({"instructions": [{"path": exact}]})[0]
+        copied = next(row["copy"] for row in valid["children"] if "copy" in row)
+        self.assertEqual(copied, exact, "display may clip, but copy target is the entire exact native path")
+        unknown = json.dumps(self.rows({"cwd": "/native/path"})[0])
+        self.assertIn("source not reported", unknown)
+        self.assertNotIn("vqro launch record", unknown)
+
     def test_malformed_optional_fields_do_not_break_the_conversation(self):
         for value in ({"skills": [None, 1, {"name": []}], "runtime": []},
                       {"sources": [], "incomplete": [[], 3]}, {"model": {}, "cwd": False}):

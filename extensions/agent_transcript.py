@@ -792,6 +792,10 @@ def startup_row(value):
     runtime = value.get("runtime") if isinstance(value.get("runtime"), dict) else {}
     identity = " ".join(filter(None, (shown(runtime.get("name")), shown(runtime.get("version")))))
     model, cwd = shown(value.get("model")), shown(value.get("cwd"), 4096)
+    if isinstance(value.get("cwd"), str) and len(value["cwd"].encode()) > 4096:
+        cwd = ""
+        if "cwd" not in incomplete:
+            incomplete.append("cwd")
     scope = value.get("skills_scope")
     skills_title = "Loaded skills" if scope == "loaded" else "Available skills" if scope == "available" else "Skills"
     fields = ("instructions", "skills", "prompts", "commands", "plugins", "mcp")
@@ -799,8 +803,18 @@ def startup_row(value):
     for field in fields:
         entries = value.get(field)
         if isinstance(entries, list):
-            inventories[field] = [entry for entry in entries[:256] if isinstance(entry, dict)
-                                  and shown(entry.get("path" if field == "instructions" else "name"))]
+            inventories[field] = []
+            for entry in entries[:256]:
+                if not isinstance(entry, dict) or not shown(entry.get("path" if field == "instructions" else "name")):
+                    continue
+                raw_path = entry.get("path")
+                if isinstance(raw_path, str) and len(raw_path.encode()) > 4096:
+                    if field not in incomplete:
+                        incomplete.append(field)
+                    if field == "instructions":
+                        continue
+                    entry = {key: item for key, item in entry.items() if key != "path"}
+                inventories[field].append(entry)
             if len(entries) > 256 and field not in incomplete:
                 incomplete.append(field)
     if not (identity or model or cwd or any(inventories.values()) or incomplete):
@@ -831,7 +845,7 @@ def startup_row(value):
             return
         has_path = True
         add({"id": "startup:path:" + str(len(children)), "text": label + ": " + shown(raw, 512),
-             "style": "link", "copy": clip(raw, 4096), "actions": [{"text": "copy", "command": "client.copy"}]})
+             "style": "link", "copy": raw, "actions": [{"text": "copy", "command": "client.copy"}]})
 
     summary = ["Start-up"] + [part for part in (identity, model) if part]
     if identity:
@@ -841,7 +855,10 @@ def startup_row(value):
         text("Model at start: " + model, "agent")
         source("model")
     if cwd:
-        path(value["cwd"], "Launch folder" if sources.get("cwd") == "vqro:launch" else "Working folder")
+        label = "Launch folder" if sources.get("cwd") == "vqro:launch" else "Working folder"
+        if not sources.get("cwd"):
+            label = "Folder (source not reported)"
+        path(value["cwd"], label)
         source("cwd")
     commands = inventories.get("commands", [])
     command_title = "Extension commands" if commands and all(e.get("kind") == "extension" for e in commands) else "Commands"
