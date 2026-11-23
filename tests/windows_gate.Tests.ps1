@@ -84,6 +84,35 @@ try {
     Assert ($row.result -eq 'PASS') 'First Python process must have isolated startup and no inherited auth/import environment'
     Assert (-not (Test-Path -LiteralPath $marker)) 'sitecustomize canary must never execute'
 
+    # Invalid UTF-8 must be drained as bytes through a pipe-sized flood before
+    # decoding fails. Retain both raw streams and execute the command only once.
+    $flood = Join-Path $root 'invalid-flood.py'
+    $once = Join-Path $root 'flood-attempts'
+    [IO.File]::WriteAllText($flood, "import os,pathlib,sys`npathlib.Path(sys.argv[1]).open('a').write('attempt\\n')`nsys.stdout.buffer.write(b'\\xff' + b'x' * (2 * 1024 * 1024))`nsys.stdout.buffer.flush()`nsys.stderr.buffer.write(b'y' * (2 * 1024 * 1024))`nsys.stderr.buffer.flush()`n")
+    $row = Invoke-GateStep 'invalid-flood' $python.Program ($python.Arguments + @('-I', '-X', 'utf8', $flood, $once)) $logs $child $root -TimeoutSeconds 30
+    Assert ($row.result -eq 'FAIL' -and $row.exit_code -eq 0 -and $row.evidence_error) 'Invalid UTF-8 must fail after the child exits, never stall its raw drains'
+    Assert ((Get-Item -LiteralPath $row.stdout_bytes).Length -eq (2 * 1024 * 1024 + 1)) 'Entire invalid stdout flood must be retained'
+    Assert ((Get-Item -LiteralPath $row.stderr_bytes).Length -eq (2 * 1024 * 1024)) 'Concurrent stderr flood must be retained'
+    Assert ([IO.File]::ReadAllLines($once).Count -eq 1) 'Capture failure must never replay a command'
+
+    $fault = New-Object 'System.Threading.Tasks.TaskCompletionSource[bool]'
+    $fault.SetException((New-Object IO.IOException('fixture raw drain fault')))
+    $observed = $false
+    try { Wait-GateCapture $null @($fault.Task) ([Diagnostics.Stopwatch]::StartNew()) 30 }
+    catch { $observed = $_.ToString().Contains('fixture raw drain fault') }
+    Assert $observed 'Drain task faults must be observed before waiting on process lifetime'
+    $pending = New-Object 'System.Threading.Tasks.TaskCompletionSource[bool]'
+    $eofBounded = $false
+    try { Wait-GateCapture ([pscustomobject]@{ HasExited = $true }) @($pending.Task) ([Diagnostics.Stopwatch]::StartNew()) 1 }
+    catch { $eofBounded = $_.ToString().Contains('deadline exceeded') }
+    Assert $eofBounded 'An exited parent with a held-open pipe must still have bounded completion'
+
+    $sleeper = Join-Path $root 'owned-sleeper.py'
+    [IO.File]::WriteAllText($sleeper, "import time`ntime.sleep(60)`n")
+    $row = Invoke-GateStep 'owned-timeout' $python.Program ($python.Arguments + @('-I', '-X', 'utf8', $sleeper)) $logs $child $root -TimeoutSeconds 2
+    Assert ($row.result -eq 'FAIL' -and $row.evidence_error.Contains('deadline exceeded')) 'An unfinished owned command must time out and FAIL'
+    Assert ($row.cleanup.StartsWith('taskkill accepted')) 'Timeout control must clean only its live owned child tree'
+
     $expected = @('one', 'two')
     $one = [pscustomobject]@{ name = 'one'; result = 'PASS' }
     $two = [pscustomobject]@{ name = 'two'; result = 'PASS' }

@@ -3,6 +3,7 @@
 [CmdletBinding()]
 param([string]$TargetDir = $env:CARGO_TARGET_DIR,
       [string]$Receipt = $env:CHECK_RECEIPT,
+      [ValidateRange(1, 86400)][int]$StepTimeoutSeconds = 3600,
       [switch]$FunctionsOnly)
 
 function Resolve-GatePython {
@@ -111,15 +112,70 @@ function Read-GateLog {
     return [IO.File]::ReadAllText($Path, (New-Object Text.UTF8Encoding($false, $true)))
 }
 
+function Wait-GateCapture {
+    param($Process, [object[]]$Tasks, [Diagnostics.Stopwatch]$Watch, [int]$TimeoutSeconds)
+    while ($true) {
+        foreach ($task in $Tasks) {
+            if ($task.IsFaulted) { throw $task.Exception }
+            if ($task.IsCanceled) { throw 'Raw pipe drain canceled' }
+        }
+        $done = @($Tasks | Where-Object { -not $_.IsCompleted }).Count -eq 0
+        if ($Process.HasExited -and $done) { return }
+        if ($Watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            throw ('Owned command/capture deadline exceeded ({0}s)' -f $TimeoutSeconds)
+        }
+        # Both child lifetime and EOF are bounded; descendants can hold pipe
+        # handles after the direct child exits. Never wait unbounded for EOF.
+        if ($Process.HasExited) { [Threading.Thread]::Sleep(100) }
+        else { $null = $Process.WaitForExit(100) }
+    }
+}
+
+function Stop-GateOwnedTree {
+    param([Diagnostics.Process]$Process, [hashtable]$ChildEnvironment, [string]$WorkingDirectory)
+    # Never replay a numeric PID after observing its owned process has exited.
+    if ($Process.HasExited) { return 'Parent already exited; descendant cleanup unconfirmed (no PID replay)' }
+    $killer = New-Object Diagnostics.Process
+    try {
+        $start = New-Object Diagnostics.ProcessStartInfo
+        $start.FileName = Join-Path $ChildEnvironment.SystemRoot 'System32/taskkill.exe'
+        $start.Arguments = '/PID ' + $Process.Id + ' /T /F'
+        $start.UseShellExecute = $false
+        $start.CreateNoWindow = $true
+        $start.WorkingDirectory = $WorkingDirectory
+        $start.EnvironmentVariables.Clear()
+        foreach ($key in $ChildEnvironment.Keys) { $start.EnvironmentVariables[$key] = $ChildEnvironment[$key] }
+        $killer.StartInfo = $start
+        if ($Process.HasExited) { return 'Parent already exited; descendant cleanup unconfirmed (no PID replay)' }
+        if (-not $killer.Start()) { throw 'Owned-tree cleanup helper did not start' }
+        if (-not $killer.WaitForExit(10000)) {
+            $killer.Kill() # Only the exact cleanup helper process we started.
+            $null = $killer.WaitForExit(2000)
+            return 'taskkill timed out; owned-tree cleanup unconfirmed'
+        }
+        if ($killer.ExitCode -ne 0) { return ('taskkill failed ({0}); cleanup unconfirmed' -f $killer.ExitCode) }
+        if (-not $Process.WaitForExit(2000)) { return 'Owned parent did not exit after taskkill; cleanup unconfirmed' }
+        return 'taskkill accepted for the live owned parent/tree; no global leftover scan'
+    } catch { return ('Owned-tree cleanup unconfirmed: ' + $_.ToString()) }
+    finally { $killer.Dispose() }
+}
+
 function Invoke-GateStep {
     param([string]$Name, [string]$Program, [string[]]$Arguments,
           [string]$LogDirectory, [hashtable]$ChildEnvironment, [string]$WorkingDirectory,
-          [switch]$ZeroWarnings)
+          [switch]$ZeroWarnings, [ValidateRange(1, 86400)][int]$TimeoutSeconds = 3600)
     $log = Join-Path $LogDirectory ($Name + '.log')
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $exitCode = 1
     $warnings = 0
     $evidenceError = $null
+    $cleanup = $null
+    $started = $false
+    $drainsFinished = $false
+    $stdoutFile = $null
+    $stderrFile = $null
+    $stdoutPath = $log + '.stdout.bin'
+    $stderrPath = $log + '.stderr.bin'
     $process = New-Object Diagnostics.Process
     try {
         $start = New-Object Diagnostics.ProcessStartInfo
@@ -129,20 +185,30 @@ function Invoke-GateStep {
         $start.CreateNoWindow = $true
         $start.RedirectStandardOutput = $true
         $start.RedirectStandardError = $true
-        $start.StandardOutputEncoding = New-Object Text.UTF8Encoding($false, $true)
-        $start.StandardErrorEncoding = New-Object Text.UTF8Encoding($false, $true)
         $start.WorkingDirectory = $WorkingDirectory
         $start.EnvironmentVariables.Clear()
         foreach ($key in $ChildEnvironment.Keys) { $start.EnvironmentVariables[$key] = $ChildEnvironment[$key] }
         $process.StartInfo = $start
-        if (-not $process.Start()) { throw 'Native process did not start' }
-        # Drain both streams concurrently: ordinary native stderr is evidence,
-        # not a PowerShell ErrorRecord, and cannot suppress later failures.
-        $stdout = $process.StandardOutput.ReadToEndAsync()
-        $stderr = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
+        # Open destinations before launch: a failed capture file must not leave
+        # a child running with undrained pipes.
+        $stdoutFile = [IO.File]::Create($stdoutPath)
+        $stderrFile = [IO.File]::Create($stderrPath)
+        $started = $process.Start()
+        if (-not $started) { throw 'Native process did not start' }
+        # Drain raw bytes. Invalid UTF-8 cannot fault a decoder mid-stream and
+        # stop pipe drainage. Observe I/O faults while the child is still live.
+        $stdout = $process.StandardOutput.BaseStream.CopyToAsync($stdoutFile)
+        $stderr = $process.StandardError.BaseStream.CopyToAsync($stderrFile)
+        Wait-GateCapture $process @($stdout, $stderr) $watch $TimeoutSeconds
+        $null = $stdout.GetAwaiter().GetResult()
+        $null = $stderr.GetAwaiter().GetResult()
+        $drainsFinished = $true
         $exitCode = $process.ExitCode
-        $text = $stdout.GetAwaiter().GetResult() + "`n" + $stderr.GetAwaiter().GetResult()
+        $stdoutFile.Dispose(); $stdoutFile = $null
+        $stderrFile.Dispose(); $stderrFile = $null
+        # Decode only after both raw drains and the owned process completed.
+        # Retain .bin evidence even when strict decoding fails.
+        $text = (Read-GateLog $stdoutPath) + "`n" + (Read-GateLog $stderrPath)
         [IO.File]::WriteAllText($log, $text, (New-Object Text.UTF8Encoding($false)))
         # A write/read/decoder failure is sticky FAIL, never zero warnings/PASS.
         $captured = Read-GateLog $log
@@ -151,6 +217,13 @@ function Invoke-GateStep {
         $evidenceError = $_.ToString()
         try { [IO.File]::AppendAllText($log, $evidenceError, (New-Object Text.UTF8Encoding($false))) } catch { }
     } finally {
+        if ($started -and ($evidenceError -or -not $process.HasExited)) {
+            if ($process.HasExited -and $drainsFinished) {
+                $cleanup = 'Owned command and raw drains completed; decode/log failure, no kill needed'
+            } else { $cleanup = Stop-GateOwnedTree $process $ChildEnvironment $WorkingDirectory }
+        }
+        if ($stdoutFile) { $stdoutFile.Dispose() }
+        if ($stderrFile) { $stderrFile.Dispose() }
         $process.Dispose()
         $watch.Stop()
     }
@@ -158,7 +231,8 @@ function Invoke-GateStep {
     if ($evidenceError -or $exitCode -ne 0 -or ($ZeroWarnings -and $warnings -ne 0)) { $result = 'FAIL' }
     Write-Host ('{0,-26} {1} {2:n1}s ({3} warnings)' -f $Name, $result, $watch.Elapsed.TotalSeconds, $warnings)
     return [pscustomobject]@{ name = $Name; result = $result; seconds = $watch.Elapsed.TotalSeconds;
-        log = $log; exit_code = $exitCode; warnings = $warnings; evidence_error = $evidenceError }
+        log = $log; exit_code = $exitCode; warnings = $warnings; evidence_error = $evidenceError;
+        stdout_bytes = $stdoutPath; stderr_bytes = $stderrPath; cleanup = $cleanup }
 }
 
 function Complete-GateSteps {
@@ -194,6 +268,7 @@ $expected = @('python-version', 'licenses', 'vendor-libghostty', 'manifest-deps'
 $steps = @()
 $normalCompletion = $false
 $commit = 'unknown'
+$revision = $null
 $toolEnvironment = @{}
 foreach ($entry in Get-ChildItem Env:) { $toolEnvironment[$entry.Name] = $entry.Value }
 try {
@@ -204,29 +279,29 @@ try {
     if (-not $python.Arguments.Count) { $child.VQRO_PYTHON = $python.Program }
     # -I ignores PYTHON* injection and user site even for the very first probe.
     $pythonArgs = $python.Arguments + @('-I', '-X', 'utf8')
-    $revision = Invoke-GateStep 'source-revision' 'git' @('rev-parse', 'HEAD') $logs $child $repo
+    $revision = Invoke-GateStep 'source-revision' 'git' @('rev-parse', 'HEAD') $logs $child $repo -TimeoutSeconds $StepTimeoutSeconds
     if ($revision.result -ne 'PASS') { throw 'Could not record source revision' }
     $commit = (Read-GateLog $revision.log).Trim()
     Write-Host ('Windows baseline check at {0}; logs {1}' -f $commit, $logs)
-    $steps += Invoke-GateStep 'python-version' $python.Program ($pythonArgs + @('-c', 'import sys; print(sys.version); sys.exit(sys.version_info < (3, 11))')) $logs $child $repo
+    $steps += Invoke-GateStep 'python-version' $python.Program ($pythonArgs + @('-c', 'import sys; print(sys.version); sys.exit(sys.version_info < (3, 11))')) $logs $child $repo -TimeoutSeconds $StepTimeoutSeconds
     if ($steps[-1].result -ne 'PASS') { throw 'Python version check failed' }
     foreach ($check in @(
         @('licenses', 'scripts/license_check.py', '--check'),
         @('vendor-libghostty', 'scripts/check_vendor.py'),
         @('manifest-deps', 'scripts/check_manifest_deps.py')
     )) {
-        $steps += Invoke-GateStep $check[0] $python.Program ($pythonArgs + @($check | Select-Object -Skip 1)) $logs $child $repo
+        $steps += Invoke-GateStep $check[0] $python.Program ($pythonArgs + @($check | Select-Object -Skip 1)) $logs $child $repo -TimeoutSeconds $StepTimeoutSeconds
     }
-    $steps += Invoke-GateStep 'build-zero-warnings' 'cargo' @('build', '--locked', '--all-targets') $logs $child $repo -ZeroWarnings
+    $steps += Invoke-GateStep 'build-zero-warnings' 'cargo' @('build', '--locked', '--all-targets') $logs $child $repo -ZeroWarnings -TimeoutSeconds $StepTimeoutSeconds
     if ($steps[-1].result -eq 'PASS') {
-        $steps += Invoke-GateStep 'cargo-test' 'cargo' @('test', '--locked') $logs $child $repo
+        $steps += Invoke-GateStep 'cargo-test' 'cargo' @('test', '--locked') $logs $child $repo -TimeoutSeconds $StepTimeoutSeconds
     } else {
         $steps += [pscustomobject]@{ name = 'cargo-test'; result = 'FAIL'; seconds = 0; log = $null;
             exit_code = $null; warnings = 0; evidence_error = 'Blocked by failed build; no implicit rebuild' }
     }
     # Never drop full discovery: unported Windows fixtures are real FAILs until
     # the separately reviewed portability fixes land.
-    $steps += Invoke-GateStep 'python-unittest' $python.Program ($pythonArgs + @('-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*.py')) $logs $child $repo
+    $steps += Invoke-GateStep 'python-unittest' $python.Program ($pythonArgs + @('-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*.py')) $logs $child $repo -TimeoutSeconds $StepTimeoutSeconds
     $normalCompletion = $true
 } catch {
     $steps += [pscustomobject]@{ name = 'gate-error'; result = 'FAIL'; seconds = 0; log = $null;
@@ -239,7 +314,8 @@ try {
     $record = [ordered]@{ kind = 'vqro.check-receipt'; version = 1; mode = 'windows-baseline';
         commit = $commit; finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); result = $result;
         failed = $failed; skipped = @(); steps = $steps; expected = $expected; normal_completion = $normalCompletion;
-        logs = $logs; run = $run; leftover_scope = 'not-scanned'; leftover_pids = @() }
+        logs = $logs; run = $run; source_revision = $revision; step_timeout_seconds = $StepTimeoutSeconds;
+        leftover_scope = 'not-scanned'; leftover_pids = @() }
     $json = $record | ConvertTo-Json -Depth 8
     [void][IO.Directory]::CreateDirectory((Split-Path -Parent $Receipt))
     $utf8 = New-Object Text.UTF8Encoding($false)

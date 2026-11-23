@@ -55,10 +55,33 @@ not evidence that an older latest receipt qualifies this run. Bind evidence to
 the fresh printed run path.
 
 Capture, decoding, log write and log read failures are sticky FAILs even after a
-native exit 0. Stdout/stderr drain concurrently; stderr warnings still count but
-ordinary stderr is not itself failure. Both streams are retained (stdout then
-stderr, not a promised interleaving). Native exit codes do not pass through a
-PowerShell redirection pipeline. All seven expected terminal steps must occur
+native exit 0. Stdout/stderr drain concurrently **as raw bytes** to separate
+`.stdout.bin`/`.stderr.bin` files. Strict UTF-8 decoding happens only after both
+raw drains and the command finish: an invalid byte cannot stop drainage and
+block a child writing a pipe-sized flood. I/O task faults are observed while the
+child runs. Stderr warnings still count; ordinary stderr alone is not failure.
+The combined text log retains stdout then stderr, not a promised interleaving.
+Raw files remain available when decoding fails. Native exit codes do not pass
+through a PowerShell redirection pipeline.
+
+Each command plus its pipe EOF completion has a default 3600-second deadline
+(configurable via `-StepTimeoutSeconds`, 1–86400). This also bounds the wait when
+a descendant holds a pipe after the direct child exits. On a fault, cancellation
+or timeout while the owned parent is observed alive, cleanup uses the plain
+Windows `taskkill /PID <owned pid> /T /F` mechanism with the same explicit private
+environment. The cleanup helper itself has a 10-second wait and at most a
+2-second reap; only that exact owned helper is killed if it exceeds its wait.
+The target command is never replayed. Cleanup failure is recorded as unconfirmed,
+not turned into success. Decoder/log failure after successful process and raw
+completion needs no kill.
+
+**Known containment gap, accepted for this slice:** if the owned parent has already
+exited, no numeric PID is replayed through taskkill: the receipt says descendant
+cleanup is unconfirmed and the step remains FAIL. Even live-parent taskkill is
+best-effort native tree cleanup, not a no-race Job Object containment guarantee.
+No unrelated PID scan/kill, suspended-launch machinery or Job Object is added.
+Interrupted receipt publication still cannot guarantee a complete receipt or
+cleanup certificate; only a fresh completed invocation qualifies as evidence. All seven expected terminal steps must occur
 exactly once and the normal-completion sentinel must be true; empty, prefix,
 interrupted and duplicate-step runs fail. The receipt declares expected steps and
 normal completion explicitly.
@@ -70,6 +93,9 @@ or desktop acceptance is claimed; tests still own and clean up their children.
 The native helper tests cover injected auth/PYTHONPATH startup canaries, private
 roots, failed log writes/reads, ordinary stderr, stderr warnings, failed launch,
 exit codes and empty/prefix/interrupted/duplicate/complete verdict controls.
+Additional native controls cover invalid UTF-8 followed by multi-MiB
+stdout/stderr (full raw capture, exit 0 still FAIL, exactly one attempt), a faulted
+drain task, held-open EOF after a fake exited parent, and a timed-out owned child.
 
 ## W12: reproducible encoding failure, not target filtering
 
