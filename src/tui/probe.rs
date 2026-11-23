@@ -3,6 +3,14 @@ use std::{collections::VecDeque, path::PathBuf, time::{Duration, Instant, System
 use serde_json::{Value, json};
 
 const STREAM_EVENT_CAP: usize = 256;
+const RESOURCE_BYTES: usize = 128;
+const ERROR_KINDS: &[&str] = &["invalid", "conflict", "not_found", "unavailable", "forbidden", "backend", "disconnected",
+    "io", "durability_unconfirmed", "timeout", "overloaded", "unsupported", "stale_generation", "too_large"];
+const CLOSE_REASONS: &[&str] = &["slow_consumer", "closed", "detached", "finished", "invalid", "provider_disconnected", "viewer_disconnected"];
+
+fn category(value: Option<&str>, known: &'static [&'static str]) -> &'static str {
+    known.iter().copied().find(|known| Some(*known) == value).unwrap_or("other")
+}
 
 pub(super) struct Probe {
     path: Option<PathBuf>, start: Instant, started_unix_s: f64,
@@ -26,6 +34,12 @@ impl Probe {
         if self.path.is_none() { return; }
         if let super::Msg::Attached { connection: source, resource, result: Ok(stream), .. } = message {
             if connected && *source == connection {
+                if resource.is_empty() || resource.len() > RESOURCE_BYTES ||
+                    !resource.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._:".contains(&b)) {
+                    self.events_dropped += 1;
+                    return;
+                }
+                // This is an attach reply, not proof App adopted it or a later key used it.
                 self.record(json!({"method":"resource.attach", "connection":connection, "stream":stream, "resource":resource}));
             }
         }
@@ -33,15 +47,20 @@ impl Probe {
     pub fn incoming(&mut self, message: &crate::rpc::Incoming, connection: u64) {
         if self.path.is_none() { return; }
         if let crate::rpc::Incoming::Notification { method, params } = message {
+            let stream = if matches!(method.as_str(), "stream.closed" | "stream.gap" | "stream.error") {
+                let Some(stream) = params["stream"].as_u64() else { self.events_dropped += 1; return; };
+                stream
+            } else { 0 };
             match method.as_str() {
                 "stream.closed" | "stream.gap" => {
-                    let reason = params["reason"]["reason"].as_str().or_else(|| params["reason"].as_str()).unwrap_or("closed");
-                    self.record(json!({"method":method, "connection":connection, "stream":params["stream"], "reason":{"reason":reason}}));
+                    let reason = category(params["reason"]["reason"].as_str().or_else(|| params["reason"].as_str()), CLOSE_REASONS);
+                    let method = if method == "stream.gap" { "stream.gap" } else { "stream.closed" };
+                    self.record(json!({"method":method, "connection":connection, "stream":stream, "reason":{"reason":reason}}));
                     self.write();
                 }
                 "stream.error" => {
-                    let kind = params["error"]["data"]["kind"].as_str().unwrap_or("error");
-                    self.record(json!({"method":method, "connection":connection, "stream":params["stream"], "kind":kind}));
+                    let kind = category(params["error"]["data"]["kind"].as_str(), ERROR_KINDS);
+                    self.record(json!({"method":"stream.error", "connection":connection, "stream":stream, "kind":kind}));
                     self.write();
                 }
                 "stream.data" => {
@@ -76,7 +95,8 @@ impl Probe {
             "draw_total_ms":self.draw.as_secs_f64()*1000.,"draw_max_ms":self.max.as_secs_f64()*1000.,
             "bucket_columns":["second","total","background","interactive"],"frames_by_second":self.buckets,
             "stream_closures":closures,"stream_attachments":events("resource.attach"),"stream_errors":events("stream.error"),
-            "stream_events_cap":STREAM_EVENT_CAP,"stream_events_dropped":self.events_dropped})
+            "stream_events_cap":STREAM_EVENT_CAP,"stream_events_dropped":self.events_dropped,
+            "stream_attachment_scope":"historical reply, not adoption or current forwarding"})
     }
     fn write(&self) {
         if let Some(path)=&self.path {
@@ -123,6 +143,38 @@ mod tests {
         assert_eq!(probe.events.len(), STREAM_EVENT_CAP);
         assert_eq!(probe.events_dropped, 3);
         assert_eq!(probe.report()["stream_events_dropped"], 3);
+    }
+
+    #[test]
+    fn unknown_labels_are_categories_not_copied_free_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut probe = Probe::new(Some(dir.path().join("metrics.json")));
+        let private = "private text".repeat(1000);
+        probe.incoming(&Incoming::Notification { method:"stream.error".into(), params:json!({"stream":7,"error":{"data":{"kind":private}}}) }, 0);
+        probe.incoming(&Incoming::Notification { method:"stream.gap".into(), params:json!({"stream":7,"reason":{"reason":private}}) }, 0);
+        let report = probe.report();
+        assert_eq!(report["stream_errors"][0]["kind"], "other");
+        assert_eq!(report["stream_closures"][0]["reason"]["reason"], "other");
+        assert_eq!(report["stream_closures"][0]["method"], "stream.gap");
+        assert!(!report.to_string().contains("private"));
+        assert!(ERROR_KINDS.iter().chain(CLOSE_REASONS).all(|label| label.len() <= 32));
+    }
+
+    #[test]
+    fn malformed_stream_ids_and_unbounded_resources_are_dropped_explicitly() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut probe = Probe::new(Some(dir.path().join("metrics.json")));
+        for stream in [json!("7"), json!(-1), json!(7.0), json!(true), json!({"private":"text"}), Value::Null] {
+            probe.incoming(&Incoming::Notification { method:"stream.closed".into(), params:json!({"stream":stream,"reason":"closed"}) }, 0);
+        }
+        for resource in ["r".repeat(RESOURCE_BYTES + 1), "private text".into()] {
+            let mut message = attached(0);
+            if let super::super::Msg::Attached { resource: target, .. } = &mut message { *target = resource; }
+            probe.message(&message, 0, true);
+        }
+        assert!(probe.events.is_empty());
+        assert_eq!(probe.events_dropped, 8);
+        assert!(!probe.report().to_string().contains("private"));
     }
 
     #[test]
