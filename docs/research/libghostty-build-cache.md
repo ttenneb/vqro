@@ -38,9 +38,12 @@ processes producing exactly one build.
 
 - RED: the entry/manifest symlink regression failed against the initial verifier; eight other tests passed.
   Rejecting symlink entry and manifest types made it pass.
-- A real native build took **45.021 s** (existing Zig packages/global cache were already present). Running the
+- A compatibility regression verifies the computed source digest equals SHA-256 of the checked-in vendor
+  manifest. It caught the distinction between pathlib's component ordering and whole-path string ordering;
+  matching pathlib fixed it. All eleven cache tests pass.
+- A real native build took **50.898 s** (existing Zig packages/global cache were already present). Running the
   compiled build script against a second copied source checkout and separate `OUT_DIR` reused the same key
-  in **1.269 s** (**1.311 s** including the FFI check/process). A recording Zig wrapper saw only `version`,
+  in **1.227 s** (**1.258 s** including the FFI check/process). A recording Zig wrapper saw only `version`,
   `cc`, `version`: **zero `zig build` invocations** on reuse.
 - A fake-Zig integration probe observed build → reuse → rebuild after changing SIMD, and two explicit
   `VQRO_LIBGHOSTTY_CACHE=off` audit runs both built into their own output directories.

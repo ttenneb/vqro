@@ -123,7 +123,10 @@ fn inventory(root: &Path, source: bool) -> io::Result<BTreeMap<String, String>> 
 /// change the key too, even when the checked-in .sha256 manifest has not yet been regenerated.
 pub fn source_digest(vendored: &Path) -> io::Result<String> {
     let mut digest = Sha256::new();
-    for (name, hash) in inventory(vendored, true)? {
+    let mut files = inventory(vendored, true)?.into_iter().collect::<Vec<_>>();
+    // pathlib sorts path components, not the whole string (a/file precedes a.zig).
+    files.sort_by(|(a, _), (b, _)| a.split('/').cmp(b.split('/')));
+    for (name, hash) in files {
         digest.update(format!("{hash}  {name}\n").as_bytes());
     }
     Ok(format!("{:x}", digest.finalize()))

@@ -87,6 +87,19 @@ fn actual_source_contents_not_checkout_path_determine_identity() {
     assert_ne!(original, source_digest(b.path()).unwrap());
 }
 
+#[test]
+fn source_digest_matches_checked_in_vendor_manifest() {
+    use sha2::{Digest, Sha256};
+    let vendored = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/libghostty-vt");
+    assert_eq!(
+        source_digest(&vendored).unwrap(),
+        format!(
+            "{:x}",
+            Sha256::digest(include_bytes!("../vendor/libghostty-vt.sha256"))
+        )
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn literal_backslashes_do_not_alias_path_separators() {
