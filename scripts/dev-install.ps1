@@ -88,9 +88,59 @@ function Assert-PlainTree([string]$Path) {
         }
     }
 }
+# Read-only handle resolution gives one volume-GUID namespace even through SUBST/drive aliases.
+# https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew
+if (-not ('VqroInstallPaths' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+public static class VqroInstallPaths {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    static extern SafeFileHandle CreateFileW(string path, uint access, uint share,
+        IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    static extern uint GetFinalPathNameByHandleW(SafeFileHandle file, StringBuilder path,
+        uint capacity, uint flags);
+    public static string Existing(string path) {
+        // No write access; share read/write/delete, OPEN_EXISTING, BACKUP_SEMANTICS (directories).
+        using (var handle = CreateFileW(path, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero)) {
+            if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+            var buffer = new StringBuilder(32768);
+            // FILE_NAME_NORMALIZED | VOLUME_NAME_GUID. Unsupported volumes fail closed.
+            uint length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 1);
+            if (length == 0) throw new Win32Exception(Marshal.GetLastWin32Error());
+            if (length >= buffer.Capacity) throw new InvalidOperationException("Physical path too long");
+            return buffer.ToString();
+        }
+    }
+}
+'@
+}
+function Resolve-PhysicalPath([string]$Path) {
+    $current = [IO.Path]::GetFullPath($Path)
+    $suffix = @()
+    while ($true) {
+        $item = $null
+        try { $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop }
+        catch [System.Management.Automation.ItemNotFoundException] { }
+        if ($null -ne $item) { break }
+        $leaf = Split-Path $current -Leaf
+        if (-not $leaf -or $leaf -match '[. :]$') { throw "Unsupported missing path component: $current" }
+        $suffix = @($leaf) + $suffix
+        $parent = Split-Path $current -Parent
+        if (-not $parent -or $parent -eq $current) { throw "Cannot resolve physical ancestor: $Path" }
+        $current = $parent
+    }
+    $physical = [VqroInstallPaths]::Existing($item.FullName)
+    foreach ($leaf in $suffix) { $physical = [IO.Path]::Combine($physical, $leaf) }
+    return $physical
+}
 function Assert-Separate([string]$Left, [string]$Right) {
-    $a = [IO.Path]::GetFullPath($Left).TrimEnd('\') + '\'
-    $b = [IO.Path]::GetFullPath($Right).TrimEnd('\') + '\'
+    $a = (Resolve-PhysicalPath $Left).TrimEnd('\') + '\'
+    $b = (Resolve-PhysicalPath $Right).TrimEnd('\') + '\'
     if ($a.StartsWith($b, [StringComparison]::OrdinalIgnoreCase) -or $b.StartsWith($a, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Overlapping directories are not supported: $Left and $Right"
     }
@@ -123,7 +173,7 @@ function Assert-SameInventory($Expected, $Actual) {
 }
 $backup = $null
 $backupRoot = Join-Path $env:LOCALAPPDATA 'vqro\backups'
-Push-Location $root
+Push-Location -LiteralPath $root
 try {
     # Guard managed boundaries before build or shutdown. Linked destinations are unsupported.
     Assert-PlainPath $BinDir
@@ -133,6 +183,11 @@ try {
     Assert-PlainPath $root
     Assert-PlainTree (Join-Path $root 'extensions')
     Assert-PlainTree (Join-Path $root 'integrations/pi')
+    Assert-PlainTree (Join-Path $root 'scripts')
+    $checkout = & git rev-parse --show-toplevel
+    if ($LASTEXITCODE -ne 0 -or (Resolve-PhysicalPath $checkout) -ine (Resolve-PhysicalPath $root)) {
+        throw 'The script directory must belong to the exact checkout root; nothing installed.'
+    }
     # Validate required destination types as well as every existing descendant's link status.
     foreach ($dir in @('manifests', 'optional', 'optional/rex', 'tier1', 'clients', 'tests')) {
         Assert-PlainPath (Join-Path $extensions $dir)
@@ -140,20 +195,20 @@ try {
     foreach ($file in @('defaults.json', 'tests.json', 'optional/rex/rex.json', 'optional/rex/README.md', 'tier1/vqro-pull.ts', 'clients/text.json')) {
         Assert-PlainPath (Join-Path $extensions $file) 'File'
     }
-    foreach ($file in Get-ChildItem (Join-Path $root 'extensions/*.py')) {
+    foreach ($file in Get-ChildItem -LiteralPath (Join-Path $root 'extensions') -Filter '*.py' -File) {
         Assert-PlainPath (Join-Path $extensions $file.Name) 'File'
     }
-    foreach ($file in Get-ChildItem (Join-Path $root 'extensions/manifests/*.json')) {
+    foreach ($file in Get-ChildItem -LiteralPath (Join-Path $root 'extensions/manifests') -Filter '*.json' -File) {
         Assert-PlainPath (Join-Path (Join-Path $extensions 'manifests') $file.Name) 'File'
     }
-    foreach ($file in Get-ChildItem (Join-Path $root 'extensions/clients/*.py')) {
+    foreach ($file in Get-ChildItem -LiteralPath (Join-Path $root 'extensions/clients') -Filter '*.py' -File) {
         Assert-PlainPath (Join-Path (Join-Path $extensions 'clients') $file.Name) 'File'
     }
-    foreach ($package in Get-ChildItem (Join-Path $root 'extensions') -Directory) {
+    foreach ($package in Get-ChildItem -LiteralPath (Join-Path $root 'extensions') -Directory) {
         if (-not (Test-Path -LiteralPath (Join-Path $package.FullName '__init__.py'))) { continue }
         $destination = Join-Path $extensions $package.Name
         Assert-PlainPath $destination
-        foreach ($file in Get-ChildItem (Join-Path $package.FullName '*.py')) {
+        foreach ($file in Get-ChildItem -LiteralPath $package.FullName -Filter '*.py' -File) {
             Assert-PlainPath (Join-Path $destination $file.Name) 'File'
         }
     }
@@ -163,21 +218,45 @@ try {
     Assert-Separate $BinDir $extensions
     Assert-Separate $BinDir $backupRoot
     Assert-Separate $extensions $backupRoot
-    $metadataText = & cargo metadata --no-deps --format-version=1
+    $python = Find-Python
+    Invoke-Python -Arguments @('-c', 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required"')
+    Invoke-Python -Arguments @((Join-Path $root 'scripts/install_extension_tests.py'), '--check', $extensions)
+    $manifest = Join-Path $root 'Cargo.toml'
+    $metadataText = & cargo metadata --manifest-path $manifest --no-deps --format-version=1
     if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed; nothing installed.' }
-    $target = [IO.Path]::GetFullPath(($metadataText | ConvertFrom-Json).target_directory)
-    Assert-PlainTree $target
-    foreach ($sourceDirectory in @('extensions', 'integrations', 'scripts', 'src')) {
-        Assert-Separate $target (Join-Path $root $sourceDirectory)
+    $metadata = $metadataText | ConvertFrom-Json
+    $target = [IO.Path]::GetFullPath($metadata.target_directory)
+    # Cargo resolves hierarchy, templates and CARGO_BUILD_BUILD_DIR itself. Never guess a fallback.
+    # https://doc.rust-lang.org/cargo/commands/cargo-metadata.html#json-format
+    $buildProperty = $metadata.PSObject.Properties['build_directory']
+    if (-not $buildProperty -or -not $buildProperty.Value) {
+        throw 'Cargo metadata must report build_directory to check all write roots; use Cargo 1.96.1 or newer. Nothing installed.'
     }
-    foreach ($destination in @($BinDir, $extensions, $backupRoot)) { Assert-Separate $target $destination }
+    $intermediate = [IO.Path]::GetFullPath($buildProperty.Value)
+    foreach ($writeRoot in @($target, $intermediate)) {
+        Assert-PlainTree $writeRoot
+        foreach ($sourceDirectory in @('extensions', 'integrations', 'scripts', 'src')) {
+            Assert-Separate $writeRoot (Join-Path $root $sourceDirectory)
+        }
+        foreach ($destination in @($BinDir, $extensions, $backupRoot)) { Assert-Separate $writeRoot $destination }
+    }
+    $manifestPhysical = Resolve-PhysicalPath (Join-Path $root 'Cargo.toml')
+    $packages = @($metadata.packages | Where-Object { (Resolve-PhysicalPath $_.manifest_path) -ieq $manifestPhysical })
+    if ($packages.Count -ne 1) { throw 'Cannot identify exactly one checkout package; nothing installed.' }
+    $packageId = $packages[0].id
     # Freeze the checked target dir; use executable paths from this build, never stale guessed leaves.
-    $messages = & cargo build --release --target-dir $target --message-format=json
+    $messages = & cargo build --manifest-path $manifest --release --target-dir $target --message-format=json
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed; nothing installed.' }
     $artifacts = @{}
+    $artifactDirectory = $null
+    $artifactProfile = $null
     foreach ($line in $messages) {
         $message = $line | ConvertFrom-Json
         if ($message.reason -eq 'compiler-artifact' -and $message.executable -and $names -contains $message.target.name) {
+            if ($artifacts.ContainsKey($message.target.name)) { throw "Ambiguous duplicate artifact for $($message.target.name); nothing installed." }
+            if ($message.package_id -cne $packageId -or $message.target.kind.Count -ne 1 -or $message.target.kind[0] -ne 'bin' -or $message.profile.test) {
+                throw "Unexpected package/target/profile for $($message.target.name); nothing installed."
+            }
             $source = [IO.Path]::GetFullPath($message.executable)
             if (-not $source.StartsWith(($target.TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) {
                 throw "Artifact outside checked build directory: $source"
@@ -185,6 +264,14 @@ try {
             Assert-PlainPath $source 'File'
             if ([IO.Path]::GetExtension($source) -ine '.exe') { throw "Expected a native Windows executable: $source" }
             if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing artifact: $source" }
+            $directory = Resolve-PhysicalPath (Split-Path $source -Parent)
+            $profile = $message.profile | ConvertTo-Json -Depth 5 -Compress
+            if ($null -eq $artifactDirectory) {
+                $artifactDirectory = $directory
+                $artifactProfile = $profile
+            } elseif ($directory -ine $artifactDirectory -or $profile -cne $artifactProfile) {
+                throw 'Artifacts do not form one package/profile/target-directory set; nothing installed.'
+            }
             $artifacts[$message.target.name] = $source
         }
     }
@@ -197,10 +284,6 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Cannot determine source status; nothing installed.' }
     $sourceLabel = "$commit"
     if ($dirty) { $sourceLabel += ' (dirty working tree)' }
-    $python = Find-Python
-    Invoke-Python -Arguments @('-c', 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required"')
-    Invoke-Python -Arguments @('scripts/install_extension_tests.py', '--check', $extensions)
-
     # Windows locks executing images. Finish every preflight before stopping or copying.
     $cli = $artifacts['vqro']
     $status = & $cli status
@@ -225,9 +308,9 @@ try {
     $priorExtensionsPresent = Test-Path -LiteralPath $extensions
     $priorExtensions = @(Get-TreeInventory $extensions)
     $backup = Join-Path $backupRoot (([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffffffZ')) + '-' + [Guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $backup | Out-Null
+    [IO.Directory]::CreateDirectory($backup) | Out-Null
     $backupBin = Join-Path $backup 'bin'
-    New-Item -ItemType Directory -Path $backupBin | Out-Null
+    [IO.Directory]::CreateDirectory($backupBin) | Out-Null
     foreach ($name in $names) {
         $installed = Join-Path $BinDir "$name.exe"
         if (Test-Path -LiteralPath $installed) { Copy-Item -LiteralPath $installed -Destination $backupBin }
@@ -251,29 +334,38 @@ try {
         Set-Content -LiteralPath (Join-Path $backup 'restore.txt') -Encoding UTF8
     Write-Host "Backup: $backup (retained, including previous backups)."
 
-    New-Item -ItemType Directory -Force -Path $extensions, $BinDir | Out-Null
-    Copy-Item extensions/*.py, extensions/defaults.json -Destination $extensions -Force
+    [IO.Directory]::CreateDirectory($extensions) | Out-Null
+    [IO.Directory]::CreateDirectory($BinDir) | Out-Null
+    Get-ChildItem -LiteralPath (Join-Path $root 'extensions') -Filter '*.py' -File |
+        ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $extensions -Force }
+    Copy-Item -LiteralPath (Join-Path $root 'extensions/defaults.json') -Destination $extensions -Force
     $manifests = Join-Path $extensions 'manifests'
-    New-Item -ItemType Directory -Force -Path $manifests | Out-Null
-    Copy-Item extensions/manifests/*.json -Destination $manifests -Force
-    Invoke-Python -Arguments @('scripts/install_extension_tests.py', $extensions)
+    [IO.Directory]::CreateDirectory($manifests) | Out-Null
+    Get-ChildItem -LiteralPath (Join-Path $root 'extensions/manifests') -Filter '*.json' -File |
+        ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $manifests -Force }
+    Invoke-Python -Arguments @((Join-Path $root 'scripts/install_extension_tests.py'), $extensions)
     $rex = Join-Path $extensions 'optional/rex'
-    New-Item -ItemType Directory -Force -Path $rex | Out-Null
-    Copy-Item extensions/optional/rex/rex.json, extensions/optional/rex/README.md -Destination $rex -Force
+    [IO.Directory]::CreateDirectory($rex) | Out-Null
+    foreach ($file in @('rex.json', 'README.md')) {
+        Copy-Item -LiteralPath (Join-Path (Join-Path $root 'extensions/optional/rex') $file) -Destination $rex -Force
+    }
     $tier1 = Join-Path $extensions 'tier1'
-    New-Item -ItemType Directory -Force -Path $tier1 | Out-Null
-    Copy-Item integrations/pi/vqro-pull.ts -Destination $tier1 -Force
+    [IO.Directory]::CreateDirectory($tier1) | Out-Null
+    Copy-Item -LiteralPath (Join-Path $root 'integrations/pi/vqro-pull.ts') -Destination $tier1 -Force
     $clients = Join-Path $extensions 'clients'
-    New-Item -ItemType Directory -Force -Path $clients | Out-Null
-    Copy-Item extensions/clients/*.py, extensions/clients/text.json -Destination $clients -Force
-    foreach ($package in Get-ChildItem extensions -Directory) {
+    [IO.Directory]::CreateDirectory($clients) | Out-Null
+    Get-ChildItem -LiteralPath (Join-Path $root 'extensions/clients') -Filter '*.py' -File |
+        ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $clients -Force }
+    Copy-Item -LiteralPath (Join-Path $root 'extensions/clients/text.json') -Destination $clients -Force
+    foreach ($package in Get-ChildItem -LiteralPath (Join-Path $root 'extensions') -Directory) {
         if (-not (Test-Path -LiteralPath (Join-Path $package.FullName '__init__.py'))) { continue }
         $destination = Join-Path $extensions $package.Name
         if ($package.Name -eq 'pi_bridge' -and (Test-Path -LiteralPath $destination)) {
             Remove-Item -LiteralPath $destination -Recurse -Force
         }
-        New-Item -ItemType Directory -Force -Path $destination | Out-Null
-        Copy-Item (Join-Path $package.FullName '*.py') -Destination $destination -Force
+        [IO.Directory]::CreateDirectory($destination) | Out-Null
+        Get-ChildItem -LiteralPath $package.FullName -Filter '*.py' -File |
+            ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $destination -Force }
     }
     foreach ($name in $names) {
         $source = $artifacts[$name]

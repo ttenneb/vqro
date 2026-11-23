@@ -53,8 +53,18 @@ Close all vqro UIs and bridge processes first so they cannot restart the core du
 The script uses one outer confirmation for the entire operation (required backup copies cannot be skipped
 individually). Before building, it refuses links/junctions/reparse points in managed paths and their ancestors,
 wrong destination types, and overlapping install/source/build/backup directories. Custom `-BinDir` must be outside
-the checkout and Cargo output. Cargo metadata determines the checked target directory; executable paths come
-from that build's JSON artifact messages, not a guessed `target/release` directory. The script builds release
+the checkout and Cargo output. Separation checks use normalized volume-GUID physical paths (including SUBST
+aliases), not drive-letter prefixes; volumes whose final physical identity cannot be read are refused.
+The root is derived from the script location and must match Git's exact physical checkout root; there is no
+wildcard-capable `-Root` argument. Filesystem operations use literal paths, including checkouts with brackets in
+their names. Reparse/junction paths are refused rather than followed; extended path forms must pass the same
+physical-volume identity checks or fail closed.
+Cargo metadata must report both `target_directory` and `build_directory` (verified with Cargo 1.96.1; older
+versions without the latter field are refused). Both final output and independent intermediate output
+(`build.build-dir` / `CARGO_BUILD_BUILD_DIR`, including Cargo's resolved templates) are checked against protected
+install, backup and source trees **before building**. Executable paths come from that build's JSON artifact
+messages, not a guessed `target/release` directory. Duplicate binary-name records are refused rather than
+last-wins; all seven must belong to the checkout package, one profile and one physical output directory. The script builds release
 binaries, checks all seven and the bundled test mapping, requests protocol shutdown
 if a core is running, and waits for vqro processes to exit. If they remain, it refuses to install; it never
 forcibly kills processes. Backend-owned terminals are not stopped by `vqro stop`.
