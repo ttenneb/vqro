@@ -6,6 +6,12 @@ Always re-execs in a new user/network namespace, empty PATH and private HOME,
 state/config/runtime/sockets. Never installs or contacts a live/default server.
 Retains receipt.json and logs in a unique scratch root. Linux test harness.
 """
+
+import sys
+if __name__ == "__main__" and sys.platform != "linux":
+    print("SKIP pi_provider_e2e: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 from python_interpreter import python
 import argparse
 import hashlib

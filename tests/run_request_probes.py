@@ -6,6 +6,12 @@ Runs each probe in its own private public-core fixture, exactly as run_agent_con
 qualification table. Its diagnostic labels cover these probes only: R4 here is the additional timeout vector,
 not the existing unknown/oversized request vectors. Use the main runner for the integrated case.
 """
+
+import sys
+if __name__ == "__main__" and sys.platform != "linux":
+    print("SKIP run_request_probes: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 from python_interpreter import python
 import argparse
 import asyncio

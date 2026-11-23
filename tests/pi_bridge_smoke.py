@@ -6,6 +6,12 @@ No prompts/tools/compaction/provider operations. Failure to create a network
 namespace is a blocker, never a reason to fall back to the real environment.
 The generated private root is retained with a JSON receipt for inspection.
 """
+
+import sys
+if __name__ == "__main__" and sys.platform != "linux":
+    print("SKIP pi_bridge_smoke: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 import argparse
 import asyncio
 import json

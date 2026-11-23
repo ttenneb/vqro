@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 """Private New Codex agent public-command E2E; fake native only, never auth/model APIs."""
+
+import sys
+if __name__ == "__main__" and sys.platform != "linux":
+    print("SKIP codex_launcher_e2e: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 from python_interpreter import python
 import argparse
 import hashlib

@@ -12,7 +12,7 @@ if sys.platform != "linux":
     print("SKIP OpenTUI trial client: requires Linux /proc and namespace/process probes")
     raise SystemExit(77)
 
-import json, os, re, shutil, socket, subprocess, sys, tempfile, time
+import json, os, re, shlex, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
 VQRO, PHERDR = (os.path.join(TARGET, "debug", b) for b in ("vqro", "vqro-herdr"))
@@ -121,7 +121,7 @@ try:
             break
     check("pane size follows the window (stream.resize: 88x22 inside the border)", bool(sized), screen())
     # Mouse: a program that asked for the mouse (SGR mode) receives a click in its own encoding.
-    keys("/usr/bin/clear; " + python() + " " + f"{R}/mouse.py", literal=True); keys("Enter")
+    keys("/usr/bin/clear; " + shlex.join([python(), f"{R}/mouse.py"]), literal=True); keys("Enter")
     wait(lambda: "mouse-ready" in screen(), 10)
     lines = screen().splitlines()
     y = next(i for i, l in enumerate(lines) if "mouse-ready" in l) + 1

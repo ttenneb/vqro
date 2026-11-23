@@ -5,6 +5,12 @@ Run through gate-slot.sh (see the slice-2 brief). --source-only checks the fixtu
 source core without requiring the implementation. --cases selects independent
 controls. Successful runs remove their scratch root; failures retain evidence.
 """
+
+import sys
+if __name__ == "__main__" and sys.platform != "linux":
+    print("SKIP e2e_testing_integration: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 import argparse
 import hashlib
 import json
@@ -18,6 +24,7 @@ import tempfile
 import time
 
 from e2e_testing_unit import PrivateCore, wait_for
+from python_interpreter import shell_fixture
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -186,13 +193,13 @@ class Driver:
         # A transparent private exec shim records actual core launches independently
         # of what the implementation claims in its receipt. It always execs the
         # requested worktree build, never a binary from the installed setup.
-        self.launcher.write_text('#!' + sys.executable + '\n' + '''import json, os, sys
+        self.launcher.write_text(shell_fixture('''import json, os, sys
 record = {"argv": sys.argv[1:], "pid": os.getpid(), "pgid": os.getpgrp(), "sid": os.getsid(0),
           "env": {k: v for k, v in os.environ.items() if k.startswith(("VQRO_", "HC_", "HERDR_", "XDG_", "TMUX"))}}
 with open(''' + repr(str(self.launch_log)) + ''', "a") as output:
     output.write(json.dumps(record) + "\\n")
 os.execv(''' + repr(str(source.binary)) + ''', [''' + repr(str(source.binary)) + ''', *sys.argv[1:]])
-''')
+''', sys.executable))
         self.launcher.chmod(0o700)
 
     def launches(self):

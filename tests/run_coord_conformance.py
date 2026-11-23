@@ -2,6 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Bennett Garcia
 """Opt-in, network-isolated public-core Part B coordination conformance."""
+
+import sys
+if __name__ == "__main__" and sys.platform != "linux":
+    print("SKIP run_coord_conformance: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 from python_interpreter import python
 import argparse
 import asyncio

@@ -1,7 +1,9 @@
 """Linux-only harnesses skip before effects; portable/mocked tests remain enabled."""
 import ast
+import builtins
 import contextlib
 import io
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -46,6 +48,27 @@ class PlatformSkips(unittest.TestCase):
                 self.assertIn('SKIP', output.getvalue())
                 self.assertIn('Linux', output.getvalue())
 
+    def test_actual_python_module_frames_skip_before_any_nontrivial_import(self):
+        real_import = builtins.__import__
+        def pure_import(name, *args, **kwargs):
+            if name != 'sys':
+                self.fail('effectful import before SKIP: ' + name)
+            return real_import(name, *args, **kwargs)
+        for name in TOP_LEVEL + MAIN:
+            path = HERE / (name + '.py')
+            program = compile(path.read_text(), str(path), 'exec')
+            for platform in ('darwin', 'win32'):
+                with self.subTest(harness=name, platform=platform):
+                    output = io.StringIO()
+                    with patch.object(sys, 'platform', platform), \
+                            patch.object(builtins, '__import__', side_effect=pure_import), \
+                            contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as result:
+                        exec(program, {'__name__': '__main__', '__file__': str(path)})
+                    self.assertEqual(result.exception.code, 77)
+                    self.assertIn('SKIP', output.getvalue())
+                    self.assertIn('Linux', output.getvalue())
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX shell entry-point control; Python frame controls stay enabled')
     def test_shell_harness_skips_before_arguments_or_private_roots(self):
         with tempfile.TemporaryDirectory(prefix='platform-skip-') as directory:
             root = Path(directory)

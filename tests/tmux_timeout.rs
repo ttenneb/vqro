@@ -23,7 +23,7 @@ async fn client(dir: &Path, conf: &str, timeout_ms: u64) -> Client {
     // Run the fixture with the same resolved interpreter, even with an old python3 first on PATH.
     use std::os::unix::fs::PermissionsExt;
     let wrapper = dir.join("fake-tmux");
-    std::fs::write(&wrapper, format!("#!/bin/sh\nexec '{}' '{}' \"$@\"\n", test_python::python().replace('\'', "'\\''"), fake().unwrap().display())).unwrap();
+    std::fs::write(&wrapper, format!("#!/bin/sh\nexec '{}' '{}' \"$@\"\n", test_python::python().replace('\'', "'\\''"), fake().unwrap().to_string_lossy().replace('\'', "'\\''"))).unwrap();
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
     config.binary = wrapper;
     config.command_timeout = Duration::from_millis(timeout_ms);

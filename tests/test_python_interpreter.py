@@ -1,8 +1,11 @@
 """Portable pure resolver controls plus Unix bootstrap integration controls."""
+import ast
 import importlib.util
+import json
 import os
 from pathlib import Path
 import runpy
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -21,6 +24,39 @@ class PureInterpreterTests(unittest.TestCase):
         with patch.object(subprocess, 'Popen', side_effect=AssertionError('import launched a child')):
             imported = runpy.run_path(str(ROOT / 'tests/python_interpreter.py'))
         self.assertTrue(callable(imported['python']))
+
+    def test_shell_fixture_preserves_literal_interpreter_and_source(self):
+        from python_interpreter import shell_fixture
+        interpreter = "C:/test python's directory/python.exe"
+        source = 'import sys; print("literal \\\" quoted source")'
+        script = shell_fixture(source, interpreter)
+        command = script.removeprefix('#!/bin/sh\nexec ').removesuffix(' "$@"\n')
+        self.assertEqual(shlex.split(command), [interpreter, '-c', source])
+        self.assertTrue(script.startswith('#!/bin/sh\n'))
+
+    def test_actual_harness_shell_expressions_preserve_literal_paths(self):
+        chosen, root = "/test python's/bin/python3", "/private root's directory"
+        namespace = {'python': lambda: chosen, 'R': root, 'shlex': shlex}
+        for name, marker, expected in (
+                ('e2e_opentui.py', 'mouse.py', [chosen, root + '/mouse.py']),
+                ('e2e_tui_providers.py', 'icons.py', [chosen, root + '/ext/icons.py'])):
+            tree = ast.parse((ROOT / 'tests' / name).read_text())
+            expressions = [node.args[0] for node in ast.walk(tree) if isinstance(node, ast.Call) and node.args
+                           and marker in ast.unparse(node.args[0])
+                           and ((isinstance(node.func, ast.Name) and node.func.id == 'keys')
+                                or (isinstance(node.func, ast.Attribute) and node.func.attr == 'write'))]
+            self.assertEqual(len(expressions), 1)
+            command = eval(compile(ast.Expression(expressions[0]), name, 'eval'), namespace)
+            command = command.removeprefix('/usr/bin/clear; ').removeprefix('#!/bin/sh\nexec ')
+            self.assertEqual(shlex.split(command), expected)
+
+    def test_conformance_registry_imports_do_not_probe_interpreters(self):
+        path = ROOT / 'tests/agent_conformance/core.py'
+        spec = importlib.util.spec_from_file_location('agent_conformance._import_control', path)
+        module = importlib.util.module_from_spec(spec)
+        with patch.object(subprocess, 'Popen', side_effect=AssertionError('registry import launched a child')):
+            spec.loader.exec_module(module)
+        self.assertTrue(hasattr(module, 'PublicImplementation'))
 
     def test_windows_uses_native_python_without_shell(self):
         with patch.object(resolver, 'WINDOWS', True), patch.dict(os.environ, {'PATH': ''}, clear=True), \
@@ -111,6 +147,16 @@ class InterpreterTests(unittest.TestCase):
         result = self.resolve()
         self.assertEqual(result.returncode, 2)
         self.assertIn("Python >= 3.11", result.stderr)
+
+    def test_shell_fixture_executes_with_spaced_apostrophe_interpreter_and_literal_args(self):
+        from python_interpreter import shell_fixture
+        fixture = self.root / "fixture's wrapper"
+        fixture.write_text(shell_fixture('import json,sys; print(json.dumps(sys.argv[1:]))', str(self.real / 'python3')))
+        fixture.chmod(0o700)
+        arguments = ['one spaced argument', 'apostrophe\' and "quote"', 'snowman ☃']
+        result = subprocess.run([str(fixture), *arguments], env=self.env, text=True, capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), arguments)
 
     def test_hung_probe_is_killed_and_reaped(self):
         shim = self.root / 'hung-python'

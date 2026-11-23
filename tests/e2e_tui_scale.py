@@ -9,6 +9,12 @@ Receipts record screen deadline misses and associated historical stream signals,
 A complete token is positive screen evidence even when late. Key/stream evidence is capped with explicit
 dropped counts; missing or truncated metadata is labelled incomplete and is not associated with keys.
 """
+
+import sys
+if __name__ == "__main__" and sys.platform != "linux":
+    print("SKIP e2e_tui_scale: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 from python_interpreter import python
 import argparse
 from collections import deque

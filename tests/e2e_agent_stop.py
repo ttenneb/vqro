@@ -6,6 +6,12 @@ Reuses tests/pi_provider_e2e.py isolation: new user/network namespace, empty PAT
 sockets and herdr-core. Fake Pi and a fake non-Pi provider only; no model calls. Retention runs with a
 short grace (GRACE seconds): a stopped agent must go well inside it, an unknown one must outlive it.
 """
+
+import sys
+if __name__ == "__main__" and sys.platform != "linux":
+    print("SKIP e2e_agent_stop: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 from python_interpreter import python
 import argparse
 import json

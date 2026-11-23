@@ -5,6 +5,12 @@ Constrain only reader/test threads AFTER native clients attach, leaving native p
 children on their normal CPUs. Pinning the entire process tree throttles the producer and
 can hide the backlog failure. All environments and cleanup are private to this invocation.
 """
+
+import sys
+if __name__ == "__main__" and sys.platform != "linux":
+    print("SKIP tmux_flood_load: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 import argparse
 import json
 import os

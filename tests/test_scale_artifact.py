@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from python_interpreter import shell_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location('scale_artifact', ROOT/'scripts/scale_artifact.py')
@@ -114,7 +115,7 @@ class PrebuildRecipeTests(unittest.TestCase):
                 old.write_text('#!/bin/sh\nexit 0\n')  # Old executable retained after a failed build.
                 old.chmod(0o700)
             marker, wrapper = root/'exclusive-ran', root/'fake-slot'
-            wrapper.write_text('#!' + sys.executable + '\n' + '''import os,pathlib,sys
+            wrapper.write_text(shell_fixture('''import os,pathlib,sys
 if '--exclusive' in sys.argv[1:]:
     pathlib.Path(os.environ['EXCLUSIVE_MARKER']).write_text('must not run')
     raise SystemExit(0)
@@ -124,7 +125,7 @@ if release_build:
 if os.environ['FAIL_PREBUILD']=='scale':
     raise SystemExit(8)
 print(pathlib.Path(os.environ['CARGO_TARGET_DIR'])/'release/deps/scale-selected')
-''')
+''', sys.executable))
             wrapper.chmod(0o700)
             for failed in ('scale', 'vqro'):
                 with self.subTest(failed=failed):

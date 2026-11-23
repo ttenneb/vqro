@@ -11,3 +11,9 @@ def python():
     resolver = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(resolver)
     return resolver.resolve()
+
+
+def shell_fixture(source, interpreter):
+    """POSIX executable fixture, with literal argv even for spaced/apostrophe paths."""
+    import shlex
+    return '#!/bin/sh\nexec ' + shlex.join([interpreter, '-c', source]) + ' "$@"\n'

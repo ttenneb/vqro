@@ -4,6 +4,12 @@
 Results always list the selected/omitted normative cases. A partial green run or
 an ACP/fake model is not adapter certification. See agent_conformance/README.md.
 """
+
+import sys
+if __name__ == "__main__" and sys.platform != "linux":
+    print("SKIP run_agent_conformance: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 from python_interpreter import python
 import argparse
 import asyncio

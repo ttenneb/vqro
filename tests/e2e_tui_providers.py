@@ -13,7 +13,7 @@ if sys.platform != "linux":
     raise SystemExit(77)
 
 from python_interpreter import python
-import json, os, shutil, socket, subprocess, sys, tempfile, time
+import json, os, shlex, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
 VQRO, PHERDR, PTMUX = (os.path.join(TARGET, "debug", b) for b in ("vqro", "vqro-herdr", "vqro-tmux"))
@@ -306,7 +306,7 @@ try:
     # Restore only our private missing executable, without changing the failed declaration.
     wrapper=f"{R}/bin/vqro-extension-page-test-missing"
     with open(wrapper,"w") as output:
-        output.write(f"#!/bin/sh\nexec '{python()}' '{R}/ext/icons.py'\n")
+        output.write("#!/bin/sh\nexec " + shlex.join([python(), f"{R}/ext/icons.py"]) + "\n")
     os.chmod(wrapper,0o700)
     keys("Escape")  # clear the list filter, then close the popup after its frame arrives
     check("recovery setup clears catalogue filter", bool(wait(lambda:not any(line.strip(" │")=="/icons" for line in screen().splitlines()))))
