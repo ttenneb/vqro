@@ -43,6 +43,8 @@ Other arguments: `--rex BIN` (the `rex` program), `--history LINES` (most histor
 - Program status (OSC 7501) is stored by Rex and reread after event loss; failed or invalid observations retain
   the last known facts. Newly listed blocks are not published until their process lifecycle is observed. Exit
   codes are reported only from a valid integer witness.
+- Argv storage is limited to 64 KiB (string bytes plus per-argument metadata); oversized requests are refused before
+  creation. Created-but-unobserved metadata shares the bounded pending-discovery budget and is cleaned up on failure.
 - Rex has **no per-terminal environment**: a spawn that asks for `env` is refused (nothing starts).
 - Rex takes **text input only** (UTF-8). Other bytes are refused for that stream, never changed.
 - Viewing a terminal makes vqro its size owner in Rex (like any Rex client that resizes it).

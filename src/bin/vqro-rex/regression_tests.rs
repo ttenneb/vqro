@@ -35,12 +35,12 @@ fn answer(method: &str, mode: u8) -> Value {
     match method {
         "session.list" if mode == 4 => json!({}),
         "session.list" if mode == 5 => json!({"sessions": []}),
-        "session.list" if mode == 7 => json!({"$error": true}),
+        "session.list" if mode == 7 || mode == 25 => json!({"$error": true}),
         "session.list" => json!({"sessions": [{"session_id": "s", "label": "vqro"}]}),
         "session.attach" if mode == 1 => json!({"$error": true}),
         "session.list_blocks" if mode == 2 => json!({"$error": true}),
         "session.list_blocks" if mode == 3 => json!({}),
-        "session.list_blocks" if mode == 17 || mode == 23 || mode == 24 => json!({"blocks": [
+        "session.list_blocks" if mode == 17 || mode == 23 || mode == 24 || mode == 26 => json!({"blocks": [
             {"block_id":"b", "creator_name":TERMINAL,"label":"block"},
             {"block_id":"unobserved", "creator_name":TERMINAL,"label":"pending"}]}),
         "session.list_blocks" => json!({"blocks": [{"block_id":"b", "creator_name":TERMINAL,"label":"block"}]}),
@@ -105,13 +105,16 @@ async fn fixture_full() -> Fixture {
         loop {
             let req = read_frame(&mut read).await;
             let mode = server_mode.load(Ordering::Relaxed);
-            let payload = answer(req["method"].as_str().unwrap(), mode);
+            let payload = if mode == 25 && req["method"] == "session.new_window" {
+                json!({"block_ids":[format!("created-{}", req["id"].as_str().unwrap())]})
+            } else { answer(req["method"].as_str().unwrap(), mode) };
             if payload["$drop"] == true { break; }
             if payload["$ignore"] == true { continue; }
             let reply = if payload["$error"] == true { json!({"type":"response","id":req["id"],"error":{"code":"fixture","message":"observation failed"}}) }
                 else { json!({"type":"response","id":req["id"],"payload":payload}) };
             if (mode == 11 && req["method"] == "com.superlogical.terminal.title")
-                || (mode == 20 && req["method"] == "com.superlogical.terminal.program_status") {
+                || (mode == 20 && req["method"] == "com.superlogical.terminal.program_status")
+                || (mode == 26 && req["method"] == "com.superlogical.terminal.process" && req["payload"]["block_id"] == "unobserved") {
                 let (write, paused, release) = (write.clone(), server_paused.clone(), server_release.clone());
                 tokio::spawn(async move {
                     paused.notify_one();
@@ -151,7 +154,7 @@ async fn fixture_full() -> Fixture {
     });
     let (provider, requests) = Provider::connect(client, Config::new("fixture", "i", capabilities())).await.unwrap();
     let app = Arc::new(App { provider, control, socket: "unused".into(), owned_dir: None, spawn_label: "vqro".into(), run: "run".into(), history: 0,
-        state: Mutex::new(State { next_revision:0, removed:HashSet::new(), facts_ready:false, blocks:BTreeMap::new(), sessions:HashMap::new(), killed:HashSet::new(), argv:HashMap::new(), streams:HashMap::new() }),
+        state: Mutex::new(State { next_revision:0, removed:HashSet::new(), facts_ready:false, ending:false, pending:HashMap::new(), blocks:BTreeMap::new(), sessions:HashMap::new(), killed:HashSet::new(), streams:HashMap::new() }),
         reconcile:Notify::new(), reconciling:tokio::sync::Mutex::new(()), publishing:tokio::sync::Mutex::new(()) });
     app.reconcile(true).await.unwrap();
     Fixture { app, mode, paused, release, published, requests, core:core_tx }
@@ -420,17 +423,94 @@ async fn revisions_never_reset_and_retirement_budget_fails_closed() {
     let (old, mut facts) = { let st = app.state.lock().unwrap(); (st.blocks["b"].revision, st.blocks["b"].facts.clone()) };
     app.write_facts(Change::Remove { bid:"b".into(), incarnation:"run".into(), reason:json!({"reason":"exited"}) }).await.unwrap();
     facts["ref"] = json!("c");
-    app.write_facts(Change::Refresh { bid:"c".into(), session:"s".into(), base:None, facts:facts.clone() }).await.unwrap();
+    let observation = app.write_facts(Change::Begin { bid:"c".into() }).await.unwrap().unwrap();
+    app.write_facts(Change::Refresh { bid:"c".into(), session:"s".into(), base:observation["revision"].as_u64(), token:observation["token"].as_u64(), facts:facts.clone() }).await.unwrap();
     assert!(app.state.lock().unwrap().blocks["c"].revision > old);
     {
         let mut state = app.state.lock().unwrap();
         for n in 0..facts::MAX_REGISTRATION_REFS-2 { state.removed.insert(format!("retired-{n}")); }
         assert_eq!(state.blocks.len() + state.removed.len(), facts::MAX_REGISTRATION_REFS);
     }
-    facts["ref"] = json!("overflow");
-    assert!(app.write_facts(Change::Refresh { bid:"overflow".into(), session:"s".into(), base:None, facts }).await.is_err());
+    assert!(app.write_facts(Change::Begin { bid:"overflow".into() }).await.is_err());
     assert!(app.provider.is_closed());
     let state = app.state.lock().unwrap();
     assert!(state.removed.contains("b"));
     assert!(!state.blocks.contains_key("overflow"));
+}
+
+#[tokio::test]
+async fn pending_discovery_exit_invalidates_its_captured_live_process() {
+    let (app, mode, paused, release, published) = fixture_detailed().await;
+    mode.store(26, Ordering::Relaxed);
+    let refresh = { let app = app.clone(); tokio::spawn(async move { app.reconcile(false).await }) };
+    tokio::time::timeout(Duration::from_secs(1), paused.notified()).await.unwrap();
+    assert!(!app.state.lock().unwrap().blocks.contains_key("unobserved"));
+    app.event(json!({"type":"block_event","payload":{"block_id":"unobserved","name":"child_exited","payload":{"exit_code":42}}})).await;
+    release.notify_one();
+    refresh.await.unwrap().unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(!app.state.lock().unwrap().blocks.contains_key("unobserved"), "an older live discovery survived the exit");
+    assert!(!published.lock().unwrap().iter().any(|v| v["method"] == "resource.upsert"
+        && v["params"]["facts"]["ref"] == "unobserved" && v["params"]["facts"]["state"] == "live"));
+}
+
+#[tokio::test]
+async fn unobserved_created_argv_is_not_retained_after_failure() {
+    let (app, mode) = fixture().await;
+    mode.store(25, Ordering::Relaxed);
+    for _ in 0..20 {
+        let error = app.spawn(&json!({"argv":["fake","argument"]})).await.unwrap_err();
+        assert!(error.message.contains("created"));
+    }
+    assert!(app.state.lock().unwrap().pending.is_empty(), "unobserved created argv entries leaked");
+}
+
+#[tokio::test]
+async fn discovery_cancellation_clears_its_pending_stamp() {
+    let (app, mode, paused, release, _) = fixture_detailed().await;
+    mode.store(26, Ordering::Relaxed);
+    let refresh = { let app = app.clone(); tokio::spawn(async move { app.reconcile(false).await }) };
+    tokio::time::timeout(Duration::from_secs(1), paused.notified()).await.unwrap();
+    assert_eq!(app.state.lock().unwrap().pending.len(), 1);
+    refresh.abort();
+    assert!(refresh.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !app.state.lock().unwrap().pending.is_empty() { tokio::time::sleep(Duration::from_millis(1)).await; }
+    }).await.unwrap();
+    release.notify_one();
+}
+
+#[tokio::test]
+async fn pending_tokens_protect_newer_argv_and_registration_end_clears_them() {
+    let (app, _) = fixture().await;
+    let old = app.write_facts(Change::Begin { bid:"new".into() }).await.unwrap().unwrap();
+    let created = app.write_facts(Change::Created { bid:"new".into(), argv:vec!["command".into()] }).await.unwrap().unwrap();
+    app.write_facts(Change::Cancel { bid:"new".into(), token:old["token"].as_u64().unwrap() }).await.unwrap();
+    let observation = app.write_facts(Change::Begin { bid:"new".into() }).await.unwrap().unwrap();
+    assert_eq!(observation["argv"], json!(["command"]));
+    app.write_facts(Change::Cancel { bid:"new".into(), token:created["token"].as_u64().unwrap() }).await.unwrap();
+    assert_eq!(app.state.lock().unwrap().pending.len(), 1);
+    app.write_facts(Change::Remove { bid:"new".into(), incarnation:"run".into(), reason:json!({"reason":"exited"}) }).await.unwrap();
+    assert!(app.state.lock().unwrap().pending.is_empty());
+    app.write_facts(Change::Created { bid:"another".into(), argv:vec!["arg".into()] }).await.unwrap();
+    app.write_facts(Change::End).await.unwrap();
+    assert!(app.state.lock().unwrap().pending.is_empty());
+    assert!(app.write_facts(Change::Created { bid:"late".into(), argv:vec!["arg".into()] }).await.unwrap().is_none());
+    assert!(app.state.lock().unwrap().pending.is_empty());
+}
+
+#[tokio::test]
+async fn pending_identity_and_argv_storage_budgets_are_enforced() {
+    let (app, _) = fixture().await;
+    let error = app.spawn(&json!({"argv":["x".repeat(facts::MAX_ARGV_BYTES)]})).await.unwrap_err();
+    assert_eq!(error.kind, "invalid");
+    assert!(error.message.contains("nothing was created"));
+    for n in 0..facts::MAX_PENDING_REFS {
+        app.write_facts(Change::Created { bid:format!("pending-{n}"), argv:vec!["arg".into()] }).await.unwrap();
+    }
+    assert!(app.write_facts(Change::Begin { bid:"overflow".into() }).await.is_err());
+    assert_eq!(app.state.lock().unwrap().pending.len(), facts::MAX_PENDING_REFS);
+    assert!(app.provider.is_closed());
+    app.write_facts(Change::End).await.unwrap();
+    assert!(app.state.lock().unwrap().pending.is_empty());
 }

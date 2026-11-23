@@ -17,7 +17,7 @@ pub async fn dir(explicit: Option<PathBuf>, standalone: bool) -> Result<PathBuf,
         peer.close();
         hello["state_dir"].as_str().map(PathBuf::from).ok_or("rex requires a persistent core state directory")?
     } else if standalone {
-        vqro::paths::state_dir()
+        vqro::paths::state_dir().map_err(|e| e.to_string())?
     } else {
         return Err("cannot locate vqro state: VQRO_SOCKET or VQRO_STATE_DIR is required".into());
     };

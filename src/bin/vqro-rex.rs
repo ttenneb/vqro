@@ -90,11 +90,12 @@ struct State {
     next_revision: u64,
     removed: HashSet<String>,
     facts_ready: bool,
+    ending: bool,
+    pending: HashMap<String, facts::Pending>,
     blocks: BTreeMap<String, Block>,
     /// Session id -> label, for sessions this connection is attached to.
     sessions: HashMap<String, String>,
     killed: HashSet<String>,
-    argv: HashMap<String, Vec<String>>,
     /// Open streams per block, told when the block goes.
     streams: HashMap<String, Vec<Arc<Notify>>>,
 }
@@ -227,9 +228,8 @@ impl App {
 
     /// Refresh stored event-derived facts too: a reconcile repairs dropped events. Failed or malformed
     /// queries retain prior facts, never invent an exit or erase a previously observed status.
-    async fn refresh_facts(&self, session: &str, b: &Value, old: Option<Value>) -> Option<Value> {
+    async fn refresh_facts(&self, session: &str, b: &Value, old: Option<Value>, argv: Vec<String>) -> Option<Value> {
         let id = b["block_id"].as_str().unwrap_or_default();
-        let argv = self.state.lock().unwrap().argv.get(id).cloned().unwrap_or_default();
         let mut lifecycle_observed = old.is_some();
         let mut facts = old.unwrap_or_else(|| json!({"ref":id,"incarnation":self.run,"kind":"terminal",
             "state":"live","argv":argv,"data":{}}));
@@ -327,17 +327,21 @@ impl App {
         let known: HashSet<String> = self.state.lock().unwrap().blocks.keys().cloned().collect();
         let mut deferred = false;
         for (bid, (session, b)) in &seen {
-            let (old, base) = {
-                let st = self.state.lock().unwrap();
-                if st.removed.contains(bid) { continue; }
-                (st.blocks.get(bid).map(|b| b.facts.clone()), st.blocks.get(bid).map(|b| b.revision))
-            };
-            let Some(facts) = self.refresh_facts(session, b, old.clone()).await else {
+            let Some(observation) = self.write_facts(Change::Begin { bid:bid.clone() }).await? else { continue };
+            let base = observation["revision"].as_u64();
+            let token = observation["token"].as_u64();
+            let old = observation["facts"].as_object().map(|_| observation["facts"].clone());
+            let argv = observation["argv"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
+            let mut pending = facts::PendingGuard::new(self.clone(), bid.clone(), token);
+            let Some(facts) = self.refresh_facts(session, b, old.clone(), argv).await else {
                 eprintln!("vqro-rex: defer {bid}: no valid lifecycle observation");
+                pending.clear().await;
                 deferred = true;
                 continue;
             };
-            let applied = self.write_facts(Change::Refresh { bid:bid.clone(), session:session.clone(), base, facts }).await?;
+            let applied = self.write_facts(Change::Refresh { bid:bid.clone(), session:session.clone(), base, token, facts }).await?;
+            pending.clear().await;
+            if applied.is_none() { self.reconcile.notify_one(); }
             deferred |= old.is_none() && applied.is_none();
         }
         if first && deferred { return Err("initial lifecycle observation incomplete; refusing full sync".into()); }
@@ -453,6 +457,9 @@ impl App {
                 return Err(ProviderError::new("invalid", format!("{key} must be a string")));
             }
         }
+        if facts::argv_size(&argv) > facts::MAX_ARGV_BYTES {
+            return Err(ProviderError::new("invalid", "argv exceeds the provider's 64 KiB storage budget; nothing was created"));
+        }
         let owned_lock = self.owned_lock().await.map_err(unknown)?;
         let session = self.spawn_session().await.map_err(unknown)?;
         let mut options = json!({"size": {"columns": cols, "rows": rows}});
@@ -474,11 +481,14 @@ impl App {
             Err(e) => return Err(unknown(e)),
         };
         let bid = reply["block_ids"][0].as_str().ok_or_else(|| ProviderError::new("backend", format!("outcome unknown: rex returned {reply}")))?.to_string();
-        self.state.lock().unwrap().argv.insert(bid.clone(), argv);
         drop(owned_lock);
+        let reservation = self.write_facts(Change::Created { bid:bid.clone(), argv }).await
+            .map_err(|e| ProviderError::new("backend", format!("terminal created: ref {bid}; pending metadata unavailable: {e}; do not retry spawn")))?;
+        let mut pending = facts::PendingGuard::new(self.clone(), bid.clone(), reservation.as_ref().and_then(|v| v["token"].as_u64()));
         if let Err(e) = self.reconcile(false).await {
             eprintln!("vqro-rex: reconcile after spawn: {e}");
         }
+        pending.clear().await;
         let facts = self.write_facts(Change::Snapshot { bid:bid.clone() }).await.map_err(|e| ProviderError::new("backend", e))?
             .ok_or_else(|| ProviderError::new("backend", format!("terminal created: ref {bid}; follow-up lifecycle observation unavailable; outcome unknown, do not retry spawn")))?;
         Ok(Outcome::Observed(Some(json!({"facts": facts}))))
@@ -873,13 +883,18 @@ async fn registration(a: &Args, endpoint: &str, socket: &Path, owned_dir: Option
         spawn_label: a.session.clone(),
         run,
         history: a.history,
-        state: Mutex::new(State { next_revision:0, removed:HashSet::new(), facts_ready:false, blocks: BTreeMap::new(), sessions: HashMap::new(), killed: HashSet::new(),
-            argv: HashMap::new(), streams: HashMap::new() }),
+        state: Mutex::new(State { next_revision:0, removed:HashSet::new(), facts_ready:false, ending:false, pending:HashMap::new(), blocks: BTreeMap::new(), sessions: HashMap::new(), killed: HashSet::new(),
+            streams: HashMap::new() }),
         reconcile: Notify::new(),
         reconciling: tokio::sync::Mutex::new(()),
         publishing: tokio::sync::Mutex::new(()),
     });
-    app.reconcile(true).await?;
+    if let Err(error) = app.reconcile(true).await {
+        let _ = app.write_facts(Change::End).await;
+        provider.close();
+        control.close().await;
+        return Err(error);
+    }
     let events_task = {
         let app = app.clone();
         tokio::spawn(async move {
@@ -921,6 +936,7 @@ async fn registration(a: &Args, endpoint: &str, socket: &Path, owned_dir: Option
     };
     reconciler.abort();
     events_task.abort();
+    let _ = app.write_facts(Change::End).await;
     provider.close();
     control.close().await;
     ended

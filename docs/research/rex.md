@@ -90,17 +90,28 @@ community clients and observing our own private server's traffic; the Rex binary
   `write_facts` under one async owner mutex. This includes native events, refresh/status observations, acknowledged
   kills, discovery/spawn snapshots, removal/full sync, and effect replies. Native Rex I/O stays outside the owner;
   no blocking mutex crosses I/O. Failed queries retain prior facts.
-- Owner rules: events apply to current known blocks; unknown-id events allocate nothing. Refresh/status/kill
+- Owner rules: events apply to current known blocks; refs that are neither active nor pending allocate nothing.
+  Before querying a new discovery, `Begin` admits a bounded pending token/revision in the owner (not a Block).
+  Events for that pending ref advance its revision, invalidating older live candidates. Commit requires both the
+  exact token and revision; stale discovery is dropped and scheduled for re-observation. Refresh/status/kill
   observations carry their captured Block revision and apply only if it is still current. Each mutation gets a
   checked, globally monotonic revision stored in the Block, never reset/reused in a registration. Kill acknowledgement
   is committed and published by this owner, not returned as an out-of-band lifecycle snapshot. If a newer witness
   invalidates the kill observation, the effect reports acceptance without claiming current lifecycle facts.
 - Effect replies are also enqueued under the owner and resolve current facts again, so a newer native event or gone
   cannot be followed by an older spawn/kill reply snapshot. Removal is final for that ref in this registration:
-  rediscovery and delayed candidates cannot republish it. Active plus retired identities are limited to 65,536,
-  refs to 256 bytes; exhausting the ledger/counter closes registration without evicting history or reusing revisions.
+  rediscovery and delayed candidates cannot republish it. Active, retired and pending identities together are
+  limited to 65,536, with at most 1,024 pending and refs limited to 256 bytes; exhausting a budget/counter closes
+  registration without evicting history or reusing revisions.
   This explicitly bounds retirement bookkeeping rather than retaining unlimited tombstones. Initial discoveries
-  remain unpublished until the owner emits the first full sync. The event-triggered status query uses the same rules. The control reader emits pending lag after queue drain even
+  remain unpublished until the owner emits the first full sync. The event-triggered status query uses the same rules.
+- Created-but-unobserved argv is stored only in the owner's pending identity entry, never a separate unbounded map.
+  Its estimated storage (string bytes plus per-argument metadata) is capped at 64 KiB; oversized argv is refused
+  before native creation. Creation metadata transfers into a fresh observation token so older cleanup cannot erase
+  a newer reservation. Token-aware guards clear pending entries on commit, failure or cancellation; removal clears
+  them too. Registration end clears all pending metadata and refuses late admissions from unfinished effect tasks.
+  A successfully observed argv lives in the Block's normal facts. Native creation followed by unavailable observation
+  still reports the created ref with an outcome-unknown/no-retry error, never a fabricated lifecycle. The control reader emits pending lag after queue drain even
   without another native event. It does not cancel a partially parsed WebSocket read to do so.
 - Status replacement requires object records, nullable/string id and textual fields, and nullable/numeric
   progress; invalid entries or supported field types preserve the old table. Sparse process replies preserve

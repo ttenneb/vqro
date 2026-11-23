@@ -6,9 +6,51 @@ use super::*;
 /// retirement history and resurrect refs. Unknown native events never consume this budget.
 pub(super) const MAX_REGISTRATION_REFS: usize = 65_536;
 const MAX_REF_BYTES: usize = 256;
+pub(super) const MAX_PENDING_REFS: usize = 1024;
+pub(super) const MAX_ARGV_BYTES: usize = 64 * 1024;
+pub(super) fn argv_size(argv: &[String]) -> usize {
+    argv.iter().fold(0usize, |n, s| n.saturating_add(s.len()).saturating_add(std::mem::size_of::<String>()))
+}
+
+pub(super) struct Pending {
+    token: u64,
+    revision: u64,
+    argv: Vec<String>,
+}
+
+/// Clears an admitted stamp/argv on ordinary failure or cancellation. The token protects a newer
+/// replacement reservation from an older future's cleanup. Registration End also clears the whole set.
+pub(super) struct PendingGuard {
+    app: Arc<App>,
+    bid: String,
+    token: Option<u64>,
+}
+
+impl PendingGuard {
+    pub(super) fn new(app: Arc<App>, bid: String, token: Option<u64>) -> Self { Self { app, bid, token } }
+    pub(super) async fn clear(&mut self) {
+        if let Some(token) = self.token {
+            let _ = self.app.write_facts(Change::Cancel { bid:self.bid.clone(), token }).await;
+            self.token = None;
+        }
+    }
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if let (Some(token), Ok(runtime)) = (self.token.take(), tokio::runtime::Handle::try_current()) {
+            let (app, bid) = (self.app.clone(), self.bid.clone());
+            runtime.spawn(async move { let _ = app.write_facts(Change::Cancel { bid, token }).await; });
+        }
+    }
+}
 
 pub(super) enum Change {
-    Refresh { bid: String, session: String, base: Option<u64>, facts: Value },
+    Begin { bid: String },
+    Created { bid: String, argv: Vec<String> },
+    Cancel { bid: String, token: u64 },
+    End,
+    Refresh { bid: String, session: String, base: Option<u64>, token: Option<u64>, facts: Value },
     Status { bid: String, base: u64, status: Value },
     Event { bid: String, name: String, body: Value },
     Kill { bid: String, base: u64 },
@@ -34,9 +76,17 @@ impl State {
         if bid.is_empty() || bid.len() > MAX_REF_BYTES {
             return Err("invalid/oversized Rex ref; closing registration".into());
         }
-        if !self.blocks.contains_key(bid) && !self.removed.contains(bid)
-            && self.blocks.len() + self.removed.len() >= MAX_REGISTRATION_REFS {
+        if !self.blocks.contains_key(bid) && !self.removed.contains(bid) && !self.pending.contains_key(bid)
+            && self.blocks.len() + self.removed.len() + self.pending.len() >= MAX_REGISTRATION_REFS {
             return Err("fact identity ledger exhausted; closing registration without evicting retired refs".into());
+        }
+        Ok(())
+    }
+
+    fn pending_admit(&self, bid: &str) -> Result<(), String> {
+        self.admit(bid)?;
+        if !self.pending.contains_key(bid) && self.pending.len() >= MAX_PENDING_REFS {
+            return Err("pending discovery budget exhausted; closing registration".into());
         }
         Ok(())
     }
@@ -45,9 +95,53 @@ impl State {
     fn apply(&mut self, change: Change, run: &str) -> Result<(Option<Value>, Vec<Publication>), String> {
         let mut publications = Vec::new();
         let mut result = None;
+        if self.ending { return Ok((None, publications)); }
         match change {
-            Change::Refresh { bid, session, base, facts } => {
-                if self.removed.contains(&bid) || self.blocks.get(&bid).map(|b| b.revision) != base {
+            Change::Begin { bid } => {
+                if self.removed.contains(&bid) { return Ok((None, publications)); }
+                if let Some(block) = self.blocks.get(&bid) {
+                    result = Some(json!({"revision":block.revision,"facts":block.facts,"argv":[]}));
+                } else {
+                    self.pending_admit(&bid)?;
+                    let revision = self.revision()?;
+                    let argv = self.pending.remove(&bid).map(|p| p.argv).unwrap_or_default();
+                    // Transfer any creation metadata into this observation's unique token. Cleanup from
+                    // an older observer or creation future cannot erase this newer in-flight witness.
+                    self.pending.insert(bid.clone(), Pending { token:revision, revision, argv });
+                    let pending = &self.pending[&bid];
+                    result = Some(json!({"revision":pending.revision,"token":pending.token,"facts":null,"argv":pending.argv}));
+                }
+            }
+            Change::Created { bid, argv } => {
+                if argv_size(&argv) > MAX_ARGV_BYTES {
+                    return Err("pending argv exceeds byte budget; closing registration".into());
+                }
+                if self.removed.contains(&bid) { return Ok((None, publications)); }
+                if self.blocks.contains_key(&bid) {
+                    let revision = self.revision()?;
+                    let block = self.blocks.get_mut(&bid).unwrap();
+                    block.revision = revision;
+                    block.facts["argv"] = json!(argv);
+                    publications.push(Publication::Upsert(block.facts.clone()));
+                } else {
+                    self.pending_admit(&bid)?;
+                    let revision = self.revision()?;
+                    // A delayed creation acknowledgement replaces an older discovery token. Cancellation
+                    // from the older observation cannot erase this reservation or its argv.
+                    self.pending.insert(bid, Pending { token:revision, revision, argv });
+                    result = Some(json!({"token":revision}));
+                }
+            }
+            Change::Cancel { bid, token } => {
+                if self.pending.get(&bid).is_some_and(|p| p.token == token) { self.pending.remove(&bid); }
+            }
+            Change::End => { self.pending.clear(); self.ending = true; }
+            Change::Refresh { bid, session, base, token, facts } => {
+                let current = self.blocks.get(&bid).map(|b| b.revision);
+                let pending = self.pending.get(&bid);
+                let valid = if current.is_some() { token.is_none() && current == base }
+                    else { pending.is_some_and(|p| Some(p.token) == token && Some(p.revision) == base) };
+                if self.removed.contains(&bid) || !valid {
                     return Ok((None, publications));
                 }
                 if self.blocks.get(&bid).is_some_and(|b| b.facts == facts) {
@@ -55,6 +149,7 @@ impl State {
                 }
                 self.admit(&bid)?;
                 let revision = self.revision()?;
+                self.pending.remove(&bid);
                 self.blocks.insert(bid, Block { session, facts: facts.clone(), revision });
                 result = Some(facts.clone());
                 publications.push(Publication::Upsert(facts));
@@ -69,8 +164,15 @@ impl State {
                 publications.push(Publication::Upsert(block.facts.clone()));
             }
             Change::Event { bid, name, body } => {
-                // Unknown/gone ids allocate nothing: no revision entry and no tombstone.
-                if !self.blocks.contains_key(&bid) { return Ok((None, publications)); }
+                // Only explicitly admitted discovery refs get an in-flight witness. Other unknown/gone
+                // ids allocate nothing. A pending event invalidates the candidate without creating a Block.
+                if !self.blocks.contains_key(&bid) {
+                    if self.pending.contains_key(&bid) {
+                        let revision = self.revision()?;
+                        self.pending.get_mut(&bid).unwrap().revision = revision;
+                    }
+                    return Ok((None, publications));
+                }
                 let revision = self.revision()?;
                 let block = self.blocks.get_mut(&bid).unwrap();
                 block.revision = revision;
@@ -109,7 +211,7 @@ impl State {
                     self.admit(&bid)?;
                     self.blocks.remove(&bid);
                     self.removed.insert(bid.clone());
-                    self.argv.remove(&bid);
+                    self.pending.remove(&bid);
                     if self.killed.remove(&bid) && reason["reason"] == "exited" { reason["reason"] = json!("killed"); }
                     for stream in self.streams.remove(&bid).unwrap_or_default() { stream.notify_one(); }
                 }
