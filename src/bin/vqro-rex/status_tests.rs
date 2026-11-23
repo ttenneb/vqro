@@ -15,8 +15,19 @@ impl Fake {
         let bin = root.join("fake-rex");
         let ready = json!({"endpoint":r"\\.\pipe\rex-status-fixture"}).to_string();
         let initial = if garbage { "not-json" } else { "" };
-        std::fs::write(&bin, format!("#!/bin/sh\ncase \"$*\" in\n*'server status --json'*)\n if test -f \"$REX_RUNTIME_DIR/started\"; then printf '%s' '{ready}'; exit 0; fi\n printf '%s' '{initial}'; printf '%s' 'fixture status failure' >&2; exit {exit};;\n*'server start --json'*) touch \"$REX_RUNTIME_DIR/started\"; printf '%s' '{{\"started\":true}}';;\n*'api call server.status'*) printf '%s' '{{\"instance_id\":\"fixture\",\"session_count\":0,\"version\":\"fake\"}}';;\n*) exit 2;;\nesac\n")).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let script = format!("#!/bin/sh\ncase \"$*\" in\n*'server status --json'*)\n if test -f \"$REX_RUNTIME_DIR/started\"; then printf '%s' '{ready}'; exit 0; fi\n printf '%s' '{initial}'; printf '%s' 'fixture status failure' >&2; exit {exit};;\n*'server start --json'*) touch \"$REX_RUNTIME_DIR/started\"; printf '%s' '{{\"started\":true}}';;\n*'api call server.status'*) printf '%s' '{{\"instance_id\":\"fixture\",\"session_count\":0,\"version\":\"fake\"}}';;\n*) exit 2;;\nesac\n");
+        // Written by a child process, never through a file descriptor of this test process: with tests running in
+        // parallel, another test's fork (before its exec) can inherit an open write descriptor, and executing the
+        // script then fails with ETXTBSY ("Text file busy"), which the status code rightly reports as unknown.
+        let mut writer = std::process::Command::new("/bin/sh")
+            .args(["-c", "cat > \"$1\" && chmod 700 \"$1\"", "sh"]).arg(&bin)
+            .stdin(std::process::Stdio::piped()).spawn().unwrap();
+        {
+            use std::io::Write;
+            let mut stdin = writer.stdin.take().unwrap();
+            stdin.write_all(script.as_bytes()).unwrap();
+        }
+        assert!(writer.wait().unwrap().success());
         Self { root, dir, bin }
     }
 }
