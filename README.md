@@ -36,7 +36,8 @@ Agents and scripts drive the same primitives with `vqro call <method> '<json>'` 
 **Native Windows:** experimental. The background-extension console-window storm has a local fix,
 with detached-core restart and installed desktop/TUI smokes passing. Services were stopped after testing.
 The full gate is still not green and `dev-install.sh` is Unix-only. See the [Windows install attempt and friction log](docs/research/windows-native-install.md)
-for prerequisites, the tested local installation, private launch commands and remaining failures. Treat it as experimental.
+for prerequisites, the tested local installation, private fixture reproduction and remaining failures. Those native
+results cover the human patch predecessor; the consolidated follow-ups still require a native rerun. Treat it as experimental.
 
 Upgrading a pre-rename installation is a one-time offline operation: use the copy-only migration utility in
 `scripts/` (`--help` first), with old UIs/launchers closed and the old core stopped. It retains the old state as a

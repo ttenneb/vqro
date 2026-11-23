@@ -87,6 +87,8 @@ pub async fn ensure_core() -> Result<()> {
     {
         use std::os::windows::process::CommandExt;
         use windows_sys::Win32::System::Threading::{DETACHED_PROCESS, CREATE_NEW_PROCESS_GROUP};
+        // The core deliberately has no UI console/process group. CREATE_NO_WINDOW is ignored
+        // with DETACHED_PROCESS; supervised descendants request it independently at each launch.
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
     cmd.spawn()?;

@@ -136,7 +136,7 @@ pub fn native_env(command:&mut Command,env:&HashMap<String,String>) {
 impl Native {
     pub async fn spawn(argv: &[String], cwd: &std::path::Path, env: &HashMap<String,String>, observe: Observe) -> Result<Self, Error> {
         let Some(program) = argv.first() else { return Err(Error::new("invalid", "explicit Pi argv is required")); };
-        let mut command = Command::new(program);
+        let mut command = vqro::program::background_command(program);
         command.args(&argv[1..]).current_dir(cwd);
         native_env(&mut command,env);
         command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);

@@ -82,7 +82,7 @@ async fn run(args: Args) -> Result<(), String> {
     {
         return Err("--instance must be 1..64 ASCII letters, digits, -, _ or .".into());
     }
-    let mut command = tokio::process::Command::new(&args.native[0]);
+    let mut command = vqro::program::background_command(&args.native[0]);
     command
         .args(&args.native[1..])
         .stdin(Stdio::piped())

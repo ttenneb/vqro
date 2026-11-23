@@ -5,13 +5,24 @@ use std::path::{Path,PathBuf};
 /// stdio alone does not prevent a window, especially when the core itself is detached.
 /// Never use this for backend-owned interactive terminals or UI clients.
 pub fn background_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
-    let command = tokio::process::Command::new(program);
-    #[cfg(windows)]
-    let command = {
-        let mut command = command;
-        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-        command
-    };
+    background_command_with(program, cfg!(windows), |command, flags| {
+        #[cfg(windows)]
+        command.creation_flags(flags);
+        #[cfg(not(windows))]
+        let _ = (command, flags);
+    })
+}
+
+// Preserve the native-tested Tokio API while permitting a powerless flag setter on Linux.
+const BACKGROUND_NO_WINDOW: u32 = 0x0800_0000;
+#[cfg(windows)]
+const _: () = assert!(BACKGROUND_NO_WINDOW == windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+fn background_command_with(
+    program: impl AsRef<std::ffi::OsStr>, windows: bool,
+    set_flags: impl FnOnce(&mut tokio::process::Command, u32),
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(program);
+    if windows { set_flags(&mut command, BACKGROUND_NO_WINDOW); }
     command
 }
 
@@ -89,5 +100,83 @@ pub fn resolve_provider(name:&str) -> Result<PathBuf,String> {
     #[test] fn windows_program_suffix_is_added_once() {
         assert_eq!(candidate(Path::new("bin"),"vqro-herdr",".exe"),Path::new("bin").join("vqro-herdr.exe"));
         assert_eq!(candidate(Path::new("bin"),"vqro-herdr.exe",".exe"),Path::new("bin").join("vqro-herdr.exe"));
+    }
+
+    #[test]
+    fn background_command_sets_only_no_window_on_windows_and_nothing_on_unix() {
+        for windows in [false, true] {
+            let mut calls = Vec::new();
+            let command = background_command_with("not-executed", windows, |_, flags| calls.push(flags));
+            let command = command.as_std();
+            assert_eq!(command.get_program(), "not-executed");
+            assert_eq!(calls, if windows { vec![0x0800_0000] } else { vec![] });
+            assert!(command.get_args().next().is_none());
+            assert!(command.get_envs().next().is_none());
+            assert!(command.get_current_dir().is_none());
+        }
+    }
+
+    #[test]
+    fn background_spawn_sites_use_the_shared_helper() {
+        for (name, source, calls) in [
+            ("ext", include_str!("ext.rs"), 1),
+            ("herdr connector", include_str!("adapter/herdr.rs"), 1),
+            ("tmux control/capture", include_str!("tmux/client.rs"), 2),
+            ("tmux CLI/version", include_str!("bin/vqro-tmux.rs"), 2),
+            ("Rex CLI", include_str!("bin/vqro-rex/server.rs"), 1),
+            ("Codex app-server", include_str!("bin/vqro-bridge-codex.rs"), 1),
+            ("Pi version", include_str!("bin/vqro-bridge-pi/main.rs"), 1),
+            ("Pi RPC", include_str!("bin/vqro-bridge-pi/native.rs"), 1),
+            ("snapshot test child", include_str!("tui/ghostty/mod.rs"), 1),
+        ] {
+            assert_eq!(source.matches("program::background_command(").count(), calls, "{name}");
+            assert!(!source.contains("Command::new("), "unclassified raw constructor: {name}");
+        }
+        for (name, source, calls) in [
+            ("UI launch", include_str!("ui_launch.rs"), 1),
+            ("TUI restart", include_str!("tui/mod.rs"), 1),
+            ("Unix kill fallback", include_str!("main.rs"), 1),
+            ("detached core", include_str!("client.rs"), 1),
+            ("Unix Rex fixtures", include_str!("bin/vqro-rex/status_tests.rs"), 2),
+            ("unexecuted Pi env fixture", include_str!("bin/vqro-bridge-pi/tests.rs"), 1),
+        ] {
+            assert_eq!(source.matches("Command::new(").count(), calls, "new constructor: {name}");
+        }
+        let core = include_str!("client.rs").split_whitespace().collect::<String>();
+        assert!(core.contains("cmd.creation_flags(DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP)"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn background_child_round_trips_all_stdio_without_console() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let script = r#"
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class ConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }';
+$line = [Console]::In.ReadLine();
+[Console]::Out.WriteLine('window=' + [ConsoleProbe]::GetConsoleWindow().ToInt64());
+[Console]::Out.WriteLine('stdin=' + $line);
+[Console]::Error.WriteLine('stderr=intact');
+"#;
+        let mut child = background_command("powershell.exe").into_std()
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .spawn().expect("Windows PowerShell console probe");
+        child.stdin.take().unwrap().write_all(b"stdio-intact\n").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill(); let _ = child.wait();
+                panic!("background console probe timed out");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(stdout.lines().any(|line| line.trim() == "window=0"), "{stdout}");
+        assert!(stdout.lines().any(|line| line.trim() == "stdin=stdio-intact"), "{stdout}");
+        assert!(stderr.contains("stderr=intact"), "{stderr}");
     }
 }

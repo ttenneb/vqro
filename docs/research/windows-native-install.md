@@ -1,5 +1,9 @@
 # Native Windows: friction, issues, and bugs found
 
+Historical human-agent report through `76d3e4f0`, preserved with machine-specific paths redacted below. Its native
+results belong to that predecessor, not automatically to the later consolidated background-launch follow-ups.
+The consolidated candidate requires a new native run; this report is not a full-gate or installation certificate.
+
 Date: 2026-11-23
 Base checkout: `9ddd1e2`; feature branch: `fix/windows-background-console-windows`
 Platform: native Windows 10.0.26200 x86-64; no WSL

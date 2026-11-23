@@ -988,7 +988,7 @@ mod tests {
             }
             let path = root.path().join("snapshot.bin");
             std::fs::write(&path, &snapshot).unwrap();
-            let result = std::process::Command::new(std::env::current_exe().unwrap())
+            let result = crate::program::background_command(std::env::current_exe().unwrap()).into_std()
                 .env_clear().env("VQRO_SNAPSHOT_BUDGET_INPUT", path)
                 .args(["--exact", "tui::ghostty::tests::snapshot_budget_decode_child", "--nocapture"])
                 .output().unwrap();

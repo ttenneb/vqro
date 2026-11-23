@@ -173,7 +173,7 @@ impl Client {
                 "absolute socket under 103 bytes, session, positive timeout/pause-after and pane capacity 1..1024 required".into(),
             ));
         }
-        let mut cmd = tokio::process::Command::new(&config.binary);
+        let mut cmd = crate::program::background_command(&config.binary);
         cmd.env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()));
         if let Some(home) = std::env::var_os("HOME") {
             cmd.env("HOME", home);
@@ -421,7 +421,7 @@ impl Client {
         let capture = format!("capture-pane -p -e -t {}", quote(pane.as_str())?);
         // Both identity check and capture run on the SAME server command queue. Never address a
         // reused %N on a replacement server merely because its socket path has been recreated.
-        let mut cmd = tokio::process::Command::new(&self.config.binary);
+        let mut cmd = crate::program::background_command(&self.config.binary);
         cmd.env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()));
         if let Some(home) = std::env::var_os("HOME") {
             cmd.env("HOME", home);

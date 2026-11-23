@@ -80,7 +80,7 @@ fn tmux_cli(bin: &PathBuf, socket: &PathBuf, args: &[&str]) -> Result<String, St
 }
 
 fn tmux_run(bin: &PathBuf, socket: &PathBuf, flags: &[&str], args: &[&str]) -> Result<String, String> {
-    let mut cmd = std::process::Command::new(bin);
+    let mut cmd = vqro::program::background_command(bin).into_std();
     cmd.env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()));
     for k in ["HOME", "TERM", "LANG"] {
         if let Some(v) = std::env::var_os(k) {
@@ -858,7 +858,7 @@ async fn registration(a: &Args, endpoint: &str, socket: &PathBuf) -> Result<(), 
     let name = a.name.clone().unwrap_or_else(|| default_name(&instance));
     let mut pconfig = Config::new(name, instance.clone(), capabilities());
     let version = tmux_cli(&a.tmux, socket, &["-V"]).or_else(|_| {
-        std::process::Command::new(&a.tmux).arg("-V").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).map_err(|e| e.to_string())
+        vqro::program::background_command(&a.tmux).into_std().arg("-V").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).map_err(|e| e.to_string())
     });
     pconfig.software = json!({"name": "tmux", "version": version.unwrap_or_default().trim().trim_start_matches("tmux ")});
     let stream = vqro::transport::connect(endpoint).await.map_err(|e| format!("cannot reach the core: {e}"))?;

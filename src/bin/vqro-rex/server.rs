@@ -68,7 +68,7 @@ pub async fn lock(dir: &Path) -> Result<std::fs::File, String> {
 /// A `rex` command for the owned server: environment cleared except selected inherited variables, `REX_RUNTIME_DIR`
 /// set, and never autostarting a server anywhere else.
 pub fn rex(bin: &Path, dir: &Path) -> std::process::Command {
-    let mut cmd = std::process::Command::new(bin);
+    let mut cmd = vqro::program::background_command(bin).into_std();
     cmd.env_clear();
     #[cfg(unix)]
     let keys = &["PATH", "HOME", "LANG", "SHELL", "USER", "LOGNAME"][..];

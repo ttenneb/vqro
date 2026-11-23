@@ -54,7 +54,7 @@ fn native_failure(error:native::Error)->Result<Outcome,ProviderError> {
 async fn startup_version(shared:Arc<Shared>,argv:Vec<String>,cwd:std::path::PathBuf,env:HashMap<String,String>){
     let Some((program,rest))=argv.split_first() else {return;};
     use tokio::io::AsyncReadExt;
-    let mut command=tokio::process::Command::new(program);
+    let mut command=vqro::program::background_command(program);
     native::native_env(&mut command,&env); // same filtering as the RPC child: no bootstrap credential, no Herdr identity
     command.args(rest).arg("--version").current_dir(&cwd).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null()).kill_on_drop(true);
