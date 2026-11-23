@@ -589,7 +589,7 @@ impl App {
             }
         };
         let history = usize::try_from(open.history_lines).unwrap_or(usize::MAX).min(self.history);
-        let screen = match tokio::task::spawn_blocking(move || vqro::tui::snapshot_to_vt(&repaint, history)).await {
+        let repaint = match tokio::task::spawn_blocking(move || vqro::tui::snapshot_to_vt(&repaint, history)).await {
             Ok(Ok(vt)) => vt,
             Ok(Err(e)) => {
                 open.respond(Err(ProviderError::new("backend", format!("rex snapshot could not be decoded: {e}"))));
@@ -600,12 +600,18 @@ impl App {
                 return;
             }
         };
+        // Publish the decode's bounded-history outcome through the facts owner, never as terminal text.
+        match self.write_facts(Change::Repaint { bid:bid.clone(), history_truncated:repaint.history_truncated, restored_rows:repaint.restored_rows }).await {
+            Ok(Some(_)) => {}
+            Ok(None) => { open.respond(Err(ProviderError::new("not_found", "terminal disappeared during snapshot decode"))); return; }
+            Err(error) => { open.respond(Err(ProviderError::new("backend", error))); return; }
+        }
         let gone = Arc::new(Notify::new());
         self.state.lock().unwrap().streams.entry(bid.clone()).or_default().push(gone.clone());
         let Some(mut stream) = open.respond(Ok(Initial::Repaint)) else { return };
         let mut metadata = data::Metadata::new(channel.nonce);
         let mut first = REPAINT_PREFIX.to_vec();
-        first.extend_from_slice(&screen);
+        first.extend_from_slice(&repaint.vt);
         let mut ok = stream.send(&first).await.is_ok();
         if ok {
             match metadata.feed(&following) {

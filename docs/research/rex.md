@@ -78,16 +78,24 @@ community clients and observing our own private server's traffic; the Rex binary
   (a DEC line-drawing designation left active isn't restored). With that, about 160000 structure-aware fuzz inputs
   under ReleaseSafe/ReleaseFast were clean apart from **one library decoder bug** (index out of bounds while decoding a
   hyperlink string, 1 input; to report upstream; fixed by a later pin). Decoded memory can be far larger than the
-  snapshot (blank history about 700x). Decoding now uses `ghostty_snapshot_decoder_ready`/`next`: it refuses if the
-  sum of both screens' advisory history plus two screens exceeds the row budget, and independently counts actual
-  progress rows because the advisory counts are untrusted. The allowance is four times (requested history + two
-  screens + 256 rows for page granularity), capped at 64,000 rows and 4,000,000 cells. Refusal fails stream open with
-  `Rex snapshot exceeds decoded row/cell budget`, before any repaint is published. This bounds history amplification,
-  not exact bytes: READY and one incremental page are allocated before their row counts can be checked, and cell
-  metadata has variable cost. Existing bounded replay still limits the emitted history. Regression tests encode
-  20,000 blank lines at 2000×500 (about 91 KB) and decode in fresh child processes, both with honest advisory counts
-  and CRC-correct zero counts; both must refuse below 64 MiB peak RSS on Linux. The ReleaseSafe gate's
-  `tui::ghostty` filter includes these controls and the malformed GR=G0 fixture. The snapshot comes from the same
+  snapshot (blank history about 700x). Decoding now uses `ghostty_snapshot_decoder_ready`/`next`, counting actual
+  progress rows rather than rejecting advisory history extents. Once the budget is reached, it frees the decoder
+  and formats what was restored: pages are prepended newest-first, so the screen and newest history are retained
+  and honest long-running terminals still open. The allowance is four times (requested history + two screens +
+  256 rows for page granularity), capped at 64,000 rows and 4,000,000 cells. A renderable screen beyond the cap
+  still fails clearly. This bounds history amplification, not exact bytes: READY and one incremental page are
+  allocated before their counts can be checked, and cell metadata has variable cost. On truncation the unused
+  older-history tail and FINISH are deliberately **not validated**; consumed records are validated normally, and
+  the library documents the partially restored terminal as usable. Rex's outer snapshot framing is still checked.
+  Existing bounded replay limits the emitted history. `snapshot_to_vt` returns `history_truncated` (stopped before
+  FINISH) and `restored_rows` (history rows prepended by successful incremental steps, excluding resident READY
+  content and subsequent bounded replay). `vqro-rex` publishes the last completed attach's values under terminal
+  facts `data.repaint = {history_truncated, restored_rows}`, through the single facts owner, never as stream text.
+  Reconcile preserves this metadata; removal/registration end prevent late decode results from resurrecting facts.
+  Regression tests encode a 12,000-line honest terminal and verify newest history and an identical screen, plus
+  20,000 blank lines at 2000×500 (about 91 KB) decoded in fresh child processes, with both honest and CRC-correct
+  zero advisory counts. Both amplification controls must truncate below 64 MiB peak RSS on Linux. The ReleaseSafe
+  gate's `tui::ghostty` filter includes these controls and the malformed GR=G0 fixture. The snapshot comes from the same
   user's Rex, so these are robustness issues, not a privilege boundary.
 - **Alpha API.** Pinned to API revision 19; the data format is undocumented and may change. The provider fails a
   stream (never shows garbage) when the snapshot or metadata framing doesn't parse.

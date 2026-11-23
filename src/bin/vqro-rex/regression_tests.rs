@@ -392,6 +392,30 @@ async fn kill_publication_waits_for_the_fact_owner() {
 }
 
 #[tokio::test]
+async fn repaint_metadata_uses_fact_owner_and_survives_refresh_without_resurrecting_removed_refs() {
+    let (app, _) = fixture().await;
+    let owner = app.publishing.lock().await;
+    let write = { let app = app.clone(); tokio::spawn(async move {
+        app.write_facts(Change::Repaint { bid:"b".into(), history_truncated:true, restored_rows:9200 }).await
+    }) };
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!write.is_finished(), "repaint metadata bypassed the single owner");
+    drop(owner);
+    let facts = write.await.unwrap().unwrap().unwrap();
+    assert_eq!(facts["data"]["repaint"], json!({"history_truncated":true,"restored_rows":9200}));
+    app.event(block_event("title_changed", json!({"title":"newer title"}))).await;
+    let latest = app.write_facts(Change::Repaint { bid:"b".into(), history_truncated:false, restored_rows:40 }).await.unwrap().unwrap();
+    assert_eq!(latest["title"], "newer title", "only repaint metadata changes, never other facts");
+    app.reconcile(false).await.unwrap();
+    assert_eq!(app.state.lock().unwrap().blocks["b"].facts["data"]["repaint"], json!({"history_truncated":false,"restored_rows":40}));
+    app.write_facts(Change::Remove { bid:"b".into(), incarnation:"run".into(), reason:json!({"reason":"exited"}) }).await.unwrap();
+    assert!(app.write_facts(Change::Repaint { bid:"b".into(), history_truncated:true, restored_rows:9200 }).await.unwrap().is_none());
+    assert!(!app.state.lock().unwrap().blocks.contains_key("b"));
+    app.write_facts(Change::End).await.unwrap();
+    assert!(app.write_facts(Change::Repaint { bid:"late".into(), history_truncated:true, restored_rows:9200 }).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn effect_replies_cannot_publish_a_snapshot_older_than_an_event_or_removal() {
     let mut f = fixture_full().await;
     for (n, remove) in [(1, false), (2, true)] {

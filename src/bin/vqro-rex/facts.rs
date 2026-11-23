@@ -63,6 +63,7 @@ pub(super) enum Change {
     End,
     Refresh { bid: String, session: String, base: Option<u64>, token: Option<u64>, facts: Value },
     Status { bid: String, base: u64, status: Value },
+    Repaint { bid: String, history_truncated: bool, restored_rows: u64 },
     Event { bid: String, name: String, body: Value },
     Kill { bid: String, base: u64 },
     Remove { bid: String, incarnation: String, reason: Value },
@@ -190,6 +191,20 @@ impl State {
                 block.revision = revision;
                 block.facts["status"] = status;
                 publications.push(Publication::Upsert(block.facts.clone()));
+            }
+            Change::Repaint { bid, history_truncated, restored_rows } => {
+                // A completed attach reports only its own repaint metadata, never a stale copy of other facts.
+                // Removal is final: a late decode cannot recreate a block or publish after registration End.
+                if !self.blocks.contains_key(&bid) { return Ok((None, publications)); }
+                let repaint = json!({"history_truncated":history_truncated,"restored_rows":restored_rows});
+                if self.blocks[&bid].facts["data"]["repaint"] != repaint {
+                    let revision = self.revision()?;
+                    let block = self.blocks.get_mut(&bid).unwrap();
+                    block.revision = revision;
+                    block.facts["data"]["repaint"] = repaint;
+                    publications.push(Publication::Upsert(block.facts.clone()));
+                }
+                result = Some(self.blocks[&bid].facts.clone());
             }
             Change::Event { bid, name, body } => {
                 // Only explicitly admitted discovery refs get an in-flight witness. Other unknown/gone
