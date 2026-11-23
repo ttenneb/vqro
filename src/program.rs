@@ -71,7 +71,8 @@ fn unix_python(explicit: Option<PathBuf>, mut dirs: Vec<PathBuf>, fallback: &[Pa
         // A bare override uses PATH only, never a fallback directory. Relative paths and PATH
         // entries are anchored to the selecting process, not the eventual extension/UI cwd.
         let program = if program.components().count() == 1 && !program.is_absolute() {
-            dirs.iter().map(|dir| dir.join(&program)).find(|p| executable(p)).unwrap_or(program)
+            dirs.iter().map(|dir| dir.join(&program)).find(|p| executable(p))
+                .ok_or_else(|| format!("VQRO_PYTHON {} not found on PATH; set it to an explicit Python 3.11+ interpreter path", program.display()))?
         } else { program };
         vec![program]
     } else {
@@ -265,6 +266,22 @@ pub fn resolve_provider(name:&str) -> Result<PathBuf,String> {
         let error = unix_python(None, dirs, &[], python_version_until).unwrap_err();
         assert!(error.contains("total probe budget"), "{error}");
         assert!(start.elapsed() < std::time::Duration::from_secs(6), "candidate deadlines must share one total budget");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn missing_bare_override_never_probes_a_current_directory_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let file = tempfile::Builder::new().prefix("custom-python-").tempfile_in(".").unwrap();
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bare = PathBuf::from(file.path().file_name().unwrap());
+        assert!(std::env::current_dir().unwrap().join(&bare).is_file());
+        let probes = std::cell::Cell::new(0);
+        let error = unix_python(Some(bare), vec![], &[], |_, _| {
+            probes.set(probes.get() + 1);
+            Ok((3, 12))
+        }).unwrap_err();
+        assert!(error.contains("VQRO_PYTHON") && error.contains("not found on PATH"), "{error}");
+        assert_eq!(probes.get(), 0, "a missing bare override must not fall back to cwd or run a probe");
     }
     #[cfg(unix)]
     #[test]
