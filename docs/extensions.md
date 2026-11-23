@@ -59,8 +59,8 @@ Run the CLI for full tests if that budget is exhausted. This is cooperative isol
 No installed tests means **no coverage**, not a test pass. `scripts/dev-install.sh` ships the mocked unit suites
 listed in `extensions/tests.json` (`suites` maps bundled declaration names to repository test/helper files;
 `not_shipped` records exclusions). Before copying installed files, the installer validates the mapping, sources
-and destination (`scripts/install_extension_tests.py --check DIR` writes nothing); symlinked test parents or
-suite directories are refused. Each mapped `tests/<name>/` directory is staged beside its destination before
+and every test output destination (`scripts/install_extension_tests.py --check DIR` writes nothing);
+symlinked test parents, suite directories or `tests.json` are refused, as are outputs of the wrong file type. Each mapped `tests/<name>/` directory is staged beside its destination before
 replacement so failed copying leaves the old suite intact and removed tests do not linger. Publication uses
 renames with rollback on failure; unrelated extension suites are left alone. Extensions can ship their own `tests/<name>/test_*.py`
 stdlib unittest suites using the same convention. Bundled tests resolve code through `VQRO_TEST_EXTENSIONS_DIR`

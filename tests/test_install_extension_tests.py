@@ -102,6 +102,45 @@ class InstallExtensionTests(unittest.TestCase):
                     if leaf:
                         self.assertEqual((destination / "tests/agents/keep.py").read_text(), "previous suite\n")
 
+    def test_invalid_mapping_output_preserves_every_target(self):
+        for kind in ("directory", "symlink", "dangling-symlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(prefix="vqro-test-output-") as temporary:
+                home = Path(temporary)
+                destination = home / "extensions"
+                mapping = installer.test_files(ROOT)
+                for name in mapping:
+                    suite = destination / "tests" / name
+                    suite.mkdir(parents=True)
+                    (suite / "sentinel").write_bytes(b"unchanged suite: " + name.encode())
+                metadata = destination / "tests.json"
+                outside = home / "outside.json"
+                if kind == "directory":
+                    metadata.mkdir()
+                    (metadata / "sentinel").write_bytes(b"unchanged metadata directory")
+                else:
+                    if kind == "symlink":
+                        outside.write_bytes(b"unchanged outside file")
+                    metadata.symlink_to(outside)
+                before = {str(path.relative_to(destination)): path.read_bytes()
+                          for path in destination.rglob("*") if path.is_file() and not path.is_symlink()}
+                before_paths = {str(path.relative_to(destination)) for path in destination.rglob("*")}
+                for check in (True, False):
+                    completed = subprocess.run([sys.executable, "-B", str(ROOT / "scripts/install_extension_tests.py"),
+                                                *(["--check"] if check else []), str(destination)],
+                                               cwd=home, env={"HOME": str(home), "PATH": os.environ.get("PATH", os.defpath)},
+                                               capture_output=True, text=True, timeout=10)
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertIn("mapping", completed.stderr)
+                    self.assertEqual({str(path.relative_to(destination)) for path in destination.rglob("*")}, before_paths)
+                    self.assertEqual({str(path.relative_to(destination)): path.read_bytes()
+                                      for path in destination.rglob("*") if path.is_file() and not path.is_symlink()}, before)
+                    if kind != "directory":
+                        self.assertTrue(metadata.is_symlink())
+                        self.assertEqual(metadata.readlink(), outside)
+                        self.assertEqual(outside.exists(), kind == "symlink")
+                        if outside.exists():
+                            self.assertEqual(outside.read_bytes(), b"unchanged outside file")
+
     def test_copy_failure_keeps_previous_complete_suite(self):
         with tempfile.TemporaryDirectory(prefix="vqro-test-copy-failure-") as temporary:
             destination = Path(temporary) / "extensions"
@@ -141,6 +180,30 @@ class InstallExtensionTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "injected rename failure"):
                     installer.install_tests(ROOT, destination)
             self.assertEqual({path.name: path.read_bytes() for path in suite.iterdir()}, before)
+
+    def test_failed_rollback_retains_backup_even_if_destination_exists(self):
+        with tempfile.TemporaryDirectory(prefix="vqro-test-rollback-failure-") as temporary:
+            destination = Path(temporary) / "extensions"
+            installer.install_tests(ROOT, destination)
+            suite = destination / "tests/agents"
+            before = {path.name: path.read_bytes() for path in suite.iterdir()}
+            rename = Path.rename
+
+            def fail_publication_and_rollback(source, target):
+                if source.name == "suite":
+                    target.mkdir()
+                    (target / "interloper").write_text("simulated competing destination")
+                    raise OSError("injected publication failure")
+                if source.name == "previous":
+                    raise OSError("injected rollback failure")
+                return rename(source, target)
+
+            with mock.patch.object(Path, "rename", fail_publication_and_rollback):
+                with self.assertRaisesRegex(OSError, "injected rollback failure"):
+                    installer.install_tests(ROOT, destination)
+            backups = list(suite.parent.glob(".agents-*/previous"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual({path.name: path.read_bytes() for path in backups[0].iterdir()}, before)
 
     def test_private_installed_offline_cli_and_broken_test_control(self):
         with tempfile.TemporaryDirectory(prefix="vqro-test-install-") as temporary:

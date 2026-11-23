@@ -39,6 +39,11 @@ def check_destination(destination, names):
             raise ValueError(f"unsafe test destination: {path}")
         if path.exists() and not path.is_dir():
             raise ValueError(f"not a suite directory: {path}")
+    metadata = destination / "tests.json"
+    if metadata.is_symlink() or not metadata.resolve().is_relative_to(destination):
+        raise ValueError(f"unsafe mapping destination: {metadata}")
+    if metadata.exists() and not metadata.is_file():
+        raise ValueError(f"not a mapping file: {metadata}")
 
 
 def preflight(root, destination):
@@ -60,6 +65,7 @@ def install_tests(root, destination, *, check=False):
         # sibling lives on the same filesystem, so publication uses rename, not copy.
         temporary = Path(tempfile.mkdtemp(prefix=f".{name}-", dir=parent))
         previous = temporary / "previous"
+        published = False
         try:
             staging = temporary / "suite"
             staging.mkdir()
@@ -70,13 +76,14 @@ def install_tests(root, destination, *, check=False):
                 directory.rename(previous)
             try:
                 staging.rename(directory)
+                published = True
             except OSError:
                 if previous.exists():
                     previous.rename(directory)
                 raise
         finally:
             # If even rollback fails, retain the previous suite for manual recovery.
-            if directory.exists() or not previous.exists():
+            if published or not previous.exists():
                 check_destination(destination, mapping)
                 shutil.rmtree(temporary)
     # Replace the mapping itself instead of following an existing tests.json symlink.
