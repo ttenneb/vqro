@@ -65,6 +65,43 @@ class PythonSelection(unittest.TestCase):
             self.assertIsNotNone(absent["setup_id"], absent)
             self.assertEqual(absent["executables"]["disabled"]["resolution"], "absent")
 
+    def test_disabled_fingerprint_forces_strict_stat_when_is_file_cannot_find_a_program(self):
+        # Python 3.14 may implement is_file without going through a patched Path.stat.
+        # Force native lookup unavailable, then prove fingerprint fallback really uses strict stat.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            extensions, tools = root / "extensions", root / "tools"
+            extensions.mkdir(); tools.mkdir()
+            candidate = tools / "py.exe"
+            candidate.write_bytes(b"metadata fixture only, never executed")
+            declaration = {"extension/disabled": {"argv": ["python3"], "enabled": False}}
+            original = Path.stat
+            denied_reads = []
+
+            def denied(path, *args, **kwargs):
+                if path == candidate:
+                    denied_reads.append(path)
+                    raise PermissionError("forced strict-stat metadata denial")
+                return original(path, *args, **kwargs)
+
+            with patch.object(sys, "platform", "win32"), patch.dict(os.environ, {"PATH": str(tools), "VQRO_PYTHON": ""}), \
+                    patch.object(Path, "is_file", return_value=False) as unavailable, patch.object(Path, "stat", denied), \
+                    patch.object(shared, "resolve_program", wraps=shared.resolve_program) as resolved, \
+                    patch.object(shared.subprocess, "Popen", side_effect=AssertionError("no candidate execution")):
+                result = shared.fingerprint(extensions, declaration, {})
+            self.assertGreaterEqual(unavailable.call_count, 3)
+            self.assertTrue(any(call.kwargs.get("executable_only") is False for call in resolved.call_args_list))
+            self.assertTrue(denied_reads, "strict fallback must actually inspect candidate metadata")
+            self.assertIsNone(result["setup_id"], result)
+            self.assertEqual(result["executables"]["disabled"]["resolution"], "unknown")
+            self.assertTrue(any("forced strict-stat metadata denial" in reason for reason in result["unknown"]), result)
+            candidate.unlink()
+            with patch.object(sys, "platform", "win32"), patch.dict(os.environ, {"PATH": str(tools), "VQRO_PYTHON": ""}), \
+                    patch.object(Path, "is_file", return_value=False):
+                absent = shared.fingerprint(extensions, declaration, {})
+            self.assertIsNotNone(absent["setup_id"], absent)
+            self.assertEqual(absent["executables"]["disabled"]["resolution"], "absent")
+
     def test_windowsapps_entries_are_not_even_inspected(self):
         exists = Mock(side_effect=AssertionError("Store stub must not be inspected"))
         self.assertIsNone(shared._windows_python_program([Path("WindowsApps"), Path("wInDoWsApPs")], exists))
