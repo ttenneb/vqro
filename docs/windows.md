@@ -50,7 +50,12 @@ The first build fetches the terminal engine's Zig packages (~310 MB) into `%LOCA
 ## 3. Install or upgrade (PowerShell 5.1 or 7)
 
 Close all vqro UIs and bridge processes first so they cannot restart the core during installation.
-The script builds release binaries, checks all seven and the bundled test mapping, requests protocol shutdown
+The script uses one outer confirmation for the entire operation (required backup copies cannot be skipped
+individually). Before building, it refuses links/junctions/reparse points in managed paths and their ancestors,
+wrong destination types, and overlapping install/source/build/backup directories. Custom `-BinDir` must be outside
+the checkout and Cargo output. Cargo metadata determines the checked target directory; executable paths come
+from that build's JSON artifact messages, not a guessed `target/release` directory. The script builds release
+binaries, checks all seven and the bundled test mapping, requests protocol shutdown
 if a core is running, and waits for vqro processes to exit. If they remain, it refuses to install; it never
 forcibly kills processes. Backend-owned terminals are not stopped by `vqro stop`.
 
@@ -64,16 +69,24 @@ forcibly kills processes. Backend-owned terminals are not stopped by `vqro stop`
 Defaults: `%LOCALAPPDATA%\vqro\bin` for executables, `%LOCALAPPDATA%\vqro\extensions` for bundled content.
 Use `-BinDir "$env:USERPROFILE\bin"` to upgrade the earlier manual install in that directory instead; avoid
 leaving old binaries earlier on PATH (`Get-Command vqro -All`). Python discovery follows `VQRO_PYTHON`, `py -3`,
-`python`, `python3`, skipping WindowsApps stubs; Python 3.11+ is required. The installer includes manifests,
+`python`, `python3`, skipping WindowsApps stubs; as in the app, PATH directories are searched in order, trying
+`py`, `python`, then `python3` within each directory. Python 3.11+ is required. The installer includes manifests,
 mapped unit suites, optional rex files, the tier-1 Pi plugin, text client and Python packages, but not OpenTUI
-or herdr-core. It prints installed executable hashes, version and source commit.
+or herdr-core. It prints installed executable hashes, version and source commit (labelled dirty when the working tree is dirty).
 
 PATH is unchanged unless `-AddToPath` is supplied; otherwise the script prints the exact user-PATH command.
 Open a new terminal after changing PATH. Run `vqro tui` to start the installed core. Before replacing files, the script copies existing seven binaries and the entire extensions directory into a
-unique UTC-timestamped `%LOCALAPPDATA%\vqro\backups` folder and prints its path. Previous backups are retained
+unique UTC-timestamped `%LOCALAPPDATA%\vqro\backups` folder and prints its path. It verifies the entire backup
+inventory and SHA256 hashes against the prior install before writing `inventory.json` and the `restore.txt`
+completion marker, then replacing anything. The inventory records prior presence/absence for all seven binaries
+and the extensions root, including hidden files and empty directories. Previous backups are retained
 (no automatic deletion); keep at least the last few known-good installs. On failure it prints restoration guidance:
-close vqro processes, verify the backup's `restore.txt` completion marker, restore its binaries, move the failed
-extensions directory aside and copy the backed-up extensions directory back. An incomplete backup is not safe to
+close vqro processes, verify `restore.txt` and backup hashes against `inventory.json`, and reject any links/reparse
+points before restoring. For each `Binaries` entry with `Present=true`, copy the saved file back; for each with
+`Present=false`, remove **only that named managed executable** from the failed install. Preserve unrelated BinDir
+files. Move the failed extensions directory aside; copy the backup directory back only when
+`ExtensionsPresent=true`, otherwise leave extensions absent. This also removes newly introduced managed binaries
+from a failed first install rather than overlaying an incomplete old set. An incomplete backup is not safe to
 restore blindly. Staging and renaming protects
 each executable from truncated copies, not the entire install from every failure: a later I/O error can leave
 mixed versions. Keep UIs closed, correct the error and rerun before launching. This development installer does
