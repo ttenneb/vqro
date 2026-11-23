@@ -4,6 +4,7 @@
 Compare two agents.py versions with 30/200 synthetic agents and 128 warm rows each.
 Measures command replies, not terminal input-to-paint latency.
 """
+from python_interpreter import PYTHON
 import argparse
 import json
 from pathlib import Path
@@ -58,7 +59,7 @@ Agents.pane_menu = _bench_pane
 '''
     source.write_text(source.read_text().replace('if __name__ == "__main__":', instrumentation + '\nif __name__ == "__main__":'))
     (root / 'ext/defaults.json').write_text(json.dumps({'version': 1, 'extensions': [
-        {'name': 'agents', 'argv': ['/usr/bin/python3', str(root / 'ext/agents.py')]}]}))
+        {'name': 'agents', 'argv': [PYTHON, str(root / 'ext/agents.py')]}]}))
     env = {'HOME': str(root / 'home'), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8',
            'VQRO_SOCKET': str(root / 'p.sock'), 'VQRO_STATE_DIR': str(root / 'state'),
            'VQRO_EXTENSIONS_DIR': str(root / 'ext'), 'VQRO_HERDR': '["/bin/false"]',

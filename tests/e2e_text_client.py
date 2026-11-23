@@ -1,10 +1,11 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """End to end: the plain Python text client (`vqro ui text`, the second base-profile client, D29) against a
 private core with the bundled extensions and the in-process fake backend.
 
 Usage: tests/e2e_text_client.py TARGET_DIR   (debug binary TARGET_DIR/debug/vqro)
 Private /tmp root; herdr/tmux providers are not used. Stops only what it started. Prints PASS/FAIL lines.
 """
+from python_interpreter import PYTHON
 import json, os, shutil, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
@@ -15,7 +16,7 @@ for d in ("home", "st", "run", "bin"):
     os.makedirs(os.path.join(R, d))
 os.chmod(os.path.join(R, "run"), 0o700)
 shutil.copytree(os.path.join(REPO, "extensions"), os.path.join(R, "ext"), ignore=shutil.ignore_patterns("__pycache__", "node_modules"))
-os.symlink(shutil.which("python3") or "/usr/bin/python3", os.path.join(R, "bin", "python3"))
+os.symlink(PYTHON, os.path.join(R, "bin", "python3"))
 ENV = {"HOME": f"{R}/home", "PATH": f"{R}/bin", "VQRO_STATE_DIR": f"{R}/st", "VQRO_SOCKET": f"{R}/p.sock",
        "VQRO_EXTENSIONS_DIR": f"{R}/ext", "XDG_RUNTIME_DIR": f"{R}/run", "HC_SOCKET": f"{R}/hc.sock", "HC_SESSION": "txt",
        "VQRO_HERDR": '["/bin/false"]', "LANG": "C.UTF-8"}

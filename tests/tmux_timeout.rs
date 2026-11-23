@@ -4,6 +4,7 @@
 //! never comes is a desync.
 #![cfg(unix)]
 
+#[path = "support/python.rs"] mod test_python;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -12,14 +13,19 @@ use tokio::sync::broadcast;
 
 fn fake() -> Option<PathBuf> {
     let fake = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_tmux_cc.py");
-    Path::new("/usr/bin/python3").exists().then_some(fake)
+    Path::new(test_python::python()).exists().then_some(fake)
 }
 
 async fn client(dir: &Path, conf: &str, timeout_ms: u64) -> Client {
     let socket = dir.join("s");
     std::fs::write(dir.join("s.conf"), conf).unwrap();
     let mut config = Config::new(socket, "test");
-    config.binary = fake().unwrap();
+    // Run the fixture with the same resolved interpreter, even with an old python3 first on PATH.
+    use std::os::unix::fs::PermissionsExt;
+    let wrapper = dir.join("fake-tmux");
+    std::fs::write(&wrapper, format!("#!/bin/sh\nexec '{}' '{}' \"$@\"\n", test_python::python().replace('\'', "'\\''"), fake().unwrap().display())).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    config.binary = wrapper;
     config.command_timeout = Duration::from_millis(timeout_ms);
     Client::connect(config).await.unwrap()
 }
@@ -35,7 +41,7 @@ fn disconnected(rx: &mut broadcast::Receiver<Notification>) -> bool {
 
 #[tokio::test]
 async fn read_only_timeout_keeps_the_client_and_its_late_reply_never_pairs_with_the_next_command() {
-    let Some(_) = fake() else { return eprintln!("skipped: no /usr/bin/python3") };
+    let Some(_) = fake() else { return eprintln!("skipped: no test Python") };
     let dir = tempfile::Builder::new().prefix("pft").tempdir_in("/tmp").unwrap();
     let c = client(dir.path(), r#"{"slow": {"list-panes": 0.6}}"#, 200).await;
     let mut notes = c.notifications();

@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Opt-in TUI check: the sidebar is one tree whose levels can be hidden; its options are also in Settings.
 
 The real `vqro tui` runs in an outer tmux harness against a private `vqro serve --fake` with the tabs,

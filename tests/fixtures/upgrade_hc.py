@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Persistent virtual hc, only for the in-process -> installed-provider upgrade test."""
 import json
 from pathlib import Path

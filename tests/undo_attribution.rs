@@ -1,5 +1,6 @@
 #![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! D24 attribution over public RPC. Every core/state/process belongs to this private fixture.
+#[path = "support/python.rs"] mod test_python;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -87,7 +88,7 @@ async fn pick_real_settings_theme(fixture:&Fixture, user:&Peer) -> Value {
     set(&seed,"doc/settings/theme",before.clone(),None).await;
     let directory=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("extensions");
     let ops:Vec<_>=["themes","settings"].into_iter().map(|name|json!({"op":"set","key":format!("extension/{name}"),
-        "value":{"enabled":true,"argv":["/usr/bin/python3",directory.join(format!("{name}.py"))]}})).collect();
+        "value":{"enabled":true,"argv":[test_python::python(),directory.join(format!("{name}.py"))]}})).collect();
     user.call("workspace.apply",json!({"ops":ops})).await.unwrap();
     let deadline=Instant::now()+Duration::from_secs(5);
     loop {
@@ -113,7 +114,7 @@ async fn pick_real_settings_theme(fixture:&Fixture, user:&Peer) -> Value {
 
 #[tokio::test]
 async fn real_settings_theme_command_uses_sdk_attribution_and_default_undo_restores_it() {
-    if !std::path::Path::new("/usr/bin/python3").exists() {return;}
+    if !std::path::Path::new(test_python::python()).exists() {return;}
     let fixture=Fixture::new().await;
     let (user,_,hello)=fixture.peer("settings-user").await;
     let before=pick_real_settings_theme(&fixture,&user).await;

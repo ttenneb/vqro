@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Private test-only holder of a real supervisor lifetime; exports its disposable token to its fixture."""
 import os
 from pathlib import Path

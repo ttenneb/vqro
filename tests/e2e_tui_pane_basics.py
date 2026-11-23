@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Opt-in TUI check: tab and pane management basics and terminal links through the real `vqro tui`, keys and mouse.
 
 On a private herdr-core: a tab shows its program's OSC title; prefix `<` moves a tab and dragging a tab chip
@@ -11,6 +11,7 @@ for a moment. Layout effects are read back from the core.
 Usage: tests/e2e_tui_pane_basics.py TARGET_DIR   (debug binaries in TARGET_DIR/debug)
 Private /tmp root; nothing live is touched. Stops only what it started.
 """
+from python_interpreter import PYTHON
 import json, os, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
@@ -25,7 +26,7 @@ for f in os.listdir(os.path.join(REPO, "extensions")):
     if f.endswith(".py") or f == "defaults.json":
         shutil.copy(os.path.join(REPO, "extensions", f), os.path.join(R, "ext", f))
 shutil.copytree(os.path.join(REPO, "extensions", "manifests"), os.path.join(R, "ext", "manifests"))
-os.symlink(shutil.which("python3") or "/usr/bin/python3", os.path.join(R, "bin", "python3"))
+os.symlink(PYTHON, os.path.join(R, "bin", "python3"))
 ENV = {"HOME": f"{R}/home", "PATH": f"{R}/bin", "TERM": "xterm-256color", "SHELL": "/bin/sh", "VQRO_STATE_DIR": f"{R}/st",
        "VQRO_SOCKET": f"{R}/p.sock", "VQRO_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
        "XDG_RUNTIME_DIR": f"{R}/run", "XDG_CONFIG_HOME": f"{R}/cfg", "HC_SESSION": "panes", "HC_SOCKET": f"{R}/hc.sock",

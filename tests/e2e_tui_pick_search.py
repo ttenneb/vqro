@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Opt-in TUI check: long pick-one lists are searchable; short ones are unchanged.
 
 The real `vqro tui` runs in an outer tmux harness against a private `vqro serve --fake` with no

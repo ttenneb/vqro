@@ -1,4 +1,5 @@
 //! Retired managed connections must not write during their process cleanup grace.
+#[path = "support/python.rs"] mod test_python;
 use std::{process::{Child,Command,Stdio},time::{Duration,Instant}};
 use serde_json::json;
 use vqro::{client,rpc::{Peer,IncomingReceiver}};
@@ -106,7 +107,7 @@ async fn noisy_extension_rotates_without_restart_and_broken_logging_still_drains
         let done=fixture.root.path().join(format!("{name}.done"));
         let code="import os,pathlib,sys; [(os.write(1,b'a'*16384),os.write(2,b'b'*16384)) for _ in range(200)]; pathlib.Path(sys.argv[1]).write_text('done'); sys.stdin.buffer.read()";
         control.call("workspace.apply",json!({"ops":[{"op":"set","key":format!("extension/{name}"),
-            "value":{"argv":["/usr/bin/python3","-c",code,done],"enabled":true}}]})).await.unwrap();
+            "value":{"argv":[test_python::python(),"-c",code,done],"enabled":true}}]})).await.unwrap();
         let until=Instant::now()+Duration::from_secs(8);
         while !done.exists() {
             control.call_with_timeout("workspace.snapshot",json!({}),Duration::from_millis(500)).await.expect("logging must not hold the core mutex");

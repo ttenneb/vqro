@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Opt-in TUI check: each window shows its own workspace.
 
 Two real `vqro tui` windows run in an outer tmux harness against a private `serve --fake` core with the
@@ -12,6 +12,7 @@ bundled tabs, panes, workspaces and sidebar extensions. Checks:
 Usage: tests/e2e_tui_workspaces.py TARGET_DIR   (debug binaries in TARGET_DIR/debug)
 Private /tmp root; nothing live is touched (no herdr-core: `VQRO_HERDR=/bin/false`). Stops only what it started.
 """
+from python_interpreter import PYTHON
 import json, os, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
@@ -27,7 +28,7 @@ for f in os.listdir(os.path.join(REPO, "extensions")):
 shutil.copytree(os.path.join(REPO, "extensions", "manifests"), os.path.join(R, "ext", "manifests"))
 with open(os.path.join(R, "ext", "defaults.json"), "w") as f:
     json.dump({"version": 1, "extensions": [{"name": n, "argv": ["python3", f"{n}.py"]} for n in ("tabs", "panes", "workspaces", "sidebar")]}, f)
-os.symlink(shutil.which("python3") or "/usr/bin/python3", os.path.join(R, "bin", "python3"))
+os.symlink(PYTHON, os.path.join(R, "bin", "python3"))
 ENV = {"HOME": f"{R}/home", "PATH": f"{R}/bin", "TERM": "xterm-256color", "SHELL": "/bin/sh", "VQRO_STATE_DIR": f"{R}/st",
        "VQRO_SOCKET": f"{R}/p.sock", "VQRO_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
        "XDG_RUNTIME_DIR": f"{R}/run", "XDG_CONFIG_HOME": f"{R}/cfg", "HC_SESSION": "tw", "HC_SOCKET": f"{R}/hc.sock",

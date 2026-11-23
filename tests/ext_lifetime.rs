@@ -1,6 +1,7 @@
 //! Linux process-death regression; the contract itself is only inherited stdin EOF.
 #![cfg(target_os = "linux")]
 
+#[path = "support/python.rs"] mod test_python;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -133,7 +134,7 @@ threading.Event().wait()
             // only lifetime signal. No Linux parent-death API is involved.
             json!(["/bin/sh", "-c", "printf '%s' \"$$\" > \"$1\"; while IFS= read -r line; do :; done", "lifetime-reader", ready])
         } else {
-            json!(["/usr/bin/python3", python, name, ready])
+            json!([test_python::python(), python, name, ready])
         };
         peer.call("workspace.apply", json!({"ops": [{"op": "set", "key": format!("extension/{name}"), "value": {"argv": argv}}]})).await.unwrap();
         until(|| std::fs::read_to_string(&ready).ok().and_then(|s| s.parse::<u32>().ok()).is_some()).await;

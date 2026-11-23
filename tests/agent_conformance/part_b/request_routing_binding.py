@@ -5,6 +5,7 @@
 Fixture configuration pins the reviewed source, manifests, existing bridge/backend
 images and deterministic fake Pi. It is not a proposed production protocol.
 """
+from python_interpreter import PYTHON
 import asyncio
 from copy import deepcopy
 from functools import wraps
@@ -125,7 +126,7 @@ class PublicRequestRouting:
         ctx = self.ctx
         key = "extension/" + name
         previous = await ctx.peer.call("workspace.get", {"key": key})
-        value = {"kind": kind, "enabled": True, "argv": argv or ["/usr/bin/python3", str(ctx.root / "ext" / source)]}
+        value = {"kind": kind, "enabled": True, "argv": argv or [PYTHON, str(ctx.root / "ext" / source)]}
         if default: value["default"] = True
         result = await ctx.peer.call("workspace.apply", {"ops": [{"op": "set", "key": key, "value": value,
             "expect": previous["version"] if previous else 0}], "note": "owned public routing fixture activation"})
@@ -315,7 +316,7 @@ class PublicRequestRouting:
         shutil.copyfile(original_fake, fake)
         key = "doc/settings/pi"
         current = await ctx.peer.call("workspace.get", {"key": key})
-        runtime = {"name": "q-controlled-pi", "argv": ["/usr/bin/python3", str(fake), "--bridge-e2e", "--trace-file", str(ctx.root / "fake-pi.jsonl")],
+        runtime = {"name": "q-controlled-pi", "argv": [PYTHON, str(fake), "--bridge-e2e", "--trace-file", str(ctx.root / "fake-pi.jsonl")],
             "bridge_argv": [str(bridge)]}
         await ctx.peer.call("workspace.apply", {"ops": [{"op": "set", "key": key, "value": {"runtimes": [runtime]},
             "expect": current["version"] if current else 0}], "note": "controlled fake-model Pi through the actual public launcher"})

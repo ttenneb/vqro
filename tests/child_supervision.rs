@@ -1,4 +1,5 @@
 //! A generic CLI child (for example a git hook) must not inherit extension lifetime authority implicitly.
+#[path = "support/python.rs"] mod test_python;
 use serde_json::json;
 use vqro::{server::{self,Backend},store::{Store,Op}};
 #[path="support/managed.rs"] mod managed;
@@ -20,7 +21,7 @@ async fn generic_cli_child_is_raw_but_explicit_sdk_opt_in_is_verified() {
     let raw_actor=inspector.call("workspace.history",json!({"limit":1})).await.unwrap()["txns"][0]["actor"].clone();
     let output=tokio::task::block_in_place(||command(&binary).args(["call","operational.register","{\"name\":\"child\"}"]).output()).unwrap();let child_registered=output.status.success();
     let script="import json,os; from vqro_ext import Vqro, supervision_hello; c=Vqro(os.environ['VQRO_SOCKET'],None); print(json.dumps(c.call('hello', supervision_hello({'client':'intentional-child'})))); c.call('operational.register',{'name':'intentional'})";
-    let output=tokio::task::block_in_place(||command(std::path::Path::new("/usr/bin/python3")).env("PYTHONPATH",std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions")).args(["-c",script]).output()).unwrap();
+    let output=tokio::task::block_in_place(||command(std::path::Path::new(test_python::python())).env("PYTHONPATH",std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions")).args(["-c",script]).output()).unwrap();
     server::shutdown(&core).await;
     assert!(wrote,"child raw workspace recovery remains available");
     assert_eq!(raw_actor,"undeclared","a generic child must never be silently promoted by inherited supervisor credentials");

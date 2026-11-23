@@ -1,6 +1,7 @@
 //! Linux transport lifetime matrix. Private fake core, owned provider children, explicit cleanup.
 //! The long-soak driver must close its own sockets; these tests assert core fds after real EOF.
 #![cfg(target_os = "linux")]
+#[path = "support/python.rs"] mod test_python;
 use vqro::{
     client,
     rpc::{Incoming, IncomingReceiver, Peer},
@@ -303,7 +304,7 @@ async fn socket_fds_return_after_clients_streams_and_provider_cycles() {
     f.stable(baseline, "provider EOF after gaps").await;
     for _ in 0..CYCLES {
         let mut child = Owned(
-            f.command("/usr/bin/python3")
+            f.command(test_python::python())
                 .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_provider.py"))
                 .args(["--name", "fd-kill", "--instance", "fixed"])
                 .stdin(Stdio::null())
@@ -418,7 +419,7 @@ async fn socket_fds_return_after_extension_kills_and_tui_quits() {
     let script = f.root.path().join("ext.py");
     let marker = f.root.path().join("pid");
     std::fs::write(&script,format!("import os,sys\nfrom pathlib import Path\nsys.path.insert(0,{:?})\nfrom vqro_ext import Extension\ne=Extension('fd-fixture')\ne.command('fd-fixture.ready','FD fixture')(lambda args: {{}})\nPath({:?}).write_text(str(os.getpid()))\ne.run()\n",Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions"),marker)).unwrap();
-    f.control.call("workspace.apply",json!({"ops":[{"op":"set","key":"extension/fd-fixture","value":{"argv":["/usr/bin/python3",script]}}]})).await.unwrap();
+    f.control.call("workspace.apply",json!({"ops":[{"op":"set","key":"extension/fd-fixture","value":{"argv":[test_python::python(),script]}}]})).await.unwrap();
     async fn ready(f: &Fixture, marker: &Path, previous: u32) -> u32 {
         let until = Instant::now() + Duration::from_secs(5);
         loop {

@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Opt-in e2e: the same workspace behaves the same on herdr and on tmux ("same setup anywhere").
 
 Two fresh private roots, each with both providers connected (vqro-herdr on a private herdr-core, vqro-tmux on its
@@ -12,6 +12,7 @@ not listed as an expected backend capability difference (EXPECTED below) fail th
 Usage: tests/e2e_same_setup.py TARGET_DIR [--keep-captures DIR]   (debug binaries in TARGET_DIR/debug)
 Private /tmp roots; nothing live is touched. Stops only what it started.
 """
+from python_interpreter import PYTHON
 import json, os, re, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
@@ -49,7 +50,7 @@ class Root:
         os.chmod(os.path.join(self.r, "run"), 0o700)
         shutil.copytree(os.path.join(REPO, "extensions"), os.path.join(self.r, "ext"),
                         ignore=shutil.ignore_patterns("node_modules", "opentui", "__pycache__"))
-        os.symlink("/usr/bin/python3", os.path.join(self.r, "bin", "python3"))
+        os.symlink(PYTHON, os.path.join(self.r, "bin", "python3"))
         os.symlink(os.path.join(TARGET, "debug", "vqro-bridge-pi"), os.path.join(self.r, "bin", "vqro-bridge-pi"))
         # The tmux-server extension's status helper, as an install provides it. Without it every status call failed
         # (ENOENT) once the owned server existed, and the extension, which declared its view only after a successful
@@ -209,7 +210,7 @@ def scenario(root):
     commands = ("tabs.open", "tabs.rename", "panes.split", "sidebar.toggle", "pi.new", "tabs.set")
     if not root.wait(lambda: set(commands) <= {x["name"] for x in c("command.list")["commands"] if x.get("available")}, 40):
         return "extension commands never became available"
-    native = ["/usr/bin/python3", os.path.join(REPO, "tests/fixtures/fake_pi.py"), "--bridge-e2e"]
+    native = [PYTHON, os.path.join(REPO, "tests/fixtures/fake_pi.py"), "--bridge-e2e"]
     # The production bridge (the default launcher, which execs vqro-bridge-pi): its PATH on the terminal host is
     # this root's bin (python3 and vqro-bridge-pi only), so the agent declares its real native capabilities.
     c("workspace.apply", {"note": "fake Pi runtime", "ops": [{"op": "set", "key": "doc/settings/pi", "value": {"runtimes": [

@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """End to end: the OpenTUI trial client (`vqro ui opentui`, D29) against a private core, with a real shell in a
 private herdr-core through vqro-herdr. Drives it in an outer tmux harness like tests/e2e_tui_providers.py.
 
@@ -6,6 +6,7 @@ Usage: tests/e2e_opentui.py TARGET_DIR   (debug binaries in TARGET_DIR/debug)
 Skips (exit 77) when Bun or the client's node_modules are absent: the trial client is optional.
 Private /tmp root; stops only what it started.
 """
+from python_interpreter import PYTHON
 import json, os, re, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
@@ -23,7 +24,7 @@ for d in ("home", "st", "run", "bin"):
 os.chmod(os.path.join(R, "run"), 0o700)
 shutil.copytree(os.path.join(REPO, "extensions"), os.path.join(R, "ext"), ignore=shutil.ignore_patterns("__pycache__", "node_modules"))
 os.symlink(os.path.join(CLIENT, "node_modules"), os.path.join(R, "ext", "clients", "opentui", "node_modules"))  # 85 MB: share, don't copy
-for name, target in (("python3", shutil.which("python3") or "/usr/bin/python3"), ("bun", BUN)):
+for name, target in (("python3", PYTHON), ("bun", BUN)):
     os.symlink(target, os.path.join(R, "bin", name))
 with open(f"{R}/mouse.py", "w") as f:  # asks for SGR mouse reports, prints the first one it gets
     f.write("import os, sys, termios, tty\nold = termios.tcgetattr(0)\nos.write(1, b'\\x1b[?1000h\\x1b[?1006hmouse-ready\\r\\n')\n"
@@ -114,7 +115,7 @@ try:
             break
     check("pane size follows the window (stream.resize: 88x22 inside the border)", bool(sized), screen())
     # Mouse: a program that asked for the mouse (SGR mode) receives a click in its own encoding.
-    keys("/usr/bin/clear; /usr/bin/python3 " + f"{R}/mouse.py", literal=True); keys("Enter")
+    keys("/usr/bin/clear; " + PYTHON + " " + f"{R}/mouse.py", literal=True); keys("Enter")
     wait(lambda: "mouse-ready" in screen(), 10)
     lines = screen().splitlines()
     y = next(i for i, l in enumerate(lines) if "mouse-ready" in l) + 1

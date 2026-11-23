@@ -1,6 +1,7 @@
 //! Opt-in real tmux 3.7b tests: cargo test --test tmux -- --ignored
 //! Every child has an allowlisted environment and unique explicit -S socket. Drop kills ONLY it.
 #![cfg(unix)]
+#[path = "support/python.rs"] mod test_python;
 use vqro::tmux::{Client, Config, Error, GapReason, Notification, PaneEvent, PaneId, PaneStream};
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -60,7 +61,7 @@ impl Server {
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tmux_worker.py");
         let done = self.root.path().join(format!("{name}.done"));
         let pane =
-            client.spawn(&["/usr/bin/python3", fixture.to_str().unwrap(), done.to_str().unwrap()], Some(self.root.path())).await.unwrap();
+            client.spawn(&[test_python::python(), fixture.to_str().unwrap(), done.to_str().unwrap()], Some(self.root.path())).await.unwrap();
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 let screen = client.command(&["capture-pane", "-p", "-t", pane.as_str()]).await.unwrap();

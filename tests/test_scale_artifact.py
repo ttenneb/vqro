@@ -113,8 +113,7 @@ class PrebuildRecipeTests(unittest.TestCase):
                 old.write_text('#!/bin/sh\nexit 0\n')  # Old executable retained after a failed build.
                 old.chmod(0o700)
             marker, wrapper = root/'exclusive-ran', root/'fake-slot'
-            wrapper.write_text('''#!/usr/bin/python3
-import os,pathlib,sys
+            wrapper.write_text('#!' + sys.executable + '\n' + '''import os,pathlib,sys
 if '--exclusive' in sys.argv[1:]:
     pathlib.Path(os.environ['EXCLUSIVE_MARKER']).write_text('must not run')
     raise SystemExit(0)

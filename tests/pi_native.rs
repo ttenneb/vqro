@@ -1,4 +1,5 @@
 //! Pi-native transport tests: real private child, no installed runtime, credentials or model.
+#[path = "support/python.rs"] mod test_python;
 #[path = "../src/bin/vqro-bridge-pi/native.rs"]
 mod native;
 
@@ -64,7 +65,7 @@ impl Fixture {
         ]);
         let events = Arc::new(Mutex::new(Vec::new()));
         let observed = events.clone();
-        let native = Native::spawn(&["/usr/bin/python3".into(),"-u".into(),"-c".into(),CHILD.into()],root.path(),&env,
+        let native = Native::spawn(&[test_python::python().into(),"-u".into(),"-c".into(),CHILD.into()],root.path(),&env,
             Arc::new(move |event|observed.lock().unwrap().push(event))).await.unwrap();
         Self { root,native,events }
     }

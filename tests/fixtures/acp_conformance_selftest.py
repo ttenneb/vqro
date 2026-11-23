@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Independent native-process checks only; not Part A adapter certification."""
+import sys
 import asyncio
 import hashlib
 import json
@@ -39,7 +40,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.control_path = Path(self.socket_temp.name) / "c"
         self.ledger = self.root / "l"
         self.proc = await asyncio.create_subprocess_exec(
-            "/usr/bin/python3", str(HERE / "acp_conformance.py"), "--control", str(self.control_path), "--ledger", str(self.ledger),
+            sys.executable, str(HERE / "acp_conformance.py"), "--control", str(self.control_path), "--ledger", str(self.ledger),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             env={"HOME": str(self.root / "home"), "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"})
         self.rows = []

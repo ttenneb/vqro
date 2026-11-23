@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Opt-in TUI smoke over wire providers: the real `vqro tui` (in an outer tmux harness) shows and drives
 terminals that live in vqro-herdr (private herdr-core) and vqro-tmux (its private tmux server).
 
@@ -6,6 +6,7 @@ Usage: tests/e2e_tui_providers.py TARGET_DIR   (debug binaries in TARGET_DIR/deb
 Private /tmp root; providers and herdr-core run with an empty PATH; default extensions get python3 only.
 Stops only what it started.
 """
+from python_interpreter import PYTHON
 import json, os, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
@@ -22,7 +23,7 @@ for f in os.listdir(os.path.join(REPO, "extensions")):
     if f.endswith(".py") or f == "defaults.json":
         shutil.copy(os.path.join(REPO, "extensions", f), os.path.join(R, "ext", f))
 shutil.copytree(os.path.join(REPO, "extensions", "manifests"), os.path.join(R, "ext", "manifests"))
-os.symlink(shutil.which("python3") or "/usr/bin/python3", os.path.join(R, "bin", "python3"))
+os.symlink(PYTHON, os.path.join(R, "bin", "python3"))
 ENV = {"HOME": f"{R}/home", "PATH": f"{R}/bin", "TERM": "xterm-256color", "SHELL": "/bin/sh", "VQRO_STATE_DIR": f"{R}/st",
        "VQRO_SOCKET": f"{R}/p.sock", "VQRO_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
        "XDG_RUNTIME_DIR": f"{R}/run", "XDG_CONFIG_HOME": f"{R}/cfg", "HC_SOCKET": f"{R}/hc.sock", "HC_SESSION": "tui", "LANG": "C.UTF-8"}
@@ -299,7 +300,7 @@ try:
     # Restore only our private missing executable, without changing the failed declaration.
     wrapper=f"{R}/bin/vqro-extension-page-test-missing"
     with open(wrapper,"w") as output:
-        output.write(f"#!/bin/sh\nexec /usr/bin/python3 '{R}/ext/icons.py'\n")
+        output.write(f"#!/bin/sh\nexec '{PYTHON}' '{R}/ext/icons.py'\n")
     os.chmod(wrapper,0o700)
     keys("Escape")  # clear the list filter, then close the popup after its frame arrives
     check("recovery setup clears catalogue filter", bool(wait(lambda:not any(line.strip(" │")=="/icons" for line in screen().splitlines()))))

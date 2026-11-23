@@ -5,6 +5,7 @@
 Only public RPC and private supervised fixtures are used; no coordination engine or
 MemoryStore is imported. The pin and native ledger belong to PublicCoordination.
 """
+from python_interpreter import PYTHON
 import asyncio
 import hashlib
 import json
@@ -56,7 +57,7 @@ async def managed_probe(ctx):
     path = ctx.root / "ext/defaults.json"
     defaults = json.loads(path.read_text())
     defaults["extensions"].append({"name": PROBE_NAME, "since": 2, "default": True,
-        "kind": "management", "argv": ["/usr/bin/python3", str(destination)]})
+        "kind": "management", "argv": [PYTHON, str(destination)]})
     path.write_text(json.dumps(defaults) + "\n")
     # Deliberately tag the launcher, not the child. The supervisor must filter it.
     ctx.backend.env["VQRO_PRINCIPAL"] = "worker:must-not-leak"
@@ -64,7 +65,7 @@ async def managed_probe(ctx):
     # Defaults are deliberately not reinstalled at an already-recorded version. Activate
     # the new fixture through an actual attributed workspace transaction instead.
     activation = await ctx.peer.call("workspace.apply", {"ops": [{"op": "set", "key": "extension/" + PROBE_NAME,
-        "value": {"argv": ["/usr/bin/python3", str(destination)], "kind": "management", "enabled": True}, "expect": 0}],
+        "value": {"argv": [PYTHON, str(destination)], "kind": "management", "enabled": True}, "expect": 0}],
         "note": "activate owned managed identity witness"})
     ctx.evidence.append({"kind": "managed_fixture_activation", "transaction": activation})
     async def ready():

@@ -13,6 +13,7 @@ Run inside a private user/mount/PID namespace with network (the Pi bind needs th
   unshare -Urmpf --mount-proc --kill-child python3 tests/tier1_smoke.py --runtime claude|pi --target T --root R
       [--claude C --claude-auth DIR] [--pi PI_CLI_JS --pi-auth FILE]
 """
+from python_interpreter import PYTHON
 import argparse
 import glob
 import hashlib
@@ -161,7 +162,7 @@ else:
     subprocess.run(["/usr/bin/mount", "--bind", os.path.abspath(a.pi_auth), target], check=True)
     subprocess.run(["/usr/bin/mount", "-o", "remount,bind,ro", target], check=True)
     receipt["credential_readonly"] = bool(os.statvfs(target).f_flag & os.ST_RDONLY)
-    projection = subprocess.run(["/usr/bin/python3", "-I", "-c", EXPIRY_PROJECTION, target],
+    projection = subprocess.run([PYTHON, "-I", "-c", EXPIRY_PROJECTION, target],
                                 env={"HOME": P["home"], "PATH": "/usr/bin:/bin"}, capture_output=True, text=True, timeout=5)
     projected = projection.stdout.strip()
     expiry = int(projected) if projection.returncode == 0 and projected.isdecimal() else None

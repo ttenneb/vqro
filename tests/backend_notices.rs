@@ -1,4 +1,5 @@
 //! Process supervision and provider readiness are different facts. No live backend.
+#[path = "support/python.rs"] mod test_python;
 use std::time::Duration;
 use vqro::{client,server::{self,Backend}};
 use serde_json::{json,Value};
@@ -18,7 +19,7 @@ async fn running_provider_process_is_not_reported_ready_before_registration() {
     assert!(snap["backend_notice"].as_str().unwrap().contains("offline"));
     let fixture=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_provider.py");
     peer.call("workspace.apply",json!({"ops":[{"op":"set","key":"extension/offline","value":{
-        "argv":["/usr/bin/python3",fixture,"--name","different-provider-name"],"kind":"provider","default":true}}]})).await.unwrap();
+        "argv":[test_python::python(),fixture,"--name","different-provider-name"],"kind":"provider","default":true}}]})).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5),async {
         loop {
             let snap=peer.call("workspace.snapshot",Value::Null).await.unwrap();

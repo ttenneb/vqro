@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Test fixture: print the bytes each keypress sends, as hex, one key per line.
 Optional argument: `kitty` (pushes kitty keyboard flag 1, "disambiguate") or `mok` (xterm modifyOtherKeys 2).
 Ctrl-D (0x04) on its own ends it, restoring the terminal."""

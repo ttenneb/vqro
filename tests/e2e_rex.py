@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """End to end: private vqro core + vqro-rex with its vqro-owned Rex server, both under one private /tmp root.
 
 Usage: tests/e2e_rex.py TARGET_DIR   (debug binaries: TARGET_DIR/debug/{vqro,vqro-rex}; Rex from $REX or /usr/bin/rex)

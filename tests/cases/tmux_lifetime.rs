@@ -1,4 +1,5 @@
 //! Owned-server lifecycle regressions. Every effect is under this test's private state root.
+#[path = "../support/python.rs"] mod test_python;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -213,7 +214,7 @@ async fn independent_controls_stop_offline_provider_and_persist_enabled_provider
         {"op":"set","key":"extension/tmux","expect":0,"value":{"enabled":true,"kind":"provider",
             "argv":[env!("CARGO_BIN_EXE_vqro-tmux"),"--tmux","/usr/bin/tmux","--name","tmux-lifetime"]}},
         {"op":"set","key":"extension/tmux-server","expect":0,"value":{"enabled":true,
-            "argv":["/usr/bin/python3",Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions/tmux_server.py")]}}
+            "argv":[test_python::python(),Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions/tmux_server.py")]}}
     ]})).await.unwrap();
     let initial = spawn_resource(&peer).await;
     command(&peer, "vqro.extension.disable",  json!({"name":"tmux"})).await;

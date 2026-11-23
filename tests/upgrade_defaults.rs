@@ -1,5 +1,6 @@
 //! User-shaped upgrade: native herdr state -> CLI serve/defaults -> vqro-herdr's own hc lookup.
 #![cfg(unix)]
+#[path = "support/python.rs"] mod test_python;
 use std::{path::{Path,PathBuf},process::{Child,Command,Stdio},time::Duration};
 use vqro::{client,server::{self,Backend}};
 use serde_json::{json,Value};
@@ -24,7 +25,7 @@ async fn v1_native_state_upgrades_via_defaults_and_unconfigured_vqro_herdr() {
     let root=tempfile::Builder::new().prefix("pu").tempdir_in("/tmp").unwrap();let state=root.path().join("st");let socket=root.path().join("p.sock");let bin=root.path().join("bin");let ext=root.path().join("ext");
     std::fs::create_dir(&bin).unwrap();std::fs::create_dir(&ext).unwrap();
     let hc=bin.join("hc");std::fs::copy(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/upgrade_hc.py"),&hc).unwrap();std::fs::set_permissions(&hc,std::fs::Permissions::from_mode(0o700)).unwrap();
-    symlink("/usr/bin/python3",bin.join("python3")).unwrap();
+    symlink(test_python::python(),bin.join("python3")).unwrap();
     for entry in std::fs::read_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("extensions")).unwrap(){let entry=entry.unwrap();if entry.path().is_file(){std::fs::copy(entry.path(),ext.join(entry.file_name())).unwrap();}}
     let old=server::start(socket.clone(),state.clone(),false,Backend::Herdr(vec![hc.to_string_lossy().into(),"connect".into()]),None).unwrap();
     let p=peer(&socket).await;let before=resource(&p).await;let id=before["id"].clone();

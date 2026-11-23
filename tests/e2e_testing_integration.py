@@ -186,8 +186,7 @@ class Driver:
         # A transparent private exec shim records actual core launches independently
         # of what the implementation claims in its receipt. It always execs the
         # requested worktree build, never a binary from the installed setup.
-        self.launcher.write_text('''#!/usr/bin/python3
-import json, os, sys
+        self.launcher.write_text('#!' + sys.executable + '\n' + '''import json, os, sys
 record = {"argv": sys.argv[1:], "pid": os.getpid(), "pgid": os.getpgrp(), "sid": os.getsid(0),
           "env": {k: v for k, v in os.environ.items() if k.startswith(("VQRO_", "HC_", "HERDR_", "XDG_", "TMUX"))}}
 with open(''' + repr(str(self.launch_log)) + ''', "a") as output:

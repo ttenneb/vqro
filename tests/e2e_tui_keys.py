@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Opt-in TUI check: keys reach programs with their modifiers, like an xterm.
 
 The real `vqro tui` runs in an outer tmux harness. Keys tmux can name are sent with `send-keys`; keys a
@@ -13,6 +13,7 @@ prints the bytes of each key it receives. Checks, on a private herdr-core and th
 Usage: tests/e2e_tui_keys.py TARGET_DIR   (debug binaries in TARGET_DIR/debug)
 Private /tmp root; nothing live is touched. Stops only what it started.
 """
+from python_interpreter import PYTHON
 import glob, json, os, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
@@ -29,7 +30,7 @@ for f in os.listdir(os.path.join(REPO, "extensions")):
     if f.endswith(".py") or f == "defaults.json":
         shutil.copy(os.path.join(REPO, "extensions", f), os.path.join(R, "ext", f))
 shutil.copytree(os.path.join(REPO, "extensions", "manifests"), os.path.join(R, "ext", "manifests"))
-os.symlink(shutil.which("python3") or "/usr/bin/python3", os.path.join(R, "bin", "python3"))
+os.symlink(PYTHON, os.path.join(R, "bin", "python3"))
 ENV = {"HOME": f"{R}/home", "PATH": f"{R}/bin", "TERM": "xterm-256color", "SHELL": "/bin/sh", "VQRO_STATE_DIR": f"{R}/st",
        "VQRO_SOCKET": f"{R}/p.sock", "VQRO_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
        "XDG_RUNTIME_DIR": f"{R}/run", "XDG_CONFIG_HOME": f"{R}/cfg", "HC_SESSION": "keys", "HC_SOCKET": f"{R}/hc.sock",
@@ -159,7 +160,7 @@ def show(rid):
 
 def run(provider, mode, sends):
     """Start keyecho in `mode` on `provider`, send `sends`, return the hex of each key received."""
-    argv = ["/usr/bin/python3", KEYECHO] + ([mode] if mode else [])
+    argv = [PYTHON, KEYECHO] + ([mode] if mode else [])
     rid = call("resource.spawn", {"provider": provider, "argv": argv, "cwd": f"{R}/home",
                                   "env": {"PATH": "/usr/bin:/bin", "TERM": "xterm-256color", "LANG": "C.UTF-8"}})["resource"]["id"]
     show(rid)

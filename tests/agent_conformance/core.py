@@ -3,6 +3,7 @@
 No adapter imports or internal resource mutation. Every test effect goes over
 resource.invoke; native control goes only to the fixture-owned socket.
 """
+from python_interpreter import PYTHON
 import asyncio
 from collections import deque
 from copy import deepcopy
@@ -132,7 +133,7 @@ class PublicImplementation:
             if source.is_file():
                 shutil.copy2(source, native_fixtures / filename)
         (self.root / "script.json").write_text(json.dumps(self.script) + "\n")
-        placeholders = {"{python}": "/usr/bin/python3", "{fixture}": str(self.fixture_dir / "runtime.py"),
+        placeholders = {"{python}": PYTHON, "{fixture}": str(self.fixture_dir / "runtime.py"),
                         "{control}": str(self.native.endpoint), "{ledger}": str(self.native.path),
                         "{script}": str(self.root / "script.json"), "{root}": str(self.root),
                         "{harness_root}": str(self.harness_dir), "{codex_fixture}": str(native_fixtures / "fake_codex.py"),

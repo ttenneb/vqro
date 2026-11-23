@@ -1,4 +1,5 @@
 //! Native-preflight regression. Private fixture controls are files, never product effects.
+#[path = "support/python.rs"] mod test_python;
 #[allow(dead_code)] // This test compiles only the admission slice of the private binary modules.
 #[path="../src/bin/vqro-bridge-pi/native.rs"] mod native;
 #[path="../src/bin/vqro-bridge-pi/admission.rs"] mod admission;
@@ -56,7 +57,7 @@ impl Fixture {
             ("PI_FIXTURE_LEDGER".into(),root.path().join("ledger").to_string_lossy().into_owned()),
         ]);
         let signals=Signals::new();let observed=signals.clone();
-        let native=Native::spawn(&["/usr/bin/python3".into(),"-u".into(),"-c".into(),CHILD.into()],root.path(),&env,Arc::new(move|event|observed.observe(&event))).await.unwrap();
+        let native=Native::spawn(&[test_python::python().into(),"-u".into(),"-c".into(),CHILD.into()],root.path(),&env,Arc::new(move|event|observed.observe(&event))).await.unwrap();
         let starts=Starts::new(native.clone(),signals.clone());
         Self {root,native,signals,starts,receipts:Arc::new(Mutex::new(Vec::new()))}
     }

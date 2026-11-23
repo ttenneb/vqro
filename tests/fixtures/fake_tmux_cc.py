@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Minimal fake of `tmux -C attach-session` for deterministic reply-timing tests (not a tmux).
 
 Invoked as the tmux binary: `fake -N -S SOCKET -f /dev/null -C attach-session -t SESSION`.

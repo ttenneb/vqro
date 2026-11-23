@@ -6,6 +6,7 @@ Runs each probe in its own private public-core fixture, exactly as run_agent_con
 qualification table. Its diagnostic labels cover these probes only: R4 here is the additional timeout vector,
 not the existing unknown/oversized request vectors. Use the main runner for the integrated case.
 """
+from python_interpreter import PYTHON
 import argparse
 import asyncio
 import json
@@ -54,7 +55,7 @@ def main():
         (root / "home").mkdir()
         copy = root / "implementation.json"
         copy.write_text(json.dumps(manifest, indent=2) + "\n")
-        command = ["/usr/bin/unshare", "-Urnpmf", "--kill-child=KILL", "--mount-proc", "/usr/bin/python3",
+        command = ["/usr/bin/unshare", "-Urnpmf", "--kill-child=KILL", "--mount-proc", PYTHON,
                    str(Path(__file__).resolve()), "--run", "--implementation", str(copy), "--vqro", str(args.vqro),
                    "--hc", str(args.hc), "--isolated-root", str(root), "--parent-net", os.readlink("/proc/self/ns/net")]
         try:

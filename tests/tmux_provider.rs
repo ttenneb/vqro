@@ -4,6 +4,9 @@
 
 #![cfg(unix)]
 
+#[path = "support/python.rs"]
+mod test_python;
+
 #[path = "cases/tmux_lifetime.rs"]
 mod lifetime;
 
@@ -136,6 +139,12 @@ async fn start_with(tmux: &Tmux, extra: &[&str]) -> (Core, Provider) {
 }
 
 async fn start_at(root: &Path, socket: &Path, binary: &Path, extra: &[&str]) -> (Core, Provider) {
+    // The fake tmux is an executable Python fixture; retain selection across env_clear.
+    let bin = root.join("test-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    if !bin.join("python3").exists() {
+        std::os::unix::fs::symlink(test_python::python(), bin.join("python3")).unwrap();
+    }
     let endpoint = root.join("core.sock");
     let listener = UnixListener::bind(&endpoint).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_vqro-tmux"))
@@ -145,7 +154,7 @@ async fn start_at(root: &Path, socket: &Path, binary: &Path, extra: &[&str]) -> 
         .args(extra)
         .env_clear()
         .env("HOME", root)
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("TERM", "xterm-256color")
         .env("VQRO_SOCKET", &endpoint)
         .spawn()

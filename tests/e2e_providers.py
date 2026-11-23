@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """End to end: private vqro core + vqro-herdr (private herdr-core) + vqro-tmux (private tmux).
 
 Usage: tests/e2e_providers.py TARGET_DIR   (debug binaries: TARGET_DIR/debug/{vqro,vqro-herdr,vqro-tmux})

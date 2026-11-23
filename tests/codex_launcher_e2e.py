@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Private New Codex agent public-command E2E; fake native only, never auth/model APIs."""
+from python_interpreter import PYTHON
 import argparse
 import hashlib
 import json
@@ -26,7 +27,7 @@ class CodexLaunch(E2E):
         assert not self.hc('ls', '--all')['terminals']
         self.start()
         self.call('workspace.apply', {'ops': [{'op': 'set', 'key': 'extension/' + name,
-            'value': {'enabled': True, 'kind': kind, 'argv': ['/usr/bin/python3', str(self.root / 'ext' / file)]}}
+            'value': {'enabled': True, 'kind': kind, 'argv': [PYTHON, str(self.root / 'ext' / file)]}}
             for name, kind, file in [('tabs', 'interface', 'tabs.py'), ('agents', 'management', 'agents.py'),
                 ('coord', 'management', 'coordination.py'), ('codex', 'runtime', 'codex.py')]], 'note': 'Private Codex launch fixture'})
         required = {'codex.new', 'coord.request_route', 'agents.show', 'agents.prompt', 'tabs.show'}
@@ -38,7 +39,7 @@ class CodexLaunch(E2E):
         created = []
         for mode in ('dedicated', 'default'):
             observation, ledger = self.root / (mode + '-environment.json'), self.root / (mode + '-native.jsonl')
-            native = ['/usr/bin/python3', '-I', str(REPO / 'tests/fixtures/codex_launcher_native.py'),
+            native = [PYTHON, '-I', str(REPO / 'tests/fixtures/codex_launcher_native.py'),
                       '--observe', str(observation), '--ledger', str(ledger)]
             runtime = {'name': mode, 'argv': native}
             if mode == 'dedicated': runtime.update(home=str(profile / 'home'), codex_home=str(profile / 'config'))
@@ -84,7 +85,7 @@ class CodexLaunch(E2E):
         coord('grants', {'id': 'codex-test-launch-standing', 'expect': 0,
             'value': {'who': parent['principal'], 'can': ['configure', 'membership', 'answer'], 'on': '*'}})
         observation = self.root / 'coordinator-environment.json'; ledger = self.root / 'coordinator-native.jsonl'
-        native = ['/usr/bin/python3', '-I', str(REPO / 'tests/fixtures/codex_launcher_native.py'),
+        native = [PYTHON, '-I', str(REPO / 'tests/fixtures/codex_launcher_native.py'),
                   '--observe', str(observation), '--ledger', str(ledger)]
         self.call('workspace.apply', {'ops': [{'op': 'set', 'key': 'doc/settings/codex',
             'value': {'runtimes': [{'name': 'child', 'argv': native}]}}], 'note': 'Private caller-driven child fixture'})
@@ -148,7 +149,7 @@ def main():
         assert all(getattr(args, key).is_absolute() for key in ('vqro', 'bridge', 'hc'))
         args.scratch_parent.mkdir(parents=True, exist_ok=True)
         root = Path(tempfile.mkdtemp(prefix='cx-', dir=args.scratch_parent)); (root / '.private-e2e').touch()
-        command = ['/usr/bin/unshare', '-Urnpmf', '--kill-child=KILL', '--mount-proc', '/usr/bin/python3', str(Path(__file__).resolve()),
+        command = ['/usr/bin/unshare', '-Urnpmf', '--kill-child=KILL', '--mount-proc', PYTHON, str(Path(__file__).resolve()),
                    '--run', '--vqro', str(args.vqro), '--bridge', str(args.bridge), '--hc', str(args.hc),
                    '--isolated-root', str(root), '--parent-net', os.readlink('/proc/self/ns/net')]
         code = subprocess.run(command, cwd=root, env={'HOME': str(root), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8',

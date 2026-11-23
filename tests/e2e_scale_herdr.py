@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Opt-in load probe through a wire provider: private vqro core + vqro-herdr + private herdr-core.
 
 Usage: tests/e2e_scale_herdr.py TARGET_DIR [TERMINALS=150] [AGENTS=50] [FLOODS=2] [SECONDS=30]

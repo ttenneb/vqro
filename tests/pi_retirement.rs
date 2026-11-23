@@ -1,4 +1,5 @@
 //! Real SDK/socket backpressure plus an owned native process; no live core, runtime or model.
+#[path = "support/python.rs"] mod test_python;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/native.rs"] mod native;
 #[path="../src/bin/vqro-bridge-pi/retirement.rs"] mod retirement;
 use std::collections::HashMap;
@@ -42,7 +43,7 @@ async fn native_exit_while_core_is_slow_reports_gone_before_teardown() {
     let (publisher,mut second)=blocked_publisher(&provider).await;
     assert!(matches!(second.try_recv(),Err(tokio::sync::oneshot::error::TryRecvError::Empty)),"publication must actually be blocked");
     let root=tempfile::tempdir().unwrap();
-    let native=native::Native::spawn(&["/usr/bin/python3".into(),"-c".into(),"import time;time.sleep(60)".into()],root.path(),&HashMap::new(),Arc::new(|_|{})).await.unwrap();
+    let native=native::Native::spawn(&[test_python::python().into(),"-c".into(),"import time;time.sleep(60)".into()],root.path(),&HashMap::new(),Arc::new(|_|{})).await.unwrap();
     native.stop();tokio::time::timeout(Duration::from_secs(2),native.exited()).await.unwrap();
     // Exit is known while the provider writer and a publication are still backpressured.
     let p=provider.clone();let retirement=tokio::spawn(async move{retirement::retire(&p,facts(true),"pi-test").await});

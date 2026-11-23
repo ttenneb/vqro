@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Opt-in typing-latency harness: how long until a typed token is visible on screen.
 
 The real `vqro tui` runs in an outer tmux harness against a private core with a private herdr-core (vqro-herdr)

@@ -1,4 +1,5 @@
 //! Admission limits leave old state recoverable and reject new growth atomically.
+#[path = "support/python.rs"] mod test_python;
 use vqro::{client, limits, server::{self, Backend}, store::{Store, Op}};
 use serde_json::{json, Value};
 
@@ -49,7 +50,7 @@ assert seen.wait(2)
 assert ext.value('doc/qa-helper') == 1
 print('ok')
 "#;
-    let mut cmd = tokio::process::Command::new("/usr/bin/python3");
+    let mut cmd = tokio::process::Command::new(test_python::python());
     cmd.args(["-B", "-c", script]).env_clear().env("HOME", dir.path()).env("PATH", "/usr/bin:/bin")
         .env("VQRO_SOCKET", &socket).env("PYTHONPATH", std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions")).kill_on_drop(true);
     let output = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output()).await.unwrap().unwrap();
