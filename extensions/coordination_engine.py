@@ -867,9 +867,8 @@ class Coordinator:
             work.put("control", control)
             def release():
                 if action == "resume":
-                    for agent in targets:
-                        self.permits.add(agent)
-                        self._wake(agent)
+                    self.permits.update(targets)
+                    self._wake_many(targets)  # one records() pass for all targets, not one per target
                 else:
                     self.permits.difference_update(targets)
             receipt = digest([context["principal"], args["op"]])
@@ -909,6 +908,23 @@ class Coordinator:
                 "selected": len(targets), "next": result["next"],
                 **({"outstanding_count": summary["count"], "outstanding_hash": summary["sha256"],
                     "outstanding_incomplete": True} if summary is not None else {})}
+
+    def _wake_many(self, agents):
+        """Wake each permitted agent with pending records, counting all of them in one records() pass (a resume over many
+        targets must not deep-copy every message once per target while holding the engine lock)."""
+        if not self.current:
+            return
+        wanted = {agent for agent in agents if agent in self.permits}
+        if not wanted:
+            return
+        counts = {}
+        for record in self.records():
+            agent = record["to"]["agent"]
+            if agent in wanted and record["state"] in PENDING:
+                counts[agent] = counts.get(agent, 0) + 1
+        for agent in agents:
+            if counts.get(agent):
+                self.wake(agent, counts[agent])  # count only; never content
 
     def _wake(self, agent):
         if agent in self.permits and self.current:

@@ -60,6 +60,27 @@ class EngineTests(unittest.TestCase):
         return self.engine.scope({"op": self.op(), "action": action, "scope": scope,
                                   "expect": self.engine.scope_preview(scope)["expect"]}, context or OWNER)
 
+    def test_resume_over_many_targets_counts_pending_in_one_records_pass(self):
+        # Gate flake RCA (rawcycle): release() of a workspace resume called _wake per target, and each _wake re-read
+        # (deep-copied) every message under the engine lock. One pass must serve all targets; wakes are unchanged.
+        agents = ["r%d" % i for i in range(1, 13)]
+        self.resources = {agent: resource(agent) for agent in agents}
+        wakes = []
+        self.engine = Coordinator(self.store, config=lambda: copy.deepcopy(self.config), resources=lambda: copy.deepcopy(self.resources),
+                                  clock=lambda: self.now, invoke=self.invoke, core_epoch="core",
+                                  owner_incarnation="generation-" + str(self.store.revision), wake=lambda agent, count: wakes.append((agent, count)))
+        for agent in agents:
+            op = self.op()
+            self.engine.send({"op": op, "submission": op, "to": agent, "mode": "start", "send_new": True,
+                              "content": [{"type": "text", "text": agent}]}, OWNER)
+        wakes.clear()
+        calls = []
+        original = self.engine.records
+        self.engine.records = lambda: (calls.append(1), original())[1]
+        self.resume()
+        self.assertLessEqual(len(calls), 2, "records() must not be re-read once per resumed target")
+        self.assertEqual(sorted(wakes), sorted((agent, 1) for agent in agents))
+
     def test_restart_starts_paused_then_first_attempt_is_durable(self):
         sent = self.send()
         self.assertIsNone(self.engine.dispatch_one())
