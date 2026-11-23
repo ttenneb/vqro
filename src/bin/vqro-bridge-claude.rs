@@ -157,15 +157,24 @@ async fn run(args: Args) -> Result<()> {
                         // Re-initialize the SAME process after core reconnect to get native pending
                         // snapshots. Never resend a user input or a previously dispatched answer.
                         let initialize = tokio::spawn(shared.clone().initialize());
+                        let mut ending = false;
                         loop {
                             tokio::select! {
                                 request=requests.recv()=>match request{Some(request)=>shared.serve_request(&provider,request).await,None=>break},
-                                _=native.exited()=>{publish.abort();initialize.abort();shared.finish(&provider).await;break;},
-                                _=life.changed()=>{publish.abort();initialize.abort();native.stop();let _=tokio::time::timeout(Duration::from_secs(5),native.exited()).await;shared.finish(&provider).await;break;},
+                                _=native.exited()=>{ending=true;break;},
+                                _=life.changed()=>{native.stop();let _=tokio::time::timeout(Duration::from_secs(5),native.exited()).await;ending=true;break;},
                             }
                         }
                         publish.abort();
                         initialize.abort();
+                        // Cancellation alone is not retirement: join before queuing the final cut.
+                        let _ = publish.await;
+                        let _ = initialize.await;
+                        if ending && shared.finish(&provider).await.is_err() {
+                            eprintln!(
+                                "vqro-bridge-claude: final publication unconfirmed; no retry"
+                            );
+                        }
                     }
                     Err(_) => {
                         failures += 1;

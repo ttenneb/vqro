@@ -462,7 +462,7 @@ impl Shared {
             changed.await;
         }
     }
-    pub async fn finish(self: &Arc<Self>, provider: &Provider) {
+    pub async fn finish(self: &Arc<Self>, provider: &Provider) -> Result<(), ProviderError> {
         if let Some(native) = self.process() {
             if !matches!(
                 tokio::time::timeout(Duration::from_secs(2), native.drained()).await,
@@ -509,8 +509,10 @@ impl Shared {
         }
         self.wake();
         // Only now may either publisher announce ended, after the native and item-stream tail cut.
-        // The final upsert is queued after completed item-stream sends by the SDK writer.
-        let _ = provider.upsert(self.facts()).await;
+        // provider.sync is the EXISTING acknowledged publication primitive (reply once applied).
+        // Its ACK fences all preceding item data/closed frames on this connection before close().
+        // A timeout/disconnect stays unconfirmed and is never replayed.
+        provider.full_sync(vec![self.facts()]).await
     }
     pub async fn serve_request(self: &Arc<Self>, provider: &Provider, request: Request) {
         match request {

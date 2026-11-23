@@ -76,5 +76,8 @@ stdout-reader completion are distinct. The reader reports EOF, forced cutoff and
 cutoff is never called EOF. Public lifecycle remains `ending` until the final item cut, so the ordinary publisher
 cannot retire clients before late records. Final frames drain before normal item close; the SDK reason field
 carries `native_reader_closed`, not a generic provider-drop fallback. A bounded unconfirmed tail is labelled
-`native_tail_unconfirmed`/incomplete, not claimed EOF or complete history. The bridge stops only its owned child
+`native_tail_unconfirmed`/incomplete, not claimed EOF or complete history. Retired publisher/initializer tasks
+are joined before the final cut. The existing acknowledged `provider.sync` (reply once applied) fences final
+item data/terminal markers and facts before intentional disconnect; a timeout stays unconfirmed and is not replayed.
+The bridge stops only its owned child
 on shutdown; it adds no persistence or stronger descendant lifetime guarantee than the native/backend layer.

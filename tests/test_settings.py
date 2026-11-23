@@ -260,7 +260,8 @@ class SettingsTests(unittest.TestCase):
         import json
         root=EXT
         names={s["name"] for s in json.loads((root/"defaults.json").read_text(encoding="utf-8"))["extensions"]}
-        self.assertEqual(len(names),24)
+        self.assertEqual(len(names),25)
+        self.assertIn('claude-code', names)
         self.assertIn('accounts', names)
         self.assertIn("test-perf",names)
         self.assertIn("codex",names)

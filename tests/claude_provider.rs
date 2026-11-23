@@ -93,7 +93,13 @@ impl Core {
     }
 }
 async fn registered(shared: &Arc<Shared>) -> (Provider, UnboundedReceiver<Request>, Core) {
-    let (a, b) = tokio::io::duplex(1 << 20);
+    registered_with_capacity(shared, 1 << 20).await
+}
+async fn registered_with_capacity(
+    shared: &Arc<Shared>,
+    capacity: usize,
+) -> (Provider, UnboundedReceiver<Request>, Core) {
+    let (a, b) = tokio::io::duplex(capacity);
     let (r, w) = tokio::io::split(b);
     let mut core = Core {
         r: BufReader::new(r),
@@ -488,7 +494,8 @@ async fn synthetic_process_provider_vertical_slice() {
     let final_shared = shared.clone();
     let final_provider = provider.clone();
     let finish = tokio::spawn(async move {
-        final_shared.finish(&final_provider).await;
+        final_shared.finish(&final_provider).await.unwrap();
+        final_provider.close();
     });
     let (mut closed, mut final_facts) = (false, false);
     while !closed || !final_facts {
@@ -502,11 +509,20 @@ async fn synthetic_process_provider_vertical_slice() {
                 );
                 closed = true;
             }
-            Some("resource.upsert") => {
+            Some("provider.sync") => {
+                assert!(
+                    closed,
+                    "final publication acknowledgement preceded the item terminal cut"
+                );
                 assert_eq!(
-                    frame["params"]["facts"]["data"]["agent"]["lifecycle"],
+                    frame["params"]["resources"][0]["data"]["agent"]["lifecycle"],
                     "ended"
                 );
+                assert!(
+                    !finish.is_finished(),
+                    "intentional disconnect happened before final ACK"
+                );
+                core.reply(&frame, json!({})).await;
                 final_facts = true;
             }
             _ => panic!("unexpected final frame {frame}"),
@@ -526,7 +542,7 @@ async fn synthetic_process_provider_vertical_slice() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn normal_publisher_cannot_end_before_late_native_records_and_item_cut() {
+async fn normal_publisher_and_acknowledged_shutdown_preserve_blocked_writer_tail() {
     let shared = Shared::new(
         "publish-boot".into(),
         "claude-fixture".into(),
@@ -537,7 +553,9 @@ async fn normal_publisher_cannot_end_before_late_native_records_and_item_cut() {
         .lock()
         .unwrap()
         .initialized(&json!({"claude_code_version":"2.1.329"}));
-    let (provider, mut requests, mut core) = registered(&shared).await;
+    // A one-byte transport blocks the SDK writer as soon as the test stops reading. The
+    // actual shutdown task below must wait for the acknowledged cut, not merely enqueue.
+    let (provider, mut requests, mut core) = registered_with_capacity(&shared, 1).await;
     core.open_items(&shared, &provider, &mut requests).await;
     let publisher = tokio::spawn(shared.clone().publish(provider.clone()));
     shared
@@ -567,6 +585,8 @@ async fn normal_publisher_cannot_end_before_late_native_records_and_item_cut() {
             break;
         }
     }
+    publisher.abort();
+    let _ = publisher.await; // same retirement/join as the bridge's real exit path
     // Deterministic exit-before-final-read schedule: only now release final native records.
     {
         let mut state = shared.state.lock().unwrap();
@@ -577,7 +597,8 @@ async fn normal_publisher_cannot_end_before_late_native_records_and_item_cut() {
     let final_shared = shared.clone();
     let final_provider = provider.clone();
     let finish = tokio::spawn(async move {
-        final_shared.finish(&final_provider).await;
+        final_shared.finish(&final_provider).await.unwrap();
+        final_provider.close(); // actual production order: ACK cut first, disconnect second
     });
     let (mut closed, mut ended) = (false, false);
     while !closed || !ended {
@@ -585,11 +606,18 @@ async fn normal_publisher_cannot_end_before_late_native_records_and_item_cut() {
         match frame["method"].as_str() {
             Some("stream.data") => core.item_data(&frame).await,
             Some("stream.closed") => closed = true,
-            Some("resource.upsert") => {
-                if frame["params"]["facts"]["data"]["agent"]["lifecycle"] == "ended" {
-                    assert!(closed, "ended preceded the item terminal cut");
-                    ended = true;
-                }
+            Some("provider.sync") => {
+                assert_eq!(
+                    frame["params"]["resources"][0]["data"]["agent"]["lifecycle"],
+                    "ended"
+                );
+                assert!(closed, "ended preceded the item terminal cut");
+                assert!(
+                    !finish.is_finished(),
+                    "runtime returned/disconnected without final ACK"
+                );
+                core.reply(&frame, json!({})).await;
+                ended = true;
             }
             _ => panic!("unexpected lifecycle frame {frame}"),
         }
@@ -600,6 +628,5 @@ async fn normal_publisher_cannot_end_before_late_native_records_and_item_cut() {
             .unwrap()
             .contains("late native tail")
     );
-    publisher.abort();
     provider.close();
 }
