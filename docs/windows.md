@@ -86,3 +86,6 @@ then `vqro tui`. New terminals start herdr-core's shell for your machine (PowerS
   `docs/research/windows-extensions.md` for the full extension audit.
 - Optional OpenTUI client: not checked on Windows.
 - `scripts/check.sh` and the e2e harnesses are Linux-only (namespaces, cgroups, procfs).
+- `tests/windows_background_smoke.py` refuses to run for now (exit 77): it is not isolated from your real profile
+  and credentials yet. Check for console windows by hand: after `vqro tui` and a minute idle, no console windows
+  other than your own terminal should be open, and none should appear later.

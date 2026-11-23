@@ -95,6 +95,10 @@ def close_fixture_handles(handles, api, *, unobserved=()):
 
 
 def main():
+    # Held by review: the controller and its children still inherit the real profile, credentials, Python startup
+    # and cwd, and a failed client close can skip cleanup. Refuse until the isolated version lands.
+    print("windows_background_smoke: not isolated yet; use the desktop checklist in docs/windows.md", file=sys.stderr)
+    raise SystemExit(77)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vqro", type=Path, required=True)
     args = parser.parse_args()
