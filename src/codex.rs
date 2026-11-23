@@ -517,6 +517,9 @@ impl Endpoint {
         if let Some(limits) = self.usage_limits.facts() {
             facts["data"]["agent"]["usage_limits"] = limits;
         }
+        if self.usage_limits.incomplete {
+            facts["data"]["agent"]["incomplete"].as_array_mut().unwrap().push(json!("usage_limits"));
+        }
         facts
     }
 
@@ -793,6 +796,9 @@ impl Endpoint {
         if let Some(limits) = self.usage_limits.facts() {
             value["usage_limits"] = limits;
         }
+        if self.usage_limits.incomplete {
+            value["incomplete"] = json!(["usage_limits"]);
+        }
         Change::new("state", "current", value)
     }
 
@@ -974,7 +980,7 @@ impl Endpoint {
             return Vec::new();
         }
         if method == "account/updated" {
-            let had_limits = self.usage_limits.facts().is_some();
+            let had_limits = self.usage_limits.facts().is_some() || self.usage_limits.incomplete;
             self.usage_limits = usage_limits::UsageLimits::default();
             return if had_limits {
                 vec![self.state_entity()]

@@ -387,7 +387,11 @@ impl Runtime {
                 .as_object_mut()
                 .unwrap()
                 .remove("observation");
-            facts["data"]["agent"]["incomplete"] = json!(["items"]);
+            if let Some(incomplete) = facts["data"]["agent"]["incomplete"].as_array_mut() {
+                if !incomplete.contains(&json!("items")) {
+                    incomplete.push(json!("items"));
+                }
+            }
         }
         facts
     }

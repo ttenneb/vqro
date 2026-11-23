@@ -1,0 +1,22 @@
+{
+  "dto": {
+    "accountId": "native-workspace",
+    "rateLimitsByLimitId": {
+      "codex": {
+        "primary": {"usedPercent": 10, "windowDurationMins": 300},
+        "secondary": {"usedPercent": "invalid"}
+      }
+    }
+  },
+  "expected": {
+    "account": {"id": "work", "label": "Work", "kind": "subscription", "sources": {"id": "vqro:launcher", "label": "vqro:launcher", "kind": "vqro:launcher"}},
+    "usage_limits": [{
+      "scope": {"kind": "account", "account": "work", "native_account_id": "native-workspace", "bucket": "codex"},
+      "window": {"id": "primary", "duration_ms": 18000000},
+      "used_percent": 10,
+      "source": "codex.account/rateLimits",
+      "observed_at_ms": 0
+    }],
+    "incomplete": ["usage_limits", "items"]
+  }
+}

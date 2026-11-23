@@ -169,7 +169,12 @@ named-to-anonymous) also discards the previous legacy rows: it never guesses whi
 mirror represented. Sparse updates within the same representation retain unmentioned windows/fields; a push
 without a map or valid legacy window does not switch representations. This prevents retained mirrors from
 double-counting one pool. Codex converts native seconds/minutes to milliseconds with
-checked arithmetic, and omits malformed/overflowing optional values. It does not publish credit balances,
+checked arithmetic, and omits malformed/overflowing optional values. Any bucket/row truncation or malformed
+relevant identifier/window/value marks `data.agent.incomplete` with `"usage_limits"`: displayed positive subsets
+are not a complete capacity inventory. This conservative marker remains sticky until native-account or endpoint
+observation reset, even if later sparse fields are valid; automatic capacity selection must treat it as unknown,
+not rank the surviving rows. The retained facts remain bounded. A missing/null native optional window is not
+itself malformed; absent limits still mean unknown. It does not publish credit balances,
 backend banners, guessed remaining amounts or reset-credit operations. No credentials/profiles are read and
 no new request timer, token refresh or billable probe is introduced. API-header observations require the runtime
 itself to expose documented header facts; generic header capture is not a capability promised by this contract.
