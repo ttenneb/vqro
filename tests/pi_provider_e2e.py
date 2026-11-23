@@ -159,12 +159,14 @@ class E2E:
     # a disk-starved machine can pause the core for seconds; nothing is retried or replayed meanwhile.
     AUDIT_TIMEOUT = 10
 
-    def audit_error(self, cursor, outcome, event_method='resource.invoke'):
+    def audit_error(self, cursor, outcome, event_method='resource.invoke', *, ready=None, timeout=None):
         # Observe exact public audits, including CLI errors and physical UI
         # effects. Never repeat an effect merely to discover its outcome.
         # Every row read is kept with its time, so a failure says what arrived and which reply never did.
         started = time.monotonic()
+        budget = self.AUDIT_TIMEOUT if timeout is None else timeout
         rows, phase = [], 'connect'
+        effect_seen, ready_result = None, None
 
         def fail(why):
             record = {'audit_failed': why, 'phase': phase, 'cursor': cursor, 'event_method': event_method,
@@ -178,20 +180,22 @@ class E2E:
             rows.append({'ms': round((time.monotonic() - started) * 1000), 'phase': phase, 'id': row.get('id'),
                          'method': row.get('method'), 'type': params.get('type'), 'seq': params.get('seq'),
                          'event_method': data.get('method'), 'outcome': data.get('outcome'),
+                         'resource': data.get('id'), 'text': data.get('text'),
                          'error': row.get('error'), 'result': row.get('result') if row.get('id') else None,
                          'missed': params if row.get('method') == 'missed' else None})
 
         with socket.socket(socket.AF_UNIX) as sock:
             try:
-                sock.settimeout(self.AUDIT_TIMEOUT)
+                sock.settimeout(budget)
                 sock.connect(self.env['VQRO_SOCKET'])
                 with sock.makefile('rwb', buffering=0) as wire:
                     for ident, method, params in [(1, 'hello', {'client': 'e2e-audit'}),
-                            (2, 'events.subscribe', {'from': cursor['seq'], 'epoch': cursor['epoch'], 'types': ['effect']})]:
+                            (2, 'events.subscribe', {'from': cursor['seq'], 'epoch': cursor['epoch'],
+                                'types': ['effect', 'resource', 'resource.removed', 'notify'] if ready else ['effect']})]:
                         phase = method
                         wire.write((json.dumps({'jsonrpc': '2.0', 'id': ident, 'method': method, 'params': params})+'\n').encode())
                         while True:
-                            left = self.AUDIT_TIMEOUT - (time.monotonic() - started)
+                            left = budget - (time.monotonic() - started)
                             if left <= 0:
                                 raise TimeoutError
                             sock.settimeout(left)
@@ -203,12 +207,21 @@ class E2E:
                             if row.get('method') == 'missed':
                                 # The cursor's events are gone: the audit can't be observed, so say so now.
                                 fail('the core answered the subscription with missed')
-                            if row.get('method') == 'event' and row['params']['type'] == 'effect':
-                                event = row['params']['data']
-                                if event['method'] == event_method:
+                            if row.get('method') == 'event':
+                                kind, event = row['params']['type'], row['params']['data']
+                                if ready:
+                                    candidate = ready(kind, event)
+                                    if candidate is not None:
+                                        ready_result = candidate
+                                if kind == 'effect' and event['method'] == event_method:
                                     assert event['outcome'] == outcome, event
-                                    self.log.append({'audited_effect': event, 'audit_ms': rows[-1]['ms']})
-                                    return event
+                                    effect_seen = event
+                                if effect_seen is not None and (ready is None or ready_result is not None):
+                                    self.log.append({'audited_effect': effect_seen, 'audit_ms': rows[-1]['ms']})
+                                    if ready:
+                                        self.log.append({'launch_ready': ready_result['id'], 'rows': rows})
+                                        return effect_seen, ready_result
+                                    return effect_seen
                             if row.get('id') == ident:
                                 if 'error' in row:
                                     fail(f'{method} was refused')
@@ -217,8 +230,8 @@ class E2E:
                                 phase = 'event'
             except (TimeoutError, socket.timeout):
                 waiting = {'connect': 'the connection', 'hello': 'the hello reply', 'events.subscribe': 'the subscribe reply',
-                           'event': f'the {event_method} effect event'}[phase]
-                fail(f'no {waiting} within {self.AUDIT_TIMEOUT} s')
+                           'event': f'the {event_method} effect and launch completion' if ready else f'the {event_method} effect event'}[phase]
+                fail(f'no {waiting} within {budget} s')
 
     def invoke(self, rid, op, args=None, outcome='accepted'):
         params = {'resource': rid, 'op': 'agent.'+op, 'args': args or {}}
@@ -288,10 +301,17 @@ class E2E:
         return p.stdout
 
     def ui_frame(self, name, *texts):
+        last_screen = None
         def rendered():
-            screen = self.ui('capture-pane', '-p', '-t', 'ui:0.0')
-            return screen if all(text in screen for text in texts) else None
-        screen = self.wait(rendered, 'UI frame '+name, timeout=8)
+            nonlocal last_screen
+            last_screen = self.ui('capture-pane', '-p', '-t', 'ui:0.0')
+            return last_screen if all(text in last_screen for text in texts) else None
+        try:
+            screen = self.wait(rendered, 'UI frame '+name, timeout=8)
+        except AssertionError as error:
+            missing = [text for text in texts if last_screen is None or text not in last_screen]
+            self.log.append({'ui_frame_failed': name, 'missing': missing, 'last_frame': last_screen})
+            raise AssertionError(f'{error}; missing={missing!r}; captured_frame={last_screen!r}') from None
         (self.root/('ui-'+name+'.txt')).write_text(screen)
         self.log.append({'ui_frame': name, 'contains': texts})
         return screen
@@ -335,9 +355,22 @@ class E2E:
         self.ui('send-keys', '-t', 'ui:0.0', 'C-g')
         self.ui_frame('new-binding', 'new Pi agent')
         self.ui('send-keys', '-t', 'ui:0.0', 'a')
-        agent = self.wait(lambda: next((r for r in self.snapshot()['resources'] if r.get('kind') == 'agent' and r.get('available')), None), 'UI new agent')
-        self.ui_frame('agent-ready', 'Ready for a prompt', 'created (observed)')
-        event = self.audit_error(cursor, 'observed', 'resource.spawn')
+        agents = {}
+        def launched(kind, data):
+            if kind == 'resource' and data.get('kind') == 'agent':
+                agents[data['id']] = data
+            elif kind == 'resource.removed':
+                agents.pop(data.get('id'), None)
+            elif kind == 'notify':
+                for agent in agents.values():
+                    if agent.get('available') and data.get('text') == f"Pi agent {agent['id']} created (observed); no prompt sent.":
+                        return agent
+            return None
+        # Registration precedes route/view/layout creation. Use the same existing 15-second startup
+        # budget for the launch completion event, not an early resource followed by an 8-second race.
+        # The notice is still asserted, but its four-second toast need not overlap the durable frame.
+        event, agent = self.audit_error(cursor, 'observed', 'resource.spawn', ready=launched, timeout=15)
+        self.ui_frame('agent-ready', 'Ready for a prompt')
         rid = agent['id']
         self.ui_navigation(rid, agent['host'])
         self.ui('send-keys', '-t', 'ui:0.0', 'C-g', 'p')  # typing stays on the prompt key, not right-click
