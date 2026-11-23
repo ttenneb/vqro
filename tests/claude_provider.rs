@@ -716,7 +716,7 @@ async fn retirement_ack_is_withheld_then_delivered_late_before_final_sync() {
     shared.wake();
     let closing_shared = shared.clone();
     let closing_provider = provider.clone();
-    let shutdown = tokio::spawn(async move {
+    let mut shutdown = tokio::spawn(async move {
         closing_shared.finish(&closing_provider).await.unwrap();
         closing_provider.close();
     });
@@ -732,7 +732,17 @@ async fn retirement_ack_is_withheld_then_delivered_late_before_final_sync() {
     // Old enqueue/sync-only shutdown emits provider.sync here; that is a protocol-order RED,
     // not a demand that the scheduler manufacture the real core's race.
     if let Ok(frame) = tokio::time::timeout(Duration::from_millis(100), core.recv()).await {
-        panic!("publication/disconnect crossed the WITHHELD retirement ACK: {frame}");
+        assert_eq!(frame["method"], "provider.sync");
+        core.reply(&frame, json!({})).await; // ACK facts, but STILL withhold stream retirement
+        tokio::time::timeout(Duration::from_secs(1), &mut shutdown)
+            .await
+            .expect("old shutdown completes")
+            .unwrap();
+        assert!(
+            !provider.is_closed(),
+            "adapter DISCONNECTED before the WITHHELD core retirement ACK"
+        );
+        panic!("publication crossed the WITHHELD retirement ACK: {frame}");
     }
     assert!(!shutdown.is_finished());
     core.send(
