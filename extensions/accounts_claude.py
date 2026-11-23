@@ -41,12 +41,16 @@ def eligible_episode(row, automatic=True):
     if type(automatic) is not bool or not isinstance(row, dict) or row.get('kind') != 'agent' or not policy.live(row):
         return None
     facts = policy.facts(row)
-    required = ('v', 'lifecycle', 'state', '_claude.input_ledger', 'session.id', 'epoch', 'account.id', 'caps.' + OP,
+    required = ('v', 'lifecycle', 'state', '_claude.input_ledger', 'host.incarnation',
+                'session.id', 'epoch', 'account.id', 'caps.' + OP,
                 'availability.native.subscription_limit', 'availability.native.episode',
                 'availability.native.session_id', 'availability.native.terminal_reason')
     if automatic:
-        required += ('background', '_claude.background_level', 'host.incarnation')
+        required += ('background', '_claude.background_level')
     if not evidence_complete(facts, required) or facts.get('state') != 'idle':
+        return None
+    native_host = facts.get('host')
+    if not isinstance(native_host, dict) or not text(native_host.get('incarnation')):
         return None
     private = facts.get('_claude')
     ledger = private.get('input_ledger') if isinstance(private, dict) else None
@@ -161,6 +165,7 @@ class ClaudeCutover:
         source, host = self.source(args['resource'], args['episode'], args['automatic'])
         facts = policy.facts(source)
         expected = {'incarnation': source['incarnation'], 'epoch': facts['epoch'],
+                    'native_process_incarnation': facts['host']['incarnation'],
                     'session': facts['session']['id'], 'account': policy.configured_id(source),
                     'episode': facts['availability']['native']['episode']}
         target = self.target(args, expected['account'], host)
@@ -168,6 +173,7 @@ class ClaudeCutover:
         current, current_host = self.source(args['resource'], args['episode'], args['automatic'])
         current_facts = policy.facts(current)
         if (current_host != host or current['incarnation'] != expected['incarnation']
+                or current_facts['host']['incarnation'] != expected['native_process_incarnation']
                 or current_facts.get('session') != facts['session']
                 or policy.configured_id(current) != expected['account']
                 or current_facts['availability']['native']['episode'] != expected['episode']):

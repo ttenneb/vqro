@@ -237,6 +237,36 @@ class CutoverTests(unittest.TestCase):
         self.ext.source['data']['agent']['host'].pop('incarnation')
         self.refused()
 
+    def test_coherent_native_process_replacement_between_source_reads_never_dispatches(self):
+        reads = []
+        def changed(method, args):
+            if method == 'resource.list':
+                reads.append(method)
+                if len(reads) == 2:
+                    facts = self.ext.source['data']['agent']
+                    facts['host']['incarnation'] = 'child-2'
+                    facts['_claude']['background_level']['process_incarnation'] = 'child-2'
+        self.ext.mutate = changed
+        self.refused()
+        self.assertEqual(len(reads), 2)
+
+    def test_background_revision_can_advance_within_the_same_native_process(self):
+        reads = []
+        def changed(method, args):
+            if method == 'resource.list':
+                reads.append(method)
+                if len(reads) == 2:
+                    self.ext.source['data']['agent']['_claude']['background_level']['revision'] += 1
+        self.ext.mutate = changed
+        result = self.run_cutover()
+        self.assertTrue(result['process_started'])
+        self.assertEqual(len(self.ext.native()), 1)
+
+    def test_offer_cannot_bypass_unknown_native_process_identity(self):
+        self.offer_claim()
+        self.ext.source['data']['agent']['host'].pop('incarnation')
+        self.refused()
+
     def test_ledger_or_background_change_before_second_source_check_prevents_auto(self):
         for field in ('ledger', 'background'):
             original = copy.deepcopy(self.ext.source)
