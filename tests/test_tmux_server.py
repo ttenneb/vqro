@@ -253,11 +253,13 @@ class TmuxServerTests(unittest.TestCase):
                 child = Mock(pid=123)
                 child.communicate.side_effect = [subprocess.TimeoutExpired("helper", 4), (b"", b"")]
                 with patch.object(m.os, "name", "nt"), \
+                        patch.object(m.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True), \
                         patch.object(m.os, "killpg", create=True) as kill_group, \
                         patch.object(m.subprocess, "Popen", return_value=child) as spawn:
                     with self.assertRaises(m.VqroError) as error: server.call(action)
                 self.assertEqual(error.exception.kind, kind)
                 self.assertNotIn("start_new_session", spawn.call_args.kwargs)
+                self.assertEqual(spawn.call_args.kwargs["creationflags"], 0x08000000)
                 child.kill.assert_called_once_with()
                 kill_group.assert_not_called()
                 self.assertEqual(spawn.call_count, 1, "never retry after timeout")

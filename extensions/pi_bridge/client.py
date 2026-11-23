@@ -7,6 +7,7 @@ import json
 import math
 
 from vqro_display import label
+from vqro_process import background_kwargs
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,7 @@ class PiRpcClient:
             lambda: _ExitProtocol(self.limits.response_bytes+1,loop),
             *argv, cwd=cwd, env=dict(env), stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            **background_kwargs(),
         )
         self.process=asyncio.subprocess.Process(transport,protocol,loop)
         self._owned_exited=protocol.owned_exit

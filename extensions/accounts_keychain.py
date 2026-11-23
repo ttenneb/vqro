@@ -11,6 +11,8 @@ import subprocess
 import sys
 import uuid
 
+from vqro_process import background_kwargs
+
 MAX_SECRET_BYTES = 2048
 SERVICE = 'vqro.api-key.v1'
 
@@ -69,7 +71,7 @@ class _CommandStore:
         try:
             result = self.run([self.executable, *args], input=data,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
-                              check=False)
+                              check=False, **background_kwargs())
         except subprocess.TimeoutExpired:
             raise KeychainError('indeterminate' if mutation else 'unavailable', handle=pending_handle) from None
         except FileNotFoundError:

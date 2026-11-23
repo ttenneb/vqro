@@ -15,6 +15,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
+from vqro_process import background_kwargs
 
 POLL_INTERVAL = 5
 UNAVAILABLE = "tmux is not available on native Windows; run vqro inside WSL"
@@ -48,7 +49,7 @@ class TmuxServer:
         use_groups = os.name == "posix" and callable(getattr(os, "killpg", None)) and hasattr(signal, "SIGKILL")
         group_options = {"start_new_session": True} if use_groups else {}
         child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 **group_options)
+                                 **group_options, **background_kwargs())
         try:
             out, err = child.communicate(timeout=4)
         except subprocess.TimeoutExpired:
