@@ -29,6 +29,7 @@ class CheckTests(unittest.TestCase):
         self.env = {"HOME": str(self.root), "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"}
         self.env["VQRO_GATE_SLOT_DIR"] = str(self.root / "slots")
         self.env["VQRO_GATE_SLOT_HELD"] = "slot-1.lock"
+        self.env["VQRO_GATE_EXCLUSIVE"] = "0"  # Never inherit real caller admission facts.
         (self.root / "slots").mkdir()
         (self.root / "slots/slot-1.lock").touch()
         self.latest = self.root / "check-receipt.json"
@@ -203,21 +204,45 @@ else:
                          ['pi-bridge-memory', 'e2e-tui-scale-budgets', 'scale-harness'])
 
     def test_only_timing_budget_breaches_are_unverified_under_observed_contention(self):
-        # Deliberately exceed a stub's .001s budget. No real system load is needed.
-        stub = shlex.quote(sys.executable) + " -c " + shlex.quote(
-            "import sys,time; start=time.monotonic(); time.sleep(.03); "
-            "sys.exit(78 if time.monotonic()-start > .001 else 0)")
+        # The private step must stay alive until the REAL sampler has retained a
+        # snapshot. A short sleep alone races interpreter startup/descheduling.
+        repo = self.root/'observed-sampler'
+        (repo/'scripts').mkdir(parents=True)
+        (repo/'scripts/timing_contention.py').write_text(f'''from pathlib import Path
+import runpy,sys
+module=runpy.run_path({str(ROOT/'scripts/timing_contention.py')!r})
+wait=module['select'].select
+def observed_wait(read,write,error,timeout=None):
+    if timeout is not None and timeout > 0:
+        output=Path(sys.argv[sys.argv.index('--output')+1])
+        (output.parent/'sample-retained').write_text('observed')
+    return wait(read,write,error,timeout)
+module['select'].select=observed_wait
+raise SystemExit(module['main']())
+''')
+        workload = '''import pathlib,sys,time
+ready=pathlib.Path(sys.argv[1]); end=time.monotonic()+10
+while not ready.exists():
+    if time.monotonic() >= end: raise RuntimeError('sampler did not retain a snapshot')
+    time.sleep(.002)
+start=time.monotonic(); time.sleep(.03)
+sys.exit(78 if time.monotonic()-start > .001 else 0)
+'''
+        stub = shlex.quote(sys.executable) + ' -c ' + shlex.quote(workload) + ' "$LOGS/sample-retained"'
         with (self.root/'slots/quick-slot-1.lock').open('w') as other:
             fcntl.flock(other, fcntl.LOCK_EX)
             for mode, exclusive, expected in [('full', False, 'skip'), ('timing', False, 'FAIL'), ('full', True, 'FAIL')]:
                 with self.subTest(mode=mode, exclusive=exclusive):
                     self.env['VQRO_GATE_EXCLUSIVE'] = str(int(exclusive))
                     prefix = '' if mode == 'timing' else 'step build-zero-warnings true\n'
-                    result, receipt, _ = self.gate(prefix + 'step scale-harness ' + stub, mode=mode)
+                    result, receipt, _ = self.gate(f'REPO={shlex.quote(str(repo))}\n' + prefix + 'step scale-harness ' + stub, mode=mode)
                     step = receipt['steps'][-1]
                     self.assertEqual(step['result'], expected, result.stdout + result.stderr)
                     self.assertEqual(result.returncode, 0 if expected == 'skip' else 1)
+                    self.assertEqual(step['contention']['status'], 'available')
                     self.assertIn('other_gate_slot_held', step['contention']['reasons'])
+                    self.assertTrue(all(row['other_slots'] == ['quick-slot-1.lock']
+                                        for row in step['contention']['samples']))
                     if expected == 'skip': self.assertEqual(step['reason'], 'unverified (contended)')
 
     def test_timing_passes_and_correctness_failures_are_not_downgraded(self):
