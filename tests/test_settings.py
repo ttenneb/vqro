@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import runpy
 import sys
+import threading
 import types
 import unittest
 from unittest import mock
@@ -14,6 +15,7 @@ EXT = Path(os.environ.get("VQRO_TEST_EXTENSIONS_DIR", Path(__file__).resolve().p
 class Extension:
     def __init__(self, name, **_):
         self.name = name
+        self.cache_lock = threading.RLock()
         self.event_types = _.get("event_types")
         self.entries = {"extension/"+n: {"value": {"argv": ["never-run"], "enabled": n != "off"}} for n in (name,"off","broken","third-party")}
         self.live = {}

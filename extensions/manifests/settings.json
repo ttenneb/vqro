@@ -1,14 +1,14 @@
 {
   "name":"settings", "title":"Settings", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"interface",
   "summary":"Browse extensions and configure the workspace interface.",
-  "description":"Provides the Settings page for extensions, interface options, themes, icons and keys. Turning it off also stops this page; use the vqro badge or command palette to enable it again. Built-in recovery remains available with every extension disabled.",
+  "description":"Provides the Settings page for extensions, interface options, themes, icons, keys and the default backend. Turning it off also stops this page; use the vqro badge or command palette to enable it again. Built-in recovery remains available with every extension disabled.",
   "requires":{"protocol":1,"client_features":["items","pages","menu","input","tree"]},
-  "provides":["command/settings.open","command/settings.set","command/settings.toggle","command/settings.prefix","command/settings.switch","view/settings"],
+  "provides":["command/settings.open","command/settings.set","command/settings.toggle","command/settings.prefix","command/settings.switch","command/settings.default_backend","view/settings"],
   "works_with":[{"cap":"data/themes","suggest":"themes","without":"The Theme page has no themes to choose"},"command/themes.apply","command/themes.accent",
                 {"cap":"data/icons","suggest":"icons","without":"The Icons page has no icon sets to choose"},"command/icons.apply",
                 {"cap":"data/keys","suggest":"keys","without":"The Keys page has no keymap profiles"},"command/keys.profile",
                 {"cap":"data/settings.page.*","without":"Extensions that offer a Settings page (Sidebar) are configured from their own popups only"},
                 {"cap":"command/logs.open","suggest":"logs","without":"No View log action; the log path is shown instead"}],
   "settings_command":"settings.open",
-  "contributes":{"commands":["settings.open","settings.set","settings.toggle","settings.prefix","settings.switch"],"keys":["Prefix ,: Settings"],"menu_items":["Settings"],"panels":["Settings"],"settings":["doc/settings/tui"]}
+  "contributes":{"commands":["settings.open","settings.set","settings.toggle","settings.prefix","settings.switch","settings.default_backend"],"keys":["Prefix ,: Settings"],"menu_items":["Settings"],"panels":["Settings"],"settings":["doc/settings/tui"]}
 }

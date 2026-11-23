@@ -1671,6 +1671,14 @@ A stop intent is recorded before kill; an uncertain stop retains the claim and a
 even with nonempty Scratch, and is never replayed. Prefix n is never suppressed by this automatic policy.
 No backend means no shell, with a visible notice; recovery remains usable without this policy.
 
+Settings' **Backends** page offers a mouse-pickable **Default backend** selector over declarations
+whose `kind` is `provider`, including disabled declarations (marked as disabled). A pick changes only
+`default` flags in one version-checked, undoable workspace transaction; it does not enable a provider.
+All known provider declarations are CAS-fenced together, so enabled providers follow the usual declaration
+restart mechanism. Selecting **None** clears the explicit preference, not the core's normal first-backend
+fallback. Re-selecting an already-canonical choice is a no-op. The command is `settings.default_backend`
+with `{value: "<extension id>"}` or `{value: ""}` for None.
+
 Extensions may add a page to Settings by publishing live content `settings.page.<name>` = `{title, items}` (ordinary
 rows whose commands are their own, over their own state); Settings lists such pages after Interface and drops a
 page when its publisher stops. The sidebar uses it for the same options as its Show popup (one tree, any level

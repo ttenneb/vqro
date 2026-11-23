@@ -394,6 +394,34 @@ def extensions_page(states, commands):
             "columns": columns}
 
 
+def backend_entries():
+    """One coherent snapshot of provider declarations and the versions a pick must compare-and-set."""
+    with ext.cache_lock:
+        return [(key, entry.get("version", 0), dict(entry["value"]))
+                for key, entry in sorted(ext.entries.items()) if key.startswith("extension/")
+                and isinstance(entry.get("value"), dict) and entry["value"].get("kind") == "provider"]
+
+
+def backends_page(states):
+    providers = backend_entries()
+    current = next((key.split("/", 1)[1] for key, _, value in providers if value.get("default") is True), "")
+    options = [{"label": "None (normal fallback)", "value": ""}]
+    for key, _, value in providers:
+        name = key.split("/", 1)[1]
+        title = ext_title(states, name)
+        shown = title if title == name else f"{title} ({label(name)})"
+        if name == current:
+            shown += " · default"
+        if value.get("enabled") is False:
+            shown += " · disabled"
+        options.append({"label": shown, "value": name})
+    return {"title": "Backends", "items": [
+        {"type": "select", "text": "Default backend", "value": current, "options": options,
+         "command": "settings.default_backend",
+         "description": "Changing declarations restarts enabled providers; disabled providers stay disabled. "
+                        "None clears the explicit preference; the core's normal fallback still applies."}]}
+
+
 # Keys page. Mirrors the client's key rules (src/tui/keys.rs, src/tui/mod.rs `rank`) to show
 # which binding wins each key; the client stays the authority.
 PREFIXES = ["C-g", "C-a", "C-b", "C-Space"]
@@ -539,6 +567,7 @@ def refresh(*_):
         {"title": "Icons", "items": icon_rows()},
         {"title": "Keys", "items": key_rows()},
         {"title": "About", "items": about},
+        backends_page(states),
     ]})
 
 
@@ -554,6 +583,33 @@ def on_event(t, d):
 def open_settings(args):
     refresh()
     return {"client": {"popup": {"view": "settings", "width": 140}}}
+
+
+@ext.command("settings.default_backend", "Choose the default backend (args: value = provider extension id, or empty for none)")
+def set_default_backend(args):
+    chosen = args.get("value")
+    if not isinstance(chosen, str):
+        raise VqroError("choose a provider extension or None", "invalid")
+
+    def attempt():
+        ext.fresh()
+        providers = backend_entries()
+        if chosen and not any(key == f"extension/{chosen}" for key, _, _ in providers):
+            raise VqroError("that provider extension is no longer declared", "invalid")
+        ops, changed = [], False
+        for key, version, old in providers:
+            value = dict(old)
+            if key == f"extension/{chosen}":
+                value["default"] = True
+            else:
+                value.pop("default", None)
+            changed = changed or value != old
+            ops.append({"op": "set", "key": key, "value": value, "expect": version})
+        if not changed:
+            return {"unchanged": True}
+        # Fence all known provider flags in one undoable transaction, including unchanged peers.
+        return ext.apply(ops, "settings: default backend")
+    return ext.retrying(attempt, attempts=8)
 
 
 @ext.command("settings.set", "Set a client option (args: tui, value)")
