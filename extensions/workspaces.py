@@ -26,6 +26,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vqro_ext import Extension, VqroError, views_in  # noqa: E402
 from vqro_views import title  # noqa: E402
+from vqro_process import background_kwargs  # noqa: E402
 
 ext = Extension("workspaces", event_types=["entries"])  # no resource events: not used here
 LIST = "doc/workspaces/list"
@@ -38,7 +39,7 @@ last_data = [[]]  # what scan() last published (this extension doesn't receive i
 def git(path, *args):
     """git's output, or None when it fails or git isn't installed (folders are then plain folders)."""
     try:
-        r = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, timeout=10)
+        r = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, timeout=10, **background_kwargs())
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -357,7 +358,7 @@ def new_worktree(args):
     dest = os.path.join(os.path.dirname(repo.rstrip("/" + os.sep)), f"{os.path.basename(repo.rstrip('/' + os.sep))}-{branch.replace('/', '-')}")
     exists = git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}") is not None
     cmd = ["git", "-C", repo, "worktree", "add", dest] + ([branch] if exists else ["-b", branch])
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, **background_kwargs())
     if r.returncode != 0:
         ext.notify(f"worktree failed: {r.stderr.strip().splitlines()[-1] if r.stderr.strip() else r.returncode}", "error")
         raise VqroError(r.stderr.strip() or "git worktree add failed", "backend")

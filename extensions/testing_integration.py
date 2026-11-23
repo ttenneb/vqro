@@ -13,6 +13,7 @@ import time
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from vqro_process import background_kwargs
 from vqro_testing import (EXIT_CODES, RECEIPT_BYTES, STATUSES, PlainClient, Sandbox, canonical,
                           compare_runs, discover_scenarios, endpoints, fingerprint, print_result,
                           row, run_scenarios, smoke, source_mark, source_untouched, text, utc_now, write_receipt,
@@ -239,7 +240,7 @@ def extension_main():
                     command.extend(["--" + name.replace("_", "-"), str(args[name])])
             environment = {"HOME": os.environ.get("HOME", str(Path.home())), "PATH": os.environ.get("PATH", os.defpath)}
             child = subprocess.Popen(command, env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL, start_new_session=True)
+                                     stderr=subprocess.DEVNULL, start_new_session=True, **background_kwargs())
             last.update(process=child, receipt=str(destination))
 
             def finish():

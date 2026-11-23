@@ -1640,6 +1640,12 @@ unbounded output queue. A log failure discards diagnostics but continues drainin
 evidence. Shutdown drains briefly, then abandons pipes a descendant keeps open. Removed extension names' files are
 retained for manual diagnosis; the per-name bound is not a global disk quota.
 Crash budget: 3 exits in 5 minutes, then `failed` until the entry changes or `vqro.extension.restart`.
+On Windows, supervised extensions and the herdr stdio connector start without allocating a console
+(`CREATE_NO_WINDOW`); redirected stdio alone does not suppress a console under a detached core.
+This does not affect interactive UI clients or backend-owned terminals. Extension authors launching
+local background helpers can use `vqro_process.background_kwargs()` with `subprocess`/asyncio: the
+no-console creation flag is per launch, not inherited by grandchildren. Intentional external UI
+launches keep their own behavior.
 
 ### Static manifests and observed facts
 

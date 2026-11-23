@@ -28,6 +28,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
+from vqro_process import background_kwargs
 from account_profiles import choose as choose_account, environment as account_environment, provider_argv, fact as account_fact, require_fresh
 
 HERE = Path(__file__).resolve().parent
@@ -174,7 +175,7 @@ class Tier1:
     @staticmethod
     def run(argv):
         try:
-            return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", timeout=10, check=True).stdout
+            return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", timeout=10, check=True, **background_kwargs()).stdout
         except (OSError, subprocess.SubprocessError) as error:
             raise VqroError(f"{argv[0]} failed: {error}", "unavailable") from None
 

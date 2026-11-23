@@ -1,6 +1,20 @@
 //! Resolve portable provider program names when a supervised process starts, never in stored defaults.
 use std::path::{Path,PathBuf};
 
+/// A stdio-only service child must not allocate its own Windows console. Redirecting
+/// stdio alone does not prevent a window, especially when the core itself is detached.
+/// Never use this for backend-owned interactive terminals or UI clients.
+pub fn background_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    let command = tokio::process::Command::new(program);
+    #[cfg(windows)]
+    let command = {
+        let mut command = command;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        command
+    };
+    command
+}
+
 fn candidate(dir:&Path, name:&str, suffix:&str) -> PathBuf {
     dir.join(if !suffix.is_empty() && !name.to_ascii_lowercase().ends_with(&suffix.to_ascii_lowercase()) { format!("{name}{suffix}") } else { name.into() })
 }
@@ -60,6 +74,17 @@ pub fn resolve_provider(name:&str) -> Result<PathBuf,String> {
         assert_eq!(windows_python(dirs(&["C:/venv/Scripts","C:/Windows"]),have(&["C:/venv/Scripts/python.exe","C:/Windows/py.exe"])),
                    Some((Path::new("C:/venv/Scripts").join("python.exe"),vec![])));
         assert_eq!(windows_python(dirs(&["C:/Windows"]),have(&[])),None);
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn background_child_has_no_console_and_retains_stdio() {
+        let output = background_command("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                "Add-Type -Namespace VqroTest -Name Console -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern System.IntPtr GetConsoleWindow();'; [Console]::Write([VqroTest.Console]::GetConsoleWindow().ToInt64())"])
+            .stdin(std::process::Stdio::null())
+            .output().await.unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "0");
     }
     #[test] fn windows_program_suffix_is_added_once() {
         assert_eq!(candidate(Path::new("bin"),"vqro-herdr",".exe"),Path::new("bin").join("vqro-herdr.exe"));

@@ -12,6 +12,7 @@ import time
 # CLI reporting must not write __pycache__ into the installed extensions directory.
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from vqro_process import background_kwargs
 from vqro_testing import (EXIT_CODES, cli_parser, dependency_row, endpoints, fingerprint, print_result, receipt,
                           resolve_program, row, save_receipt, script_path, text, utc_now, write_receipt)
 
@@ -127,7 +128,7 @@ def tests_row(name, extensions_dir, *, enabled=True, timeout=TEST_TIMEOUT):
                                         "-p", "test_*.py"], cwd=directory,
                                        env={"PATH": os.environ.get("PATH", os.defpath), "HOME": home,
                                             "VQRO_TEST_EXTENSIONS_DIR": str(Path(extensions_dir).resolve())},
-                                       stdout=output, stderr=subprocess.STDOUT, timeout=timeout, check=False)
+                                       stdout=output, stderr=subprocess.STDOUT, timeout=timeout, check=False, **background_kwargs())
             status = "pass" if completed.returncode == 0 else "fail"
             evidence = f"exit {completed.returncode}"
         except subprocess.TimeoutExpired:

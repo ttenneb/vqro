@@ -9,7 +9,6 @@ use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use tokio::process::Command;
 use tokio::sync::oneshot;
 
 use crate::core::Shared;
@@ -169,7 +168,7 @@ pub fn reconcile(core: &Shared) {
             Ok(resolved)=>resolved,
             Err(error)=>{ rt.last_exit=Some(error.clone());rt.fail("startup",error);let state=rt.to_json();c.emit("extension",json!({"name":name,"state":state}));continue; }
         };
-        let mut cmd = Command::new(program);
+        let mut cmd = crate::program::background_command(program);
         cmd.args(&leading).args(&argv[1..])
             .env("VQRO_SOCKET", &socket)
             .env_remove("VQRO_SOCKET_SOURCE")

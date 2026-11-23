@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdout, Command};
+use tokio::process::ChildStdout;
 use tokio::sync::mpsc;
 
 use super::*;
@@ -133,7 +133,7 @@ async fn session(
     cmds: &mut mpsc::UnboundedReceiver<AdapterCmd>,
     connection: u64,
 ) -> anyhow::Result<()> {
-    let mut child = Command::new(&argv[0])
+    let mut child = crate::program::background_command(&argv[0])
         // A backend may auto-start its own service: neither credentials nor identity belong to its user terminals.
         .env_remove("VQRO_PRINCIPAL").env_remove("VQRO_HOST_CONTEXT")
         .env_remove("VQRO_EXTENSION_TOKEN").env_remove("VQRO_EXTENSION_LIFETIME").env_remove("VQRO_EXTENSION")
