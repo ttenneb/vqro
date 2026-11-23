@@ -158,6 +158,9 @@ def folder_of(r):
 def term_row(rid, r, where=False):
     """A terminal row. With `where` (not placed under a folder in the tree), an unnamed terminal also
     shows its folder, so a column of "zsh" rows can be told apart; named ones keep their room for badges."""
+    unknown_command = r.get("argv") is None and not r.get("name") and not any(
+        resource.get("kind") == "agent" and resource.get("host") == r.get("id")
+        for resource in ext.resources.values())
     label = title(r, ext.resources)
     folder = folder_of(r) if where and not r.get("name") else None
     if folder and folder != label:
@@ -183,7 +186,7 @@ def term_row(rid, r, where=False):
     if agent and st.get("state") in STATUS:
         icon = dict(icon, name=[st["state"], "agent"])
     return {
-        "id": f"term:{rid}", "text": label, "style": ("dim" if label == "unknown command" else ("agent" if agent else None)) if live else "dim",
+        "id": f"term:{rid}", "text": label, "style": ("dim" if unknown_command else ("agent" if agent else None)) if live else "dim",
         "icon": icon, "icon_style": icon_style,
         "badges": badges,
         "command": "sidebar.show", "args": {"resource": rid},

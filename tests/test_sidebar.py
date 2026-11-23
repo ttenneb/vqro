@@ -55,6 +55,25 @@ class SidebarTests(unittest.TestCase):
             row = next(x for x in module["build"]() if x.get("args", {}).get("resource") == "r1")
             self.assertEqual((row["text"], row["style"]), (expected, style))
 
+    def test_unknown_command_with_cwd_stays_dim_on_the_unplaced_build_path(self):
+        module = load(); ext = module["ext"]
+        for argv_fields in ({"argv": None}, {}):
+            with self.subTest(argv_fields=argv_fields):
+                ext.resources = {"r1": dict(argv_fields, id="r1", kind="terminal", state="live", cwd="/work/project")}
+                row = next(x for x in module["build"]() if x.get("args", {}).get("resource") == "r1")
+                self.assertEqual((row["text"], row["style"]), ("unknown command · project", "dim"))
+
+    def test_unknown_argv_does_not_dim_supplied_names_or_bridge_labels(self):
+        module = load(); ext = module["ext"]
+        ext.resources = {"r1": {"id": "r1", "kind": "terminal", "state": "live", "argv": None,
+                                "cwd": "/work/project", "name": "unknown command"}}
+        named = module["term_row"]("r1", ext.resources["r1"], where=True)
+        self.assertEqual((named["text"], named["style"]), ("unknown command", None))
+        ext.resources["r1"].pop("name")
+        ext.resources["r2"] = {"id": "r2", "kind": "agent", "host": "r1", "name": "Other", "state": "live"}
+        bridge = module["term_row"]("r1", ext.resources["r1"], where=True)
+        self.assertEqual((bridge["text"], bridge["style"]), ("Other r2 bridge · project", None))
+
     def test_tier1_status_shows_only_where_the_terminal_reports_none(self):
         module = load(); ext = module["ext"]
         ext.resources = {
