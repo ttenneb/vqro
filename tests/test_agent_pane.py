@@ -479,6 +479,28 @@ class TranscriptRows(unittest.TestCase):
         for bad in (-1, 1.5, "2500", True):
             self.assertEqual(agent_transcript.group_row([("t1", dict(bare, duration_ms=bad))])["children"][1]["columns"][3], "—")
 
+    def test_activity_headers_offer_native_numeric_column_sort_without_reordering(self):
+        tools = [('t1', {'title': 'bash', 'status': 'completed', 'input': {'command': 'second'},
+                         'duration_ms': 9, 'content': [{'type': 'text', 'text': 'é'}]}),
+                 ('t2', {'title': 'read', 'status': 'failed', 'input': {'path': 'first'},
+                         'duration_ms': 2000, 'content': [{'type': 'text', 'text': 'abc'}]}),
+                 ('t3', {'title': 'bash', 'status': 'pending', 'input': {'command': 'unknown'}})]
+        group = agent_transcript.group_row(tools)
+        self.assertTrue(group['children'][0]['table_header'])
+        self.assertTrue(all(c.get('sortable') is True for c in group['child_table']['columns']))
+        rows = group['children'][1:]
+        self.assertEqual([r['id'] for r in rows], ['t:t1', 't:t2', 't:t3'], 'producer preserves given order')
+        self.assertEqual(rows[0]['column_sort'], ['bash', rows[0]['columns'][1], 'completed', 9, 2])
+        self.assertEqual(rows[1]['column_sort'][3:], [2000, 3])
+        self.assertEqual(rows[2]['column_sort'][3:], [None, None], 'unknown values are not zero')
+        self.assertNotIn('column_sort', group['children'][0], 'header never participates as a data row')
+        for bad in (True, -1, 1.5, '9'):
+            tool = dict(tools[0][1], duration_ms=bad)
+            row = agent_transcript.group_row([('t1', tool)])['children'][1]
+            self.assertIsNone(row['column_sort'][3])
+        timed = dict(tools[0][1], duration_ms=None, started_ms=100, ended_ms=125)
+        self.assertEqual(agent_transcript.group_row([('t1', timed)])['children'][1]['column_sort'][3], 25)
+
     def test_tool_lines_carry_aligned_cells_and_the_activity_opens_a_turn_table(self):
         """Cards/table slice (the human's relay-12 answers): tool lines line up; Activity → [Table] of this turn only."""
         group = next(r for r in self.rows() if r.get("text", "").startswith("Activity"))

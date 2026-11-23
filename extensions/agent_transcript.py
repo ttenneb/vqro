@@ -91,12 +91,19 @@ def duration(start, end):
     return f"{seconds:.1f}s" if seconds < 10 else f"{seconds:.0f}s" if seconds < 120 else f"{seconds / 60:.0f}m"
 
 
-def tool_time(value):
-    """A tool's Time: the runtime-reported duration_ms (agent-v0 4) if present, else its start/end, else None."""
+def tool_elapsed_ms(value):
+    """Native elapsed milliseconds for display/sorting; missing is unknown, never an observed timer."""
     elapsed = value.get("duration_ms")
     if type(elapsed) is int and elapsed >= 0:
-        return duration(0, elapsed)
-    return duration(value.get("started_ms"), value.get("ended_ms"))
+        return elapsed
+    start, end = value.get("started_ms"), value.get("ended_ms")
+    return end - start if type(start) is int and type(end) is int and end >= start else None
+
+
+def tool_time(value):
+    """A tool's Time: native duration_ms, else native start/end, else None."""
+    elapsed = tool_elapsed_ms(value)
+    return duration(0, elapsed) if elapsed is not None else None
 
 
 def plural(n):
@@ -522,6 +529,9 @@ def group_row(steps, cwd=None):
                           TOOL_ICON.get(value.get("status"), "?") + " " + str(value.get("status") or "unknown"),
                           tool_time(value) or "—",
                           f"{len(output.encode('utf-8'))} B" if output else "—"]
+        row["column_sort"] = [row["columns"][0], row["columns"][1],
+                              value.get("status") if isinstance(value.get("status"), str) else None,
+                              tool_elapsed_ms(value), len(output.encode('utf-8')) if output else None]
         row.pop("badges", None)  # status/time/size are cells, not distant right-aligned chips
         children.append(row)
     # One Activity is one row, which the panel budget can't split: keep its newest steps within ACTIVITY_BYTES and say
@@ -539,7 +549,7 @@ def group_row(steps, cwd=None):
     children = [{"id": "gh:" + tools[0][0], "text": "Tool · Target · Status · Time · Output · Actions",
                  "columns": ["Tool", "Target", "Status", "Time", "Output"],
                  "detail": "Actions" + " " * len("[copy]"),  # align with the start of [open] [copy], not its end
-                 "style": "heading", "focusable": False}] + kept
+                 "style": "heading", "focusable": False, "table_header": True}] + kept
     starts = [v.get("started_ms") for _, v in tools if type(v.get("started_ms")) is int]
     ends = [v.get("ended_ms") for _, v in tools if type(v.get("ended_ms")) is int]
     took = duration(min(starts), max(ends)) if starts and ends else None
@@ -560,9 +570,9 @@ def group_row(steps, cwd=None):
             "children": children, "expanded": False}
 
 
-ACTIVITY_COLUMNS = [{"width": 12}, {"width": "fill", "min_width": 16},
-                    {"width": 12, "priority": 3}, {"width": 7, "align": "right", "priority": 1},
-                    {"width": 9, "align": "right", "priority": 2}]
+ACTIVITY_COLUMNS = [{"width": 12, "sortable": True}, {"width": "fill", "min_width": 16, "sortable": True},
+                    {"width": 12, "priority": 3, "sortable": True}, {"width": 7, "align": "right", "priority": 1, "sortable": True},
+                    {"width": 9, "align": "right", "priority": 2, "sortable": True}]
 
 # The conversation panel's column layout: only rows carrying `columns` (tool lines) use it; no header (no labels).
 TOOL_COLUMNS = [{"width": 12}, {"width": "fill"}]
