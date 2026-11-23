@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import stat
 from collections import deque
 from fnmatch import fnmatchcase
 from vqro_process import background_kwargs
@@ -185,7 +186,7 @@ def _windows_path_dirs(path, separator=os.pathsep):
     return entries
 
 
-def _windows_python_program(dirs, exists):
+def _windows_python_program(dirs, exists, *, preserve_uncertainty=False):
     # Match src/program.rs: PATH directory order first, then py -3/python/python3 within each.
     # This checker never executes it; -3 is an argument to the app's selected py.exe, not a path.
     for directory in dirs:
@@ -196,6 +197,8 @@ def _windows_python_program(dirs, exists):
             try:
                 available = exists(candidate)
             except OSError:
+                if preserve_uncertainty:
+                    return candidate  # Fingerprinting must hash/report uncertainty, never prove absence.
                 available = False  # Core metadata-query failures are unavailable candidates, not probes/retries.
             if available:
                 return candidate
@@ -209,8 +212,16 @@ def resolve_program(program, cwd, *, binary=None, path=None, executable_only=Tru
         if override:
             return _literal_program(override, cwd, path, executable_only=executable_only)
         if sys.platform == "win32":
-            return _windows_python_program(_windows_path_dirs(path),
-                                           lambda candidate: candidate.is_file())
+            if executable_only:
+                return _windows_python_program(_windows_path_dirs(path), lambda candidate: candidate.is_file())
+
+            def fingerprint_file(candidate):
+                try:
+                    return stat.S_ISREG(candidate.stat().st_mode)
+                except (FileNotFoundError, NotADirectoryError):
+                    return False
+
+            return _windows_python_program(_windows_path_dirs(path), fingerprint_file, preserve_uncertainty=True)
     if program.startswith("vqro-") and "/" not in program and "\\" not in program:
         binary = binary or shutil.which("vqro", path=path)
         if binary:

@@ -29,6 +29,42 @@ class PythonSelection(unittest.TestCase):
         self.assertEqual(shared._windows_python_program([directory], exists), directory / "python.exe")
         self.assertEqual(exists.call_count, 2)
 
+    def test_fingerprint_mode_preserves_uncertainty_before_any_usable_candidate(self):
+        first, second = Path("first"), Path("second")
+        exists = Mock(side_effect=[PermissionError("metadata unavailable"), True])
+        self.assertEqual(shared._windows_python_program([first, second], exists, preserve_uncertainty=True), first / "py.exe")
+        exists.assert_called_once_with(first / "py.exe")
+        exists = Mock(side_effect=[True, PermissionError("later uncertainty")])
+        self.assertEqual(shared._windows_python_program([first, second], exists, preserve_uncertainty=True), first / "py.exe")
+        exists.assert_called_once_with(first / "py.exe")
+
+    def test_disabled_python3_metadata_error_is_unknown_not_known_absence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            extensions, tools = root / "extensions", root / "tools"
+            extensions.mkdir(); tools.mkdir()
+            candidate = tools / "py.exe"
+            candidate.write_bytes(b"fixture only, never executed")
+            declaration = {"extension/disabled": {"argv": ["python3"], "enabled": False}}
+            original = Path.stat
+
+            def denied(path, *args, **kwargs):
+                if path == candidate:
+                    raise PermissionError("mocked candidate metadata denial")
+                return original(path, *args, **kwargs)
+
+            with patch.object(sys, "platform", "win32"), patch.dict(os.environ, {"PATH": str(tools), "VQRO_PYTHON": ""}), \
+                 patch.object(Path, "stat", denied), patch.object(shared.subprocess, "Popen", side_effect=AssertionError("no candidate execution")):
+                result = shared.fingerprint(extensions, declaration, {})
+            self.assertIsNone(result["setup_id"], result)
+            self.assertEqual(result["executables"]["disabled"]["resolution"], "unknown")
+            self.assertTrue(any("mocked candidate metadata denial" in reason for reason in result["unknown"]), result)
+            candidate.unlink()
+            with patch.object(sys, "platform", "win32"), patch.dict(os.environ, {"PATH": str(tools), "VQRO_PYTHON": ""}):
+                absent = shared.fingerprint(extensions, declaration, {})
+            self.assertIsNotNone(absent["setup_id"], absent)
+            self.assertEqual(absent["executables"]["disabled"]["resolution"], "absent")
+
     def test_windowsapps_entries_are_not_even_inspected(self):
         exists = Mock(side_effect=AssertionError("Store stub must not be inspected"))
         self.assertIsNone(shared._windows_python_program([Path("WindowsApps"), Path("wInDoWsApPs")], exists))
