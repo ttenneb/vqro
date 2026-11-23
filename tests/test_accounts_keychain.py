@@ -44,6 +44,7 @@ class KeychainTests(unittest.TestCase):
         with self.assertRaises(keys.KeychainError) as caught:
             keys.SecretTool('/fake/secret-tool', run=run).store(keys.Secret('fake-api-key'))
         self.assertEqual(caught.exception.status, 'indeterminate')
+        self.assertEqual(caught.exception.handle, run.call_args.args[0][-1])
         self.assertEqual(run.call_count, 1)
 
     def test_clear_does_not_claim_confirmed_deletion(self):
@@ -70,6 +71,14 @@ class KeychainTests(unittest.TestCase):
 
 
 class MacTests(unittest.TestCase):
+    def test_timeout_preserves_handle_for_cleanup(self):
+        run = Mock(side_effect=subprocess.TimeoutExpired(['fake'], 1))
+        with self.assertRaises(keys.KeychainError) as caught:
+            keys.MacSecurity('/fake/security', run=run).store(keys.Secret('fake-key'), handle='b' * 32)
+        self.assertEqual((caught.exception.status, caught.exception.handle), ('indeterminate', 'b' * 32))
+        self.assertIn(('b' * 32).encode(), run.call_args.kwargs['input'])
+        run.assert_called_once()
+
     def test_fixed_alphabet_single_stdin_command_below_parser_limit(self):
         run = Mock(return_value=subprocess.CompletedProcess([], 0, b'', b''))
         value = 'quotes\" backslash\\ tab\t and unicode \u00e9; $(ignored)'

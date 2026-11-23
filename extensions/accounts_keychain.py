@@ -17,8 +17,9 @@ SERVICE = 'vqro.api-key.v1'
 
 class KeychainError(Exception):
     """Safe, structured status; never wrap raw native exceptions or diagnostics."""
-    def __init__(self, status):
+    def __init__(self, status, *, handle=None):
         self.status = status
+        self.handle = handle
         super().__init__('API key storage: ' + status)
 
 
@@ -64,19 +65,19 @@ class _CommandStore:
         self.executable = executable
         self.run = run
 
-    def _call(self, args, *, data=None, mutation=False):
+    def _call(self, args, *, data=None, mutation=False, pending_handle=None):
         try:
             result = self.run([self.executable, *args], input=data,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
                               check=False)
         except subprocess.TimeoutExpired:
-            raise KeychainError('indeterminate' if mutation else 'unavailable') from None
+            raise KeychainError('indeterminate' if mutation else 'unavailable', handle=pending_handle) from None
         except FileNotFoundError:
             raise KeychainError('unavailable') from None
         except PermissionError:
             raise KeychainError('denied') from None
         except OSError:
-            raise KeychainError('indeterminate' if mutation else 'unavailable') from None
+            raise KeychainError('indeterminate' if mutation else 'unavailable', handle=pending_handle) from None
         if result.returncode:
             # CLI exit codes/diagnostic strings do not prove locked vs absent.
             raise KeychainError('backend_error')
@@ -89,12 +90,12 @@ class SecretTool(_CommandStore):
     def _attrs(handle):
         return ['application', SERVICE, 'account', valid_handle(handle)]
 
-    def store(self, secret):
+    def store(self, secret, *, handle=None):
         if not isinstance(secret, Secret):
             raise KeychainError('invalid_secret')
-        handle = uuid.uuid4().hex
+        handle = valid_handle(handle) if handle is not None else uuid.uuid4().hex
         self._call(['store', '--label=vqro API key', *self._attrs(handle)],
-                   data=secret.reveal().encode('utf-8'), mutation=True)
+                   data=secret.reveal().encode('utf-8'), mutation=True, pending_handle=handle)
         return handle
 
     def retrieve(self, handle):
@@ -114,17 +115,17 @@ class MacSecurity(_CommandStore):
     """
     PREFIX = b'vqro-api-key-v1:'
 
-    def store(self, secret):
+    def store(self, secret, *, handle=None):
         if not isinstance(secret, Secret):
             raise KeychainError('invalid_secret')
-        handle = uuid.uuid4().hex
+        handle = valid_handle(handle) if handle is not None else uuid.uuid4().hex
         envelope = self.PREFIX + base64.b64encode(secret.reveal().encode('utf-8'))
         command = (b'add-generic-password -s ' + SERVICE.encode('ascii') + b' -a '
                    + handle.encode('ascii') + b' -w ' + envelope + b'\n')
         # Apple readline's fixed buffer is 4096. One full line, then EOF.
         if len(command) >= 4095:
             raise KeychainError('invalid_secret')
-        self._call(['-i', '-q'], data=command, mutation=True)
+        self._call(['-i', '-q'], data=command, mutation=True, pending_handle=handle)
         return handle
 
     def retrieve(self, handle):
@@ -189,10 +190,10 @@ class WindowsCredentials:
                 self.last_error(), 'backend_error')
             raise KeychainError(status)
 
-    def store(self, secret):
+    def store(self, secret, *, handle=None):
         if not isinstance(secret, Secret):
             raise KeychainError('invalid_secret')
-        handle = uuid.uuid4().hex
+        handle = valid_handle(handle) if handle is not None else uuid.uuid4().hex
         raw = secret.reveal().encode('utf-8')
         buffer = (ctypes.c_ubyte * len(raw)).from_buffer_copy(raw)
         credential = Credential(Type=1, TargetName=self._target(handle),

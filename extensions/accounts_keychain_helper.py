@@ -10,6 +10,7 @@ import getpass
 import json
 import os
 import sys
+import uuid
 import warnings
 
 from accounts_keychain import KeychainError, Secret, backend, valid_handle
@@ -38,7 +39,12 @@ def launch(handle, provider, argv, *, store, environment=None, execute=os.execvp
         env.pop(PROVIDER_ENV[provider], None)
 
 
-def enter(*, store, read=getpass.getpass, terminal=None):
+def pending_store(handle):
+    # Flush the non-secret recovery reference BEFORE any mutation can begin.
+    print(json.dumps({'status': 'pending_store', 'handle': handle}), file=sys.stderr, flush=True)
+
+
+def enter(*, store, read=getpass.getpass, terminal=None, announce=pending_store):
     if terminal is None:
         terminal = sys.stdin.isatty() and sys.stderr.isatty()
     if not terminal:
@@ -49,7 +55,14 @@ def enter(*, store, read=getpass.getpass, terminal=None):
             # Reject that fallback BEFORE it reads any input.
             warnings.simplefilter('error', getpass.GetPassWarning)
             secret = Secret(read('API key (hidden): '))
-        return store.store(secret)
+        handle = uuid.uuid4().hex
+        announce(handle)
+        try:
+            return store.store(secret, handle=handle)
+        except KeychainError as error:
+            raise KeychainError(error.status, handle=handle) from None
+        except (Exception, KeyboardInterrupt):
+            raise KeychainError('indeterminate', handle=handle) from None
     except getpass.GetPassWarning:
         raise KeychainError('denied') from None
     except EOFError:
@@ -78,7 +91,10 @@ def main(argv=None, *, store_factory=backend):
             print(json.dumps({'status': store_factory().delete(args.handle)}))
         return 0
     except KeychainError as error:
-        print(json.dumps({'status': error.status}), file=sys.stderr)
+        result = {'status': error.status}
+        if error.handle is not None:
+            result['handle'] = error.handle
+        print(json.dumps(result), file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         # A mutation may already have occurred; never claim cancellation rolled it back.

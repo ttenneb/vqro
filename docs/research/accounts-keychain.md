@@ -9,7 +9,8 @@ also not exercised against a real keychain; fake tests prove plumbing, not OS be
 
 ## Contract / use
 
-`store(Secret) -> opaque handle`, `retrieve(handle) -> Secret` (private Python only),
+`store(Secret, handle=optional_preallocated_handle) -> opaque handle`,
+`retrieve(handle) -> Secret` (private Python only),
 `delete(handle) -> deleted | not_found`, failures `KeychainError.status` with fixed safe
 text. All adapters use random 32-hex handles and a versioned service namespace. No
 subscription tokens or provider refresh ownership. Secrets are nonempty UTF-8 text,
@@ -19,7 +20,11 @@ The helper is invoked via an explicitly configured execution-host Python and abs
 host helper path, not the coordinator's default Python or an inferred remote path:
 
 - `python3 /host/path/accounts_keychain_helper.py store`: hidden terminal input only;
-  stdout is JSON containing only the resulting handle. It refuses non-terminal input
+  stdout is JSON containing only the resulting handle. Before mutation, stderr emits
+  and flushes `{status: pending_store, handle: HANDLE}`; an unknown/interrupted store
+  returns `{status: indeterminate, handle: HANDLE}` for explicit verification/deletion.
+  The pending record remains available even if the helper is killed before replying.
+  No mutation is retried automatically. It refuses non-terminal input
   and getpass's echo-on fallback. Do not type secrets into agent messages or commands.
 - `... delete --handle HANDLE`: an explicit irreversible effect. Failed/unconfirmed
   deletion retains the registry reference unless a human explicitly chooses to forget.
@@ -27,6 +32,10 @@ host helper path, not the coordinator's default Python or an inferred remote pat
   remove competing inherited OpenAI/Anthropic API/bearer/OAuth variables, add only
   OPENAI_API_KEY or ANTHROPIC_API_KEY to a fresh child env, exec once without a shell.
   The helper does not print a key or expose a retrieve CLI. It never retries a spawn.
+  Removing those four known environment names is not a credential sandbox, billing
+  guarantee, or provider/host binding: other credential sources, runtime helpers,
+  configuration and endpoint overrides can still affect authentication. The integrated
+  launcher path is not approved by this isolated-helper review.
 
 Accounts registry/launch integration seam (slice 1 owner): `kind: api_key`, opaque
 `secret_ref` handle, known `provider`, runtime selection and public `VQRO_ACCOUNT`
@@ -46,7 +55,8 @@ explicitly selected account. No package installation, plaintext store, ambient k
 substitution, or fake in-memory fallback. Keychain operations are not transactions:
 store before committing its handle, and report an orphan handle if that commit fails.
 A timeout/interruption during mutation is indeterminate, not a rollback or permission
-to replay it. Environment access by same-user tooling/admins, runtime children or crash
+to replay it. Store exceptions retain the preallocated cleanup handle; the helper
+records that non-secret handle before entering the OS boundary, not only after success. Environment access by same-user tooling/admins, runtime children or crash
 dumps is outside this protection. Python cannot guarantee complete zeroization.
 
 ## Linux / Windows evidence and limitations

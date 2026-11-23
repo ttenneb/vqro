@@ -1,10 +1,11 @@
 """Host helper tests use injected stores, input and exec; never real credentials."""
 import contextlib
 import io
+import json
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'extensions'))
 import accounts_keychain as keys
@@ -70,6 +71,45 @@ class HelperTests(unittest.TestCase):
         store.store.return_value = 'a' * 32
         self.assertEqual(helper.enter(store=store, read=lambda _: 'fake-api-key', terminal=True), 'a' * 32)
         self.assertIsInstance(store.store.call_args.args[0], keys.Secret)
+
+    def test_pending_handle_is_announced_before_indeterminate_store(self):
+        events = []
+        store = Mock()
+        def write(secret, *, handle):
+            self.assertEqual(events, [handle])
+            raise keys.KeychainError('indeterminate')
+        store.store.side_effect = write
+        with self.assertRaises(keys.KeychainError) as caught:
+            helper.enter(store=store, read=lambda _: 'fake-key', terminal=True, announce=events.append)
+        self.assertEqual(caught.exception.handle, events[0])
+        keys.valid_handle(events[0])
+        store.store.assert_called_once()
+
+    def test_interrupted_store_preserves_announced_handle(self):
+        store, events = Mock(), []
+        store.store.side_effect = KeyboardInterrupt()
+        with self.assertRaises(keys.KeychainError) as caught:
+            helper.enter(store=store, read=lambda _: 'fake-key', terminal=True, announce=events.append)
+        self.assertEqual((caught.exception.status, caught.exception.handle), ('indeterminate', events[0]))
+        store.store.assert_called_once()
+
+    def test_cli_unknown_store_outputs_pending_and_final_cleanup_handle(self):
+        store = Mock()
+        store.store.side_effect = keys.KeychainError('indeterminate')
+        output, error = io.StringIO(), io.StringIO()
+        original_enter = helper.enter
+        def fake_entry(**kwargs):
+            return original_enter(**kwargs, read=lambda _: 'fake-key', terminal=True)
+        with patch.object(helper, 'enter', side_effect=fake_entry), contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+            result = helper.main(['store'], store_factory=lambda: store)
+        rows = [json.loads(line) for line in error.getvalue().splitlines()]
+        self.assertEqual(result, 1)
+        self.assertEqual(output.getvalue(), '')
+        self.assertEqual([row['status'] for row in rows], ['pending_store', 'indeterminate'])
+        self.assertEqual(rows[0]['handle'], rows[1]['handle'])
+        self.assertEqual(rows[0]['handle'], store.store.call_args.kwargs['handle'])
+        self.assertNotIn('fake-key', error.getvalue())
+        store.store.assert_called_once()
 
     def test_cli_failure_has_only_safe_status(self):
         store = Mock()
