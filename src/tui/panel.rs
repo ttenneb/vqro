@@ -184,7 +184,9 @@ pub fn height(v: &Value, st: &State, width: u16, icons: &Icons) -> u16 {
     // Chrome uses styles only for painting, so the default palette has the same measured widths.
     let chrome = chrome_lines(v, st, width, &Palette::default());
     let rule = (chrome == 0 && rows.iter().any(|r| r.pinned)) as u16; // render_list draws one shared rule
-    bar.saturating_add(chrome).saturating_add(rule).saturating_add(rows.iter().fold(0u16,|sum,r|sum.saturating_add(row_lines(r,st,width,icons))))
+    // A list left empty (by a facet or filter) still shows one line saying so, under its controls.
+    let empty = rows.iter().all(|r| r.pinned) as u16;
+    bar.saturating_add(chrome).saturating_add(rule).saturating_add(empty).saturating_add(rows.iter().fold(0u16,|sum,r|sum.saturating_add(row_lines(r,st,width,icons))))
 }
 
 fn text_style(item: &Value, pal: &Palette) -> Style {
@@ -282,15 +284,12 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
         buf.set_string(area.x,area.bottom()-1,truncate(&text,area.width as usize),pal.style(Some("dim")));
         area.height-=1;
     }
-    if rows.is_empty() {
-        let msg = if st.filter.is_empty() { "(empty)" } else { "(no matches)" };
-        buf.set_string(area.x, area.y, msg, pal.style(Some("dim")));
-        return;
-    }
-    follow(v, rows, st);
-    st.sel = st.sel.min(rows.len() - 1);
-    if !selectable(&rows[st.sel].item) {
-        st.sel = step(&rows, st.sel, 1);
+    if !rows.is_empty() {
+        follow(v, rows, st);
+        st.sel = st.sel.min(rows.len() - 1);
+        if !selectable(&rows[st.sel].item) {
+            st.sel = step(&rows, st.sel, 1);
+        }
     }
 
     // Pinned toolbar rows first, then a rule, then the scrolling list.
@@ -319,6 +318,15 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
     if (pinned > 0 || line_drawn || layout.as_ref().is_some_and(|l| l.header.is_some())) && y < area.bottom() {
         buf.set_string(area.x, y, "─".repeat(area.width as usize), pal.border(false));
         y += 1;
+    }
+    // Nothing to list: the toolbar, facet line and headers above stay, so a choice that leaves nothing (a facet
+    // with 0 items, a filter) can be undone with the mouse (the human's empty [Table] popup).
+    if rows.iter().all(|r| r.pinned) {
+        let msg = if !st.filter.is_empty() { "(no matches)" }
+            else if !st.facets.is_empty() { "Nothing matches this choice: pick All above" }
+            else { "(empty)" };
+        if y < area.bottom() { buf.set_string(area.x, y, truncate(msg, area.width as usize), pal.style(Some("dim"))); }
+        return;
     }
     let laid: Vec<Flat>;
     let rows: &[Flat] = match &layout { Some(l) => { laid = rows.iter().map(|r| l.apply(r, icons)).collect(); &laid } None => rows };
@@ -1083,6 +1091,32 @@ mod tests {
                 assert!(hits.rows.iter().any(|(_, i)| state.prepare(&value).rows[*i].id == "t1"), "tool remains clickable");
             }
         }
+    }
+
+    #[test]
+    fn a_facet_with_no_items_keeps_its_controls_so_it_can_be_undone() {
+        // The human's [Table] popup: choosing "failed 0" left only "(empty)", without the chips or headers, and no
+        // way back but closing it.
+        let v = Arc::new(json!({"facets":[{"key":"status","label":"Show"}],"sorts":[{"key":"name","label":"name"}],
+            "columns":[{"label":"Tool","width":8},{"label":"What","width":"fill"}],
+            "items":[{"text":"bash · pwd","columns":["bash","pwd"],"facets":{"status":"done"},"sort":{"name":"bash"}}]}));
+        let mut st = State::default();
+        st.facets.insert("status".into(), "failed".into());
+        let wanted = height(&v, &st, 60, &Icons::new(None, false));
+        let area = Rect::new(0, 0, 60, wanted);
+        let mut buf = Buffer::empty(area);
+        let hits = render(&mut buf, area, &v, &mut st, true, &Palette::default(), &Icons::new(None, false), None);
+        let line = |y: u16| (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string();
+        let screen: Vec<String> = (0..area.height).map(line).collect();
+        assert!(screen[0].starts_with("Show:  All 1"), "the facet line stays: {screen:?}");
+        assert!(!hits.facets.is_empty() && hits.sort.is_some(), "and can be clicked");
+        assert!(screen.iter().any(|l| l.trim_start().starts_with("Tool")), "the headers stay: {screen:?}");
+        assert!(screen.iter().any(|l| l.contains("Nothing matches this choice: pick All above")), "{screen:?}");
+        // Choosing All again shows the row.
+        st.facets.clear();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 60, 8));
+        render(&mut buf, Rect::new(0, 0, 60, 8), &v, &mut st, true, &Palette::default(), &Icons::new(None, false), None);
+        assert!((0..8).any(|y| (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().contains("pwd")));
     }
 
     #[test]

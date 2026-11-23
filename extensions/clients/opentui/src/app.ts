@@ -1164,7 +1164,13 @@ function drawList(a: App, buf: OptimizedBuffer, area: Rect, key: string, value: 
   const rows = rowsOf(value, st);
   const listed = { rows, hits: [] as { y: number; x: number; w: number; i: number; chip?: number }[], area };
   a.listed.set(key, listed);
-  if (!rows.length) { text(buf, area.x, y, st.filter ? "(no matches)" : "(empty)", p.color("dim")); return; }
+  if (!rows.length) {
+    // The facet line stays, so a choice that leaves nothing (a facet with 0 items) can be undone with the mouse.
+    y += y < bottom ? facetLine(a, buf, area, y, value, st) : 0;
+    const msg = st.filter ? "(no matches)" : Object.keys(st.facets).length ? "Nothing matches this choice: pick All above" : "(empty)";
+    text(buf, area.x, y, fit(msg, area.w), p.color("dim"));
+    return;
+  }
   // follow: stay at the end while the reader is there (core-protocol.md, Optional list with detail).
   // The end is the last selectable list row, not a toolbar or bottom-pinned row (a composer stays selected).
   let following = false;
