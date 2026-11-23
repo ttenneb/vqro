@@ -163,7 +163,12 @@ Adapters publish only what the runtime reports, including estimates labelled as 
 
 Codex publishes at most 32 primary/secondary window observations from native `account/rateLimits/updated`
 notifications and the existing bounded quota-blocked `account/rateLimits/read`. It prefers the multi-bucket map
-when supplied (no double-counting its legacy mirror), converts native seconds/minutes to milliseconds with
+when supplied, including an explicitly empty map. A map supersedes all retained legacy rows; a later valid
+legacy window supersedes retained map rows. Switching legacy bucket identity (including anonymous-to-named or
+named-to-anonymous) also discards the previous legacy rows: it never guesses which named pool an anonymous
+mirror represented. Sparse updates within the same representation retain unmentioned windows/fields; a push
+without a map or valid legacy window does not switch representations. This prevents retained mirrors from
+double-counting one pool. Codex converts native seconds/minutes to milliseconds with
 checked arithmetic, and omits malformed/overflowing optional values. It does not publish credit balances,
 backend banners, guessed remaining amounts or reset-credit operations. No credentials/profiles are read and
 no new request timer, token refresh or billable probe is introduced. API-header observations require the runtime

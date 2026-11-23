@@ -19,8 +19,8 @@ fn retention_is_bounded_and_native_account_changes_do_not_keep_old_windows() {
     for n in 0..100 {
         e.notification(
             "account/rateLimits/updated",
-            &json!({"accountId":"a","rateLimits":{
-            "limitId":format!("bucket-{n}"),"primary":{"usedPercent":3}}}),
+            &json!({"accountId":"a","rateLimitsByLimitId":{
+            (format!("bucket-{n}")):{"primary":{"usedPercent":3}}}}),
         );
     }
     assert_eq!(limits(&e).as_array().unwrap().len(), 32);
