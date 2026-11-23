@@ -70,8 +70,10 @@ Accounts offers `doc/settings/accounts-policy` (ordinary undoable workspace conf
   observed within60 seconds, not future-dated and not expired. Counts without a denominator, unknown windows,
   stale/expired/unsourced reports never become spare capacity. An incomplete limit list or ANY unresolved relevant
   window makes the whole account unknown: a fresh positive subset is not enough. A newer authoritative comparable
-  report can replace the same window; stale windows are retained as unknown, not silently discarded. A native
-  known-blocked live account is excluded. No positive comparable result means ask; reset times never manufacture
+  report can replace the same window; stale windows are retained as unknown, not silently discarded. If ANY
+  same-account live resource has absent, null or empty `usage_limits`, the whole account remains unknown, even
+  when another resource reports a positive subset. Producer truncation/malformed-skip must carry `incomplete`
+  containing `usage_limits`; bounds are not evidence of completeness. A native known-blocked live account is excluded. No positive comparable result means ask; reset times never manufacture
   a fresh100%. This is a comparison of
   reported fractions, **not** equal token allocations, entitlement, authenticated identity or permission to run.
 - `round_robin` rotates eligible configured profiles in registry order, excluding known live blocked accounts.
@@ -106,8 +108,12 @@ bounded64; overload is reported, never silently turned into extra launches. No p
 is made; fresh native resource reports and policy changes drive re-evaluation.
 
 Missing `operational.*` refuses offered/automatic fresh-restart effects; there is no private-file or undoable-claim
-fallback. Normal new-agent selection and notifications still work. The source is rechecked after claim admission;
-a stale check consumes the claim rather than retrying an effect. Native launch/readback errors are reported without
+fallback. Normal new-agent selection and notifications still work. After durable claim admission, the source,
+selected target/registry and current policy are re-read; automatic work also requires fresh known positive headroom
+and an unambiguous inert executable AGAIN. Manual labelled-unknown offers remain explicit choices, but revalidate
+target, API policy and registry too. The same account only: stale/unknown/disallowed automatic admission consumes
+the claim with NO launch, no reselection/retry/undo, even if later data recovers. Final reads are not an atomic native
+quota reservation; changes after validation remain possible. Native launch/readback errors are reported without
 copying raw native error bodies into workspace state.
 
 Disabling the accounts extension removes its UI and stops its background blocked-agent handling; existing

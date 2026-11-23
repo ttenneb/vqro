@@ -96,7 +96,8 @@ def capacities(rows, candidates):
                 or field.startswith(('usage_limits.','usage_limits[')) for field in incomplete):
             unknown.add(ident)  # cut constraints are unknown, never a positive partial subset
         limits=native.get('usage_limits')
-        if limits is not None and not isinstance(limits,list): unknown.add(ident)
+        if not isinstance(limits,list) or not limits:
+            unknown.add(ident)  # a same-account live source with absent/null/empty limits is not complete capacity
         for row in limits if isinstance(limits,list) else []:
             if not isinstance(row,dict): unknown.add(ident);continue
             scope=row.get('scope');observed=row.get('observed_at_ms');source=row.get('source')

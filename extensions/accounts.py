@@ -209,14 +209,29 @@ class Accounts:
         return argv
 
     def launch_fresh(self,source,target,revision,automatic=False):
-        configured=policy.settings(self.ext)
-        if (automatic and configured['blocked']!='auto_restart') or (target['kind']=='api_key' and not configured['api_key_overflow']):
+        def permitted(configured):
+            return (not automatic or configured['blocked']=='auto_restart') \
+                and (target['kind']!='api_key' or configured['api_key_overflow'])
+        if not permitted(policy.settings(self.ext)):
             raise VqroError('fresh-work policy changed; no launch','stale')
         token=policy.episode(source)
         self.effects.claim(source,token,target)  # acknowledged protected CAS BEFORE any launcher command
         # Recheck the native source. A failed/stale check consumes this claim; never retry it automatically.
         current=self.source(source['id'])
         if policy.episode(current)!=token: raise VqroError('source changed after fresh-launch claim; no launch','stale')
+        candidates,current_revision,scores=self.alternatives(current,policy.settings(self.ext))
+        selected=next((row for row in candidates if row['id']==target['id']),None)
+        if current_revision!=revision or selected!=target:
+            raise VqroError('target/registry changed after fresh-launch claim; claim consumed, no launch','stale')
+        if automatic:
+            headroom=scores.get(target['id'])
+            if headroom is None or headroom<=0:
+                raise VqroError('target capacity is no longer fresh/known/positive; claim consumed, no launch','stale')
+            provider_argv(self.automatic_argv(target['runtime']),target)
+        # Last policy read follows the potentially delayed claim AND fresh observation/runtime reads.
+        # This is not an atomic native quota reservation; later native changes remain possible.
+        if not permitted(policy.settings(self.ext)):
+            raise VqroError('fresh-work policy changed after claim; claim consumed, no launch','stale')
         try:
             result=self.ext.invoke(COMMANDS[target['runtime']],{'account':target['id'],'_account_revision':revision,'fresh':True})
         except VqroError:
