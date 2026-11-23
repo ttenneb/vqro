@@ -110,6 +110,7 @@ class ControllerTimeout(unittest.TestCase):
                 '--scratch-parent', str(root), *extra]
         output = io.StringIO()
         with patch.object(cli, 'cases_from_spec', return_value=self.cases), \
+             patch.object(cli, 'python', return_value=sys.executable), \
              patch.object(cli.subprocess, 'run', **process) as run, contextlib.redirect_stdout(output):
             code = cli.main(argv)
         return code, json.loads(output.getvalue()), run.call_args
