@@ -416,7 +416,7 @@ impl Shared {
                         } else {
                             "native_reader_closed"
                         };
-                        let _ = stream.close(json!({"kind":kind})).await;
+                        let _ = stream.close(json!({"reason":kind})).await;
                         break;
                     }
                     tokio::select! {_=changed=>{},command=stream.next()=>match command{

@@ -435,7 +435,11 @@ async fn synthetic_process_provider_vertical_slice() {
         let frame = core.recv().await;
         match frame["method"].as_str() {
             Some("stream.data") => core.item_data(&frame).await,
-            Some("stream.close") => {
+            Some("stream.closed") => {
+                assert_eq!(
+                    frame["params"]["reason"]["reason"], "native_reader_closed",
+                    "not a generic provider-drop marker"
+                );
                 closed = true;
             }
             Some("resource.upsert") => {
