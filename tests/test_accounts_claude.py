@@ -28,7 +28,11 @@ class Fake:
         self.registry = {'version': 7, 'value': {'accounts': [self.target]}}
         self.episode = policy.episode(self.source)
         self.claim = {'state': 'claimed', 'resource': 'r2', 'episode': self.episode, 'host': 'r1',
-                      'account': 'b', '_account_revision': 7, 'automatic': True}
+                      'account': 'b', '_account_revision': 7, 'automatic': True,
+                      'source_incarnation': 'birth', 'source_epoch': 'e1', 'source_account': 'a',
+                      'session': 'native-session', 'native_episode': 'native-result-uuid',
+                      'authorization': {'mode': 'auto', 'principal': None, 'owner_revision': None}}
+        self.owner = {'version': 3, 'value': 'workspace-owner'}
         self.result = {'outcome': 'observed', 'effect': 'e7', 'data': {
             'started': True, 'requested_session': 'native-session', 'session': 'native-session', 'resume_confirmed': True,
             'account': 'b', 'epoch': 'e2'}}
@@ -58,7 +62,7 @@ class Fake:
         if method == 'resource.list':
             return {'resources': [copy.deepcopy(self.source)]}
         if method == 'workspace.get':
-            return copy.deepcopy(self.registry)
+            return copy.deepcopy(self.owner if params['key'] == 'doc/principals/owner' else self.registry)
         if method == 'operational.get':
             return copy.deepcopy(self.claim)
         if method == 'resource.invoke':
@@ -148,6 +152,58 @@ class CutoverTests(unittest.TestCase):
             self.refused()
             native.clear()
             native.update(original)
+
+    def test_l1_claim_cannot_authorize_l2_limit_in_same_source_epoch(self):
+        self.ext.source['data']['agent']['availability']['native']['episode'] = 'native-result-L2'
+        self.assertEqual(policy.episode(self.ext.source), self.args['episode'])
+        self.refused()
+
+    def test_claim_binds_native_episode_session_and_source_at_both_reads(self):
+        for field in ('native_episode', 'session', 'source_incarnation', 'source_epoch', 'source_account'):
+            original = copy.deepcopy(self.ext.claim)
+            self.ext.claim.pop(field)
+            self.refused()
+            self.ext.claim = original
+        reads = []
+        invoke = self.ext.invoke
+        def changed(command, args):
+            reads.append(command)
+            if len(reads) == 2:
+                self.ext.claim['native_episode'] = 'native-result-L0'
+            return invoke(command, args)
+        self.ext.invoke = changed
+        self.refused()
+        self.assertEqual(len(reads), 2)
+
+    def test_auto_authority_must_be_exact_and_notify_is_not_authority(self):
+        for authorization in (None, {}, {'mode': 'notify', 'principal': None, 'owner_revision': None},
+                              {'mode': 'auto', 'principal': 'someone', 'owner_revision': 3}):
+            self.ext.claim['authorization'] = authorization
+            self.refused()
+
+    def test_offer_requires_current_authenticated_owner_bound_in_protected_claim(self):
+        self.args['automatic'] = False
+        self.ext.claim['automatic'] = False
+        self.ext.claim['authorization'] = {'mode': 'offer', 'principal': 'workspace-owner', 'owner_revision': 3}
+        self.run_cutover()
+        self.assertEqual(len(self.ext.native()), 1)
+        self.ext.calls.clear()
+        self.ext.owner['version'] = 4
+        self.refused()
+
+    def test_offer_owner_change_before_second_claim_read_prevents_dispatch(self):
+        self.args['automatic'] = False
+        self.ext.claim['automatic'] = False
+        self.ext.claim['authorization'] = {'mode': 'offer', 'principal': 'workspace-owner', 'owner_revision': 3}
+        reads = []
+        def changed(method, args):
+            if method == 'workspace.get' and args['key'] == 'doc/principals/owner':
+                reads.append(method)
+                if len(reads) == 2:
+                    self.ext.owner['value'] = 'new-owner'
+        self.ext.mutate = changed
+        self.refused()
+        self.assertEqual(len(reads), 2)
 
     def test_claim_binding_checks_host_revision_automatic_and_episode(self):
         for field, value in (('host', 'other'), ('_account_revision', 8), ('automatic', False),

@@ -3,7 +3,8 @@
 **vqro switches automatically by restarting the agent on the other account; the
 conversation continues.** Accounts owns selection, one protected cutover claim and
 one NEW visible vqro-labelled AUTO continuation turn. It never resends old input.
-OFFER/NOTIFY do not send that continuation. The callback described here restarts
+NOTIFY never restarts anything. OFFER restarts only after the authenticated current
+workspace owner clicks the explicit choice and does not send that continuation. The callback described here restarts
 only the selected endpoint through the route-1 adapter; it is not another supervisor.
 
 ## Integration status
@@ -46,7 +47,15 @@ this command and is the SOLE claim/continuation owner. The callback reads the bo
 claim through `accounts.claim.read {claim:_claim}`; it never registers/writes the
 common operational domain or owns its internal journal schema. It
 checks source identity, quota episode, current session/account, target registry
-revision, matching claimed source/target and declared native restart support.
+revision, matching claimed source/target and declared native restart support. BOTH
+claim reads must bind `source_incarnation`, `source_epoch`, `source_account`, native
+`session` and `native_episode` to the source actually dispatched. Common's episode
+hash alone does not distinguish two native limit results within the same epoch.
+AUTO requires protected authorization `{mode:auto,principal:null,owner_revision:null}`.
+OFFER requires protected `{mode:offer,principal:<core-authenticated owner>,owner_revision}`;
+the callback re-reads `doc/principals/owner` and compares its exact value/version at
+both checks. No caller-supplied authority or NOTIFY restart is accepted. Common policy
+alone owns cross-epoch native-episode dedup and the rolling-hour automatic budget.
 Repeated events/uncertain dispatches are never automatically replayed by the caller.
 
 Registry `host` equals the source runtime provider's authenticated core-published

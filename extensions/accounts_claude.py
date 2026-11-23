@@ -69,13 +69,29 @@ class ClaudeCutover:
         # Only the nonsecret fields understood by the native operation cross this boundary.
         return {key: row[key] for key in ('id', 'label', 'kind', 'secret_ref', 'host')} | {'provider': 'anthropic'}
 
-    def claimed(self, args, host):
-        # Common owns the journal format; this callback only reads its bound claim.
+    def claimed(self, args, host, source):
+        # Common owns the journal/authority; never accept authority from callback args.
         claim = self.ext.invoke('accounts.claim.read', {'claim': args['_claim']})
         expected = {key: args[key] for key in ('resource', 'episode', 'account', '_account_revision', 'automatic')}
-        expected.update(host=host, state='claimed')
-        if not isinstance(claim, dict) or any(claim.get(key) != value for key, value in expected.items()):
+        expected.update(host=host, state='claimed', session=source['session'],
+                        source_incarnation=source['incarnation'], source_epoch=source['epoch'],
+                        source_account=source['account'], native_episode=source['episode'])
+        if (not isinstance(claim, dict) or type(claim.get('automatic')) is not bool
+                or any(claim.get(key) != value for key, value in expected.items())):
             raise VqroError('matching protected account cutover claim is required; no switch', 'conflict')
+        authority = claim.get('authorization')
+        if args['automatic']:
+            if authority != {'mode': 'auto', 'principal': None, 'owner_revision': None}:
+                raise VqroError('protected automatic cutover authority is missing; no switch', 'forbidden')
+        else:
+            if (not isinstance(authority, dict) or set(authority) != {'mode', 'principal', 'owner_revision'}
+                    or authority.get('mode') != 'offer' or not text(authority.get('principal'))
+                    or type(authority.get('owner_revision')) is not int or authority['owner_revision'] <= 0):
+                raise VqroError('protected human offer authority is missing; no switch', 'forbidden')
+            owner = self.ext.vqro.call('workspace.get', {'key': 'doc/principals/owner'})
+            if (not isinstance(owner, dict) or owner.get('value') != authority['principal']
+                    or owner.get('version') != authority['owner_revision']):
+                raise VqroError('workspace owner changed after the human choice; no switch', 'stale')
 
     def restart(self, args):
         if (not isinstance(args, dict) or not text(args.get('resource'), 128)
@@ -90,7 +106,7 @@ class ClaudeCutover:
                     'session': facts['session']['id'], 'account': policy.configured_id(source),
                     'episode': facts['availability']['native']['episode']}
         target = self.target(args, expected['account'], host)
-        self.claimed(args, host)
+        self.claimed(args, host, expected)
         current, current_host = self.source(args['resource'], args['episode'])
         current_facts = policy.facts(current)
         if (current_host != host or current['incarnation'] != expected['incarnation']
@@ -100,7 +116,7 @@ class ClaudeCutover:
             raise VqroError('Claude source/session changed after claim; no switch', 'stale')
         if self.target(args, expected['account'], host) != target:
             raise VqroError('Claude target changed after claim; no switch', 'stale')
-        self.claimed(args, host)
+        self.claimed(args, host, expected)
         # One attempt. Native admission owns the atomic epoch/session/account/child fence.
         # Keychain access occurs only in the execution-host helper, not this extension.
         native_args = {key: expected[key] for key in ('epoch', 'session', 'account', 'episode')}
