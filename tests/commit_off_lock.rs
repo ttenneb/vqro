@@ -261,6 +261,8 @@ async fn clean_failure_is_invisible_but_post_rename_failure_is_adopted_once() {
     }
 }
 
+// The raw-wire observation uses a Unix socket; the admission rule itself is platform neutral.
+#[cfg(unix)]
 #[tokio::test]
 async fn commit_admission_counts_escaped_note_bytes_not_only_raw_text() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
