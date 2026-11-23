@@ -93,6 +93,10 @@ is replayed automatically; POSIX-semantics replacement is not used as a durabili
   (for example `py -3`) until this is handled.
 - tmux backend and coordination archive export: not supported on native Windows (they say so); see
   `docs/research/windows-extensions.md` for the full extension audit.
+- Integration/performance diagnostic sandboxes (`test.integration`, `test.perf`) are not supported on native
+  Windows yet; their constructor refuses before filesystem/process effects. The unit-health diagnostic uses the
+  shared local transport, but its standalone no-argument directory/endpoint defaults remain Unix-shaped: select
+  the endpoint and directories explicitly with `--socket`, `--state-dir` and `--extensions-dir`.
 - Optional OpenTUI client: not checked on Windows.
 - `scripts/check.sh` and the e2e harnesses are Linux-only (namespaces, cgroups, procfs).
 - `tests/windows_background_smoke.py` refuses to run for now (exit 77): it is not isolated from your real profile

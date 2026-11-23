@@ -7,21 +7,26 @@ placement or argv. Every child uses the private core's exact environment.
 """
 import asyncio
 from contextlib import asynccontextmanager
-import fcntl
 import json
 import os
 from pathlib import Path
-import pty
 import struct
 import subprocess
-import termios
+import sys
+
+if sys.platform != "win32":
+    import fcntl
+    import pty
+    import termios
 
 from pi_provider_e2e import identity
-from ..results import FixtureFailed
+from ..results import FixtureFailed, HarnessGap
 
 
 class OwnedPty:
     def __init__(self, ctx, label, argv, principal):
+        if sys.platform == "win32":
+            raise HarnessGap("owned PTY conformance launcher is Unix-only; no ConPTY fixture is implemented")
         self.ctx,self.label,self.argv=ctx,label,argv
         self.path=ctx.root/(label+".raw")
         self.output=bytearray();self.error=None

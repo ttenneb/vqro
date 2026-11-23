@@ -1,7 +1,7 @@
 {
   "name":"test-perf", "title":"Performance report", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"management",
   "summary":"Repeated startup, idle, interaction and size measurements of disposable setup copies.",
-  "description":"Runs fresh private sandbox copies serially, keeps raw samples, and compares a candidate with the baseline. Configurable limits only warn; broken measurements fail and noisy comparisons remain unverified. Turning it off removes the async in-app commands; its CLI remains available. No live setup changes, real agent launches or functional correctness claims.",
+  "description":"The sandbox is not supported on native Windows yet; it refuses construction instead of starting a partial run. Runs fresh private sandbox copies serially, keeps raw samples, and compares a candidate with the baseline. Configurable limits only warn; broken measurements fail and noisy comparisons remain unverified. Turning it off removes the async in-app commands; its CLI remains available. No live setup changes, real agent launches or functional correctness claims.",
   "requires":{"protocol":1,"client_features":["items"]},
   "provides":["command/test.perf","command/test.perf.show","view/test-perf.report","doc/settings/test-perf"],
   "contributes":{"commands":["test.perf","test.perf.show"],"panels":["Performance report"],"settings":["doc/settings/test-perf"]}

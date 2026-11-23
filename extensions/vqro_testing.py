@@ -18,12 +18,15 @@ from collections import deque
 from fnmatch import fnmatchcase
 from vqro_process import background_kwargs
 
+from vqro_transport import connect_endpoint
+
 sys.dont_write_bytecode = True
 
 STATUSES = ("pass", "warn", "fail", "skip", "unverified")
 EXIT_CODES = {"pass": 0, "fail": 1, "unverified": 77, "error": 2}
 EVIDENCE_CHARS = 300
 RECEIPT_BYTES = 750 * 1024
+WINDOWS_SANDBOX_UNSUPPORTED = "integration/performance sandbox is not supported on native Windows yet"
 
 
 def text(value):
@@ -214,8 +217,10 @@ def utc_now():
 def write_receipt(result, destination):
     destination = Path(destination)
     fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as stream:
-        os.fchmod(stream.fileno(), 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        # Windows inherits directory ACLs; POSIX mode bits cannot establish owner-only access there.
+        if sys.platform != "win32":
+            os.fchmod(stream.fileno(), 0o600)
         json.dump(result, stream, ensure_ascii=False, indent=2)
         stream.write("\n")
     return str(destination)
@@ -237,11 +242,9 @@ class PlainClient:
     ALLOWED = {"hello", "extension.list", "workspace.snapshot"}
 
     def __init__(self, path, timeout=15):
-        self.socket = socket.socket(socket.AF_UNIX)
+        self.socket = connect_endpoint(path, timeout=timeout)
         self.timeout = timeout
-        self.socket.settimeout(timeout)
         try:
-            self.socket.connect(path)
             self.stream = self.socket.makefile("rwb", buffering=0)
         except Exception:
             self.socket.close()
@@ -322,6 +325,8 @@ def contains_credentials(value):
 class SandboxClient:
     """Bounded synchronous RPC and event reader, restricted to one disposable root."""
     def __init__(self, path, root, timeout=15):
+        if sys.platform == "win32":
+            raise ValueError(WINDOWS_SANDBOX_UNSUPPORTED)
         if not Path(path).resolve().is_relative_to(Path(root).resolve()):
             raise ValueError("sandbox endpoint outside root")
         self.socket = socket.socket(socket.AF_UNIX)
@@ -468,6 +473,8 @@ class Sandbox:
     """Disposable copy, audited before launch. Cooperative isolation, not a security boundary."""
     def __init__(self, source_dir, snapshot, *, binary=None, root=None, backend="fake",
                  allow_external=False, keep=False, candidate_ext=None, candidate_ops=None, observer=None):
+        if sys.platform == "win32":
+            raise ValueError(WINDOWS_SANDBOX_UNSUPPORTED)
         self.source_dir = Path(source_dir).resolve()
         self.snapshot = snapshot
         self.binary = os.path.abspath(binary or shutil.which("vqro") or Path.home() / ".local/bin/vqro")
@@ -482,7 +489,7 @@ class Sandbox:
                     "XDG_CONFIG_HOME": str(self.root / "config"), "HC_SOCKET": str(self.root / "hc.sock"),
                     "HC_SESSION": "sandbox"}
         if backend == "fake":
-            self.env["VQRO_HERDR"] = '["/bin/false"]'
+            self.env["VQRO_HERDR"] = json.dumps([sys.executable, "-c", "raise SystemExit(1)"])
         self.process = self.client = self.log = None
         self.groups, self.declarations, self.audit_rows = [], {}, []
         self.info = {"root": str(self.root), "backend": backend, "started": False, "not_copied": [], "fake_providers": {},

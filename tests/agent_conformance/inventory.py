@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 SPEC = "docs/spec/agent-v0-conformance.md"
 GROUPS = "CDORML"
@@ -51,7 +52,8 @@ class Contract:
 def main_contract():
     repo = Path(__file__).resolve().parents[2]
     # Resolve once, then read that immutable object, not a racing main ref.
-    env = {"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1"}
+    env = {"PATH": os.environ.get("PATH", os.defpath) if sys.platform == "win32" else os.defpath,
+           "GIT_CONFIG_NOSYSTEM": "1"}
     try:
         def git(*args):
             return subprocess.run(["git", "--no-pager", "-C", str(repo), *args], env=env,
@@ -63,6 +65,6 @@ def main_contract():
         contract = Contract(text, commit, "git-main")
     except (OSError, subprocess.SubprocessError, ValueError):
         # Source exports can run diagnostics, but cannot assert current-main completeness.
-        contract = Contract((repo / SPEC).read_text(), None, "bundled-unverified")
+        contract = Contract((repo / SPEC).read_text(encoding="utf-8"), None, "bundled-unverified")
     contract.ids  # Refuse malformed documents before starting any fixture.
     return contract

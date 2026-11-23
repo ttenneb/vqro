@@ -11,6 +11,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
+import sys
 
 from .results import CheckFailed, HarnessGap, check
 
@@ -83,7 +84,8 @@ def document(row):
 def git(repo, *args):
     try:
         return subprocess.run(["git", "--no-pager", "--no-replace-objects", "-C", str(repo), *args],
-            env={"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1"}, check=True,
+            env={"PATH": os.environ.get("PATH", os.defpath) if sys.platform == "win32" else os.defpath,
+                 "GIT_CONFIG_NOSYSTEM": "1"}, check=True,
             capture_output=True, timeout=2).stdout
     except (OSError, subprocess.SubprocessError) as error:
         raise HarnessGap("pinned component source object is unavailable") from error

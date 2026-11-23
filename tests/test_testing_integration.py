@@ -13,6 +13,7 @@ import vqro_testing as harness
 import testing_integration as integration
 
 
+@unittest.skipIf(sys.platform == "win32", "positive integration sandbox fixtures are explicitly unsupported on native Windows")
 class SandboxTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="vqi-")
@@ -96,7 +97,7 @@ class SandboxTests(unittest.TestCase):
         self.snapshot["entries"]["extension/example"]["value"].update(kind="provider")
         sandbox = self.sandbox().prepare()
         self.assertFalse(sandbox.declarations["extension/example"]["enabled"])
-        self.assertEqual(sandbox.env["VQRO_HERDR"], '["/bin/false"]')
+        self.assertEqual(json.loads(sandbox.env["VQRO_HERDR"]), [sys.executable, "-c", "raise SystemExit(1)"])
         self.assertEqual(sandbox.enabled(), [])
 
     def test_external_path_kept_off_unless_explicitly_allowed(self):
@@ -255,6 +256,7 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(harness.smoke(sandbox)[0]["status"], "fail")
 
 
+@unittest.skipIf(sys.platform == "win32", "positive integration sandbox CLI scenarios are explicitly unsupported on native Windows")
 class IntegrationModesTests(unittest.TestCase):
     setUp = SandboxTests.setUp
 

@@ -255,7 +255,8 @@ class CollectorTests(unittest.TestCase):
             self.assertEqual(receipt["thresholds"]["values"]["absolute"]["startup_core_ms"], 0.5)
             self.assertEqual(receipt["counts"]["warn"], 2)
             self.assertEqual(receipt, json.loads(out.read_text()))
-            self.assertEqual(out.stat().st_mode & 0o777, 0o600)
+            if sys.platform != "win32":  # Windows inherits directory ACLs, not POSIX mode bits.
+                self.assertEqual(out.stat().st_mode & 0o777, 0o600)
             self.assertEqual(workspace.read_bytes(), original)
             self.assertFalse((root / "run").exists())
 

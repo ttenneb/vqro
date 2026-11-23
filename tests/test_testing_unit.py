@@ -254,7 +254,7 @@ class HealthChecks(unittest.TestCase):
     def install_test(self, source):
         directory = self.extensions / "tests" / "sample"
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / "test_fixture.py").write_text(source)
+        (directory / "test_fixture.py").write_text(source, encoding="utf-8")
         return directory
 
     def test_tests_runner_pass_and_no_bytecode_writes(self):
@@ -321,11 +321,24 @@ class HealthChecks(unittest.TestCase):
         self.assertIn("command time budget", budgeted["evidence"])
         self.assertEqual(own_limit["status"], "fail")
 
+    def test_tests_runner_preserves_non_ascii_diagnostic_bytes(self):
+        self.install_test("print('café λ')\nimport unittest\nclass Tests(unittest.TestCase):\n def test_ok(self): pass\n")
+        item = unit.tests_row("sample", self.extensions)
+        self.assertEqual(item["status"], "pass", item)
+        self.assertIn("café λ", item["evidence"])
+
+    def test_tests_runner_uses_current_interpreter_and_utf8_diagnostics(self):
+        self.install_test("import unittest\nclass Tests(unittest.TestCase):\n def test_ok(self): pass\n")
+        with patch.object(unit.subprocess, "run", return_value=Mock(returncode=0)) as run:
+            self.assertEqual(unit.tests_row("sample", self.extensions)["status"], "pass")
+        self.assertEqual(run.call_args.args[0][0], sys.executable)
+        self.assertEqual(run.call_args.kwargs["env"]["PYTHONIOENCODING"], "utf-8")
+
     def test_tests_runner_scrubs_all_live_environment(self):
         self.install_test("import os, pathlib, unittest\nclass Tests(unittest.TestCase):\n"
                           " def test_env(self):\n"
                           "  self.assertFalse(any(k.startswith(('VQRO_', 'HC_', 'HERDR_')) for k in os.environ if k != 'VQRO_TEST_EXTENSIONS_DIR'))\n"
-                          "  self.assertEqual(set(os.environ) - {'LC_CTYPE'}, {'PATH', 'HOME', 'VQRO_TEST_EXTENSIONS_DIR'})\n"
+                          "  self.assertEqual(set(os.environ) - {'LC_CTYPE'}, {'PATH', 'HOME', 'PYTHONIOENCODING', 'VQRO_TEST_EXTENSIONS_DIR'})\n"
                           f"  self.assertEqual(os.environ['VQRO_TEST_EXTENSIONS_DIR'], {str(self.extensions.resolve())!r})\n"
                           "  self.assertTrue(pathlib.Path(os.environ['HOME']).is_dir())\n")
         with patch.dict(os.environ, {"VQRO_SOCKET": "canary", "VQRO_PRINCIPAL": "secret", "HC_SOCKET": "canary",
@@ -399,11 +412,12 @@ class HealthChecks(unittest.TestCase):
             destination = shared.save_receipt(result, self.state)
         paths = list((self.state / "test-unit").glob("receipt-*.json"))
         self.assertEqual(len(paths), 20)
-        self.assertEqual(stat.S_IMODE(Path(destination).stat().st_mode), 0o600)
-        self.assertEqual(json.loads(Path(destination).read_text()), result)
-        Path(destination).chmod(0o666)
-        shared.write_receipt(result, destination)
-        self.assertEqual(stat.S_IMODE(Path(destination).stat().st_mode), 0o600)
+        self.assertEqual(json.loads(Path(destination).read_text(encoding="utf-8")), result)
+        if sys.platform != "win32":  # Owner-only POSIX modes are not a Windows ACL assertion.
+            self.assertEqual(stat.S_IMODE(Path(destination).stat().st_mode), 0o600)
+            Path(destination).chmod(0o666)
+            shared.write_receipt(result, destination)
+            self.assertEqual(stat.S_IMODE(Path(destination).stat().st_mode), 0o600)
 
     def test_receipt_and_panel_bounds(self):
         self.facts["sample"].update(display_status="failed", failure={"reason": "x" * 10000})
@@ -501,10 +515,11 @@ class HealthChecks(unittest.TestCase):
 
 class PlainClientTests(unittest.TestCase):
     def test_protocol_error_and_line_bound(self):
-        with patch.object(shared.socket, "socket") as constructor:
-            transport = constructor.return_value
+        with patch.object(shared, "connect_endpoint") as connector:
+            transport = connector.return_value
             stream = transport.makefile.return_value
             client = shared.PlainClient("fixture", timeout=1)
+            connector.assert_called_once_with("fixture", timeout=1)
             stream.readline.return_value = b'{"id":1,"error":{"message":"broken"}}\n'
             with self.assertRaisesRegex(RuntimeError, "broken"):
                 client.call("hello")
@@ -519,26 +534,31 @@ class PlainClientTests(unittest.TestCase):
             stream.close.assert_called_once()
             transport.close.assert_called_once()
 
-    def test_connect_error_closes_socket(self):
-        with patch.object(shared.socket, "socket") as constructor:
-            constructor.return_value.connect.side_effect = OSError("no core")
-            with self.assertRaises(OSError):
+    def test_makefile_error_closes_connected_transport(self):
+        with patch.object(shared, "connect_endpoint") as connector:
+            connector.return_value.makefile.side_effect = OSError("no stream")
+            with self.assertRaisesRegex(OSError, "no stream"):
                 shared.PlainClient("fixture")
-            constructor.return_value.close.assert_called_once()
+            connector.return_value.close.assert_called_once()
+
+    def test_connect_error_propagates_without_a_fallback_transport(self):
+        with patch.object(shared, "connect_endpoint", side_effect=OSError("no core")) as connector:
+            with self.assertRaisesRegex(OSError, "no core"):
+                shared.PlainClient("fixture")
+            connector.assert_called_once_with("fixture", timeout=15)
 
     def test_readonly_client_handles_notifications_and_eof(self):
         # A local fixture socket, never an actual core.
         with tempfile.TemporaryDirectory(prefix="vqtu-") as directory:
             path = str(Path(directory) / "s")
-            server = socket.socket(socket.AF_UNIX)
-            self.addCleanup(server.close)
-            server.bind(path)
-            server.listen(1)
+            left, right = socket.socketpair()
+            self.addCleanup(left.close)
+            self.addCleanup(right.close)
             requests = []
 
             def serve():
-                connection, _ = server.accept()
-                with connection, connection.makefile("rb") as stream:
+                with right, right.makefile("rb") as stream:
+                    connection = right
                     request = json.loads(stream.readline())
                     requests.append(request)
                     connection.sendall(b'{"jsonrpc":"2.0","method":"notice"}\n')
@@ -547,7 +567,8 @@ class PlainClientTests(unittest.TestCase):
 
             worker = threading.Thread(target=serve)
             worker.start()
-            client = shared.PlainClient(path, timeout=1)
+            with patch.object(shared, "connect_endpoint", return_value=left):
+                client = shared.PlainClient(path, timeout=1)
             try:
                 self.assertEqual(client.call("hello", {"client": "test-unit"}), {"version": "fixture"})
                 with self.assertRaises(ValueError):

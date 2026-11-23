@@ -69,7 +69,7 @@ class E2E:
         assert max(len(self.env[k].encode()) for k in ('HC_SOCKET', 'VQRO_SOCKET')) < 103
 
     def command(self, argv, allow_error=False):
-        p = subprocess.run(argv, env=self.env, cwd=self.root/'work', capture_output=True, text=True, timeout=20)
+        p = subprocess.run(argv, env=self.env, cwd=self.root/'work', capture_output=True, text=True, encoding="utf-8", timeout=20)
         try:
             result = json.loads(p.stdout)
         except json.JSONDecodeError:
@@ -296,7 +296,7 @@ class E2E:
     def ui(self, *args):
         p = subprocess.run(['/usr/bin/tmux', '-S', str(self.root/'t.sock'), '-f', '/dev/null', *args],
             cwd=self.root/'work', env={'HOME': self.env['HOME'], 'PATH': self.env['PATH'], 'LANG': 'C.UTF-8', 'SHELL': '/bin/sh'},
-            capture_output=True, text=True, timeout=5)
+            capture_output=True, text=True, encoding="utf-8", timeout=5)
         assert not p.returncode, (args, p.stderr)
         return p.stdout
 

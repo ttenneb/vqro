@@ -124,10 +124,10 @@ def tests_row(name, extensions_dir, *, enabled=True, timeout=TEST_TIMEOUT):
     # The environment is cooperative isolation, not a security sandbox for arbitrary test code.
     with tempfile.TemporaryDirectory(prefix="vqro-unit-") as home, tempfile.TemporaryFile() as output:
         try:
-            completed = subprocess.run(["python3", "-B", "-m", "unittest", "discover", "-s", str(directory.resolve()),
+            completed = subprocess.run([sys.executable, "-B", "-m", "unittest", "discover", "-s", str(directory.resolve()),
                                         "-p", "test_*.py"], cwd=directory,
                                        env={"PATH": os.environ.get("PATH", os.defpath), "HOME": home,
-                                            "VQRO_TEST_EXTENSIONS_DIR": str(Path(extensions_dir).resolve())},
+                                            "PYTHONIOENCODING": "utf-8", "VQRO_TEST_EXTENSIONS_DIR": str(Path(extensions_dir).resolve())},
                                        stdout=output, stderr=subprocess.STDOUT, timeout=timeout, check=False, **background_kwargs())
             status = "pass" if completed.returncode == 0 else "fail"
             evidence = f"exit {completed.returncode}"

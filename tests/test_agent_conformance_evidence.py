@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -48,7 +49,7 @@ class ComponentEvidenceTests(unittest.TestCase):
         self.temp.cleanup()
 
     def run_git(self, *args):
-        return subprocess.run(["git", "-C", str(self.repo), *args], env={"PATH": os.defpath,
+        return subprocess.run(["git", "-C", str(self.repo), *args], env={"PATH": os.environ.get("PATH", os.defpath) if sys.platform == "win32" else os.defpath,
             "HOME": str(self.root), "GIT_CONFIG_NOSYSTEM": "1"}, capture_output=True, check=True).stdout
 
     def commit(self):
