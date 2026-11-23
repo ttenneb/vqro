@@ -405,7 +405,8 @@ class PublicRendererPhaseTests(unittest.IsolatedAsyncioTestCase):
             observer = Observer()
             async def connect(*args, **kwargs): return observer
             module = 'agent_conformance.item_metadata_cases'
-            with patch(module+'.subprocess.Popen', side_effect=spawn), patch(module+'.Peer.connect', side_effect=connect), \
+            with patch(module+'.python', return_value=sys.executable), \
+                 patch(module+'.subprocess.Popen', side_effect=spawn), patch(module+'.Peer.connect', side_effect=connect), \
                  patch(module+'.identity', side_effect=lambda pid: None if process.terminated else {'pid': pid, 'birth': 1}):
                 try:
                     await observe_public_rendering(ctx)
