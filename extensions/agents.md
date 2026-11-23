@@ -37,7 +37,11 @@
   Capabilities revision and startup epoch/revision plus advertised command declarations are fenced against the
   displayed composer; changed declarations send nothing and require reviewing the current message box again.
   The installed item epoch must match the current resource epoch when reported; loading, broken, disconnected or
-  partial-snapshot inventory cannot authorize invocation. The displayed epoch is also passed to `agent.command`
+  partial-snapshot inventory cannot authorize invocation. Each new stream attachment requests a full snapshot;
+  invocation readiness requires a complete, error-free reconstruction on that attachment, not merely a stream ID.
+  Any SDK decode/parse/control error revokes that witness until a subsequent clean snapshot completes. Retained
+  entities remain available for display, labelled as possibly stale; non-lossy errors do not create a reset/retry loop.
+  The displayed epoch is also passed to `agent.command`
   as its downstream admission precondition, protecting a subsequent native epoch change. A skill display name
   without an advertised invocation key remains visible but is not callable.
   `agents.compose` is explicit invocation intent, not an authentication boundary: callers wanting literal data must

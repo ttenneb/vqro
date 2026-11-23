@@ -800,6 +800,37 @@ class AgentPane(unittest.TestCase):
             self.compose_submit('/review notes')
         self.assertFalse([p for m, p in self.core.calls if m == 'resource.invoke'])
 
+    def test_reattach_reply_without_snapshot_never_authorizes_retained_inventory(self):
+        _, draft = self.invocation_fixture()
+        c = self.agents.conversations['r2']
+        c.ended('reset', 'private reset')
+        self.agents.flush_conversations()
+        self.assertIsNotNone(c.stream)
+        with self.assertRaises(VqroError):
+            self.compose_submit('/review notes')
+        self.assertIn('may be stale', json.dumps(self.agents.settings_panel(self.core.resources['r2'])))
+        self.feed(snapshot({('startup', 'current'): {'commands': [{'name': 'review'}]}}))
+        self.compose_submit('/review notes')
+        self.assertEqual([p for m, p in self.core.calls if m == 'resource.invoke'][-1]['op'], 'agent.command')
+
+    def test_malformed_or_abandoned_snapshot_never_authorizes_partial_inventory(self):
+        _, _ = self.invocation_fixture()
+        c = self.agents.conversations['r2']
+        bad_cases = [b'\xff\n', b'{bad json\n',
+            line({'op': 'snapshot', 'phase': 'abandon'}),
+            line({'op': 'put', 'kind': 'startup', 'id': 'current', 'rev': 1, 'seq': 3, 'value': {}})]
+        for bad in bad_cases:
+            with self.subTest(bad=bad):
+                begin = line({'op': 'snapshot', 'phase': 'begin', 'epoch': 'e1', 'coverage': 'all_retained'})
+                end = line({'op': 'snapshot', 'phase': 'end', 'seq': 0})
+                c.data(begin + bad + end)
+                with self.assertRaises(VqroError):
+                    self.compose_submit('/review notes')
+                # A subsequent complete clean reset snapshot is positive reconstruction evidence.
+                c.data(snapshot({('startup', 'current'): {'commands': [{'name': 'review'}]}}))
+                self.compose_submit('/review notes')
+        self.assertEqual(len([p for m, p in self.core.calls if m == 'resource.invoke']), len(bad_cases))
+
     def test_display_only_skill_never_becomes_an_invocation_key(self):
         self.invocation_fixture()
         self.compose_submit('/display-only notes')
@@ -922,7 +953,7 @@ class AgentPane(unittest.TestCase):
         stream = self.agents.conversations["r2"].stream
         self.core.sinks.pop(stream).ended("closed", {"reason": "provider_disconnected"})
         self.agents.flush_conversations()
-        self.assertEqual(self.attaches()[-1]["items"], {"after": {"epoch": "e1", "seq": 4}})
+        self.assertEqual(self.attaches()[-1]["items"], {}, "each attachment requests its own complete inventory snapshot")
         self.core.resources["r2"]["available"] = False
         self.agents.event("resource", {"id": "r2"})
         self.agents.flush_conversations()
@@ -1255,7 +1286,9 @@ class AgentPane(unittest.TestCase):
         continue, gets two delayed retries from the last good cursor and then stops with a visible report."""
         cursors = self.bad_record_storm({"op": "put", "seq": 5, "kind": "message"})  # no id: unreadable
         self.assertEqual(len(cursors), 3, "the first attach plus two backed-off retries, not a storm")
-        self.assertEqual(cursors[1:], [{"epoch": "e1", "seq": 4}] * 2, "never skips the record or advances the cursor")
+        self.assertEqual(cursors[1:], [None] * 2, "each attachment requests full reconstruction, never skips a bad record")
+        retained = self.agents.conversations['r2'].view
+        self.assertEqual((retained.epoch, retained.seq), ('e1', 4), "retained display cursor is not advanced to manufacture readiness")
         note = " ".join(self.texts())
         self.assertIn("Incompatible stream", note)
         self.assertIn("can't read (bad_record", note)

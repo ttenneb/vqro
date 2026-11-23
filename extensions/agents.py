@@ -333,6 +333,9 @@ class Conversation:
         self.view = ItemView(**bounds)
         self.lock = threading.Lock()
         self.stream = None
+        # Retained SDK display state is not proof that THIS attachment reconstructed valid inventory.
+        self.reconstruction_ready = False
+        self.reconstruction_clean = False
         self.generation = 0  # bumped when a stream ends, so a late attach reply can't revive it
         self.clamped = False  # the provider declared more than this viewer keeps
         self.notices = collections.deque(maxlen=LIVE_NOTICES)  # (at_ms, value): live notice records, newest last
@@ -354,7 +357,28 @@ class Conversation:
                 return  # late bytes of a stream already closed: never applied or counted against the current one
             now, epoch = int(time.time() * 1000), self.view.epoch
             rejected_before = self.view.rejection
-            received = self.view.feed(data, epochs=True)
+            received = []
+            # Observe each complete SDK record separately, even when a transport chunk contains an error and
+            # a later snapshot end. The SDK remains the only parser/bounded byte buffer; its display recovery
+            # semantics are unchanged. An unfinished fragment stays in the SDK until a later call.
+            pieces = data.split(b"\n")
+            for index, piece in enumerate(pieces):
+                chunk = piece + b"\n" if index < len(pieces) - 1 else piece
+                if not chunk:
+                    continue
+                pending, snapshots = self.view.snapshot_pending, self.view.snapshots
+                errors = sum(self.view.errors.values())
+                received.extend(self.view.feed(chunk, epochs=True))
+                invalid = sum(self.view.errors.values()) != errors
+                if not pending and self.view.snapshot_pending:
+                    self.reconstruction_clean = not invalid
+                if self.view.snapshot_pending:
+                    self.reconstruction_ready = False
+                if invalid:
+                    self.reconstruction_clean = False
+                    self.reconstruction_ready = False
+                if self.view.snapshots != snapshots:
+                    self.reconstruction_ready = self.reconstruction_clean and not invalid and not self.view.broken
             if self.view.epoch != epoch:  # a new epoch or session: earlier live notices are about something else
                 self.notices.clear()
             # Only notices of the epoch now installed, judged per record, so chunk boundaries never matter (#97).
@@ -366,6 +390,8 @@ class Conversation:
                 self.rejected(rejection)
             elif not broken and self.rejections and not self.incompatible and self.passed_rejection():
                 self.rejections, self.rejected_at = 0, None  # real progress: the warning no longer applies
+        # Invalid non-lossy display records revoke invocation readiness, but do not invent a reset/retry
+        # loop. A clean producer resynchronization or a later attachment can restore the witness.
         self.wake(self.rid, reattach=broken)
 
     def passed_rejection(self):
@@ -397,6 +423,7 @@ class Conversation:
             if generation is not None and generation != self.generation:
                 return  # an old stream's end never ends the current one
             self.view.stream_ended()
+            self.reconstruction_ready = self.reconstruction_clean = False
             self.stream = None
             self.generation += 1
         self.wake(self.rid, reattach=True)
@@ -615,11 +642,13 @@ class Agents:
                 # After lost records, start over from a fresh snapshot: simple, bounded, and right whatever the loss
                 # was (vqro_items keeps after() at the last record applied, but a snapshot also repairs an over-bound
                 # view).
-                lost = c.view.broken
                 if old is not None:
                     c.view.stream_ended()
                     c.generation += 1
-                after, generation = None if lost else c.view.after(), c.generation
+                # Every new attachment needs its own valid reconstruction, not retained cursor continuation.
+                # This is a read-only reset snapshot request; old entities remain available for labelled display.
+                c.reconstruction_ready = c.reconstruction_clean = False
+                after, generation = None, c.generation
         if old is not None:
             self.ext.close_stream(old)  # outside the lock (see above)
         if stop:
@@ -955,6 +984,8 @@ class Agents:
                               "if it sends that much, the conversation stops updating and says so."})
             if c.view.epoch is None:
                 return notes + [{"type": "text", "style": "dim", "text": "Loading the conversation…"}]
+            if not c.reconstruction_ready:
+                notes.append({"type": "text", "style": "warn", "text": "Retained conversation and customization inventory may be stale; waiting for valid reconstruction on this stream."})
             session = agent_facts(r).get("session") if isinstance(agent_facts(r).get("session"), dict) else {}
             live = agent_transcript.notice_rows(c.notices, names.agent_name(r["id"]))
             out = notes + agent_transcript.rows(c.view.entities, names, c.view.coverage, self.view_of(r["id"]),
@@ -1054,7 +1085,10 @@ class Agents:
             inventory = {k: v for k, v in startup.items() if k in (
                 "skills", "skills_scope", "prompts", "commands", "plugins", "mcp", "extensions", "sources", "incomplete")}
             row = agent_transcript.startup_row(inventory, hint=False)
-        return row.get("children", []) if row else []
+        rows = row.get("children", []) if row else []
+        if rows and not self.invocation_inventory(r)[4]:
+            rows = [{"type": "text", "style": "warn", "text": "Retained customization inventory may be stale; explicit invocations wait for valid reconstruction on this stream."}] + rows
+        return rows
 
     def has_settings(self, r):
         return bool(self.customization_rows(r) or (self.supported(r, "configure") and advertised(r, "config")) or (self.supported(r, "command") and advertised(r, "commands")))
@@ -1366,7 +1400,7 @@ class Agents:
         if conversation is not None:
             with conversation.lock:
                 epoch = conversation.view.epoch
-                ready = epoch is not None and not conversation.view.broken and not conversation.view.snapshot_pending and conversation.stream is not None
+                ready = conversation.reconstruction_ready and epoch is not None and not conversation.view.broken and not conversation.view.snapshot_pending and conversation.stream is not None
                 rev, startup = conversation.view.entities.get(("startup", "current"), (None, {}))
         resource_epoch = agent_facts(r).get("epoch")
         ready = ready and (resource_epoch is None or resource_epoch == epoch)
