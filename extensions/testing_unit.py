@@ -327,6 +327,14 @@ def notice(status):
     return {"label": label, "style": style}
 
 
+def status_segment(status):
+    """An empty live label clears the segment; full diagnostics remain in the menu/page."""
+    current_failure = status.get("setup_id") is not None and any(
+        status[suite].get("current") is True and status[suite]["state"] == "fail" for suite in ("unit", "integration"))
+    visible = not status["finish_ok"] if status["require_unit"] else current_failure
+    return {"label": "tests !", "style": "warn"} if visible else {"label": ""}
+
+
 def setup_page(status):
     segment = notice(status)
     items = [{"type": "text", "text": segment["label"], "style": segment["style"]},
@@ -386,7 +394,7 @@ def extension_main():
             if isinstance(entries, dict) and rpc_rule_notice({"entries": entries}) and RPC_RULE_NOTICE not in status["not_verified_reasons"]:
                 status["not_verified_reasons"].insert(0, RPC_RULE_NOTICE)
             last["status"] = status
-            ext.publish("testing.status", notice(status))
+            ext.publish("testing.status", status_segment(status))
             ext.publish("settings.page.testing", setup_page(status))
             return status
 
@@ -418,9 +426,9 @@ def extension_main():
     @ext.command("test.unit", "Check installed extension health (args: tests, strict)")
     def run(args):
         with lock:
-            ext.publish("testing.status", {"label": "NOT VERIFIED · Unit checking", "style": "warn"})
             snapshot = ext.vqro.call("workspace.snapshot")
             recording_on = snapshot.get("entries", {}).get(POLICY_KEY, {}).get("value", False) is True
+            ext.publish("testing.status", status_segment(error_status("Unit checking", snapshot)))
             result = collect(state_dir, extensions_dir, client=ext.vqro, hello=ext.info,
                              tests=args.get("tests", True), strict=args.get("strict", False), tests_budget=20, record=recording_on)
             destination = None

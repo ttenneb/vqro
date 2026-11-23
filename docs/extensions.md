@@ -93,9 +93,13 @@ not a security boundary. The Pi plugin in this slice is supported only for termi
 Missing plugin/skill assets do not stop Pi launching: they produce one unavailable notice/log and no testing flags.
 RPC Pi launches remain unchanged at the bridge boundary and report testing-plugin support as unavailable;
 no extension injection or environment-filter exception is added to those bridges. This is only the first slice:
-RPC coverage is a **required follow-up**, not dropped scope. While a declared RPC Pi launcher is enabled, the
-status segment, Settings page, status reasons and receipts show:
+RPC coverage is a **required follow-up**, not dropped scope. While a declared RPC Pi launcher is enabled,
+the status menu's full report, Settings page, setup-status reasons and receipts retain:
 **NOT VERIFIED: rule not active for vqro-launched Pi agents yet**.
+The bottom-bar segment is deliberately compact (`tests !`, warn style): while policy is ON it appears only
+when finish is not ok, including RPC caveats. With policy OFF it is hidden for missing/unverified/stale evidence
+and RPC caveats; only an actual current Unit/Integration FAIL may show it. Performance never shows a segment
+by itself. Clicking the segment opens the full setup/health report; full diagnostics are not crowded into the bar.
 The injected prompt/skill requires the finish tool while the current authoritative policy is ON, even when
 receipts are stale or NOT VERIFIED. OFF or genuinely unknown/unavailable policy does not impose an unconditional
 rule. Run-start policy labels are samples; public per-request context conveys observed policy changes without

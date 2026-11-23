@@ -147,6 +147,40 @@ class SetupTests(unittest.TestCase):
             self.assertFalse(status["require_unit"])
             self.assertFalse(status["finish_ok"])
 
+    def test_status_segment_is_quiet_off_compact_on_and_keeps_full_details(self):
+        for required in (False, True):
+            snapshot = {"entries": {setup.POLICY_KEY: {"value": required}, "extension/pi": {"value": {"enabled": True}}}}
+            for state in ("missing", "unverified", "stale", "pending", "error"):
+                status = unit.error_status("full evidence detail", snapshot)
+                status["unit"]["state"] = state
+                status["integration"]["state"] = state
+                segment = unit.status_segment(status)
+                self.assertEqual(segment["label"], "tests !" if required else "")
+                if required:
+                    self.assertEqual(segment["style"], "warn")
+                    self.assertLessEqual(len(segment["label"]), 8)
+                self.assertIn(setup.RPC_RULE_NOTICE, status["not_verified_reasons"])
+                details = "\n".join(item.get("text", "") for item in unit.setup_page(status)["items"])
+                self.assertIn(setup.RPC_RULE_NOTICE, details)
+                self.assertIn("full evidence detail", details)
+            status["finish_ok"] = True
+            self.assertEqual(unit.status_segment(status)["label"], "")
+
+        for suite in ("unit", "integration"):
+            status = unit.error_status("details", {"entries": {setup.POLICY_KEY: {"value": False}}})
+            status["setup_id"] = "a" * 64
+            status[suite].update(state="fail", current=True)
+            self.assertEqual(unit.status_segment(status), {"label": "tests !", "style": "warn"})
+            status[suite]["current"] = False
+            self.assertEqual(unit.status_segment(status)["label"], "")
+            status[suite]["current"] = True
+            status["setup_id"] = None
+            self.assertEqual(unit.status_segment(status)["label"], "")
+        status = unit.error_status("details")
+        status["setup_id"] = "a" * 64
+        status["performance"].update(state="fail", current=True)
+        self.assertEqual(unit.status_segment(status)["label"], "")
+
     def test_malformed_policy_has_explicit_unknown_state(self):
         self.snapshot["entries"][setup.POLICY_KEY]["value"] = "not-a-boolean"
         status = self.status()
