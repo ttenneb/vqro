@@ -191,7 +191,7 @@ pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
     // reach the model as written, so it is refused here; a skill is invoked explicitly with agent.command. Only the
     // owner's plain input can start that way (everyone else's is framed with a sender header first).
     if message.starts_with("/skill:") {
-        return Err(reject("unsupported","text starting with /skill: would be expanded by a native skill, not delivered literally; invoke the skill with agent.command"));
+        return Err(reject("unsupported","text starting with /skill: may be expanded by a Pi skill, so it cannot be proven to stay literal; to send it as text, start with a space or another character; to run a skill use agent.command"));
     }
     // Pi's own rule for templates and extension commands (prompt-templates.js expandPromptTemplate: ^/(\S+)(\s+.*)?$
     // against the loaded names; agent-session.js _tryExecuteExtensionCommand): a leading /name it knows is expanded or

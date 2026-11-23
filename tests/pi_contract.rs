@@ -271,3 +271,18 @@ fn unknown_slash_namespace_refuses_every_leading_name_without_claiming_a_command
         for text in [" /late","late","/"] {args["content"]=json!([{"type":"text","text":text}]);assert_eq!(send(&args,&owner).unwrap().args["message"],text,"{mode} {text:?}");}
     }
 }
+
+/// lead-secondary on 6ccc7e91: the /skill: refusal never claims the skill exists (an absent skill is refused with the
+/// same "may" wording).
+#[test]
+fn skill_prefix_refusal_never_claims_the_skill_exists(){
+    let mut args=input();args["origin"]["kind"]=json!("human");args["render"]=json!(["user"]);
+    let names:Vec<String>=vec![];
+    for ctx in [Context {owner_proven:true,slash_names:Some(&names),..context()},Context {owner_proven:true,slash_names:None,..context()}] {
+        args["content"]=json!([{"type":"text","text":"/skill:does-not-exist please"}]);
+        let error=send(&args,&ctx).err().unwrap();
+        assert_eq!(error.kind,"unsupported");
+        assert!(error.message.contains("may be expanded") && error.message.contains("agent.command"),"{}",error.message);
+        assert!(!error.message.contains("would be expanded"),"never asserts the skill exists: {}",error.message);
+    }
+}
