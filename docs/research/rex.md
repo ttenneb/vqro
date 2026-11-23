@@ -86,11 +86,21 @@ community clients and observing our own private server's traffic; the Rex binary
   missing blocks. Failed attach/list or malformed replies preserve prior facts and streams. A successful session
   list that omits a session retires its blocks. An incomplete initial observation cannot send a full sync.
 - Reconcile refreshes stored title, pwd, program status, process and exit facts for known blocks too, repairing
-  lost events. Per-block revisions fence the whole candidate snapshot: capture before queries, discard if any
-  event or fact commit advanced the revision while queries were in flight. Fact commit and publication share an
-  async serialization lock so a discarded/older snapshot cannot be queued after a newer event upsert. No blocking
-  mutex crosses I/O, and no publication lock is held across native queries. Failed queries retain prior facts.
-  The event-triggered status query uses the same revision fence. The control reader emits pending lag after queue drain even
+  lost events. `src/bin/vqro-rex/facts.rs` is the **single writer** for facts and publication: typed messages enter
+  `write_facts` under one async owner mutex. This includes native events, refresh/status observations, acknowledged
+  kills, discovery/spawn snapshots, removal/full sync, and effect replies. Native Rex I/O stays outside the owner;
+  no blocking mutex crosses I/O. Failed queries retain prior facts.
+- Owner rules: events apply to current known blocks; unknown-id events allocate nothing. Refresh/status/kill
+  observations carry their captured Block revision and apply only if it is still current. Each mutation gets a
+  checked, globally monotonic revision stored in the Block, never reset/reused in a registration. Kill acknowledgement
+  is committed and published by this owner, not returned as an out-of-band lifecycle snapshot. If a newer witness
+  invalidates the kill observation, the effect reports acceptance without claiming current lifecycle facts.
+- Effect replies are also enqueued under the owner and resolve current facts again, so a newer native event or gone
+  cannot be followed by an older spawn/kill reply snapshot. Removal is final for that ref in this registration:
+  rediscovery and delayed candidates cannot republish it. Active plus retired identities are limited to 65,536,
+  refs to 256 bytes; exhausting the ledger/counter closes registration without evicting history or reusing revisions.
+  This explicitly bounds retirement bookkeeping rather than retaining unlimited tombstones. Initial discoveries
+  remain unpublished until the owner emits the first full sync. The event-triggered status query uses the same rules. The control reader emits pending lag after queue drain even
   without another native event. It does not cancel a partially parsed WebSocket read to do so.
 - Status replacement requires object records, nullable/string id and textual fields, and nullable/numeric
   progress; invalid entries or supported field types preserve the old table. Sparse process replies preserve

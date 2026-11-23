@@ -31,6 +31,9 @@ use vqro::rex::{self, control, data, Control, Event};
 
 #[path = "vqro-rex/server.rs"]
 mod owned_server;
+#[path = "vqro-rex/facts.rs"]
+mod facts;
+use facts::Change;
 #[cfg(all(test, unix))]
 #[path = "vqro-rex/regression_tests.rs"]
 mod regression_tests;
@@ -77,13 +80,16 @@ fn args() -> Result<Args, String> {
 }
 
 struct Block {
+    revision: u64,
     session: String,
     facts: Value,
 }
 
 struct State {
-    /// Per-block fact/event revisions fence in-flight native observations, including undiscovered blocks.
-    revisions: HashMap<String, u64>,
+    /// Global allocator never resets/reuses a revision within this registration; revisions live in Block.
+    next_revision: u64,
+    removed: HashSet<String>,
+    facts_ready: bool,
     blocks: BTreeMap<String, Block>,
     /// Session id -> label, for sessions this connection is attached to.
     sessions: HashMap<String, String>,
@@ -321,55 +327,30 @@ impl App {
         let known: HashSet<String> = self.state.lock().unwrap().blocks.keys().cloned().collect();
         let mut deferred = false;
         for (bid, (session, b)) in &seen {
-            let (old, revision) = {
+            let (old, base) = {
                 let st = self.state.lock().unwrap();
-                (st.blocks.get(bid).map(|b| b.facts.clone()), st.revisions.get(bid).copied().unwrap_or(0))
+                if st.removed.contains(bid) { continue; }
+                (st.blocks.get(bid).map(|b| b.facts.clone()), st.blocks.get(bid).map(|b| b.revision))
             };
             let Some(facts) = self.refresh_facts(session, b, old.clone()).await else {
                 eprintln!("vqro-rex: defer {bid}: no valid lifecycle observation");
                 deferred = true;
                 continue;
             };
-            let _publish = self.publishing.lock().await;
-            {
-                let mut st = self.state.lock().unwrap();
-                if st.revisions.get(bid).copied().unwrap_or(0) != revision {
-                    // A newer event/commit won. Keep its facts; never publish this stale candidate.
-                    deferred |= old.is_none();
-                    continue;
-                }
-                if old.as_ref() == Some(&facts) { continue; }
-                st.blocks.insert(bid.clone(), Block { session:session.clone(), facts:facts.clone() });
-                st.revisions.insert(bid.clone(), revision.wrapping_add(1));
-            }
-            if !first { self.provider.upsert(facts).await.map_err(|e| e.to_string())?; }
+            let applied = self.write_facts(Change::Refresh { bid:bid.clone(), session:session.clone(), base, facts }).await?;
+            deferred |= old.is_none() && applied.is_none();
         }
         if first && deferred { return Err("initial lifecycle observation incomplete; refusing full sync".into()); }
-        let _publish = self.publishing.lock().await;
-        let mut gone = Vec::new();
-        {
+        let gone = {
             let mut st = self.state.lock().unwrap();
             st.sessions.retain(|id, _| listed.contains(id));
-            for bid in known {
-                let session = &st.blocks[&bid].session;
-                if !seen.contains_key(&bid) && (!listed.contains(session) || complete.contains(session)) {
-                    st.blocks.remove(&bid);
-                    st.revisions.remove(&bid);
-                    st.argv.remove(&bid);
-                    for n in st.streams.remove(&bid).unwrap_or_default() {
-                        n.notify_one();
-                    }
-                    gone.push((bid.clone(), if st.killed.remove(&bid) { "killed" } else { "exited" }));
-                }
-            }
+            known.into_iter().filter(|bid| st.blocks.get(bid).is_some_and(|b|
+                !seen.contains_key(bid) && (!listed.contains(&b.session) || complete.contains(&b.session)))).collect::<Vec<_>>()
+        };
+        for bid in gone {
+            self.write_facts(Change::Remove { bid, incarnation:self.run.clone(), reason:json!({"reason":"exited"}) }).await?;
         }
-        if first {
-            let all: Vec<Value> = self.state.lock().unwrap().blocks.values().map(|b| b.facts.clone()).collect();
-            self.provider.full_sync(all).await.map_err(|e| e.to_string())?;
-        }
-        for (bid, why) in gone {
-            self.provider.gone(&bid, &self.run, json!({"reason": why})).await.map_err(|e| e.to_string())?;
-        }
+        if first { self.write_facts(Change::Sync).await?; }
         Ok(())
     }
 
@@ -391,50 +372,20 @@ impl App {
         let Some(bid) = payload["block_id"].as_str() else { return };
         let (name, body) = (payload["name"].as_str().unwrap_or_default(), &payload["payload"]);
         if !matches!(name, "title_changed" | "pwd_changed" | "child_exited" | "program_status_changed" | "program_status_removed" | "process_changed") { return; }
-        let _publish = self.publishing.lock().await;
-        let facts = {
-            let mut st = self.state.lock().unwrap();
-            let revision = st.revisions.entry(bid.to_string()).or_default();
-            *revision = revision.wrapping_add(1);
-            let Some(block) = st.blocks.get_mut(bid) else { return };
-            let f = &mut block.facts;
-            let before = f.clone();
-            match name {
-                "title_changed" => f["title"] = json!(body["title"].as_str().filter(|s| !s.is_empty())),
-                "pwd_changed" => {
-                    if let Some(cwd) = body["pwd"].as_str().and_then(cwd_from_pwd) {
-                        f["cwd"] = json!(cwd);
-                    }
-                }
-                "child_exited" if integer(&body["exit_code"]) => {
-                    f["state"] = json!("finished");
-                    f["exit"] = json!({"reason": "exited", "exit_code": body["exit_code"]});
-                }
-                "program_status_changed" | "program_status_removed" => {
-                    // Re-read the whole table below (records are a tree; one event changes part of it).
-                    drop(st);
-                    let app = self.clone();
-                    let bid = bid.to_string();
-                    tokio::spawn(async move { app.refresh_status(&bid).await });
-                    return;
-                }
-                "process_changed" => {
-                    if let Some(p) = body["foreground"]["name"].as_str() {
-                        f["data"]["foreground"] = json!(p);
-                    }
-                }
-                _ => return,
-            }
-            if *f == before { return }
-            f.clone()
-        };
-        let _ = self.provider.upsert(facts).await;
+        if let Err(error) = self.write_facts(Change::Event { bid:bid.to_string(), name:name.to_string(), body:body.clone() }).await {
+            eprintln!("vqro-rex: fact owner: {error}");
+            return;
+        }
+        if matches!(name, "program_status_changed" | "program_status_removed") {
+            let (app, bid) = (self.clone(), bid.to_string());
+            tokio::spawn(async move { app.refresh_status(&bid).await });
+        }
     }
 
     async fn refresh_status(self: &Arc<Self>, bid: &str) {
         let Some((session, revision)) = ({
             let st = self.state.lock().unwrap();
-            st.blocks.get(bid).map(|b| (b.session.clone(), st.revisions.get(bid).copied().unwrap_or(0)))
+            st.blocks.get(bid).map(|b| (b.session.clone(), b.revision))
         }) else { return };
         let Ok(s) = self.block_call(&session, bid, "program_status", json!({})).await else { return };
         let Some(records) = s["records"].as_array() else {
@@ -445,18 +396,9 @@ impl App {
             eprintln!("vqro-rex: invalid program_status {bid}; keeping prior status");
             return;
         };
-        let _publish = self.publishing.lock().await;
-        let facts = {
-            let mut st = self.state.lock().unwrap();
-            if st.revisions.get(bid).copied().unwrap_or(0) != revision { return; }
-            let Some(block) = st.blocks.get_mut(bid) else { return };
-            if block.facts["status"] == status { return }
-            block.facts["status"] = status;
-            let facts = block.facts.clone();
-            st.revisions.insert(bid.to_string(), revision.wrapping_add(1));
-            facts
-        };
-        let _ = self.provider.upsert(facts).await;
+        if let Err(error) = self.write_facts(Change::Status { bid:bid.to_string(), base:revision, status }).await {
+            eprintln!("vqro-rex: fact owner: {error}");
+        }
     }
 
     async fn effect(self: Arc<Self>, e: EffectRequest) {
@@ -466,7 +408,9 @@ impl App {
             "resource.forget" => self.forget(e.r#ref.as_deref(), &e.incarnation).await,
             other => Err(ProviderError::new("unsupported", format!("op {other} is not served"))),
         };
-        e.respond(result);
+        if let Err(error) = self.write_facts(Change::Reply { request:e, result }).await {
+            eprintln!("vqro-rex: effect publication: {error}");
+        }
     }
 
     /// The session new terminals go to (created and attached when first needed).
@@ -535,27 +479,24 @@ impl App {
         if let Err(e) = self.reconcile(false).await {
             eprintln!("vqro-rex: reconcile after spawn: {e}");
         }
-        let facts = self.state.lock().unwrap().blocks.get(&bid).map(|b| b.facts.clone())
+        let facts = self.write_facts(Change::Snapshot { bid:bid.clone() }).await.map_err(|e| ProviderError::new("backend", e))?
             .ok_or_else(|| ProviderError::new("backend", format!("terminal created: ref {bid}; follow-up lifecycle observation unavailable; outcome unknown, do not retry spawn")))?;
         Ok(Outcome::Observed(Some(json!({"facts": facts}))))
     }
 
     async fn kill(self: &Arc<Self>, bid: Option<&str>, incarnation: &str) -> Result<Outcome, ProviderError> {
         let bid = bid.ok_or_else(|| ProviderError::new("invalid", "kill needs ref"))?;
-        let session = self.state.lock().unwrap().blocks.get(bid).filter(|_| incarnation == self.run).map(|b| b.session.clone())
+        let (session, base) = self.state.lock().unwrap().blocks.get(bid).filter(|_| incarnation == self.run).map(|b| (b.session.clone(), b.revision))
             .ok_or_else(|| ProviderError::new("not_found", format!("no terminal {bid}")))?;
-        self.state.lock().unwrap().killed.insert(bid.to_string());
         match self.control.call("block.close", json!({"session_id": session, "block_id": bid})).await {
             Ok(_) => {
                 self.reconcile.notify_one();
-                let mut facts = self.state.lock().unwrap().blocks.get(bid).map(|b| b.facts.clone())
-                    .unwrap_or_else(|| json!({"ref": bid, "incarnation": self.run, "kind": "terminal"}));
-                facts["state"] = json!("finished");
-                facts["exit"] = json!({"reason": "killed"});
-                Ok(Outcome::Observed(Some(json!({"facts": facts}))))
+                match self.write_facts(Change::Kill { bid:bid.to_string(), base }).await.map_err(|e| ProviderError::new("backend", e))? {
+                    Some(facts) => Ok(Outcome::Observed(Some(json!({"facts":facts})))),
+                    None => Ok(Outcome::Accepted(None)), // acknowledgement, not a current lifecycle witness
+                }
             }
             Err(control::Error::Rejected { code, message }) => {
-                self.state.lock().unwrap().killed.remove(bid);
                 Ok(Outcome::Rejected { kind: "backend".into(), message: format!("{code}: {message}") })
             }
             Err(e) => Err(unknown(e)),
@@ -569,7 +510,8 @@ impl App {
         if incarnation == self.run && self.state.lock().unwrap().blocks.contains_key(bid) {
             return Ok(Outcome::Rejected { kind: "invalid".into(), message: format!("terminal {bid} is still open in rex; kill it first") });
         }
-        self.provider.gone(bid, incarnation, json!({"reason": "forgotten"})).await.map_err(|e| ProviderError::new("unavailable", e.to_string()))?;
+        self.write_facts(Change::Remove { bid:bid.to_string(), incarnation:incarnation.to_string(), reason:json!({"reason":"forgotten"}) })
+            .await.map_err(|e| ProviderError::new("unavailable", e))?;
         Ok(Outcome::Observed(None))
     }
 
@@ -931,7 +873,7 @@ async fn registration(a: &Args, endpoint: &str, socket: &Path, owned_dir: Option
         spawn_label: a.session.clone(),
         run,
         history: a.history,
-        state: Mutex::new(State { revisions: HashMap::new(), blocks: BTreeMap::new(), sessions: HashMap::new(), killed: HashSet::new(),
+        state: Mutex::new(State { next_revision:0, removed:HashSet::new(), facts_ready:false, blocks: BTreeMap::new(), sessions: HashMap::new(), killed: HashSet::new(),
             argv: HashMap::new(), streams: HashMap::new() }),
         reconcile: Notify::new(),
         reconciling: tokio::sync::Mutex::new(()),

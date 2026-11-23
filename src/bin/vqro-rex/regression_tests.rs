@@ -71,7 +71,17 @@ async fn fixture() -> (Arc<App>, Arc<AtomicU8>) {
     (app, mode)
 }
 
+struct Fixture {
+    app: Arc<App>, mode: Arc<AtomicU8>, paused: Arc<Notify>, release: Arc<Notify>, published: Arc<Mutex<Vec<Value>>>,
+    requests: tokio::sync::mpsc::UnboundedReceiver<Request>, core: tokio::sync::mpsc::UnboundedSender<Value>,
+}
+
 async fn fixture_detailed() -> (Arc<App>, Arc<AtomicU8>, Arc<Notify>, Arc<Notify>, Arc<Mutex<Vec<Value>>>) {
+    let f = fixture_full().await;
+    (f.app, f.mode, f.paused, f.release, f.published)
+}
+
+async fn fixture_full() -> Fixture {
     use std::os::unix::fs::PermissionsExt;
     let root = format!("/tmp/rxf-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
     std::fs::create_dir(&root).unwrap();
@@ -119,24 +129,32 @@ async fn fixture_detailed() -> (Arc<App>, Arc<AtomicU8>, Arc<Notify>, Arc<Notify
     let (client, core) = tokio::io::duplex(65536);
     let published = Arc::new(Mutex::new(Vec::new()));
     let core_published = published.clone();
+    let (core_tx, mut core_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     tokio::spawn(async move {
-        let (read, mut write) = tokio::io::split(core);
+        let (read, write) = tokio::io::split(core);
+        let write = Arc::new(tokio::sync::Mutex::new(write));
+        let injected_write = write.clone();
+        tokio::spawn(async move {
+            while let Some(value) = core_rx.recv().await {
+                injected_write.lock().await.write_all((value.to_string() + "\n").as_bytes()).await.unwrap();
+            }
+        });
         let mut lines = BufReader::new(read).lines();
         while let Some(line) = lines.next_line().await.unwrap() {
             let req: Value = serde_json::from_str(&line).unwrap();
             core_published.lock().unwrap().push(req.clone());
-            if req.get("id").is_some() {
+            if req.get("id").is_some() && req.get("method").is_some() {
                 let reply = json!({"jsonrpc":"2.0","id":req["id"],"result":{"generation":1}}).to_string() + "\n";
-                write.write_all(reply.as_bytes()).await.unwrap();
+                write.lock().await.write_all(reply.as_bytes()).await.unwrap();
             }
         }
     });
-    let (provider, _) = Provider::connect(client, Config::new("fixture", "i", capabilities())).await.unwrap();
+    let (provider, requests) = Provider::connect(client, Config::new("fixture", "i", capabilities())).await.unwrap();
     let app = Arc::new(App { provider, control, socket: "unused".into(), owned_dir: None, spawn_label: "vqro".into(), run: "run".into(), history: 0,
-        state: Mutex::new(State { revisions:HashMap::new(), blocks:BTreeMap::new(), sessions:HashMap::new(), killed:HashSet::new(), argv:HashMap::new(), streams:HashMap::new() }),
+        state: Mutex::new(State { next_revision:0, removed:HashSet::new(), facts_ready:false, blocks:BTreeMap::new(), sessions:HashMap::new(), killed:HashSet::new(), argv:HashMap::new(), streams:HashMap::new() }),
         reconcile:Notify::new(), reconciling:tokio::sync::Mutex::new(()), publishing:tokio::sync::Mutex::new(()) });
     app.reconcile(true).await.unwrap();
-    (app, mode, paused, release, published)
+    Fixture { app, mode, paused, release, published, requests, core:core_tx }
 }
 
 #[tokio::test]
@@ -306,4 +324,113 @@ async fn status_query_cannot_overwrite_a_later_status_event() {
     release.notify_one();
     refreshing.await.unwrap();
     assert_eq!(app.state.lock().unwrap().blocks["b"].facts["status"]["state"], "working");
+}
+
+#[tokio::test]
+async fn kill_invalidates_a_pre_kill_live_candidate() {
+    let (app, mode, paused, release, published) = fixture_detailed().await;
+    mode.store(11, Ordering::Relaxed);
+    let refresh = { let app = app.clone(); tokio::spawn(async move { app.reconcile(false).await }) };
+    tokio::time::timeout(Duration::from_secs(1), paused.notified()).await.unwrap();
+    app.kill(Some("b"), "run").await.unwrap();
+    mode.store(19, Ordering::Relaxed);
+    release.notify_one();
+    refresh.await.unwrap().unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(app.state.lock().unwrap().blocks["b"].facts["state"], "finished");
+    assert_eq!(published.lock().unwrap().iter().rev().find(|v| v["method"] == "resource.upsert").unwrap()["params"]["facts"]["state"], "finished");
+}
+
+#[tokio::test]
+async fn removal_is_final_and_a_delayed_status_cannot_cross_local_lifetimes() {
+    let (app, mode, paused, release, published) = fixture_detailed().await;
+    mode.store(20, Ordering::Relaxed);
+    let refresh = { let app = app.clone(); tokio::spawn(async move { app.refresh_status("b").await }) };
+    tokio::time::timeout(Duration::from_secs(1), paused.notified()).await.unwrap();
+    mode.store(5, Ordering::Relaxed);
+    app.reconcile(false).await.unwrap();
+    mode.store(6, Ordering::Relaxed);
+    app.reconcile(false).await.unwrap();
+    release.notify_one();
+    refresh.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(!app.state.lock().unwrap().blocks.contains_key("b"), "removed refs cannot be rediscovered in this registration");
+    let rows = published.lock().unwrap();
+    let gone = rows.iter().position(|v| v["method"] == "resource.gone" && v["params"]["ref"] == "b").unwrap();
+    assert!(!rows[gone+1..].iter().any(|v| v["method"] == "resource.upsert" && v["params"]["facts"]["ref"] == "b"));
+}
+
+#[tokio::test]
+async fn unknown_id_events_allocate_no_bookkeeping() {
+    let (app, _) = fixture().await;
+    let before = app.state.lock().unwrap().next_revision;
+    for n in 0..1000 {
+        app.event(json!({"type":"block_event","payload":{"block_id":format!("unknown-{n}"),
+            "name":"title_changed","payload":{"title":"ignored"}}})).await;
+    }
+    let state = app.state.lock().unwrap();
+    assert_eq!(state.blocks.len(), 1);
+    assert!(state.removed.is_empty());
+    assert_eq!(state.next_revision, before, "unknown ids must not even consume revisions");
+}
+
+#[tokio::test]
+async fn kill_publication_waits_for_the_fact_owner() {
+    let (app, _) = fixture().await;
+    let owner = app.publishing.lock().await;
+    let kill = { let app = app.clone(); tokio::spawn(async move { app.kill(Some("b"), "run").await }) };
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let bypassed = kill.is_finished();
+    drop(owner);
+    kill.await.unwrap().unwrap();
+    assert!(!bypassed, "kill result bypassed fact/publication owner");
+}
+
+#[tokio::test]
+async fn effect_replies_cannot_publish_a_snapshot_older_than_an_event_or_removal() {
+    let mut f = fixture_full().await;
+    for (n, remove) in [(1, false), (2, true)] {
+        f.core.send(json!({"jsonrpc":"2.0","id":format!("effect-{n}"),"method":"effect.invoke",
+            "params":{"generation":1,"effect":format!("kill-{n}"),"op":"terminal.kill","ref":"b","incarnation":"run","args":{},"deadline_ms":1000}})).unwrap();
+        let Request::Effect(request) = tokio::time::timeout(Duration::from_secs(1), f.requests.recv()).await.unwrap().unwrap() else { panic!("effect request"); };
+        let stale = f.app.state.lock().unwrap().blocks["b"].facts.clone();
+        if remove {
+            f.app.write_facts(Change::Remove { bid:"b".into(), incarnation:"run".into(), reason:json!({"reason":"exited"}) }).await.unwrap();
+        } else {
+            f.app.event(block_event("child_exited", json!({"exit_code":31}))).await;
+        }
+        f.app.write_facts(Change::Reply { request, result:Ok(Outcome::Observed(Some(json!({"facts":stale})))) }).await.unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(row) = f.published.lock().unwrap().iter().find(|v| v["id"] == format!("effect-{n}")).cloned() { break row; }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }).await.unwrap();
+        if remove { assert!(reply["result"]["data"]["facts"].is_null()); }
+        else {
+            assert_eq!(reply["result"]["data"]["facts"]["state"], "finished");
+            assert_eq!(reply["result"]["data"]["facts"]["exit"]["exit_code"], 31);
+        }
+    }
+}
+
+#[tokio::test]
+async fn revisions_never_reset_and_retirement_budget_fails_closed() {
+    let (app, _) = fixture().await;
+    let (old, mut facts) = { let st = app.state.lock().unwrap(); (st.blocks["b"].revision, st.blocks["b"].facts.clone()) };
+    app.write_facts(Change::Remove { bid:"b".into(), incarnation:"run".into(), reason:json!({"reason":"exited"}) }).await.unwrap();
+    facts["ref"] = json!("c");
+    app.write_facts(Change::Refresh { bid:"c".into(), session:"s".into(), base:None, facts:facts.clone() }).await.unwrap();
+    assert!(app.state.lock().unwrap().blocks["c"].revision > old);
+    {
+        let mut state = app.state.lock().unwrap();
+        for n in 0..facts::MAX_REGISTRATION_REFS-2 { state.removed.insert(format!("retired-{n}")); }
+        assert_eq!(state.blocks.len() + state.removed.len(), facts::MAX_REGISTRATION_REFS);
+    }
+    facts["ref"] = json!("overflow");
+    assert!(app.write_facts(Change::Refresh { bid:"overflow".into(), session:"s".into(), base:None, facts }).await.is_err());
+    assert!(app.provider.is_closed());
+    let state = app.state.lock().unwrap();
+    assert!(state.removed.contains("b"));
+    assert!(!state.blocks.contains_key("overflow"));
 }
