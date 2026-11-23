@@ -66,7 +66,12 @@ impl Catalog {
                     let state=if core_provides(&cap,major) {
                         row["providers"]=json!([{"name":"vqro","display_status":"core"}]);"satisfied"
                     } else {
-                        let offered=providers.get(&cap).map(Vec::as_slice).unwrap_or(&[]);
+                        // A family (`data/settings.page.*`) is met by any provider of a member (`data/settings.page.sidebar`).
+                        let family:Vec<(String,u64)>;
+                        let offered:&[(String,u64)]=match cap.strip_suffix('*') {
+                            Some(prefix)=>{family=providers.iter().filter(|(k,_)|k.starts_with(prefix)).flat_map(|(_,v)|v.iter().cloned()).collect();&family}
+                            None=>providers.get(&cap).map(Vec::as_slice).unwrap_or(&[]),
+                        };
                         let same:Vec<&(String,u64)>=offered.iter().filter(|(p,m)|*m==major && p!=name).collect();
                         for (p,_) in offered.iter().filter(|(p,_)|p!=name) {
                             used_by.entry(p.clone()).or_default().push(json!({"name":name,"cap":cap_text,"hard":hard,"display_status":status.get(name)}));
@@ -140,6 +145,22 @@ fn ui_status(row:&mut Value,want:&(String,u64),clients:&[Value]) {
         assert!(!super::core_provides("ability/vqro.principals",2));
     }
     use super::*;
+    #[test]fn a_family_need_is_met_by_a_provider_of_any_member(){
+        // testing-lead's report: settings works_with data/settings.page.* stayed "missing" though sidebar provides
+        // data/settings.page.sidebar.
+        let root=tempfile::tempdir().unwrap();
+        let write=|n:&str,v:Value|std::fs::write(root.path().join(format!("{n}.json")),v.to_string()).unwrap();
+        write("sidebar",json!({"name":"sidebar","provides":["data/settings.page.sidebar"]}));
+        write("settings",json!({"name":"settings","works_with":[{"cap":"data/settings.page.*"},"data/other.*"]}));
+        let specs:Vec<(String,u64,Value)>=["sidebar","settings"].iter().map(|n|(n.to_string(),0,json!({"manifest":format!("{n}.json")}))).collect();
+        let mut catalog=Catalog::new(root.path().into());catalog.refresh(&specs);
+        let status:BTreeMap<String,String>=[("sidebar","running"),("settings","running")].iter().map(|(a,b)|(a.to_string(),b.to_string())).collect();
+        let deps=catalog.dependencies(&status,&[]);
+        let w=&deps["settings"]["works_with"];
+        assert_eq!(w[0]["status"],"satisfied");assert_eq!(w[0]["providers"][0]["name"],"sidebar");
+        assert_eq!(w[1]["status"],"missing","a family nobody provides");
+        assert_eq!(deps["sidebar"]["used_by"][0]["name"],"settings");
+    }
     #[test]fn dependencies_report_satisfied_off_missing_version_and_reverse_users(){
         let root=tempfile::tempdir().unwrap();
         let write=|n:&str,v:Value|std::fs::write(root.path().join(format!("{n}.json")),v.to_string()).unwrap();

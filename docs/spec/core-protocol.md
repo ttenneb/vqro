@@ -1684,7 +1684,8 @@ Fields:
 - `provides: [capability]`, `needs: [capability | {cap, suggest?, why?}]`, `works_with: [capability | {cap, suggest?,
   without?}]` (D29): what the extension offers, what its main purpose requires, and what it merely works better with.
   A capability is `kind/name[@major]` (major defaults to 1): `command/<command>`, `view/<view>` (a trailing `*` names a
-  view family, `view/agent-*`), `data/<live data name>`, `doc/<workspace key>`, `ability/<name>` (`vqro.terminals`,
+  family, `view/agent-*`; a family in `needs`/`works_with`, such as `data/settings.page.*`, is met by any provider of
+  a member, `data/settings.page.sidebar`), `data/<live data name>`, `doc/<workspace key>`, `ability/<name>` (`vqro.terminals`,
   `vqro.agents`, `vqro.resource.forget`; third parties use their own namespace) and `ui/<client feature>`. `suggest`
   names a provider to offer for enabling or installing; any provider of the capability satisfies the need. The core
   provides `command/vqro.*` and the spec-defined shared settings `doc/settings/tui`, `doc/settings/theme` and
