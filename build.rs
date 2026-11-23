@@ -1,7 +1,10 @@
 //! Builds the vendored libghostty-vt (Ghostty's terminal emulation library, MIT) with Zig and links it statically,
 //! for the TUI's `libghostty` terminal engine. Adapted from herdr's build.rs (Apache-2.0).
 //!
-//! The library is built out of tree (`OUT_DIR`), so the vendored source stays untouched. Environment:
+//! The library is built out of tree into a verified per-user content cache, shared by worktrees and profiles.
+//! `VQRO_LIBGHOSTTY_CACHE` overrides the cache root; `off` disables sharing and builds in `OUT_DIR` for audits.
+//! `OUT_DIR/libghostty-cache.json` records the key, reuse/build result, and elapsed time without Cargo warnings.
+//! Environment:
 //! `ZIG` (the zig binary; else `zig` on PATH when it is the version the source needs, else a user-local
 //! `~/.local/zig-<version>/zig`; the pinned source needs Zig 0.17.1), `LIBGHOSTTY_VT_OPTIMIZE`
 //! (default `ReleaseFast`), `LIBGHOSTTY_VT_SIMD` (default on), `LIBGHOSTTY_VT_ZIG_PKG_DIR` (where Zig keeps the
@@ -9,6 +12,9 @@
 //! machine, never inside the vendored tree). Offline builds work once that directory holds the packages the
 //! library needs (see `vendor/libghostty-vt.notices.md`). Pin and local patches: `vendor/libghostty-vt.vendor.json`,
 //! `vendor/libghostty-vt.patches.md`.
+#[path = "build/ghostty_cache.rs"]
+mod ghostty_cache;
+
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -91,23 +97,29 @@ fn home() -> Option<PathBuf> {
 /// `%LOCALAPPDATA%` on a Windows host, else `~/.cache`) under `vqro/zig-pkg`, else (no home) the build's own out dir.
 fn pkg_dir() -> PathBuf {
     if let Ok(dir) = env::var("LIBGHOSTTY_VT_ZIG_PKG_DIR") { return dir.into(); }
+    cache_root().join("zig-pkg")
+}
+
+fn cache_root() -> PathBuf {
     let local_app_data = if cfg!(windows) { env::var_os("LOCALAPPDATA").filter(|d| !d.is_empty()).map(PathBuf::from) } else { None };
-    let cache = env::var("XDG_CACHE_HOME").ok().filter(|d| !d.is_empty()).map(PathBuf::from)
+    env::var_os("XDG_CACHE_HOME").filter(|d| !d.is_empty()).map(PathBuf::from)
         .or(local_app_data)
-        .or_else(|| home().map(|h| h.join(".cache")));
-    match cache {
-        Some(cache) => cache.join("vqro").join("zig-pkg"),
-        None => PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("zig-pkg"),
-    }
+        .or_else(|| home().map(|h| h.join(".cache")))
+        .map(|base| base.join("vqro"))
+        .unwrap_or_else(|| PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")))
 }
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=build/ghostty_cache.rs");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt.vendor.json");
+    println!("cargo:rerun-if-changed=vendor/libghostty-vt.sha256");
+    // All source files (including additions), not only the previously known source subdirectories.
+    println!("cargo:rerun-if-changed=vendor/libghostty-vt");
     for path in ["build.zig", "build.zig.zon", "include", "pkg", "src", "LIB_VERSION"] {
         println!("cargo:rerun-if-changed=vendor/libghostty-vt/{path}");
     }
-    for var in ["LIBGHOSTTY_VT_OPTIMIZE", "LIBGHOSTTY_VT_SIMD", "LIBGHOSTTY_VT_ZIG_PKG_DIR", "ZIG"] {
+    for var in ["LIBGHOSTTY_VT_OPTIMIZE", "LIBGHOSTTY_VT_SIMD", "LIBGHOSTTY_VT_ZIG_PKG_DIR", "ZIG", "VQRO_LIBGHOSTTY_CACHE", "XDG_CACHE_HOME", "HOME", "USERPROFILE", "LOCALAPPDATA"] {
         println!("cargo:rerun-if-env-changed={var}");
     }
 
@@ -131,35 +143,70 @@ fn main() {
         .status()
         .unwrap_or_else(|e| panic!("libghostty-vt needs Zig {} (set ZIG to its path): running `{zig}` failed: {e}", wanted_zig(&vendored)));
     assert!(check.success(), "src/tui/ghostty/bindings.rs no longer matches the vendored libghostty-vt headers (bindings_check.c)");
-    let mut command = Command::new(&zig);
-    command
-        .arg("build")
-        .arg("-Demit-lib-vt")
-        .arg(format!("-Doptimize={optimize}"))
-        .arg(format!("-Dsimd={simd}"))
-        .arg(format!("-Dtarget={}", zig_target(&target)))
-        .arg("-Demit-xcframework=false")
-        // Only the parts vqro uses: grid references and colors (the TUI engine), snapshot decoding and the VT
-        // formatter (`vqro-rex` turns a Rex terminal's initial Ghostty snapshot into a VT repaint; nothing in the TUI
-        // calls them). The rest is left out of the archive, so it is neither linked nor reachable: no Kitty graphics
-        // (and its image decoder), selection, search, render state or input encoding. Left-out functions return
-        // GHOSTTY_UNSUPPORTED.
-        .arg("-Dvt-features=-all,+grid-introspection,+color,+snapshot,+formatter")
-        .arg("--prefix")
-        .arg(&out)
-        .arg("--cache-dir")
-        .arg(out.join("zig-cache"));
-    // Zig 0.17 puts fetched packages in the project (`zig-pkg/`, here the vendored tree) unless ZIG_LOCAL_PKG_DIR
-    // names another place. Packages are named by their content hash (build.zig.zon), so one shared directory per
-    // machine serves every checkout, worktree and target, and a fresh checkout needs no network once it is filled.
-    // (Zig 0.17.1's `--system` offline mode panics, so the package directory is the offline route.)
-    command.env("ZIG_LOCAL_PKG_DIR", pkg_dir());
-    let status = command.current_dir(&vendored).status().unwrap_or_else(|e| {
-        panic!("libghostty-vt needs Zig {} to build (set ZIG to its path): running `{zig}` failed: {e}", wanted_zig(&vendored))
-    });
-    assert!(status.success(), "zig build of the vendored libghostty-vt failed: {status}");
-
-    let lib = out.join("lib");
+    let started = std::time::Instant::now();
+    let version = Command::new(&zig).arg("version").output().expect("zig version");
+    assert!(version.status.success(), "zig version failed");
+    let flags = vec![
+        "build".into(),
+        "-Demit-lib-vt".into(),
+        format!("-Doptimize={optimize}"),
+        format!("-Dsimd={simd}"),
+        format!("-Dtarget={}", zig_target(&target)),
+        "-Demit-xcframework=false".into(),
+        // Only the grid/color engine, snapshot decoder and VT formatter; no other VT features.
+        "-Dvt-features=-all,+grid-introspection,+color,+snapshot,+formatter".into(),
+        "--prefix".into(), "{prefix}".into(),
+        "--cache-dir".into(), "{work}".into(),
+    ];
+    let inputs = ghostty_cache::Inputs {
+        schema: ghostty_cache::SCHEMA,
+        source: ghostty_cache::source_digest(&vendored).expect("hash vendored libghostty-vt source"),
+        target: target.clone(),
+        optimize,
+        zig_version: String::from_utf8(version.stdout).expect("UTF-8 zig version").trim().into(),
+        flags,
+    };
+    let build = |prefix: &std::path::Path, work: &std::path::Path| -> std::io::Result<()> {
+        let mut command = Command::new(&zig);
+        // Execute exactly the flags in the key. Only storage locations are checkout-independent placeholders.
+        for flag in &inputs.flags {
+            match flag.as_str() {
+                "{prefix}" => { command.arg(prefix); }
+                "{work}" => { command.arg(work); }
+                other => { command.arg(other); }
+            }
+        }
+        // Preserve the existing content-addressed package directory; never fetch in the vendored tree.
+        // Zig 0.17.1's --system mode panics; pre-populated packages are required for offline builds.
+        command.env("ZIG_LOCAL_PKG_DIR", pkg_dir());
+        let status = command.current_dir(&vendored).status()?;
+        if !status.success() { return Err(std::io::Error::other(format!("zig build failed: {status}"))); }
+        if target.contains("-windows-") && !target.contains("-windows-msvc") {
+            // GNU linking looks for lib<name>.a; include the alias in the verified immutable entry.
+            fs::copy(prefix.join("lib/ghostty-vt-static.lib"), prefix.join("lib/libghostty-vt-static.a"))?;
+        }
+        Ok(())
+    };
+    let required = if target.contains("-windows-msvc") { "lib/ghostty-vt-static.lib" }
+        else if target.contains("-windows-") { "lib/libghostty-vt-static.a" }
+        else { "lib/libghostty-vt.a" };
+    let cache_setting = env::var_os("VQRO_LIBGHOSTTY_CACHE");
+    let (prefix, result) = if cache_setting.as_deref() == Some(std::ffi::OsStr::new("off")) {
+        build(&out, &out.join("zig-cache")).expect("uncached libghostty-vt build");
+        (out.clone(), "disabled")
+    } else {
+        let root = cache_setting.filter(|p| !p.is_empty()).map(PathBuf::from)
+            .unwrap_or_else(|| cache_root().join("libghostty-vt"));
+        let entry = ghostty_cache::ensure(&root, &inputs, &[required], build).expect("verified libghostty-vt cache");
+        (entry.path, if entry.reused { "reused" } else { "built" })
+    };
+    let note = serde_json::json!({"key": inputs.key(), "result": result, "elapsed_ms": started.elapsed().as_millis()});
+    fs::write(out.parent().expect("OUT_DIR").join("libghostty-cache.json"), serde_json::to_vec_pretty(&note).expect("cache note")).expect("write cache note");
+    println!("cargo:rustc-env=VQRO_LIBGHOSTTY_CACHE_KEY={}", inputs.key());
+    // Cargo may reuse build-script output on later links: watch the installed entry too, so removal or
+    // corruption invalidates that output and forces verification/rebuild before another link.
+    println!("cargo:rerun-if-changed={}", prefix.display());
+    let lib = prefix.join("lib");
     println!("cargo:rustc-link-search=native={}", lib.display());
     if target.contains("apple-darwin") {
         println!("cargo:rustc-link-arg={}", lib.join("libghostty-vt.a").display());
@@ -168,7 +215,6 @@ fn main() {
         println!("cargo:rustc-link-lib=static=ghostty-vt-static");
     } else if target.contains("-windows-") {
         // Zig names the GNU-ABI archive the Windows way too, but GNU linking looks for `lib<name>.a`.
-        fs::copy(lib.join("ghostty-vt-static.lib"), lib.join("libghostty-vt-static.a")).expect("libghostty-vt static archive");
         println!("cargo:rustc-link-lib=static=ghostty-vt-static");
     } else {
         println!("cargo:rustc-link-lib=static=ghostty-vt");
