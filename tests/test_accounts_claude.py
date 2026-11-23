@@ -38,8 +38,7 @@ class Fake:
                       'account': 'b', '_account_revision': 7, 'automatic': True,
                       'source_incarnation': 'birth', 'source_epoch': 'e1', 'source_account': 'a',
                       'session': 'native-session', 'native_episode': 'native-result-uuid',
-                      'authorization': {'mode': 'auto', 'principal': None, 'owner_revision': None,
-                                        'background_loss_disclosed': False}}
+                      'authorization': {'mode': 'auto', 'principal': None, 'owner_revision': None}}
         self.owner = {'version': 3, 'value': 'workspace-owner'}
         self.result = {'outcome': 'observed', 'effect': 'e7', 'data': {
             'started': True, 'requested_session': 'native-session', 'session': 'native-session', 'resume_confirmed': True,
@@ -330,7 +329,12 @@ class CutoverTests(unittest.TestCase):
             self.ext.claim['authorization'] = authorization
             self.refused()
 
-    def test_auto_requires_explicit_false_nested_disclosure(self):
+    def test_canonical_auto_without_disclosure_defaults_false(self):
+        self.assertNotIn('background_loss_disclosed', self.ext.claim['authorization'])
+        self.run_cutover()
+        self.assertIs(self.ext.native()[0][1]['args']['allow_background_loss'], False)
+
+    def test_auto_optional_nested_disclosure_must_be_false_if_present(self):
         for value in (None, True, 'false'):
             self.ext.claim['authorization']['background_loss_disclosed'] = value
             self.refused()

@@ -58,7 +58,8 @@ claim reads must bind `source_incarnation`, `source_epoch`, `source_account`, na
 `session` and `native_episode` to the source actually dispatched. Common's episode
 hash alone does not distinguish two native limit results within the same epoch.
 AUTO requires protected `claim.authorization`
-`{mode:auto,principal:null,owner_revision:null,background_loss_disclosed:false}`.
+`{mode:auto,principal:null,owner_revision:null}`; absent disclosure defaults false ONLY for AUTO.
+An explicit nested false has the same meaning; true/malformed values are refused.
 OFFER requires protected `claim.authorization`
 `{mode:offer,principal:<core-authenticated owner>,owner_revision,background_loss_disclosed:true}`;
 there is no duplicate root disclosure flag and a caller flag supplies no authority;

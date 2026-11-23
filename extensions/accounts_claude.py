@@ -133,11 +133,12 @@ class ClaudeCutover:
                 or any(claim.get(key) != value for key, value in expected.items())):
             raise VqroError('matching protected account cutover claim is required; no switch', 'conflict')
         authority = claim.get('authorization')
-        disclosed = authority.get('background_loss_disclosed') if isinstance(authority, dict) else None
+        disclosed = authority.get('background_loss_disclosed', False) if isinstance(authority, dict) else None
         if type(disclosed) is not bool or disclosed != (not args['automatic']):
             raise VqroError('protected background-loss disclosure does not match the cutover mode; no switch', 'forbidden')
         if args['automatic']:
-            if authority != {'mode': 'auto', 'principal': None, 'owner_revision': None, 'background_loss_disclosed': False}:
+            canonical = {'mode': 'auto', 'principal': None, 'owner_revision': None}
+            if authority != canonical and authority != {**canonical, 'background_loss_disclosed': False}:
                 raise VqroError('protected automatic cutover authority is missing; no switch', 'forbidden')
         else:
             if (not isinstance(authority, dict) or set(authority) != {'mode', 'principal', 'owner_revision', 'background_loss_disclosed'}

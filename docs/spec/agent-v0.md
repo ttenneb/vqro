@@ -724,8 +724,8 @@ running tasks/subagents. True permits restarting despite that background work. T
 only this execution flag, never account policy or protected claims. The accounts callback passes true
 ONLY for an explicitly clicked OFFER with protected current-owner authority and
 `claim.authorization.background_loss_disclosed:true` proving that the pane showed
-**background work may be lost**. AUTO requires the same protected field false and always passes the
-execution flag false; no duplicate root/caller flag supplies authority. NOTIFY never restarts.
+**background work may be lost**. AUTO treats an absent protected disclosure field as false, refuses
+true/malformed values, and always passes the execution flag false; no duplicate root/caller flag supplies authority. NOTIFY never restarts.
 
 AUTO additionally requires native turn-over/idle with a retained positive latest subscription-limit
 episode, an empty **vqro-owned input ledger**, and a complete fresh native background level with no
