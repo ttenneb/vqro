@@ -209,7 +209,7 @@ class InstallExtensionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="vqro-test-install-") as temporary:
             home = Path(temporary)
             destination = home / ".local/share/vqro/extensions"
-            shutil.copytree(ROOT / "extensions", destination, ignore=shutil.ignore_patterns("__pycache__"))
+            shutil.copytree(ROOT / "extensions", destination, ignore=shutil.ignore_patterns("__pycache__", "node_modules"))  # dev packages are never installed
             (destination / "tier1").mkdir(exist_ok=True)
             shutil.copyfile(ROOT / "integrations/pi/vqro-pull.ts", destination / "tier1/vqro-pull.ts")
             env = {"HOME": str(home), "PATH": os.environ.get("PATH", os.defpath)}
