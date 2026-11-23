@@ -689,6 +689,47 @@ dialogs remain answerable; nothing is auto-approved.
    end evidence.
 8. **Reserved names, no v0 semantics:** `agent.authenticate`, `agent.blob`, rewind/checkpoints.
 
+### 6.9 Claude execution-host restart (provider-specific, provisional)
+
+A route-1 Claude bridge may declare `claude.restart` for its one owned process. This is an
+execution-host operation, not a native Claude account-switch API or a stable cross-runtime v0 module.
+It uses `resource.invoke` on that endpoint with
+`{v:0,epoch,session,account,episode,target:{account,ref,host,revision},allow_background_loss?:false}`.
+`ref` is an opaque host-keychain handle, never a token. `host` is the authenticated runtime
+provider's `provider.host`, not the native process's `data.agent.host`. Under admission fencing the
+adapter compares the exact source epoch, observed session, configured account and latest native
+limit episode; it stops only its child, observes exit, and invokes its configured private helper once
+with `claude --resume <exact session>`. Unknown effects never authorize retry, fallback or replay.
+
+`allow_background_loss` is a boolean, default false. False refuses with a reported reason such as
+`background_work` if the complete fresh native background level is unknown/incomplete or contains
+running tasks/subagents. True permits restarting despite that background work. The adapter interprets
+only this execution flag, never account policy or protected claims. The accounts callback passes true
+ONLY for an explicitly clicked OFFER with protected current-owner authority and proof that the pane
+showed **background work may be lost**; AUTO always passes false. NOTIFY never restarts.
+
+AUTO additionally requires native turn-over/idle with a retained positive latest subscription-limit
+episode, an empty **vqro-owned input ledger**, and a complete fresh native background level with no
+running work. The vqro witness is `data.agent._claude.input_ledger
+{v:0,source:"vqro-ledger",epoch,complete:true,pending:0}` with an epoch matching the agent;
+`pending` includes own input reservations not yet terminally correlated, including unresolved old epochs.
+OFFER also requires this complete empty ledger: there is no accepted-input-loss override. Native
+`background:[]` is published only after a complete actual native background level (`tasks:[]`); missing,
+nonempty or malformed levels stay unknown. Required `incomplete` cuts/malformed evidence cannot be treated
+as complete. The native queue stays unknown when native APIs do not establish completeness; neither
+idle, a user-send count nor a partial interrupt receipt is represented as native `queue:[]`. Unknown,
+cut or malformed required evidence means no AUTO yet; coordination may reconsider the retained episode
+at a later qualifying idle within its once-only and hourly budgets. The producer invalidates the
+retained episode on any newer turn start/result, allowed-rate observation, new epoch/process, and
+conservatively before reserving new valid input. No timer invents native recovery.
+
+Reply data distinguishes `started:true` (successful native control initialization), `requested_session`,
+`resume_confirmed`, optional native-observed `session`, configured target `account`, and new `epoch`.
+The requested session is never substituted for native confirmation. A healthy initialized process
+without session readback is labelled **resumed session <id> on account B (not confirmed)**; AUTO may
+then submit its one new visible vqro-labelled continuation, never old input. The shared accounts layer
+owns that protected intent and continuation; the native restart operation does neither.
+
 ## 7. Lifecycle evidence
 
 | `lifecycle` | Evidence (only) |

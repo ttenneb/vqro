@@ -19,18 +19,42 @@ def text(value, maximum=256):
     return isinstance(value, str) and 0 < len(value.encode('utf-8', errors='replace')) <= maximum and '\0' not in value
 
 
-def eligible_episode(row):
+def evidence_complete(facts, required):
+    markers = facts.get('incomplete', [])
+    if not isinstance(markers, list) or any(not isinstance(mark, str) or not mark or not mark.isprintable() for mark in markers):
+        return False
+    return not any(mark == path or mark.startswith((path + '.', path + '['))
+                   or path.startswith((mark + '.', mark + '[')) for mark in markers for path in required)
+
+
+def eligible_episode(row, automatic=True):
     """Pure scheduler predicate: return the current native limit UUID or None.
 
     Producer contract: the retained witness is invalidated on ANY newer native
     turn start/terminal result, allowed-rate observation, epoch or incarnation.
     Presence is not reconstructed from cached timers, blocked state or old input.
+    Native queue remains unknown: use the producer's own epoch-bound input ledger;
+    AUTO also requires its complete native empty background level. OFFER background
+    loss is separately authorized by the protected, disclosed human claim.
     Native restart admission independently fences latest work and quiescence.
     """
-    if not isinstance(row, dict) or row.get('kind') != 'agent' or not policy.live(row):
+    if type(automatic) is not bool or not isinstance(row, dict) or row.get('kind') != 'agent' or not policy.live(row):
         return None
     facts = policy.facts(row)
-    if facts.get('state') != 'idle' or not isinstance(facts.get('queue'), list) or facts['queue']:
+    required = ('state', '_claude.input_ledger', 'session.id', 'epoch', 'account.id', 'caps.' + OP,
+                'availability.native.subscription_limit', 'availability.native.episode',
+                'availability.native.session_id', 'availability.native.terminal_reason')
+    if automatic:
+        required += ('background',)
+    if not evidence_complete(facts, required) or facts.get('state') != 'idle':
+        return None
+    private = facts.get('_claude')
+    ledger = private.get('input_ledger') if isinstance(private, dict) else None
+    if (not isinstance(ledger, dict) or type(ledger.get('v')) is not int or ledger['v'] != 0
+            or ledger.get('source') != 'vqro-ledger' or ledger.get('epoch') != facts.get('epoch')
+            or ledger.get('complete') is not True or type(ledger.get('pending')) is not int or ledger['pending'] != 0):
+        return None
+    if automatic and (not isinstance(facts.get('background'), list) or facts['background']):
         return None
     session = facts.get('session')
     caps = facts.get('caps')
@@ -52,15 +76,15 @@ class ClaudeCutover:
         self.ext = ext
         ext.command('accounts.cutover.claude', 'Switch this Claude agent to another account')(self.restart)
 
-    def source(self, resource, episode):
+    def source(self, resource, episode, automatic):
         reply = self.ext.vqro.call('resource.list', {'id': resource})
         rows = reply.get('resources') if isinstance(reply, dict) else None
         if not isinstance(rows, list) or len(rows) != 1:
             raise VqroError('Claude source is unavailable; no switch', 'stale')
         row = rows[0]
-        if (not isinstance(row, dict) or row.get('id') != resource or eligible_episode(row) is None
+        if (not isinstance(row, dict) or row.get('id') != resource or eligible_episode(row, automatic=automatic) is None
                 or policy.episode(row) != episode):
-            raise VqroError('Claude needs a current native limit episode, explicit idle and empty queue; no switch', 'stale')
+            raise VqroError('Claude needs a current native episode, idle and complete empty work witnesses; no switch', 'stale')
         provider = self.ext.providers.get(row.get('provider')) or {}
         declarations = provider.get('capabilities')
         host = provider.get('host')
@@ -105,8 +129,9 @@ class ClaudeCutover:
             if authority != {'mode': 'auto', 'principal': None, 'owner_revision': None}:
                 raise VqroError('protected automatic cutover authority is missing; no switch', 'forbidden')
         else:
-            if (not isinstance(authority, dict) or set(authority) != {'mode', 'principal', 'owner_revision'}
-                    or authority.get('mode') != 'offer' or not text(authority.get('principal'))
+            if (not isinstance(authority, dict) or set(authority) != {'mode', 'principal', 'owner_revision', 'background_loss_disclosed'}
+                    or authority.get('mode') != 'offer' or authority.get('background_loss_disclosed') is not True
+                    or not text(authority.get('principal'))
                     or type(authority.get('owner_revision')) is not int or authority['owner_revision'] <= 0):
                 raise VqroError('protected human offer authority is missing; no switch', 'forbidden')
             owner = self.ext.vqro.call('workspace.get', {'key': 'doc/principals/owner'})
@@ -121,14 +146,14 @@ class ClaudeCutover:
                 or type(args.get('automatic')) is not bool or not text(args.get('_claim'), 128)):
             raise VqroError('invalid Claude cutover request', 'invalid')
         self.ext.fresh()
-        source, host = self.source(args['resource'], args['episode'])
+        source, host = self.source(args['resource'], args['episode'], args['automatic'])
         facts = policy.facts(source)
         expected = {'incarnation': source['incarnation'], 'epoch': facts['epoch'],
                     'session': facts['session']['id'], 'account': policy.configured_id(source),
                     'episode': facts['availability']['native']['episode']}
         target = self.target(args, expected['account'], host)
         self.claimed(args, host, expected)
-        current, current_host = self.source(args['resource'], args['episode'])
+        current, current_host = self.source(args['resource'], args['episode'], args['automatic'])
         current_facts = policy.facts(current)
         if (current_host != host or current['incarnation'] != expected['incarnation']
                 or current_facts.get('session') != facts['session']
@@ -141,7 +166,8 @@ class ClaudeCutover:
         # One attempt. Native admission owns the atomic epoch/session/account/child fence.
         # Keychain access occurs only in the execution-host helper, not this extension.
         native_args = {key: expected[key] for key in ('epoch', 'session', 'account', 'episode')}
-        native_args.update(v=0, target={'account': target['id'], 'ref': target['secret_ref'],
+        native_args.update(v=0, allow_background_loss=not args['automatic'],
+                           target={'account': target['id'], 'ref': target['secret_ref'],
                                       'host': host, 'revision': args['_account_revision']})
         result = self.ext.vqro.call('resource.invoke', {'resource': args['resource'], 'op': OP, 'args': native_args})
         data = result.get('data') if isinstance(result, dict) else None

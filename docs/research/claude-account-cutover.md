@@ -13,11 +13,12 @@ This slice implements the callback, host-helper credential mode and fake boundar
 regressions. Native `claude.restart` is a required separate route-1 adapter seam.
 The callback fails closed when the agent/provider do not declare it; fake tests do
 not certify native process restart, subscription acceptance or session readback.
-The pinned Claude SDK has not established a complete known-empty input queue witness:
-route-1 currently reports `queue:null`, which this callback refuses. User-only queued
-counts, main-thread interrupt receipts and idle alone are not substituted for `[]`.
-This is an unresolved native-evidence blocker for actual automatic cutover, not a
-manual-only replacement for the required feature.
+The pinned Claude SDK does not establish a complete known-empty native queue witness;
+route-1 therefore keeps `queue:null`. The approved AUTO eligibility seam instead uses
+vqro's own epoch-bound input ledger and a complete native background level, below.
+User-only queued counts, partial interrupt receipts and idle alone are never replaced
+with native `[]`. Actual producer/restart integration and runtime qualification remain
+separate from this callback's fake tests.
 No real keychain, Claude login, transcript or model request is used by the tests.
 
 ## Credential boundary
@@ -57,9 +58,10 @@ claim reads must bind `source_incarnation`, `source_epoch`, `source_account`, na
 `session` and `native_episode` to the source actually dispatched. Common's episode
 hash alone does not distinguish two native limit results within the same epoch.
 AUTO requires protected authorization `{mode:auto,principal:null,owner_revision:null}`.
-OFFER requires protected `{mode:offer,principal:<core-authenticated owner>,owner_revision}`;
+OFFER requires protected `{mode:offer,principal:<core-authenticated owner>,owner_revision,background_loss_disclosed:true}`;
 the callback re-reads `doc/principals/owner` and compares its exact value/version at
-both checks. No caller-supplied authority or NOTIFY restart is accepted. Common policy
+both checks. The protected disclosure means the pane showed **background work may be lost**
+before that human click; no caller-supplied boolean supplies authority. No NOTIFY restart is accepted. Common policy
 alone owns cross-epoch native-episode dedup and the rolling-hour automatic budget.
 Repeated events/uncertain dispatches are never automatically replayed by the caller.
 
@@ -74,7 +76,7 @@ This is a coordinated route-1 extension seam, not a stable cross-runtime standar
 
 ```json
 {"resource":"r2","op":"claude.restart","args":{
-  "v":0,"epoch":"e1","session":"native-session","account":"a",
+  "v":0,"epoch":"e1","session":"native-session","account":"a","allow_background_loss":false,
   "episode":"<native ended limit result UUID>",
   "target":{"account":"b","ref":"<opaque32hex>","host":"r1","revision":7}
 }}
@@ -99,9 +101,20 @@ associated with an ended `blocking_limit` result and the same native session. Cl
 availability `blocked` state is turn-scoped and clears on the terminal result; an idle
 agent with that retained episode still qualifies. The callback does not require
 `availability.state == blocked`, and an idle agent with no positive episode never
-qualifies. `eligible_episode(row)` is a pure shared scheduling predicate returning the
-native episode UUID or null: it requires explicit `state:idle` and an observed empty
-`queue:[]`, never an absent/unknown queue. Both callback source/claim boundaries use it.
+qualifies. `eligible_episode(row, automatic=True)` is a pure shared scheduling predicate
+returning the native episode UUID or null. Both callback source/claim boundaries use it.
+It requires explicit `state:idle` plus `data.agent._claude.input_ledger`
+`{v:0,source:"vqro-ledger",epoch:<same epoch>,complete:true,pending:0}`. This ledger is
+vqro's own input reservations not terminally correlated, including unresolved old epochs;
+unknown completeness/pending or an epoch mismatch refuses. It is not a native queue snapshot.
+AUTO additionally requires `background:[]`, published ONLY after a complete actual native
+`background_tasks_changed tasks:[]` level. Missing/nonempty/malformed background is unknown
+and refuses AUTO. Required cut/malformed `incomplete` evidence also refuses; unrelated cut
+fields do not disable the operation. Native `queue:null` remains unchanged and is not read
+as empty. With protected OFFER disclosure the callback passes `allow_background_loss:true`
+and may accept unknown/running background work; AUTO always sends false. The adapter with
+false independently refuses unknown/incomplete/running background work with a reason such
+as `background_work`, while true permits its restart. The adapter never interprets claims.
 The producer MUST invalidate the retained `availability.native` episode on ANY newer
 native turn start or terminal result, an allowed-rate observation, or epoch/incarnation
 change. Thus presence denotes the latest qualifying terminal result, not a historical

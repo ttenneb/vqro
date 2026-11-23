@@ -18,7 +18,9 @@ class Fake:
         self.providers = {'runtime': {'role': 'runtime', 'host': 'r1', 'capabilities': {'claude.restart': {}}}}
         self.source = {'id': 'r2', 'kind': 'agent', 'incarnation': 'birth', 'provider': 'runtime',
                        'host': 'r1', 'available': True, 'data': {'agent': {
-                           'v': 0, 'lifecycle': 'live', 'state': 'idle', 'queue': [], 'epoch': 'e1',
+                           'v': 0, 'lifecycle': 'live', 'state': 'idle', 'queue': None, 'epoch': 'e1',
+                           '_claude': {'input_ledger': {'v': 0, 'source': 'vqro-ledger', 'epoch': 'e1',
+                                                       'complete': True, 'pending': 0}}, 'background': [],
                            'session': {'id': 'native-session'}, 'account': {'id': 'a'},
                            'caps': {'claude.restart': {}, 'agent.availability': {'reasons': ['quota']}},
                            'availability': {'state': 'blocked', 'reason': 'quota', 'native': {
@@ -98,6 +100,7 @@ class CutoverTests(unittest.TestCase):
         self.assertEqual({k: params['args'][k] for k in ('epoch', 'session', 'account', 'episode')},
                          {'epoch': 'e1', 'session': 'native-session', 'account': 'a', 'episode': 'native-result-uuid'})
         self.assertEqual(params['args']['target'], {'account': 'b', 'ref': 'b' * 32, 'host': 'r1', 'revision': 7})
+        self.assertIs(params['args']['allow_background_loss'], False)
         self.assertEqual((result['session'], result['account'], result['epoch']), ('native-session', 'b', 'e2'))
         self.assertTrue(result['process_started'])
         self.assertTrue(result['session_confirmed'])
@@ -144,6 +147,21 @@ class CutoverTests(unittest.TestCase):
         self.assertEqual(caught.exception.wire_error, wire)
         self.assertEqual(len(self.ext.native()), 1)
 
+    def test_required_incomplete_or_malformed_markers_never_invoke_actual_callback(self):
+        facts = self.ext.source['data']['agent']
+        for markers in (['state'], ['_claude.input_ledger'], ['_claude.input_ledger.pending'],
+                        ['background'], ['background[0]'], ['session'], ['session.id'],
+                        ['availability.native'], ['availability.native.episode'], ['epoch'],
+                        ['account.id'], ['caps.claude.restart'], None, {}, [None], ['']):
+            facts['incomplete'] = markers
+            self.refused()
+        facts.pop('incomplete')
+
+    def test_unrelated_incomplete_markers_do_not_disable_valid_episode(self):
+        self.ext.source['data']['agent']['incomplete'] = ['history', 'items', 'session.title', 'queue']
+        result = self.run_cutover()
+        self.assertTrue(result['process_started'])
+
     def test_pure_eligibility_has_no_rpc_and_newer_work_clears_native_witness(self):
         row = copy.deepcopy(self.ext.source)
         self.assertEqual(eligible_episode(row), 'native-result-uuid')
@@ -165,14 +183,69 @@ class CutoverTests(unittest.TestCase):
         self.assertTrue(result['process_started'])
         self.assertEqual(len(self.ext.native()), 1)
 
-    def test_running_or_unknown_nonempty_queue_never_dispatches_episode(self):
+    def test_running_or_nonempty_unknown_own_ledger_never_dispatches_episode(self):
         facts = self.ext.source['data']['agent']
         facts['state'] = 'running'
         self.refused()
         facts['state'] = 'idle'
-        for queued in (None, [{'message': 'pending'}], 'unknown'):
-            facts['queue'] = queued
+        ledger = facts['_claude']['input_ledger']
+        for field, value in (('pending', 1), ('pending', None), ('pending', False),
+                             ('complete', False), ('epoch', 'old'), ('source', 'native-queue')):
+            original = copy.deepcopy(ledger)
+            ledger[field] = value
             self.refused()
+            ledger.clear()
+            ledger.update(original)
+
+    def test_auto_requires_complete_native_background_level_with_no_running_work(self):
+        for background in (None, [{'id': 'running-task'}], {}, 'unknown'):
+            self.ext.source['data']['agent']['background'] = background
+            self.refused()
+
+    def test_ledger_or_background_change_before_second_source_check_prevents_auto(self):
+        for field in ('ledger', 'background'):
+            original = copy.deepcopy(self.ext.source)
+            self.ext.calls.clear()
+            reads = []
+            def changed(method, args):
+                if method == 'resource.list':
+                    reads.append(method)
+                    if len(reads) == 2:
+                        facts = self.ext.source['data']['agent']
+                        if field == 'ledger':
+                            facts['_claude']['input_ledger']['pending'] = 1
+                        else:
+                            facts['background'] = [{'id': 'running'}]
+            self.ext.mutate = changed
+            self.refused()
+            self.assertEqual(len(reads), 2)
+            self.ext.source = original
+        self.ext.mutate = None
+
+    def test_offer_cannot_discard_pending_or_unknown_vqro_input(self):
+        self.args['automatic'] = False
+        self.ext.claim['automatic'] = False
+        self.ext.claim['authorization'] = {'mode': 'offer', 'principal': 'workspace-owner', 'owner_revision': 3,
+                                           'background_loss_disclosed': True}
+        for pending in (1, None):
+            self.ext.source['data']['agent']['_claude']['input_ledger']['pending'] = pending
+            self.refused()
+
+    def test_offer_may_accept_unknown_background_only_with_protected_disclosure(self):
+        self.args['automatic'] = False
+        self.ext.claim['automatic'] = False
+        self.ext.claim['authorization'] = {'mode': 'offer', 'principal': 'workspace-owner', 'owner_revision': 3,
+                                           'background_loss_disclosed': True}
+        self.ext.source['data']['agent']['background'] = None
+        result = self.run_cutover()
+        self.assertTrue(result['process_started'])
+        self.assertIs(self.ext.native()[0][1]['args']['allow_background_loss'], True)
+
+    def test_native_queue_stays_unknown_not_synthesized_from_own_ledger(self):
+        self.assertIsNone(self.ext.source['data']['agent']['queue'])
+        result = self.run_cutover()
+        self.assertTrue(result['process_started'])
+        self.assertIsNone(self.ext.source['data']['agent']['queue'])
 
     def test_new_running_turn_before_second_source_check_prevents_dispatch(self):
         reads = []
@@ -230,17 +303,30 @@ class CutoverTests(unittest.TestCase):
     def test_offer_requires_current_authenticated_owner_bound_in_protected_claim(self):
         self.args['automatic'] = False
         self.ext.claim['automatic'] = False
-        self.ext.claim['authorization'] = {'mode': 'offer', 'principal': 'workspace-owner', 'owner_revision': 3}
+        self.ext.claim['authorization'] = {'mode': 'offer', 'principal': 'workspace-owner', 'owner_revision': 3,
+                                           'background_loss_disclosed': True}
         self.run_cutover()
         self.assertEqual(len(self.ext.native()), 1)
+        self.assertIs(self.ext.native()[0][1]['args']['allow_background_loss'], True)
         self.ext.calls.clear()
         self.ext.owner['version'] = 4
         self.refused()
 
+    def test_offer_needs_protected_pane_disclosure_before_background_loss_flag(self):
+        self.args['automatic'] = False
+        self.ext.claim['automatic'] = False
+        authority = {'mode': 'offer', 'principal': 'workspace-owner', 'owner_revision': 3}
+        for disclosed in (None, False, 'true'):
+            self.ext.claim['authorization'] = dict(authority)
+            if disclosed is not None:
+                self.ext.claim['authorization']['background_loss_disclosed'] = disclosed
+            self.refused()
+
     def test_offer_owner_change_before_second_claim_read_prevents_dispatch(self):
         self.args['automatic'] = False
         self.ext.claim['automatic'] = False
-        self.ext.claim['authorization'] = {'mode': 'offer', 'principal': 'workspace-owner', 'owner_revision': 3}
+        self.ext.claim['authorization'] = {'mode': 'offer', 'principal': 'workspace-owner', 'owner_revision': 3,
+                                           'background_loss_disclosed': True}
         reads = []
         def changed(method, args):
             if method == 'workspace.get' and args['key'] == 'doc/principals/owner':
