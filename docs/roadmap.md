@@ -1,37 +1,97 @@
 # Roadmap
 
-**vqro is a working prototype, and fluid.** This page says where we are and what we think comes next; it is
-revised as we learn, not a commitment. Detail of what was built and when: `build-plan.md`.
+**vqro is a working prototype, and fluid.** This page is a living priority list: where we are and what comes next.
+It is revised as we learn, not a commitment, and there is no "finished" release cut planned. Detail of what was
+built and when: `build-plan.md`.
 
-> **2026-11-17: the human will revisit priorities after the current hardening and fixes.** Until then only daily
-> use and hardening are active; the platform and multi-machine streams below are candidates, not an order. The
-> multi-machine constraints (D23, confirmed) apply to all work now.
+## The aim (2026-11-20, confirmed 2026-11-23)
 
-## Where we are (2026-11-20)
+Switch agents and multiplexers without the interface changing. The first useful version means all three together:
+1. a dependable daily workspace for terminals and agents;
+2. the agent standard working on Pi and on another genuinely different runtime;
+3. the same setup across at least two multiplexers and two runtimes.
 
-Working and used daily over herdr-core on Linux:
-- Core: durable transactional store, event log with boot epochs, commands routed to owning connections, extension
-  supervisor with a lifetime channel, bounded streams and queues, live view content, scale harness.
-- Providers (`spec/provider-v0.md`, section 9): wire protocol and Python/Rust SDKs, out-of-process `vqro-herdr` and
-  `vqro-tmux`. The default herdr backend is the external `vqro-herdr` provider; in-process adapters remain for
-  tests/embedders, not normal `vqro serve` execution.
-- Agents: Rust Pi RPC bridge, Codex app-server adapter, Claude Code hooks and tier-1 launchers, plus the `agents`
-  and default `coord` extensions. Their capability subsets differ; the draft integration/coordination standards
-  are partially implemented and unqualified, pending current-image conformance.
-- TUI client and the bundled extensions (tabs, panes, gestures, workspaces, sidebar, themes, icons, keys, settings).
+These are quality **milestones**, each shown by a proof (below), not a release gate. Building continues on
+everything in flight and more.
 
-Not yet: native Windows (compiles except the transport; runtime gaps in `build-plan.md`, "Windows work"), macOS
-validation (compiles), WSL validation, any second machine.
+## Where we are (2026-11-23)
 
-## Streams (run in parallel)
+Used daily over herdr-core on Linux:
+- **Core:**
+  - durable transactional store and event log;
+  - command routing;
+  - extension supervisor;
+  - bounded streams;
+  - live view content.
+- **Terminal engine:** libghostty is the default terminal engine (vt100 selectable).
+- **Backends:**
+  - out-of-process `vqro-herdr` (default) and `vqro-tmux` (off by default);
+  - the optional Rex provider.
 
-| Stream | Priority (to be revisited) | Done when | Main risk |
-|---|---|---|---|
-| **Daily use** on this machine | active | Daily work runs on vqro without regressions; scale budgets hold | Regressions while the other streams land |
-| **Windows native** | to be set | Core, TUI and default extensions run natively (named-pipe endpoint, durable store, paths, stop request, Python helpers); a Windows backend provider drives ConPTY terminals | ConPTY output re-rendering; no Windows machine for runtime tests yet |
-| **WSL** | to be set | Both modes work: vqro inside WSL (Linux build), and native-Windows vqro driving WSL terminals through a provider that owns the `wsl.exe` transport; agents in WSL reach the core through the neutral reachability contract (D23) | Bridges in WSL can't open a Windows named pipe: needs the reachability mechanism early |
-| **macOS** | to be set | Core, TUI, `vqro-herdr` and `vqro-tmux` run on macOS; keys and mouse verified in Terminal.app and iTerm2 | Terminal key/mouse differences; provider naming (`/proc` hostname) |
-| **Multi-machine** | backlog | vqro on one machine drives another machine's terminals and agents through backend-neutral mechanisms | Remote agent reachability (options in D23); identity across hosts |
+  A same-setup test compares one workspace on herdr and on tmux.
+- **Agents:**
+  - Rust Pi RPC bridge;
+  - Codex app-server adapter with a daily launcher;
+  - Claude Code hooks and tier-1 launchers;
+  - the `agents` and `coord` extensions.
+
+  The standard covers customization (slice 1), child agents, background tasks, plans and goals (agent-v0 section 4).
+  Capability subsets differ per runtime; qualification on the current build is pending.
+- **TUI and bundled extensions:**
+  - tabs, panes and workspaces;
+  - sidebar, menus and settings;
+  - themes, icons and keys;
+  - the agent pane;
+  - setup checks for agent changes (Unit, Integration, Performance).
+- **Windows native:**
+  - named-pipe transport, durable store and Python helpers;
+  - providers with console-less background processes;
+  - a development installer and native check script.
+
+  It runs on the human's machine; its acceptance checklist is pending.
+- **macOS:**
+  - the build, `check.sh` and the tests run there;
+  - the core finds Python 3.11 or newer outside a login shell.
+
+  It has been verified on Linux with macOS conditions simulated; its acceptance checklist on the human's Mac is
+  pending.
+
+## Milestone proofs
+
+| Milestone | Proof | State |
+|---|---|---|
+| Daily workspace | A clean install of current main; several days of daily use without regressions; empty start opens Scratch with a shell | in progress |
+| Agent standard | Conformance run on the current build for Pi and Codex, failures fixed or named (last full run, an older build: 69 pass / 10 fail / 1 n/a) | to run |
+| Same setup | Automated herdr/tmux comparison (exists) plus a daily trial on tmux | trial planned |
+| Platforms | The native Windows and macOS acceptance checklists pass on the human's machines | pending on the machines |
+
+## Priorities now (in flight, revisable)
+
+1. **Accounts for capacity:**
+   - one shared setup; swap only the login;
+   - continue the same conversation on another account;
+   - Pi first, then Codex, then Claude by keychain token;
+   - Pi limit switching: known messages automatically, a click otherwise.
+2. **Claude Code through its headless stream-json interface** (route 1) as the main integration, with subagents,
+   tasks and plans first-class.
+3. **Unit check required for agent changes to a vqro setup**, once it is clean on the human's setup.
+4. **The milestone proofs above:** conformance run, tmux trial, platform checklists.
+5. **Daily UI feedback** as it arrives (empty start, table sorting, menus).
+
+**Later, on purpose:**
+- WSL;
+- multi-machine;
+- Alacritty as a second engine;
+- a Claude watch-only mode (route 3);
+- macOS CI;
+- a `timeout` replacement.
+
+**Not doing:**
+- herdr-core changes;
+- Plane;
+- per-account profile folders.
+
+Legal and licensing questions never block building; they are listed for a later review.
 
 ### Architectural constraints for multi-machine (apply now, in every stream)
 
@@ -43,20 +103,9 @@ validation (compiles), WSL validation, any second machine.
   refuses.
 - Facts and spawn arguments name machines neutrally (`machine`, `placement.machine`), never by parsing refs.
 
-## Next (in this order within each stream, revisable)
-
-1. Contract wording before anything freezes: D23 rules into `provider-v0.md` (bridge reachability, `machine` fact,
-   placement), Windows endpoint (D22).
-2. Windows native: transport module, store replace, paths, stop request, Python named-pipe helper; `cargo check` for
-   Windows in CI.
-3. WSL: vqro inside WSL smoke; then a Windows-side provider over `wsl.exe` and the bridge reachability mechanism.
-4. macOS: smoke run of core, TUI, providers; fix provider default names and the herdr command line.
-5. Qualify the implemented agent integrations and default coordination extension against their draft contracts.
-   Claude Code and Codex integrations and per-principal undo for user-initiated extension changes already exist.
-6. Freeze candidates: only pieces that survived two backends, two runtimes and two operating systems.
-
 Kill / rethink questions: does any primitive assume one host or one OS? Does a provider need the core to know its
-transport? If yes, the contract is wrong.
+transport? If yes, the contract is wrong. Freeze candidates are only pieces that survived two backends, two
+runtimes and two operating systems.
 
 Rules: one trunk, short branches or worktree streams; small verification per change; record surprises in
 `research/` and binding choices in `decisions.md`.
