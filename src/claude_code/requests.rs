@@ -175,9 +175,16 @@ impl Requests {
         {
             return result;
         }
-        if let Some(token) = self.unsupported_tokens.remove(native) {
-            token.cancel_before_write();
+        if let Some(token) = self.unsupported_tokens.get(native) {
+            // Automatic error replies have the same commit boundary as human answers. A changed
+            // payload is not settlement after WRITING/WRITTEN (including a later write failure).
+            // Keep the original token, fingerprint and tool correlation until native withdrawal
+            // or independent tool settlement. Only a revoked/unwritten reply can be replaced.
+            if !token.cancel_before_write() && token.write_begun() {
+                return result;
+            }
         }
+        self.unsupported_tokens.remove(native);
         self.serial += 1;
         let id = format!("q{}", self.serial);
         let request = &frame["request"];
