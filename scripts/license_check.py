@@ -4,6 +4,7 @@
 components vendored and linked into vqro (vendor/notices.json: libghostty-vt and what its static library holds)."""
 import argparse
 import hashlib
+import itertools
 import json
 import os
 from pathlib import Path
@@ -84,12 +85,12 @@ def allowed_expression(expression):
 
 
 def check_project(root):
-    package = tomllib.loads((root / "Cargo.toml").read_text())["package"]
+    package = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))["package"]
     if package.get("license") != "Apache-2.0": raise ValueError("vqro package must declare Apache-2.0")
     if hashlib.sha256((root / "LICENSE").read_bytes()).hexdigest() != ROOT_LICENSE_SHA:
         raise ValueError("root LICENSE differs from the approved Apache-2.0 text")
     for path in sorted((root / "extensions/manifests").glob("*.json")):
-        manifest = json.loads(path.read_text())
+        manifest = json.loads(path.read_text(encoding="utf-8"))
         if manifest.get("license") != "Apache-2.0" or manifest.get("author") != "Bennett Garcia":
             raise ValueError(f"bundled manifest licence/author missing: {path.name}")
 
@@ -117,7 +118,7 @@ def archive_files(package):
 
 def cargo_output(arguments):
     return subprocess.run(["cargo", *arguments], cwd=ROOT,
-        env={**os.environ, "CARGO_NET_OFFLINE": "true"}, capture_output=True, text=True, check=True, timeout=60).stdout
+        env={**os.environ, "CARGO_NET_OFFLINE": "true"}, capture_output=True, text=True, encoding="utf-8", check=True, timeout=60).stdout
 
 
 def vendored(root, texts):
@@ -125,7 +126,7 @@ def vendored(root, texts):
     path = root / VENDORED
     if not path.exists(): return []
     out = []
-    for c in json.loads(path.read_text())["components"]:
+    for c in json.loads(path.read_text(encoding="utf-8"))["components"]:
         choice = satisfying_licenses(c["license"])
         if choice is None: raise ValueError(f"vendored licence outside allowlist: {c['name']}: {c['license']}")
         if not c.get("files"): raise ValueError(f"vendored component without licence text: {c['name']}")
@@ -189,6 +190,16 @@ def render(metadata):
     return "".join(result)
 
 
+def inventory_difference(checked_in, generated):
+    """One actionable, encoding-safe difference without rewriting legal bytes."""
+    before = checked_in.decode("utf-8").splitlines(keepends=True)
+    after = generated.decode("utf-8").splitlines(keepends=True)
+    for number, (left, right) in enumerate(itertools.zip_longest(before, after), 1):
+        if left != right:
+            return f"line {number}: checked-in {ascii(left)[:240]}; generated {ascii(right)[:240]}"
+    return "byte content differs"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
@@ -200,8 +211,11 @@ def main():
         metadata = json.loads(cargo_output(["metadata", "--offline", "--locked", "--format-version", "1"]))
         content = render(metadata); target = ROOT / OUTPUT
         if args.write: target.write_bytes(content.encode("utf-8"))
-        elif not target.exists() or target.read_bytes() != content.encode("utf-8"):
-            raise ValueError(f"{OUTPUT} stale/missing; run python3 scripts/license_check.py --write")
+        elif not target.exists():
+            raise ValueError(f"{OUTPUT} missing; run python3 scripts/license_check.py --write")
+        elif target.read_bytes() != content.encode("utf-8"):
+            detail = inventory_difference(target.read_bytes(), content.encode("utf-8"))
+            raise ValueError(f"{OUTPUT} stale ({detail}); inspect the difference before regenerating with --write")
         print(f"licences OK: {len(metadata['packages'])} packages; {OUTPUT} {'written' if args.write else 'current'}")
         return 0
     except (ValueError, OSError, subprocess.SubprocessError) as error:

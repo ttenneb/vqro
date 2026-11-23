@@ -106,6 +106,28 @@ class Licenses(unittest.TestCase):
                 with mock.patch("sys.argv", ["license_check", "--check"]): self.assertEqual(m.main(), 1)
                 self.assertEqual((root / m.OUTPUT).read_text(), "stale")
 
+    def test_cargo_metadata_is_utf8_even_with_a_cp1252_locale(self):
+        m = module()
+        metadata = json.dumps({"authors": ["Bartłomiej Kamiński", "Marvin Löbel"]}, ensure_ascii=False)
+
+        def run(argv, **kwargs):
+            # Model Windows' legacy default text decoder without requiring that
+            # locale to be installed on the test host. Cargo JSON is UTF-8.
+            return mock.Mock(stdout=metadata.encode("utf-8").decode(kwargs.get("encoding", "cp1252")))
+
+        with mock.patch.object(m.subprocess, "run", side_effect=run):
+            self.assertEqual(json.loads(m.cargo_output(["metadata"])), json.loads(metadata))
+
+    def test_stale_diagnostic_identifies_encoding_and_line_endings_without_writing(self):
+        m = module()
+        detail = m.inventory_difference("heading\nLöbel\n".encode(), "heading\nLÃ¶bel\n".encode())
+        self.assertIn("line 2:", detail)
+        self.assertIn("checked-in 'L\\xf6bel", detail)
+        self.assertTrue(detail.isascii())  # printable even with a legacy console encoding
+        detail = m.inventory_difference(b"heading\r\n", b"heading\n")
+        self.assertIn("\\r\\n", detail)
+        self.assertIn("generated 'heading\\n'", detail)
+
     def test_repository_metadata_and_exact_root_license(self):
         m = module()
         m.check_project(ROOT)
