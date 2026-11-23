@@ -1,13 +1,15 @@
 """Tmux management is policy over public primitives, never provider RPC."""
 import importlib.util
 import json
+import os
 import tempfile
 from pathlib import Path
 import subprocess
 import unittest
 from unittest.mock import patch, Mock
 
-SPEC = importlib.util.spec_from_file_location("tmux_server_ext", Path(__file__).resolve().parents[1] / "extensions/tmux_server.py")
+EXT = Path(os.environ.get("VQRO_TEST_EXTENSIONS_DIR", Path(__file__).resolve().parents[1] / "extensions"))
+SPEC = importlib.util.spec_from_file_location("tmux_server_ext", EXT / "tmux_server.py")
 m = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(m)
 

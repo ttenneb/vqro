@@ -1,13 +1,15 @@
 import copy
 import copy
 import json
+import os
 from pathlib import Path
 import sys
 import threading
 import unittest
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
+EXT = Path(os.environ.get("VQRO_TEST_EXTENSIONS_DIR", Path(__file__).resolve().parents[1] / "extensions"))
+sys.path.insert(0, str(EXT))
 from agents import Agents, EFFECTS
 from vqro_ext import Extension, VqroError
 from agent_fixture import FakeCore
@@ -52,7 +54,7 @@ class AgentsTests(unittest.TestCase):
         self.assertNotIn("agents.settings", self.core.handlers)
         self.assertNotIn("binding/agents.new", self.core.entries)
         self.assertEqual(self.native(), [])
-        source = (Path(__file__).resolve().parents[1]/"extensions/agents.py").read_text()
+        source = (EXT / "agents.py").read_text()
         self.assertNotIn("pi_bridge", source)
         self.assertNotIn("pi1", source)
         self.assertNotIn("resource.spawn", source)

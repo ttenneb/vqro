@@ -10,7 +10,7 @@ import types
 import unittest
 from unittest import mock
 
-EXT = Path(__file__).resolve().parents[1] / "extensions"
+EXT = Path(os.environ.get("VQRO_TEST_EXTENSIONS_DIR", Path(__file__).resolve().parents[1] / "extensions"))
 sys.path.insert(0, str(EXT))
 import vqro_ext  # noqa: E402
 from vqro_ext import VqroError  # noqa: E402

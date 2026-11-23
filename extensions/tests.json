@@ -1,0 +1,20 @@
+{
+  "not_shipped": {
+    "links": "Invokes a generated opener executable; not a mocked unit suite.",
+    "vqro_ext": "Shared SDK, not a bundled extension declaration.",
+    "vqro_provider": "Shared SDK, not a bundled extension declaration; also imports a repository fixture."
+  },
+  "suites": {
+    "agents": ["tests/test_agents.py", "tests/agent_fixture.py"],
+    "pi": ["tests/test_pi.py", "tests/agent_fixture.py"],
+    "sidebar": ["tests/test_sidebar.py"],
+    "settings": ["tests/test_settings.py"],
+    "themes": ["tests/test_themes.py"],
+    "retention": ["tests/test_retention.py", "tests/agent_fixture.py"],
+    "tmux-server": ["tests/test_tmux_server.py"],
+    "tabs": ["tests/test_workspace_tabs.py"],
+    "workspaces": ["tests/test_workspace_tabs.py"],
+    "panes": ["tests/test_pane_basics.py", "tests/test_workspace_tabs.py"],
+    "tier1": ["tests/test_tier1.py", "tests/agent_fixture.py"]
+  }
+}

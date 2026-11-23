@@ -1,11 +1,14 @@
 """Manifest-driven extension catalogue, without launching processes or a core."""
 import copy
+import os
 from pathlib import Path
 import runpy
 import sys
 import types
 import unittest
 from unittest import mock
+
+EXT = Path(os.environ.get("VQRO_TEST_EXTENSIONS_DIR", Path(__file__).resolve().parents[1] / "extensions"))
 
 
 class Extension:
@@ -38,7 +41,7 @@ class Extension:
 def load():
     fake=types.SimpleNamespace(Extension=Extension,VqroError=RuntimeError)
     with mock.patch.dict(sys.modules,{"vqro_ext":fake}):
-        return runpy.run_path(str(Path(__file__).resolve().parents[1]/"extensions/settings.py"))
+        return runpy.run_path(str(EXT / "settings.py"))
 
 
 class SettingsTests(unittest.TestCase):
@@ -253,7 +256,7 @@ class SettingsTests(unittest.TestCase):
 
     def test_builtins_have_complete_readable_manifests(self):
         import json
-        root=Path(__file__).resolve().parents[1]/"extensions"
+        root=EXT
         names={s["name"] for s in json.loads((root/"defaults.json").read_text())["extensions"]}
         self.assertEqual(len(names),23)
         self.assertIn('accounts', names)

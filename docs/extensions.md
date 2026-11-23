@@ -51,11 +51,18 @@ Options include `--socket`, `--extensions-dir`, `--strict` (warnings fail), and 
 receipt unless requested). Offline mode reads `workspace.json` without changing it. Exit codes are 0 pass,
 1 fail, 77 unverified (no extension observed running), and 2 harness error, including zero declarations.
 Disabled extensions have their metadata and launch paths checked, but do not run tests or fail for broken paths.
-Tests use a private temporary HOME and a scrubbed environment with only PATH and HOME. The CLI allows 120 seconds
+Tests use a private temporary HOME and a scrubbed environment with only PATH, HOME, and
+`VQRO_TEST_EXTENSIONS_DIR` (the absolute installed extensions directory, not an endpoint). The CLI allows 120 seconds
 per extension; the in-app command shares a 20-second tests budget and reports remaining tests as unverified.
 Run the CLI for full tests if that budget is exhausted. This is cooperative isolation, **not a security sandbox**: only run installed tests you trust.
 
-No installed tests means **no coverage**, not a test pass. Bundled tests are not currently installed.
+No installed tests means **no coverage**, not a test pass. `scripts/dev-install.sh` ships the mocked unit suites
+listed in `extensions/tests.json` (`suites` maps bundled declaration names to repository test/helper files;
+`not_shipped` records exclusions). Each mapped `tests/<name>/` directory is replaced on install so removed tests
+do not linger; unrelated extension suites are left alone. Extensions can ship their own `tests/<name>/test_*.py`
+stdlib unittest suites using the same convention. Bundled tests resolve code through `VQRO_TEST_EXTENSIONS_DIR`
+when set, otherwise the repository-relative extensions directory. Shared pure helpers are copied beside each suite.
+The workspace/pane suites exercise several cooperating bundled extensions against an in-memory fake core.
 A healthy status does not prove behaviour, rendering or performance; use the separate disposable integration
 checks for behaviour. Performance checks are not built yet. `--no-tests` skips even installed tests and records that coverage gap.
 

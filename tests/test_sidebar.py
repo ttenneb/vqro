@@ -1,5 +1,6 @@
 """Sidebar coalescing without sockets, processes or background threads."""
 import copy
+import os
 from pathlib import Path
 import runpy
 import sys
@@ -7,6 +8,8 @@ import threading
 import types
 import unittest
 from unittest import mock
+
+EXT = Path(os.environ.get("VQRO_TEST_EXTENSIONS_DIR", Path(__file__).resolve().parents[1] / "extensions"))
 
 
 class CacheLock:
@@ -37,11 +40,11 @@ class Extension:
 
 
 def load():
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
+    sys.path.insert(0, str(EXT))
     from vqro_ext import views_in
     fake = types.SimpleNamespace(Extension=Extension, VqroError=RuntimeError, views_in=views_in)
     with mock.patch.dict(sys.modules, {"vqro_ext": fake}), mock.patch.object(threading, "Thread"):
-        return runpy.run_path(str(Path(__file__).resolve().parents[1] / "extensions/sidebar.py"))
+        return runpy.run_path(str(EXT / "sidebar.py"))
 
 
 class SidebarTests(unittest.TestCase):

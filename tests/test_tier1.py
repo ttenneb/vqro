@@ -9,7 +9,8 @@ import time
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
+EXT = Path(os.environ.get("VQRO_TEST_EXTENSIONS_DIR", Path(__file__).resolve().parents[1] / "extensions"))
+sys.path.insert(0, str(EXT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tier1  # noqa: E402
 import tier1_run  # noqa: E402

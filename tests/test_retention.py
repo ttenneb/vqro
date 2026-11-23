@@ -1,5 +1,6 @@
 """Retention policy using only a fake public extension surface; no threads or sockets."""
 from pathlib import Path
+import os
 import runpy
 import sys
 import threading
@@ -7,7 +8,8 @@ import types
 import unittest
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
+EXT = Path(os.environ.get("VQRO_TEST_EXTENSIONS_DIR", Path(__file__).resolve().parents[1] / "extensions"))
+sys.path.insert(0, str(EXT))
 import vqro_ext
 from agent_fixture import FakeCore
 
@@ -20,7 +22,7 @@ class RetentionTests(unittest.TestCase):
         replacement = types.SimpleNamespace(Extension=lambda *a, **k: self.core,
                                            VqroError=vqro_ext.VqroError, views_in=vqro_ext.views_in)
         with mock.patch.dict(sys.modules, {"vqro_ext": replacement}), mock.patch("threading.Thread"):
-            self.module = runpy.run_path(str(Path(__file__).resolve().parents[1] / "extensions/retention.py"))
+            self.module = runpy.run_path(str(EXT / "retention.py"))
 
     def plan(self, now, **kwargs):
         with mock.patch.object(self.module["time"], "monotonic", return_value=now):

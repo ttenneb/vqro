@@ -16,6 +16,8 @@ mkdir -p "$HOME/.local/share/vqro/extensions" "$HOME/.local/bin"
 cp extensions/*.py extensions/defaults.json "$HOME/.local/share/vqro/extensions/"
 mkdir -p "$HOME/.local/share/vqro/extensions/manifests"
 cp extensions/manifests/*.json "$HOME/.local/share/vqro/extensions/manifests/"
+# Unit suites run offline against the installed code; replace each mapped suite to drop stale files.
+python3 scripts/install_extension_tests.py "$HOME/.local/share/vqro/extensions"
 # The tier-1 Pi plugin, loaded per launch by the tier1 extension (pi -e); never added to ~/.pi.
 mkdir -p "$HOME/.local/share/vqro/extensions/tier1"
 cp integrations/pi/vqro-pull.ts "$HOME/.local/share/vqro/extensions/tier1/"

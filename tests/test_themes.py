@@ -1,10 +1,13 @@
 """Bundled semantic colours stay readable on their published base backgrounds."""
 from pathlib import Path
+import os
 import runpy
 import sys
 import types
 import unittest
 from unittest import mock
+
+EXT = Path(os.environ.get("VQRO_TEST_EXTENSIONS_DIR", Path(__file__).resolve().parents[1] / "extensions"))
 
 
 ROLES = ("heading", "control", "link", "info", "you", "agent", "other_agent", "changed")
@@ -42,7 +45,7 @@ def load():
     ext.command.side_effect = lambda *_: lambda f: f
     sdk = types.SimpleNamespace(Extension=mock.Mock(return_value=ext), VqroError=RuntimeError)
     with mock.patch.dict(sys.modules, {"vqro_ext": sdk}), mock.patch.object(sys, "path", list(sys.path)):
-        return runpy.run_path(str(Path(__file__).resolve().parents[1] / "extensions/themes.py"))
+        return runpy.run_path(str(EXT / "themes.py"))
 
 
 def luminance(colour):

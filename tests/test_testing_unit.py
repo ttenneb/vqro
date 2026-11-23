@@ -301,8 +301,9 @@ class HealthChecks(unittest.TestCase):
     def test_tests_runner_scrubs_all_live_environment(self):
         self.install_test("import os, pathlib, unittest\nclass Tests(unittest.TestCase):\n"
                           " def test_env(self):\n"
-                          "  self.assertFalse(any(k.startswith(('VQRO_', 'HC_', 'HERDR_')) for k in os.environ))\n"
-                          "  self.assertEqual(set(os.environ) - {'LC_CTYPE'}, {'PATH', 'HOME'})\n"
+                          "  self.assertFalse(any(k.startswith(('VQRO_', 'HC_', 'HERDR_')) for k in os.environ if k != 'VQRO_TEST_EXTENSIONS_DIR'))\n"
+                          "  self.assertEqual(set(os.environ) - {'LC_CTYPE'}, {'PATH', 'HOME', 'VQRO_TEST_EXTENSIONS_DIR'})\n"
+                          f"  self.assertEqual(os.environ['VQRO_TEST_EXTENSIONS_DIR'], {str(self.extensions.resolve())!r})\n"
                           "  self.assertTrue(pathlib.Path(os.environ['HOME']).is_dir())\n")
         with patch.dict(os.environ, {"VQRO_SOCKET": "canary", "VQRO_PRINCIPAL": "secret", "HC_SOCKET": "canary",
                                      "HERDR_ENV": "1", "HERDR_SOCKET": "canary", "PRIVATE_SECRET": "canary"}):
