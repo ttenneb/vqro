@@ -107,13 +107,21 @@ class FinishCore(PrivateCore):
             oracle.check(label + ": receipt mode 0600", stat.S_IMODE(path.stat().st_mode) == 0o600)
         return receipt
 
-    def notice(self, oracle, label, text="NOT VERIFIED"):
+    def notice(self, oracle, label, segment="tests !"):
         status = self.status()
         live = self.call("workspace.snapshot").get("live", {})
         content = live.get("testing.status", {})
-        oracle.check(label + ": Testing notice", text in content.get("label", ""), content)
-        if text == "NOT VERIFIED":
-            oracle.check(label + ": non-green semantic notice", content.get("style") in ("warn", "error"), content)
+        oracle.check(label + ": compact Testing segment", content.get("label") == segment, content)
+        if segment:
+            oracle.check(label + ": compact warning style", content.get("style") == "warn", content)
+        page = live.get("settings.page.testing", {})
+        items = page.get("items", [])
+        detail = items[0] if items else {}
+        oracle.check(label + ": full NOT VERIFIED detail on Settings page",
+                     detail.get("text", "").startswith("NOT VERIFIED") and detail.get("style") in ("warn", "error"), page)
+        human = self.command([arg for arg in self.cli_args("--setup-status") if arg != "--json"])
+        oracle.check(label + ": full NOT VERIFIED detail in setup-status", human.returncode == 0
+                     and human.stdout.startswith("NOT VERIFIED"), {"exit": human.returncode, "stdout": human.stdout, "stderr": human.stderr})
         return status, live
 
 
@@ -130,6 +138,7 @@ def check_gate(core, oracle):
     status = core.stable_status()
     oracle.check("policy off: default remains off", status.get("require_unit") is False, status)
     oracle.check("policy off: finish allowed without receipt", status.get("finish_ok") is True, status)
+    core.notice(oracle, "policy off missing evidence", segment="")
     oracle.check("known setup identity", bool(re.fullmatch(r"[a-f0-9]{64}", str(status.get("setup_id")))), status)
     core.set_value(POLICY, True)
     status = core.stable_status()
@@ -151,7 +160,7 @@ def check_gate(core, oracle):
                  and bool(status.get("integration", {}).get("skip_reason")), status)
     oracle.check("soft coverage gap disclosed, not blocking", status.get("finish_ok") is True
                  and "ctl-gap" in json.dumps(status.get("coverage_gaps", [])), status)
-    _, live = core.notice(oracle, "coverage gap notice")
+    _, live = core.notice(oracle, "coverage gap notice", segment="")
     page = live.get("settings.page.testing", {})
     oracle.check("Testing page shows coverage gap", "ctl-gap" in json.dumps(page), page)
     core.set_value("doc/settings/control", {"edit": 1})
@@ -268,7 +277,40 @@ def check_gate(core, oracle):
         status = core.status()
     oracle.check("later skip attempt retains failed Integration evidence", status.get("integration", {}).get("receipt") == str(output)
                  and status["integration"].get("state") == "fail", status)
-    core.notice(oracle, "failed Integration remains visible")
+    core.notice(oracle, "failed Integration remains visible", segment="")
+
+    # Compact status is product policy, not an aggregate of every non-green
+    # detail. Off is quiet except for a current functional Unit/Integration fail.
+    core.set_value(POLICY, False)
+    core.stable_status()
+    core.notice(oracle, "policy off stale failure", segment="")
+    test.write_text(FAIL_TEST)
+    core.stable_status()
+    core.record(oracle, "policy off current Unit fail", "fail", 1)
+    status, _ = core.notice(oracle, "policy off current Unit fail", segment="tests !")
+    oracle.check("policy off current failure does not arm finish gate", status.get("require_unit") is False
+                 and status.get("finish_ok") is True and status.get("unit", {}).get("state") == "fail", status)
+    core.set_value("doc/settings/control", {"edit": 4})
+    core.stable_status()
+    core.notice(oracle, "policy off failure no longer current", segment="")
+
+    # A model-free declared RPC launcher: replace only the PRIVATE pi fixture,
+    # never start Pi, a bridge, a runtime or a model provider.
+    core.seed("pi", test=PASS_TEST)
+    core.settled({"pi": "running"})
+    test.write_text(PASS_TEST)
+    core.set_value(POLICY, True)
+    core.stable_status()
+    core.notice(oracle, "RPC launcher with refused finish", segment="tests !")
+    core.record(oracle, "Unit pass with RPC launcher")
+    status = core.invoke("test.setup.skip", {"suite": "integration", "reason": "Model-free RPC notice control"})
+    oracle.check("RPC notice does not block accepted evidence", status.get("finish_ok") is True, status)
+    status, _ = core.notice(oracle, "RPC launcher with accepted evidence", segment="not verified")
+    oracle.check("setup-status retains full RPC qualification",
+                 "NOT VERIFIED: rule not active for vqro-launched Pi agents yet" in status.get("not_verified_reasons", []), status)
+    core.set_value(POLICY, False)
+    core.stable_status()
+    core.notice(oracle, "policy off with RPC launcher", segment="")
 
 
 def main():
