@@ -21,12 +21,16 @@ Child data never grants coordination authority. No model call was used in tests.
   the child `parent` field absent. Unknown native states map to `unknown` and retain
   `native.status`. Idle loaded threads are waiting, not finished. Turn completion does
   not prove child-thread termination; a completed collab child is not undone by idle.
-- Child messages/tool output and deltas use adapter-reserved `_codex_scoped_...` IDs
-  and `child` tags in the parent stream, avoiding normal native item-ID reuse across
-  siblings. Child requests are ordinary requests with `child`, retaining the native
-  thread in params; their observation scope/response epoch is the parent conversation.
-  Responses use the original native request ID once. Explicit native resolution,
-  parent epoch change or native host end fences them; no request replay.
+- All main and child items/deltas use a shared injective namespace: `n:` followed
+  by URL-safe base64 of a JSON pair `[native_thread_id,native_item_id]`. Pairs too
+  long for the 128-byte entity-ID bound use compact epoch-local `l:` IDs instead.
+  Native strings cannot impersonate a generated child or root item ID. Child items
+  carry `child` tags in the parent stream. Requests are ordinary requests with `child`
+  where applicable, retaining the native thread in params; observation scope/response
+  epoch is the parent conversation and subject references use the mapped tool ID.
+  Responses use the original native request ID once. Explicit native resolution must
+  match both the recorded native request ID AND thread before it changes a request.
+  Parent epoch change or native host end fences them; no request replay.
 - Native child token-usage reports stay on that child, not the parent's usage total.
 - Whole `turn/plan/updated` maps to a per-turn `plan` list: `items`, `update:"whole"`,
   `source:"native"`, optional explanation, unknown status preserved on its item.
@@ -45,7 +49,8 @@ Child data never grants coordination authority. No model call was used in tests.
 ## Bounds and recovery
 
 Associations live inside the parent's native-session epoch: at most 256 children and
-4096 scoped native-ID mappings, reset on session replacement. IDs/threads are at most
+4096 compact mappings for unusually long native-ID pairs, reset on session replacement.
+Ordinary reversible IDs do not consume that map. IDs/threads are at most
 128 bytes; native child payload fields are bounded. Whole plans accept at most 256
 steps, bounded text and total entity bytes. Excess/unrepresentable observations are
 omitted, not claims that native children are absent. The ordinary tail-coverage item

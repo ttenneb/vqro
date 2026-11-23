@@ -1081,41 +1081,13 @@ impl Endpoint {
                 };
                 vec![self.state_entity()]
             }
-            "item/started" | "item/completed" => {
-                let mut changes = self.collaboration(&p["item"], thread);
-                changes.extend(self.item(&p["item"], method == "item/completed"));
-                changes
-            }
-            "item/agentMessage/delta" => {
-                let (Ok(item), Some(text)) = (id(p, "itemId"), p["delta"].as_str()) else {
-                    return vec![];
-                };
-                vec![Change::append(
-                    "message",
-                    item,
-                    json!({"role":"assistant","content":[{"type":"text","text":""}],"final":false}),
-                    "/content/0/text",
-                    text.into(),
-                )]
-            }
-            "item/commandExecution/outputDelta" => {
-                let (Ok(item), Some(text)) = (id(p, "itemId"), p["delta"].as_str()) else {
-                    return vec![];
-                };
-                vec![Change::append(
-                    "tool",
-                    item,
-                    json!({"title":"Codex command","status":"running","content":[{"type":"text","text":""}]}),
-                    "/content/0/text",
-                    text.into(),
-                )]
-            }
+            "item/started" | "item/completed" | "item/agentMessage/delta" | "item/commandExecution/outputDelta" => self.observed_items(method, p),
             "serverRequest/resolved" => {
                 let native = &p["requestId"];
                 let key = self
                     .pending
                     .iter()
-                    .find(|(_, q)| &q.native_id == native)
+                    .find(|(_, q)| &q.native_id == native && q.entity["params"]["threadId"] == p["threadId"])
                     .map(|(key, _)| key.clone());
                 if let Some(key) = key {
                     let mut q = self.pending.remove(&key).unwrap();
@@ -1308,8 +1280,10 @@ impl Endpoint {
         }
         entity["params"] = params.clone();
         entity["incomplete"] = json!(false);
+        let subject = params["itemId"].as_str()
+            .and_then(|native| self.children.identity(thread, "tool", native));
         entity["scope"] =
-            json!({"session":self.session,"run":params["turnId"],"subject":params["itemId"]});
+            json!({"session":self.session,"run":params["turnId"],"subject":subject});
         let bytes: usize = self
             .pending
             .values()

@@ -295,10 +295,10 @@ fn children_and_scoped_identity_budgets_do_not_leak_unscoped_items() {
     );
     // Exhaust the shared bounded namespace; any emitted child item remains tagged.
     for n in 0..4200 {
-        let changes=e.notification("item/started",&json!({"threadId":"worker-0","item":{"id":format!("m{n}"),"type":"agentMessage","text":"child"}}));
+        let changes=e.notification("item/started",&json!({"threadId":"worker-0","item":{"id":format!("{n:0>120}"),"type":"agentMessage","text":"child"}}));
         assert!(changes.iter().all(|c| c.value["child"].is_string()));
     }
-    assert!(e.notification("item/started",&json!({"threadId":"worker-0","item":{"id":"past-budget","type":"agentMessage","text":"child"}})).is_empty());
+    assert!(e.notification("item/started",&json!({"threadId":"worker-0","item":{"id":"x".repeat(120),"type":"agentMessage","text":"child"}})).is_empty());
 }
 
 #[test]
@@ -311,6 +311,57 @@ fn malformed_item_without_thread_or_session_is_ignored() {
         )
         .is_empty()
     );
+}
+
+#[test]
+fn root_native_ids_cannot_impersonate_generated_child_items_or_deltas() {
+    let mut e = endpoint();
+    child(&mut e, "worker", "main");
+    let child_items = e.notification(
+        "item/started",
+        &json!({"threadId":"worker","item":{"id":"m","type":"agentMessage","text":"child"}}),
+    );
+    let generated = find(&child_items, "message").id.clone();
+    let root_items = e.notification(
+        "item/started",
+        &json!({"threadId":"main","item":{"id":generated,"type":"agentMessage","text":"root"}}),
+    );
+    assert_ne!(find(&root_items, "message").id, generated);
+    let root_delta = e.notification(
+        "item/agentMessage/delta",
+        &json!({"threadId":"main","itemId":generated,"delta":"root delta"}),
+    );
+    assert_eq!(
+        find(&root_delta, "message").id,
+        find(&root_items, "message").id
+    );
+    assert_ne!(find(&root_delta, "message").id, generated);
+    let child_tool=e.notification("item/started",&json!({"threadId":"worker","item":{"id":"t","type":"commandExecution","status":"inProgress"}}));
+    let generated_tool = find(&child_tool, "tool").id.clone();
+    let root_tool=e.notification("item/started",&json!({"threadId":"main","item":{"id":generated_tool,"type":"commandExecution","status":"inProgress"}}));
+    assert_ne!(find(&root_tool, "tool").id, generated_tool);
+}
+
+#[test]
+fn child_resolution_cannot_cancel_main_request_with_same_native_id() {
+    let mut e = endpoint();
+    child(&mut e, "worker", "main");
+    let request = e
+        .request(
+            json!(71),
+            "item/fileChange/requestApproval",
+            &json!({"threadId":"main","itemId":"tool"}),
+        )
+        .unwrap();
+    assert!(
+        e.notification(
+            "serverRequest/resolved",
+            &json!({"threadId":"worker","requestId":71})
+        )
+        .is_empty()
+    );
+    let answer=e.prepare_answer(&json!({"v":0,"epoch":"e2","request":request.id,"revision":1,"response":{"choice":"decline"}})).unwrap();
+    assert_eq!(answer.native_id, json!(71));
 }
 
 #[test]

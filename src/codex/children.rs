@@ -1,5 +1,6 @@
 //! Bounded native child observations in their parent's stream, never emulated controls.
 use super::{Change, ENTITY_BYTES, Endpoint, id, reported_string, small};
+use base64::Engine;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -18,10 +19,20 @@ impl Children {
         self.rows.contains_key(thread)
     }
 
-    fn identity(&mut self, thread: &str, kind: &str, native: &str) -> Option<String> {
+    pub(super) fn identity(&mut self, thread: &str, kind: &str, native: &str) -> Option<String> {
         if thread.is_empty() || thread.len() > 128 || native.is_empty() || native.len() > 128 {
             return None;
         }
+        // Reversibly encode BOTH native components for every item path, including the
+        // main thread. Native strings cannot impersonate generated scoped IDs. JSON tuple
+        // framing is injective even for unusual native strings with delimiters/controls.
+        let pair = serde_json::to_vec(&(thread, native)).ok()?;
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pair);
+        if encoded.len() <= 126 {
+            return Some(format!("n:{encoded}"));
+        }
+        // Unusually long native IDs need a compact epoch-local mapping. Its separate
+        // prefix cannot collide with the reversible namespace above.
         let key = (thread.to_owned(), kind.to_owned(), native.to_owned());
         if let Some(id) = self.ids.get(&key) {
             return Some(id.clone());
@@ -30,7 +41,7 @@ impl Children {
             return None;
         }
         self.next += 1;
-        let id = format!("_codex_scoped_{}", self.next);
+        let id = format!("l:{}", self.next);
         self.ids.insert(key, id.clone());
         Some(id)
     }
@@ -359,6 +370,56 @@ impl Endpoint {
         vec![Change::new("goal", id, value)]
     }
 
+    pub(super) fn observed_items(&mut self, method: &str, params: &Value) -> Vec<Change> {
+        let Some(thread) = params["threadId"].as_str() else {
+            return vec![];
+        };
+        let child = self.children_child_id(thread);
+        if matches!(method, "item/started" | "item/completed") {
+            let item = &params["item"];
+            let mut changes = self.collaboration(item, thread);
+            for mut change in self.item(item, method == "item/completed") {
+                let Some(id) = self.children.identity(thread, &change.kind, &change.id) else {
+                    continue;
+                };
+                change.id = id;
+                if let Some(child) = &child {
+                    change.value["child"] = child.clone();
+                }
+                changes.push(change);
+            }
+            return changes;
+        }
+        let (Ok(native), Some(text)) = (id(params, "itemId"), params["delta"].as_str()) else {
+            return vec![];
+        };
+        if text.len() > ENTITY_BYTES {
+            return vec![];
+        }
+        let (kind, mut base, field) = if method == "item/agentMessage/delta" {
+            (
+                "message",
+                json!({"role":"assistant","content":[{"type":"text","text":""}],"final":false}),
+                "/content/0/text",
+            )
+        } else if method == "item/commandExecution/outputDelta" {
+            (
+                "tool",
+                json!({"title":"Codex command","status":"running","content":[{"type":"text","text":""}]}),
+                "/content/0/text",
+            )
+        } else {
+            return vec![];
+        };
+        if let Some(child) = child {
+            base["child"] = child;
+        }
+        let Some(id) = self.children.identity(thread, kind, &native) else {
+            return vec![];
+        };
+        vec![Change::append(kind, id, base, field, text.into())]
+    }
+
     pub(super) fn child_notification(&mut self, method: &str, params: &Value) -> Vec<Change> {
         let Some(thread) = params["threadId"]
             .as_str()
@@ -426,49 +487,10 @@ impl Endpoint {
             }
             "turn/plan/updated" => self.whole_plan(params, Some(child)),
             "thread/goal/updated" | "thread/goal/cleared" => self.goal(method, params, Some(child)),
-            "item/started" | "item/completed" => {
-                let item = &params["item"];
-                let mut changes = self.collaboration(item, thread);
-                let final_item = method == "item/completed";
-                let mut mapped = self.item(item, final_item);
-                for change in &mut mapped {
-                    let Some(id) = self.children.identity(thread, &change.kind, &change.id) else {
-                        continue;
-                    };
-                    change.id = id;
-                    change.value["child"] = child.clone();
-                }
-                // No partially namespaced change may escape when the identity budget is full.
-                mapped.retain(|c| c.value.get("child").is_some());
-                changes.extend(mapped);
-                changes
-            }
-            "item/agentMessage/delta" | "item/commandExecution/outputDelta" => {
-                let (Ok(native), Some(text)) = (id(params, "itemId"), params["delta"].as_str())
-                else {
-                    return vec![];
-                };
-                if text.len() > ENTITY_BYTES {
-                    return vec![];
-                }
-                let (kind, base, field) = if method == "item/agentMessage/delta" {
-                    (
-                        "message",
-                        json!({"role":"assistant","content":[{"type":"text","text":""}],"final":false,"child":child}),
-                        "/content/0/text",
-                    )
-                } else {
-                    (
-                        "tool",
-                        json!({"title":"Codex command","status":"running","content":[{"type":"text","text":""}],"child":child}),
-                        "/content/0/text",
-                    )
-                };
-                let Some(id) = self.children.identity(thread, kind, &native) else {
-                    return vec![];
-                };
-                vec![Change::append(kind, id, base, field, text.into())]
-            }
+            "item/started"
+            | "item/completed"
+            | "item/agentMessage/delta"
+            | "item/commandExecution/outputDelta" => self.observed_items(method, params),
             _ => vec![],
         }
     }
