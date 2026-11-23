@@ -151,11 +151,14 @@ try:
         subprocess.run([*HARNESS, "pipe-pane"])
         # Reattach (a new TUI): the backend's history repaint must not copy or ring again.
         raw2 = f"{R}/raw2-{name}.log"
-        subprocess.run([*HARNESS, "respawn-pane", "-k", f"/bin/sh {R}/tui.sh"], env={"PATH": "/usr/bin:/bin", "HOME": f"{R}/home"})
+        # Capture first, then start the new TUI: started the other way round, a repaint that lands before the pipe
+        # is attached is lost, and under load the capture came back empty (vqro-lead's gate at 27f9229a).
         subprocess.run([*HARNESS, "pipe-pane", "-o", f"cat >> {raw2}"])
+        subprocess.run([*HARNESS, "respawn-pane", "-k", f"/bin/sh {R}/tui.sh"], env={"PATH": "/usr/bin:/bin", "HOME": f"{R}/home"})
         marker = "line-299" if name == "herdr" else "e2e-effects-done"  # the last output before the reattach
-        wait(lambda: marker in screen(), 15); time.sleep(1)
-        again = open(raw2, "rb").read() if os.path.exists(raw2) else b""
+        read2 = lambda: open(raw2, "rb").read() if os.path.exists(raw2) else b""
+        wait(lambda: marker in screen() and marker.encode() in read2(), 15); time.sleep(1)
+        again = read2()
         check(f"{name}: reattaching does not replay a copy or a notification", b"]52;" not in again and b"]9;e2e" not in again and marker.encode() in again, repr(again[-300:]))
         subprocess.run([*HARNESS, "pipe-pane"])
         call("resource.kill", {"resource": rid})
