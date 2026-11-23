@@ -630,3 +630,47 @@ async fn normal_publisher_and_acknowledged_shutdown_preserve_blocked_writer_tail
     );
     provider.close();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_ack_deadline_includes_a_budget_stalled_enqueue() {
+    use std::{future::Future, task::Poll};
+    let shared = Shared::new(
+        "stalled-boot".into(),
+        "claude-fixture".into(),
+        "fixture-instance".into(),
+    );
+    let (provider, _requests, _core) = registered_with_capacity(&shared, 1).await;
+    {
+        let mut state = shared.state.lock().unwrap();
+        state.observe(&vqro::native_process::Event::Exited(
+            vqro::native_process::Exit {
+                code: Some(0),
+                success: true,
+            },
+        ));
+        state.end_ready = true;
+    }
+    let facts = shared.facts();
+    let mut blocked = None;
+    // The peer now reads NOTHING. Poll sends until one is definitely blocked on the actual SDK
+    // outgoing budget/channel. Keep that waiter alive; no sleep or guessed fill duration.
+    for _ in 0..4096 {
+        let mut sending = Box::pin(provider.upsert(facts.clone()));
+        match std::future::poll_fn(|cx| Poll::Ready(sending.as_mut().poll(cx))).await {
+            Poll::Ready(result) => result.unwrap(),
+            Poll::Pending => {
+                blocked = Some(sending);
+                break;
+            }
+        }
+    }
+    let held = blocked.expect("bounded fixture must fill the SDK output queue");
+    let error = tokio::time::timeout(Duration::from_secs(7), shared.finish(&provider))
+        .await
+        .expect("whole final-publication stage must be bounded")
+        .unwrap_err();
+    assert_eq!(error.kind, "timeout");
+    assert!(error.message.contains("unconfirmed"));
+    drop(held);
+    provider.close();
+}

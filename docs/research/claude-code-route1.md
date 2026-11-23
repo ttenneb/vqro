@@ -78,6 +78,7 @@ cannot retire clients before late records. Final frames drain before normal item
 carries `native_reader_closed`, not a generic provider-drop fallback. A bounded unconfirmed tail is labelled
 `native_tail_unconfirmed`/incomplete, not claimed EOF or complete history. Retired publisher/initializer tasks
 are joined before the final cut. The existing acknowledged `provider.sync` (reply once applied) fences final
-item data/terminal markers and facts before intentional disconnect; a timeout stays unconfirmed and is not replayed.
+item data/terminal markers and facts before intentional disconnect. An outer five-second deadline includes
+outgoing-budget/channel enqueue stalls as well as the ACK wait; timeout stays unconfirmed and is not replayed.
 The bridge stops only its owned child
 on shutdown; it adds no persistence or stronger descendant lifetime guarantee than the native/backend layer.

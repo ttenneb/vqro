@@ -512,7 +512,18 @@ impl Shared {
         // provider.sync is the EXISTING acknowledged publication primitive (reply once applied).
         // Its ACK fences all preceding item data/closed frames on this connection before close().
         // A timeout/disconnect stays unconfirmed and is never replayed.
-        provider.full_sync(vec![self.facts()]).await
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            provider.full_sync(vec![self.facts()]),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(ProviderError::new(
+                "timeout",
+                "final publication deadline; unconfirmed, never resent",
+            )),
+        }
     }
     pub async fn serve_request(self: &Arc<Self>, provider: &Provider, request: Request) {
         match request {
