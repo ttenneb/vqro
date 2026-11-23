@@ -62,6 +62,83 @@ class CheckTests(unittest.TestCase):
         receipt = json.loads(latest.read_text()) if latest.exists() else None
         return result, receipt, logs
 
+    def scale_fixture(self, case, supplied='current', extra=0, mode='timing', cargo_success=False):
+        root = self.root/case
+        target, logs = root/'target with spaces', root/'logs'
+        deps = target/'release/deps'
+        deps.mkdir(parents=True)
+        logs.mkdir()
+        current, ran = deps/'scale-current', root/'ran'
+        current.write_text('#!/bin/sh\nprintf current > ' + shlex.quote(str(ran)) +
+                           '\nprintf \'{"failure_class":"pass"}\\n\' > "$VQRO_SCALE_RECEIPT"\n')
+        current.chmod(0o700)
+        for index in range(extra):
+            stale = deps/f'scale-stale-{index}'
+            stale.write_text('#!/bin/sh\nexit 49\n')
+            stale.chmod(0o700)
+        nonexec = deps/'scale-nonexec'
+        nonexec.write_text('not executable')
+        outside = root/'outside'
+        outside.write_text('#!/bin/sh\nexit 48\n')
+        outside.chmod(0o700)
+        bin_dir = root/'bin'
+        bin_dir.mkdir()
+        cargo = bin_dir/'cargo'
+        if cargo_success:
+            messages = [dict(reason='compiler-artifact', manifest_path=str(ROOT/'Cargo.toml'),
+                package_id='fixture-vqro', target=dict(name='scale', kind=['test'], src_path=str(ROOT/'tests/scale.rs')),
+                profile=dict(test=True), executable=str(current), fresh=False), dict(reason='build-finished', success=True)]
+            cargo.write_text('#!/bin/sh\nprintf \'%s\\n\' "$*" > ' + shlex.quote(str(root/'cargo-invoked')) +
+                '\nprintf \'%s\\n\' ' + shlex.quote('\n'.join(map(json.dumps, messages))) + '\n')
+        else:
+            cargo.write_text('#!/bin/sh\nprintf forbidden > ' + shlex.quote(str(root/'cargo-invoked')) + '\nexit 81\n')
+        cargo.chmod(0o700)
+        path = {'current': current, 'nonexec': nonexec, 'outside': outside, 'missing': deps/'scale-absent'}.get(supplied)
+        env = dict(self.env)
+        if path is not None: env['VQRO_SCALE_TEST_EXE'] = str(path)
+        body = '\n'.join(['set -u', f'MODE={mode}', f'REPO={shlex.quote(str(ROOT))}',
+            f'TARGET={shlex.quote(str(target))}', f'LOGS={shlex.quote(str(logs))}', f'RUN={shlex.quote(str(root))}',
+            f'CARGO=(env -i HOME="$HOME" PATH={shlex.quote(str(bin_dir))}:/usr/bin:/bin CARGO_TARGET_DIR="$TARGET")',
+            shell_function('timing_python'), shell_function('scale_harness'), 'scale_harness'])
+        result = subprocess.run(['/bin/bash', '-c', body], env=env, capture_output=True, text=True, timeout=10)
+        return result, logs, target, current, ran
+
+    def test_scale_explicit_path_runs_current_amid_stale_binaries(self):
+        result, logs, target, current, ran = self.scale_fixture('extras', extra=4)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(ran.read_text(), 'current')
+        self.assertFalse((ran.parent/'cargo-invoked').exists(), 'timing mode must not invoke Cargo at all')
+        selected = json.loads((logs/'scale-artifact.json').read_text())
+        self.assertEqual(selected['path'], str(current.resolve()))
+        self.assertEqual(selected['sha256'], hashlib.sha256(current.read_bytes()).hexdigest())
+        self.assertEqual(selected['mtime_unix_ns'], current.stat().st_mtime_ns)
+
+    def test_scale_explicit_path_missing_outside_or_non_executable_fails_without_execution(self):
+        for supplied in (None, 'missing', 'outside', 'nonexec'):
+            with self.subTest(supplied=supplied):
+                result, logs, target, current, ran = self.scale_fixture(str(supplied), supplied=supplied)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn('prebuild the release scale test and pass its path', result.stdout + result.stderr)
+                self.assertFalse(ran.exists(), 'invalid/missing explicit path must never run any stale executable')
+                self.assertFalse((ran.parent/'cargo-invoked').exists(), 'failure must not start a hidden build')
+
+    def test_full_scale_explicit_prebuild_selects_and_runs_the_cargo_artifact(self):
+        result, logs, target, current, ran = self.scale_fixture('full', supplied=None, extra=4,
+                                                              mode='full', cargo_success=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(ran.read_text(), 'current')
+        args = (ran.parent/'cargo-invoked').read_text()
+        self.assertIn('--no-run --message-format=json', args)
+        selection = json.loads((logs/'scale-artifact.json').read_text())
+        self.assertEqual(selection['path'], str(current))
+        self.assertEqual(selection['selection']['method'], 'cargo compiler-artifact')
+
+    def test_failed_full_prebuild_never_runs_a_stale_binary(self):
+        result, logs, target, current, ran = self.scale_fixture('failed-full', mode='full')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertFalse(ran.exists())
+        self.assertFalse((logs/'scale-artifact.json').exists())
+
     def test_sampler_and_grader_receive_only_explicit_sanitized_environment(self):
         repo = self.root/'fake-repo'
         (repo/'scripts').mkdir(parents=True)
@@ -99,6 +176,10 @@ else:
         scale.write_bytes(b'fake scale test artifact')
         scale.chmod(0o700)
         (release/'deps/scale-fixture.d').write_text('not an executable artifact')
+        stale = release/'deps/scale-stale'
+        stale.write_text('unselected stale executable')
+        stale.chmod(0o700)
+        (self.root/'scale-artifact.json').write_text(json.dumps(dict(kind='vqro.scale-test-artifact', path=str(scale))))
         result = self.receipt(['PASS'], provenance=(ROOT, target, 'a'*40))
         self.assertEqual(result.returncode, 0, result.stderr)
         attestation = json.loads(self.latest.read_text())['build_provenance']

@@ -5,7 +5,7 @@
 #   scripts/check.sh full    quick + every opt-in private suite (tmux, providers, herdr-core), the e2e
 #                            scripts, TUI smoke/scale probe, the default scale profile, and a leftover check
 #   scripts/check.sh timing  only TUI scale, scale harness and bridge memory; strict budget grading,
-#                            using prebuilt release vqro and exactly one release scale test binary
+#                            using prebuilt release vqro and an explicit VQRO_SCALE_TEST_EXE
 #
 # Every step runs under `env -i` with private paths: no live vqro, hc/herdr-core or tmux server is
 # touched (suites start their own private ones and stop only those). Prints a PASS/FAIL table and writes
@@ -241,18 +241,26 @@ sys.exit(0 if ok else 1)'
 }
 
 scale_harness() {
-  local command=(cargo test --release --test scale -- --ignored --exact scale_load --nocapture)
+  local executable record="$LOGS/scale-artifact.json" helper="$REPO/scripts/scale_artifact.py"
   if [ "$MODE" = timing ]; then
-    local binaries=() path
-    for path in "$TARGET"/release/deps/scale-*; do [ -f "$path" ] && [ -x "$path" ] && binaries+=("$path"); done
-    if [ "${#binaries[@]}" -ne 1 ]; then
-      echo "FAIL timing: prebuild exactly one release scale test binary (cargo test --release --test scale --no-run)"
+    if [ -z "${VQRO_SCALE_TEST_EXE:-}" ]; then
+      echo "FAIL timing: prebuild the release scale test and pass its path (VQRO_SCALE_TEST_EXE)" >&2
       return 1
     fi
-    command=("${binaries[0]}" --ignored --exact scale_load --nocapture)
+    # Stable Cargo --no-run can compile. Timing admission does not invoke it at all.
+    executable=$(timing_python "$helper" validate --manifest "$REPO/Cargo.toml" --target-dir "$TARGET" \
+      --executable "$VQRO_SCALE_TEST_EXE" --record "$record") || return 1
+  else
+    # Full gates already permit builds. Keep the package/target selection evidence,
+    # rather than guessing among stale hashed executables in a long-lived target.
+    local messages="$LOGS/scale-prebuild.jsonl"
+    "${CARGO[@]}" cargo test --release --test scale --no-run --message-format=json > "$messages" \
+      || { cat "$messages"; return 1; }
+    executable=$(timing_python "$helper" select --manifest "$REPO/Cargo.toml" --target-dir "$TARGET" \
+      --record "$record" < "$messages") || return 1
   fi
   "${CARGO[@]}" VQRO_SCALE_RUN_DIR="$RUN" VQRO_SCALE_RECEIPT="$LOGS/scale-receipt.json" VQRO_SCALE_DEFER_TIMING_GRADE=1 \
-    "${command[@]}" || return 1
+    "$executable" --ignored --exact scale_load --nocapture || return 1
   # Cargo/test success is required too: a stale receipt can never excuse a panic.
   timing_python - "$LOGS/scale-receipt.json" <<'PY'
 import json, sys
@@ -448,11 +456,17 @@ def artifact(path):
         return {"path": str(path), "sha256": digest.hexdigest(), "mtime_unix_ns": stat.st_mtime_ns}
     except OSError as error:
         return {"path": str(path), "unavailable": str(error)}
+try:
+    selected_scale = json.loads((Path(logs) / "scale-artifact.json").read_text())
+    if selected_scale.get("kind") != "vqro.scale-test-artifact" or not isinstance(selected_scale.get("path"), str):
+        selected_scale = None
+except (OSError, ValueError, AttributeError):
+    selected_scale = None
 r["build_provenance"] = {"assurance": "caller-attested, not revision-bound",
     "checkout": str(checkout), "checkout_commit": checkout_commit,
     "release_vqro": artifact(target / "release/vqro"),
-    "scale_test_artifacts": [artifact(path) for path in sorted((target / "release/deps").glob("scale-*"))
-                             if path.is_file() and path.stat().st_mode & 0o111]}
+    "scale_test_selection": selected_scale,
+    "scale_test_artifacts": [artifact(Path(selected_scale["path"]))] if selected_scale else []}
 scale = logs + "/scale-receipt.json"
 try:
     sr = json.load(open(scale))

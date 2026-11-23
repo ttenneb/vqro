@@ -84,23 +84,43 @@ lock descriptors. Pool sizes must agree across callers.
 
 ## Strict proof before installation
 
-Prebuild from the revision being graded, outside the timing-only run:
+Prebuild from the revision being graded, outside the timing-only run. The stdlib
+helper reads Cargo's successful JSON stream and selects this manifest's `scale`
+test target (including its package/target source), not an inventory of old hashed
+executables. Its stdout is the path callers pass; no prebuild attestation file is
+required. Optional `--record` is diagnostic/provenance output only.
 
 ```sh
-cargo test --release --test scale --no-run
-cargo build --release --bin vqro
-# Run those builds through the normal slot wrapper too.
+VQRO_SCALE_TEST_EXE=$(
+  "$GATE_SLOT" env -i HOME="$HOME" PATH="$PATH" CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+    bash -c 'set -o pipefail
+      cargo test --release --test scale --no-run --message-format=json |
+        python3 -I scripts/scale_artifact.py select --manifest Cargo.toml --target-dir "$CARGO_TARGET_DIR"'
+) || exit 1
+export VQRO_SCALE_TEST_EXE
+"$GATE_SLOT" env -i HOME="$HOME" PATH="$PATH" CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+  cargo build --release --bin vqro
 "$GATE_SLOT" --exclusive --wait-seconds 1800 env -i HOME="$HOME" PATH="$PATH" \
-  CARGO_TARGET_DIR="$CARGO_TARGET_DIR" scripts/check.sh timing
+  CARGO_TARGET_DIR="$CARGO_TARGET_DIR" VQRO_SCALE_TEST_EXE="$VQRO_SCALE_TEST_EXE" scripts/check.sh timing
 ```
 
 Timing mode runs only the three sampled steps above plus the usual owned-leftover
 receipt/cleanup guard. It never builds or runs the unrelated quick/full suites.
-It requires a release vqro and exactly one executable release scale test artifact;
-missing/ambiguous artifacts fail, with no cold-build fallback. Receipts label build
+It requires a release vqro and an explicit `VQRO_SCALE_TEST_EXE`. Timing only
+checks that the nominated file exists, is executable and canonically inside
+`CARGO_TARGET_DIR` (symlink escapes rejected). Missing/invalid paths fail with
+`prebuild the release scale test and pass its path`; they are not skips. Timing
+never invokes Cargo or scans the artifact directory. Stale extra binaries are
+irrelevant. Full gates may prebuild with Cargo JSON and run the selected artifact.
+
+Stable Cargo `--no-run` still compiles, and `fresh:false` is reported afterward.
+Therefore no build-capable Cargo freshness query runs in timing admission. The
+explicit prebuild may report non-fresh artifacts because builds are allowed there.
+This is the caller-attested policy, not a new build/fingerprint framework.
+Receipts label build
 provenance **caller-attested, not revision-bound**, name the checkout path and full
 checkout commit, and record SHA256 plus nanosecond Unix mtime of the release vqro
-and executable scale-test artifacts. This identifies what was graded; it does not
+and the one chosen scale-test artifact, not unrelated old files. This identifies what was graded; it does not
 claim that a hash or mtime binds a prebuilt artifact to the checkout revision.
 Archive its strict receipt beside the full receipt; a timed-out exclusive admission
 is not a grading run. Target duration is under about five minutes, excluding admission
