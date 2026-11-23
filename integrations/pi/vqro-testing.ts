@@ -12,6 +12,7 @@ const INTEGRATION_STATES = new Set(["pass", "fail", "skipped", "unverified", "mi
 
 type Status = {
   setup_id: string; generation: number; require_unit: boolean; finish_ok: boolean;
+  policy_state?: "on" | "off" | "unknown";
   instance: { socket: string | null; state_dir: string | null; extensions_dir: string; epoch: string | null };
   coverage_gaps: string[];
   unit: { state: string; receipt: string | null; verdict: unknown; current?: boolean; exception: null | {
@@ -28,13 +29,28 @@ type Dependencies = {
   stderr?: (message: string) => void;
 };
 
-function policyRule(status?: Status): string {
-  const stale = status?.unit.state === "stale" || status?.integration.state === "stale";
-  if (status?.require_unit === true && !stale) {
-    return "Current setup policy ON: vqro_setup_finish is required before reporting a setup change finished. Attach current Unit evidence or request a human-accepted exception, plus Integration evidence or an explicit skip reason. " + GUIDANCE;
+type Policy = Pick<Status, "require_unit" | "policy_state" | "not_verified_reasons">;
+
+function policyEnvelope(value: any): Policy | undefined {
+  if (!value || typeof value.require_unit !== "boolean" || !Array.isArray(value.not_verified_reasons) ||
+      !value.not_verified_reasons.every((reason: unknown) => typeof reason === "string") ||
+      value.policy_state !== undefined && (!["on", "off", "unknown"].includes(value.policy_state) ||
+        value.policy_state === "on" && !value.require_unit || value.policy_state === "off" && value.require_unit)) return;
+  return { require_unit: value.require_unit, policy_state: value.policy_state, not_verified_reasons: value.not_verified_reasons };
+}
+
+function policyState(status?: Policy): "ON" | "OFF" | "UNKNOWN" {
+  if (!status || status.policy_state === "unknown" || status.not_verified_reasons.some(reason => reason.startsWith("require_unit setting is not boolean"))) return "UNKNOWN";
+  return status.require_unit ? "ON" : "OFF";
+}
+
+function policyRule(status?: Policy): string {
+  const conditional = "Follow the CURRENT authoritative testing policy at every step. This sampled policy label does not survive a policy change: later vqro-testing-policy context supersedes it. Only while current policy is ON is the finish step mandatory; OFF makes evidence recommended, and unknown policy must never be inferred OFF. ";
+  if (policyState(status) === "ON") {
+    return conditional + "Current setup policy ON: vqro_setup_finish is required before reporting a setup change finished. Stale/NOT VERIFIED receipts do not soften this duty. Attach current Unit evidence or request a human-accepted exception, plus Integration evidence or an explicit skip reason. " + GUIDANCE;
   }
-  const state = !status ? "UNKNOWN/UNAVAILABLE" : stale ? "STALE assessment" : "OFF";
-  return `Current setup policy ${state}: Unit and Integration evidence are recommended, not unconditionally required by this instruction. You may use vqro_setup_finish to inspect evidence. Recommended reporting: attach available receipts or explain why checks were skipped/unavailable; refresh unknown or stale status before claiming verified completion. ` + GUIDANCE;
+  const state = policyState(status) === "OFF" ? "OFF" : "UNKNOWN/UNAVAILABLE";
+  return conditional + `Current setup policy ${state}: Unit and Integration evidence are recommended, not unconditionally required by this sample. You may use vqro_setup_finish to inspect evidence. Recommended reporting: attach available receipts or explain why checks were skipped/unavailable; refresh unknown policy before claiming verified completion. ` + GUIDANCE;
 }
 
 function parseStatus(value: any): Status {
@@ -46,6 +62,8 @@ function parseStatus(value: any): Status {
       typeof value.performance?.recommended !== "boolean" || typeof value.performance?.why !== "string") {
     throw new Error("invalid test.setup.status response");
   }
+  if (value.policy_state !== undefined && (!["on", "off", "unknown"].includes(value.policy_state) ||
+      value.policy_state === "on" && !value.require_unit || value.policy_state === "off" && value.require_unit)) throw new Error("invalid policy state");
   const instance = value.instance;
   if (!instance || typeof instance !== "object" || !instance.extensions_dir || typeof instance.extensions_dir !== "string" ||
       ![instance.socket, instance.state_dir, instance.epoch].every(item => item === null || typeof item === "string") ||
@@ -65,6 +83,7 @@ function parseStatus(value: any): Status {
   const integrationOK = (["pass", "fail", "unverified"].includes(value.integration.state) &&
     value.integration.current === true && !!value.integration.receipt) ||
     (value.integration.state === "skipped" && !!value.integration.skip_reason?.trim());
+  if (value.finish_ok && policyState(value) === "UNKNOWN") throw new Error("unknown policy cannot approve finish");
   if (value.finish_ok && value.require_unit && !(unitOK && integrationOK)) throw new Error("inconsistent finish approval");
   return value;
 }
@@ -88,7 +107,7 @@ function summary(status?: Status, error?: string): string {
   const gaps = status.coverage_gaps.length ? ` [Coverage gaps: ${status.coverage_gaps.join("; ")}]` : "";
   return `Setup change: ${scope ? `[${scope}] · ` : ""}Unit ${verdict}${gaps} (${receipt}); Integration ${integration}; ${status.finish_ok ? "finish evidence accepted" : "NOT VERIFIED: finish refused"}` +
     (status.unit.exception ? `; human exception: ${status.unit.exception.reason}` : "") +
-    (status.require_unit ? "" : "; Unit requirement OFF") +
+    (policyState(status) === "OFF" ? "; Unit requirement OFF" : policyState(status) === "UNKNOWN" ? "; Unit policy UNKNOWN" : "") +
     (["fail", "error", "unverified", "stale", "pending"].includes(status.performance.state) ?
       `; Performance ${status.performance.state.toUpperCase()}${status.performance.state === "stale" ? ` (${older})` : ""} (never blocking)` : "") +
     (status.performance.recommended ? `; Performance recommended: ${status.performance.why} (never blocking)` : "");
@@ -99,9 +118,12 @@ export function installTesting(pi: any, deps: Dependencies) {
   let previous: string | undefined;
   let attempted: string | undefined;
   let current: Status | undefined;
+  let policy: Policy | undefined;
+  let failedAttempt: { identity: string; receipt: string | null } | undefined;
   let failure: string | undefined;
   let notice: string | undefined;
   let reporting = false;
+  let livePolicyContext: string | undefined;
   let serial: Promise<void> = Promise.resolve();
   const stderr = deps.stderr || ((message: string) => process.stderr.write(message + "\n"));
 
@@ -111,11 +133,23 @@ export function installTesting(pi: any, deps: Dependencies) {
     else stderr(message); // Never corrupt RPC/JSON stdout or rely on no-op print-mode UI.
   }
 
+  async function assessment(): Promise<Status> {
+    let value: unknown;
+    try { value = await deps.status(); }
+    catch (error) { policy = undefined; throw error; }
+    policy = policyEnvelope(value); // Receipt/identity errors do not make a known ON policy optional.
+    return parseStatus(value);
+  }
+
   async function inspect(ctx: any, at: string) {
+    const priorPolicy = policyState(policy);
     show(ctx, "Setup testing: Unit NOT VERIFIED (checking evidence)");
     try {
-      const status = parseStatus(await deps.status());
+      const status = await assessment();
       const identity = token(status);
+      if (failedAttempt && (identity !== failedAttempt.identity ||
+          status.unit.current === true && status.unit.receipt !== failedAttempt.receipt)) failedAttempt = undefined;
+      if (failedAttempt && status.require_unit) throw new Error("latest Unit attempt is NOT VERIFIED; an older receipt cannot authorize finish");
       const changed = at !== "baseline" && identity !== previous;
       reporting ||= changed || at === "finish";
       current = status;
@@ -125,15 +159,19 @@ export function installTesting(pi: any, deps: Dependencies) {
         // Record the attempt before invocation: timeout/EOF never causes an automatic replay.
         attempted = identity;
         show(ctx, "Setup change: Unit NOT VERIFIED (Unit running)");
+        failedAttempt = { identity, receipt: status.unit.receipt };
         await deps.unit();
-        current = parseStatus(await deps.status());
+        current = await assessment();
         if (token(current) !== identity) throw new Error("setup changed during Unit; fresh evidence required");
+        failedAttempt = undefined;
       }
       previous = identity;
+      if (policyState(policy) !== priorPolicy) livePolicyContext = policyRule(policy);
       show(ctx, reporting ? summary(current) : summary(current).replace("Setup change:", "Setup testing:"));
     } catch (error) {
       current = undefined;
       failure = String(error);
+      if (policyState(policy) !== priorPolicy) livePolicyContext = policyRule(policy);
       show(ctx, summary(undefined, failure));
     }
   }
@@ -141,9 +179,11 @@ export function installTesting(pi: any, deps: Dependencies) {
   function check(ctx: any, at: string) {
     serial = serial.then(() => inspect(ctx, at)).catch((error) => {
       current = undefined;
+      policy = undefined;
       failure = String(error);
       // A broken UI transport must not turn a rejected finish into success.
       notice = summary(undefined, failure);
+      livePolicyContext = policyRule(undefined);
       stderr(notice);
     });
     return serial;
@@ -153,12 +193,23 @@ export function installTesting(pi: any, deps: Dependencies) {
     await serial;
     previous = attempted = undefined;
     reporting = false;
+    livePolicyContext = undefined;
     current = undefined;
+    policy = undefined;
+    failedAttempt = undefined;
     await check(ctx, "baseline");
   });
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     await check(ctx, "prompt"); // Do not impose a cached or unavailable policy on the next run.
-    return { systemPrompt: `${event.systemPrompt}\n\n${policyRule(current)}` };
+    livePolicyContext = undefined; // The new run-start sample already describes this observation.
+    return { systemPrompt: `${event.systemPrompt}\n\n${policyRule(policy)}` };
+  });
+  pi.on("context", async (event: any) => {
+    if (!livePolicyContext) return;
+    // Public per-request context, not a queued steer/follow-up or a provider turn.
+    // Keep it across retries; replace only our own earlier ephemeral context.
+    return { messages: [...event.messages.filter((message: any) => !(message.role === "custom" && message.customType === "vqro-testing-policy")),
+      { role: "custom", customType: "vqro-testing-policy", content: livePolicyContext, display: true, timestamp: Date.now() }] };
   });
   pi.on("tool_result", async (event: any, ctx: any) => {
     // Shell parsing is not reliable: conservatively rescan after any bash/edit/write.
@@ -177,7 +228,7 @@ export function installTesting(pi: any, deps: Dependencies) {
   });
   pi.registerTool({
     name: "vqro_setup_finish", label: "Finish vqro setup change",
-    description: "Inspect setup evidence. A fresh ON policy requires the finish step; OFF or unknown/stale/unavailable assessments recommend evidence without an unconditional completion duty. Missing evidence is not a pass; no prose veto.",
+    description: "Inspect current setup policy/evidence. ON requires the finish step even with stale evidence; OFF recommends evidence; unknown policy is not OFF or a pass. Follow later policy context updates. No prose veto.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     async execute(_id: string, _args: unknown, _signal: unknown, _update: unknown, ctx: any) {
       await check(ctx, "finish");
@@ -240,6 +291,7 @@ export default function (pi: any) {
       if (![0, 1, 77].includes(result.code ?? -1)) throw new Error(`Unit harness unavailable: exit ${result.code}: ${result.stderr}`);
       const receipt = JSON.parse(result.stdout);
       if (receipt.kind !== "vqro.test-receipt" || receipt.suite !== "unit") throw new Error("invalid Unit receipt");
+      if (receipt.recorded !== true) throw new Error("Unit recording unsupported; finish evidence NOT VERIFIED");
       // The subsequent status call must adopt/validate the receipt; stdout alone never grants finish.
     },
   });

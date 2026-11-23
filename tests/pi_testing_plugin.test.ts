@@ -69,7 +69,7 @@ generation=int((root/'generation').read_text()) if (root/'generation').exists() 
 if '--record' in args:
  assert '--out' not in args
  (root/'recorded').write_text(str(generation))
- print(json.dumps({'kind':'vqro.test-receipt','suite':'unit','receipt':'checker-owned.json'}))
+ print(json.dumps({'kind':'vqro.test-receipt','suite':'unit','recorded':True,'receipt':'checker-owned.json'}))
 else:
  passed=not generation or (root/'recorded').exists()
  print(json.dumps({'setup_id':('a' if generation==0 else 'b')*64,'generation':generation,'require_unit':True,'finish_ok':passed,
@@ -120,10 +120,15 @@ else:
     const cases = [
       { name: "ON", value: status(), required: true },
       { name: "OFF", value: status("a", 0, { require_unit: false }), required: false },
-      { name: "UNKNOWN", value: status("a", 0, { setup_id: null }), required: false },
+      { name: "UNKNOWN", value: status("a", 0, { setup_id: null, require_unit: false, finish_ok: false, policy_state: "unknown" }), required: false },
+      { name: "UNKNOWN-IDENTITY", value: status("a", 0, { setup_id: null, finish_ok: false }), required: true },
       { name: "UNAVAILABLE", value: status(), unavailable: true, required: false },
-      { name: "STALE", value: status("a", 0, { finish_ok: false,
-        unit: { state: "stale", receipt: "/old.json", verdict: "pass", exception: null } }), required: false },
+      { name: "STALE-UNIT", value: status("a", 0, { finish_ok: false,
+        unit: { state: "stale", receipt: "/old.json", verdict: "pass", exception: null } }), required: true },
+      { name: "STALE-INTEGRATION", value: status("a", 0, { finish_ok: false,
+        integration: { state: "stale", receipt: "/old-integration.json", skip_reason: null } }), required: true },
+      { name: "MALFORMED", value: status("a", 0, { require_unit: false, finish_ok: false, policy_state: "unknown",
+        not_verified_reasons: ["require_unit setting is not boolean; enforcement cannot be established"] }), required: false },
     ];
     for (const item of cases) {
       const f = fixture(item.value);
@@ -137,10 +142,57 @@ else:
       } else {
         expect(prompt).not.toContain("vqro_setup_finish is required");
         expect(prompt).toContain("Unit and Integration evidence are recommended");
-        expect(prompt).toContain(item.name === "STALE" ? "STALE assessment" : item.name === "OFF" ? "policy OFF" : "UNKNOWN/UNAVAILABLE");
+        expect(prompt).toContain(item.name === "OFF" ? "policy OFF" : "UNKNOWN/UNAVAILABLE");
       }
       expect(f.providerRequests).toBe(0);
     }
+  });
+
+  test("tool-time ON and OFF transitions reach public context without another provider request", async () => {
+    for (const [start, end] of [[true, false], [false, true]]) {
+      const f = fixture(status("a", 0, { require_unit: start }));
+      await f.emit("session_start");
+      const initial = (await f.emit("before_agent_start", { systemPrompt: "base" })).systemPrompt;
+      expect(initial).toContain("Follow the CURRENT authoritative testing policy");
+      f.set(status("b", 1, { require_unit: end }));
+      f.unit(async () => {}); // Do not let the fixture's default Unit action reset policy to ON.
+      await f.emit("tool_result", { toolName: "write" });
+      const inbox = { role: "custom", customType: "vqro-inbox", content: "preserved", timestamp: 1 };
+      const next = await f.emit("context", { messages: [inbox] });
+      expect(next.messages[0]).toBe(inbox);
+      const guidance = next.messages.at(-1);
+      expect(guidance.role).toBe("custom");
+      expect(guidance.customType).toBe("vqro-testing-policy");
+      expect(guidance.content).toContain(end ? "Current setup policy ON" : "Current setup policy OFF");
+      if (end) expect(guidance.content).toContain("vqro_setup_finish is required");
+      else expect(guidance.content).toContain("evidence are recommended");
+      const retry = await f.emit("context", { messages: next.messages });
+      expect(retry.messages.filter((m: any) => m.customType === "vqro-testing-policy")).toHaveLength(1);
+      expect(f.providerRequests).toBe(0);
+    }
+  });
+
+  test("settle-time policy transition is available to any natural next context", async () => {
+    const f = fixture();
+    await f.emit("session_start");
+    await f.emit("before_agent_start", { systemPrompt: "base" });
+    f.set(status("b", 1, { require_unit: false }));
+    f.unit(async () => {});
+    const final = await f.emit("agent_before_settle", { entries: [] });
+    expect(final).not.toHaveProperty("continue");
+    const next = await f.emit("context", { messages: [] });
+    expect(next.messages.at(-1).content).toContain("Current setup policy OFF");
+    expect(f.providerRequests).toBe(0);
+  });
+
+  test("malformed legacy policy envelope is unknown, never inferred OFF", async () => {
+    const f = fixture(status("a", 0, { require_unit: false, finish_ok: false,
+      not_verified_reasons: ["require_unit setting is not boolean; enforcement cannot be established"] }));
+    await f.emit("session_start");
+    const prompt = (await f.emit("before_agent_start", { systemPrompt: "base" })).systemPrompt;
+    expect(prompt).toContain("UNKNOWN/UNAVAILABLE");
+    expect(prompt).not.toContain("Current setup policy OFF");
+    await expect(f.finish()).rejects.toThrow("Unit policy UNKNOWN");
   });
 
   test("policy is refreshed before prompting instead of reusing a formerly armed value", async () => {
@@ -243,10 +295,16 @@ else:
     f.unit(async () => { throw new Error("Unit timed out"); });
     await f.emit("tool_result", { toolName: "bash" });
     expect(f.statuses.at(-1)).toContain("NOT VERIFIED");
-    // Authoritative backend must not contain a current pass for the timed-out run.
-    f.set(status("b", 1, { finish_ok: false, unit: { state: "pending", receipt: null, verdict: null, exception: null } }));
+    // Recovery cannot reuse the old PASS after an uncertain latest attempt.
+    f.set(status("b", 1));
     await expect(f.finish()).rejects.toThrow('"finish_ok":false');
     expect(f.units).toBe(1);
+    const prompt = (await f.emit("before_agent_start", { systemPrompt: "base" })).systemPrompt;
+    expect(prompt).toContain("Current setup policy ON");
+    expect(prompt).toContain("vqro_setup_finish is required");
+    f.set(status("b", 1, { unit: { state: "pass", current: true, receipt: "/fresh-unit.json", verdict: "pass", exception: null } }));
+    expect((await f.finish()).details.finish_ok).toBe(true);
+    expect(f.units).toBe(1); // A different fresh receipt resolves uncertainty; no command replay.
     f.set(status("c", 2));
     f.unit(async () => { f.set(status("d", 3, { finish_ok: false })); });
     await f.emit("tool_result", { toolName: "write" });

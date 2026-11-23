@@ -96,11 +96,13 @@ no extension injection or environment-filter exception is added to those bridges
 RPC coverage is a **required follow-up**, not dropped scope. While a declared RPC Pi launcher is enabled, the
 status segment, Settings page, status reasons and receipts show:
 **NOT VERIFIED: rule not active for vqro-launched Pi agents yet**.
-The injected prompt/skill requires the finish tool only for a fresh ON assessment; OFF, unknown, stale or
-unavailable assessments recommend evidence with honest wording instead of imposing an unconditional rule.
+The injected prompt/skill requires the finish tool while the current authoritative policy is ON, even when
+receipts are stale or NOT VERIFIED. OFF or genuinely unknown/unavailable policy does not impose an unconditional
+rule. Run-start policy labels are samples; public per-request context conveys observed policy changes without
+requesting another provider turn. Malformed policy is explicitly unknown, never inferred OFF.
 
-`test.setup.status {}` returns the current `setup_id`, observed `generation`, `require_unit`, Unit/Integration/
-Performance evidence and `finish_ok`. Unit is required only when armed: a current recorded Unit pass or an
+`test.setup.status {}` returns the current `setup_id`, observed `generation`, `require_unit`, explicit
+`policy_state` (`on`, `off`, `unknown`), Unit/Integration/Performance evidence and `finish_ok`. Unit is required only when armed: a current recorded Unit pass or an
 explicit current owner exception is then necessary, plus an Integration receipt or a nonempty skip explanation.
 When required, an off/missing/failed testing extension also blocks finish unless a current owner exception applies:
 changes are not tracked while it is off. The built-in recovery surface can make the extension accessible for an
@@ -120,7 +122,9 @@ In-app Unit uses recording only while policy is ON. OFF status reads/ordinary he
 lock the Unix recorder; an OFF health receipt is ad hoc, not finish evidence. Explicit CLI `--record` still
 requests recording. If its lock/observer is unavailable, ordinary checks still run: `health_verdict` reports
 their outcome, `recording.state` is `unsupported`, `recorded` is false, and finish evidence is NOT VERIFIED.
-No no-op lock is substituted and no unsupported recording is published as a current receipt.
+No no-op lock is substituted and no unsupported recording is published as a current receipt. A failed armed
+recording attempt latches observer invalidation: recovery cannot silently reuse an older Unit PASS after a
+new failed health report. A newly completed recorded run is needed for a current acknowledgement.
 JSON includes its path. `--out` is mutually exclusive, ad hoc and **never adopted** as Unit completion evidence.
 Status reads adopt only complete, supported, recorded receipts for this setup, generation and selected instance;
 wrong suites/instances, old generations, incomplete JSON and unfinished runs never count as a pass. Integration
@@ -147,7 +151,9 @@ including change/revert, increment the persisted generation while armed or expli
 restart/missed events invalidate prior evidence and rescan. OFF assessments use read-only previews, not a
 persisted observer. Filesystem changes are detected on explicit status checks and while armed evidence is pending. This does
 not claim perfect detection of unobserved transient external file edits. Live notices use only `view.publish`:
-`testing.status`, a status-menu item, and `settings.page.testing`. Missing, stale, failed, pending or unknown evidence
+`testing.status`, a status-menu item, and `settings.page.testing`. The fixed RPC first-slice caveat is retained
+in bounded Unit/Integration/Performance error/size fallback receipts, not dropped by replacement reporting.
+Missing, stale, failed, pending or unknown evidence
 is prominent; a coverage gap is a warning, not a failed or unverified Unit result.
 
 `test.setup.skip {"suite":"integration","reason":"..."}` records an explicit current skip explanation; it cannot

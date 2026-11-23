@@ -23,7 +23,8 @@ from vqro_testing import (EXIT_CODES, RECEIPT_BYTES, STATUSES, PlainClient, Sand
                           row, script_path, text, utc_now, write_receipt,
                           scenario_matches, run_scenarios, source_mark, source_untouched)
 from testing_unit import offline_facts
-from testing_setup import SetupStore, bind_start, bind_end, scan as setup_scan
+from testing_setup import SetupStore, bind_start, bind_end, scan as setup_scan, rpc_rule_notice
+from vqro_testing import has_rpc_notice, preserve_rpc_notice, RPC_RULE_NOTICE
 
 DEFAULTS = {"relative_slowdown": 0.25, "noise_ms": 5, "rss_relative": 0.25, "noise_rss_mb": 10,
             "idle_new_activity": True, "size_relative": 2.0,
@@ -561,11 +562,13 @@ def run(args):
                   skipped=[], leftovers=[process for box in sandboxes for process in box.leftovers])
     result["warnings"] = f"{result['counts']['warn']} performance warnings"
     if len(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False).encode()) > RECEIPT_BYTES:
+        known_rpc = has_rpc_notice(result)
         result.update(verdict="error", baseline=None, candidate=None, fingerprint={}, inputs=[],
                       sandbox={key: value for key, value in result["sandbox"].items() if key in ("root", "backend", "started", "canary")},
                       not_covered=["complete receipt exceeded the size bound"], leftovers=result["leftovers"][:20],
                       rows=[row("harness", "receipt", "fail", "receipt exceeds size bound")],
                       counts={status: int(status == "fail") for status in STATUSES}, warnings="0 performance warnings")
+        preserve_rpc_notice(result, known_rpc)
     return result
 
 
@@ -580,6 +583,8 @@ def panel(result=None, destination=None):
             value = f" · {stats.get('median')} {stats.get('unit', '')}" if "median" in stats else ""
             items.append({"type": "text", "style": styles[r["status"]], "text": f"{r['id']}: {r['status']}{value} · {r['evidence']}"})
         items.append({"type": "text", "style": "dim", "text": "Limits warn only. Functional correctness, rendering and agent profiles not covered."})
+        if has_rpc_notice(result):
+            items.insert(0, {"type": "text", "text": RPC_RULE_NOTICE, "style": "warn"})
     return {"title": "Performance report", "items": items}
 
 
@@ -618,9 +623,14 @@ def extension_main():
                 child.wait()
                 try:
                     result = json.loads(destination.read_text())
+                    if (not isinstance(result, dict) or result.get("kind") != "vqro.test-receipt" or result.get("suite") != "perf"
+                            or result.get("verdict") not in ("pass", "fail", "unverified", "error")
+                            or not isinstance(result.get("counts"), dict) or not isinstance(result.get("rows"), list)):
+                        raise ValueError("subprocess did not produce a supported receipt object")
                 except (OSError, ValueError) as failure:
                     result = {"kind": "vqro.test-receipt", "version": 1, "suite": "perf", "verdict": "error", "warnings": "0 performance warnings",
                               "counts": {status: int(status == "fail") for status in STATUSES}, "rows": [row("harness", "subprocess", "fail", str(failure))]}
+                    preserve_rpc_notice(result, bool(rpc_rule_notice(snapshot)))
                     write_receipt(result, destination)
                 with lock:
                     last["result"] = result

@@ -24,6 +24,8 @@ sys.dont_write_bytecode = True
 
 STATUSES = ("pass", "warn", "fail", "skip", "unverified")
 EXIT_CODES = {"pass": 0, "fail": 1, "unverified": 77, "error": 2}
+RPC_RULE_NOTICE = "NOT VERIFIED: rule not active for vqro-launched Pi agents yet"
+
 EVIDENCE_CHARS = 300
 RECEIPT_BYTES = 750 * 1024
 WINDOWS_SANDBOX_UNSUPPORTED = "integration/performance sandbox is not supported on native Windows yet"
@@ -414,6 +416,18 @@ def fingerprint(extensions_dir, declarations, hello, *, settings=None, state_dir
                       "limit": "configured executable bytes, not loaded images or unmanaged external imports"}}
 
 
+def has_rpc_notice(result):
+    return (RPC_RULE_NOTICE in result.get("not_covered", []) or RPC_RULE_NOTICE in result.get("not_verified_reasons", []) or
+            any(RPC_RULE_NOTICE in str(item.get("evidence", "")) for item in result.get("rows", []) if isinstance(item, dict)))
+
+
+def preserve_rpc_notice(result, known):
+    """Retain only the fixed, bounded caveat across destructive error/size fallback."""
+    if known and RPC_RULE_NOTICE not in result.setdefault("not_covered", []):
+        result["not_covered"].append(RPC_RULE_NOTICE)
+    return result
+
+
 def receipt(rows, *, source, started_at, started, fingerprint_value, inputs, not_covered,
             extension_count, strict=False, error=False):
     counts = {status: sum(r["status"] == status for r in rows) for status in STATUSES}
@@ -432,9 +446,10 @@ def receipt(rows, *, source, started_at, started, fingerprint_value, inputs, not
               "skipped": [{"id": r["id"], "why": r["evidence"]} for r in rows if r["status"] == "skip" ]}
     if len(json.dumps(result, ensure_ascii=False, indent=2).encode()) > RECEIPT_BYTES:
         # Never publish a partial report as a successful complete run.
-        return receipt([row("receipt", "harness", "fail", "receipt exceeds size bound")], source=source,
-                       started_at=started_at, started=started, fingerprint_value={}, inputs=[],
-                       not_covered=["report exceeded receipt bound; no complete result"], extension_count=0, error=True)
+        fallback = receipt([row("receipt", "harness", "fail", "receipt exceeds size bound")], source=source,
+                           started_at=started_at, started=started, fingerprint_value={}, inputs=[],
+                           not_covered=["report exceeded receipt bound; no complete result"], extension_count=0, error=True)
+        return preserve_rpc_notice(fallback, has_rpc_notice(result))
     return result
 
 

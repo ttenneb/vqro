@@ -9,10 +9,9 @@ import threading
 import uuid
 
 from vqro_testing import (canonical, digest, fingerprint, process_identity, relevant_entries,
-                          is_settings_key, text, utc_now, write_receipt)
+                          is_settings_key, text, utc_now, write_receipt, RPC_RULE_NOTICE)
 
 POLICY_KEY = "doc/settings/testing.require_unit"
-RPC_RULE_NOTICE = "NOT VERIFIED: rule not active for vqro-launched Pi agents yet"
 
 
 def rpc_rule_notice(snapshot):
@@ -295,7 +294,8 @@ class SetupStore:
             finish = ((unit["state"] == "pass" or exception is not None) and (attached or integration["state"] == "skipped")
                       and (not unavailable or exception is not None))
         finish = finish and value.get("setup_id") is not None and not invalid_policy
-        return {"setup_id": value.get("setup_id"), "generation": state["generation"], "require_unit": required, "instance": value.get("instance"),
+        return {"setup_id": value.get("setup_id"), "generation": state["generation"], "require_unit": required,
+                "policy_state": "unknown" if invalid_policy else "on" if required else "off", "instance": value.get("instance"),
                 "unit": unit, "integration": integration, "performance": performance,
                 "finish_ok": bool(finish), "not_verified_reasons": list(dict.fromkeys(reasons)), "coverage_gaps": unit.get("coverage_gaps", [])}
 

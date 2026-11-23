@@ -76,6 +76,53 @@ class SetupTests(unittest.TestCase):
         shared.write_receipt(receipt, path)
         return path, receipt
 
+    @unittest.skipUnless(os.name == "posix", "requires the supported recorder lock; missing-lock health has separate portable controls")
+    def test_real_handler_transient_recorder_fault_cannot_recover_old_pass_after_new_fail(self):
+        self.coverage()
+        for phase in ("observe", "begin"):
+            with self.subTest(phase=phase):
+                self.facts["sample"]["display_status"] = "running"
+                handlers = {}
+                ext = Mock()
+                ext.info, ext.vqro = self.hello, self.client
+                ext.entries = self.snapshot["entries"]
+                ext.value.side_effect = lambda key, default=None: self.snapshot["entries"].get(key, {}).get("value", default)
+                ext.command.side_effect = lambda name, title: lambda fn: handlers.setdefault(name, fn)
+                with patch("vqro_ext.Extension", return_value=ext), patch.object(unit.threading, "Thread"), patch.dict(os.environ, {"VQRO_EXTENSIONS_DIR": str(self.ext)}):
+                    unit.extension_main()
+                    self.record()
+                    self.store.skip(self.value(), self.snapshot, "integration", "current fixture explanation")
+                    before = handlers["test.setup.status"]({})
+                    self.assertTrue(before["finish_ok"], before)
+                    old_setup = before["setup_id"]
+                    self.facts["sample"]["display_status"] = "failed"  # Runtime failure, not a configured-byte change.
+                    original = getattr(setup.SetupStore, phase)
+                    calls = [0]
+
+                    def transient(store, *args, **kwargs):
+                        calls[0] += 1
+                        if calls[0] == 1:
+                            raise OSError("one-attempt recorder fault")
+                        return original(store, *args, **kwargs)
+
+                    with patch.object(setup.SetupStore, phase, transient), patch.object(unit, "tests_row", return_value=shared.row("tests", "sample", "pass", "mocked installed suite")), patch.object(unit, "collect", wraps=unit.collect) as collect:
+                        latest = handlers["test.unit"]({})
+                    collect.assert_called_once()  # No replay of the failed health attempt.
+                    self.assertEqual(latest["health_verdict"], "fail")
+                    self.assertFalse(latest["recorded"])
+                    recovered = handlers["test.setup.status"]({})
+                    self.assertEqual(recovered["setup_id"], old_setup)
+                    self.assertGreater(recovered["generation"], before["generation"])
+                    self.assertFalse(recovered["finish_ok"], recovered)
+                    self.assertNotEqual(recovered["unit"]["state"], "pass")
+
+    def test_malformed_policy_has_explicit_unknown_state(self):
+        self.snapshot["entries"][setup.POLICY_KEY]["value"] = "not-a-boolean"
+        status = self.status()
+        self.assertEqual(status["policy_state"], "unknown")
+        self.assertFalse(status["finish_ok"])
+        self.assertIn("Unit policy: unknown", unit.setup_page(status)["items"][1]["text"])
+
     def test_policy_off_status_and_health_never_touch_recorder_lock(self):
         self.snapshot["entries"][setup.POLICY_KEY]["value"] = False
         with patch.dict(sys.modules, {"fcntl": None}), patch.object(setup.SetupStore, "locked", side_effect=AssertionError("OFF must not lock")), patch.object(unit, "tests_row", return_value=shared.row("tests", "sample", "pass", "portable mocked suite")):

@@ -183,6 +183,10 @@ def collect(state_dir, extensions_dir, *, client=None, hello=None, offline=False
             except Exception as failure:
                 # Recorder/observer portability is separate from ordinary health checks.
                 recording_error = text(f"recording unsupported or unavailable: {failure}")
+                try:
+                    tracker.invalidate("latest recorded Unit attempt could not be established; old acknowledgement invalidated")
+                except Exception:
+                    pass  # The in-app observer latches this failure until invalidation can succeed.
                 rows.append(row("recording", "completion", "unverified", recording_error))
                 not_covered.append(recording_error + "; finish evidence NOT VERIFIED")
         started_at = utc_now()
@@ -274,7 +278,7 @@ def panel(result=None, destination=None):
 
 
 def error_status(reason):
-    return {"setup_id": None, "generation": 0, "require_unit": False,
+    return {"setup_id": None, "generation": 0, "require_unit": False, "policy_state": "unknown",
             "unit": {"state": "error", "receipt": None, "verdict": None, "exception": None},
             "integration": {"state": "unverified", "receipt": None, "skip_reason": None},
             "performance": {"state": "unverified", "recommended": True, "why": "checker unavailable"},
@@ -314,7 +318,7 @@ def notice(status):
 def setup_page(status):
     segment = notice(status)
     items = [{"type": "text", "text": segment["label"], "style": segment["style"]},
-             {"type": "text", "text": f"Unit required: {'on' if status['require_unit'] else 'off'} · finish evidence: {'accepted' if status['finish_ok'] else 'not verified'}"},
+             {"type": "text", "text": f"Unit policy: {status.get('policy_state') or ('on' if status['require_unit'] else 'off')} · finish evidence: {'accepted' if status['finish_ok'] else 'not verified'}"},
              {"type": "text", "text": f"Generation {status['generation']} · setup {status['setup_id'] or 'unknown'}", "style": "dim"}]
     for suite in ("unit", "integration", "performance"):
         result = status[suite]
@@ -404,6 +408,8 @@ def extension_main():
             result = collect(state_dir, extensions_dir, client=ext.vqro, hello=ext.info,
                              tests=args.get("tests", True), strict=args.get("strict", False), tests_budget=20, record=recording_on)
             destination = None
+            if recording_on and not result.get("recorded"):
+                last["observer_error"] = result["recording"].get("reason") or "latest armed Unit attempt did not record completion evidence"
             if result["recording"]["state"] != "unsupported":
                 try:
                     destination = save_receipt(result, state_dir, result.get("receipt"))
