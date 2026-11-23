@@ -1655,6 +1655,17 @@ version and not already recorded by name in `doc/vqro/defaults.installed`. This 
 An entry that exists is left as it is, and a removed default stays removed, even when its `since` later moves. Client options live in `doc/settings/tui`, the theme in `doc/settings/theme`, the icon set in
 `doc/settings/icons`, the tab bar look in `doc/settings/tabs`.
 
+The bundled workspaces extension also exposes `doc/settings/workspaces.open_shell_when_empty`
+(default true), **Open a shell in an empty Scratch**, through `settings.page.workspaces`.
+On activation and backend availability it starts one shell in empty `main` (Scratch), including headless
+core starts. It leaves a nonempty Scratch or a valid selected workspace alone. Only the unchanged built-in
+recovery placeholder counts as an empty tab; arbitrary user panels are retained. Startup and a concurrent
+first `tabs.open` coalesce through the extension-owned CAS claim `doc/workspaces/first-shell`, removed
+atomically with placing the terminal. A definitely rejected spawn releases the claim; an uncertain or
+observed-but-unplaced spawn keeps it across restart and warns instead of replaying. Inspect terminals and
+explicitly repair/delete the claim through workspace transactions before requesting another automatic attempt.
+No backend means no shell, with a visible notice; recovery remains usable without this policy.
+
 Extensions may add a page to Settings by publishing live content `settings.page.<name>` = `{title, items}` (ordinary
 rows whose commands are their own, over their own state); Settings lists such pages after Interface and drops a
 page when its publisher stops. The sidebar uses it for the same options as its Show popup (one tree, any level

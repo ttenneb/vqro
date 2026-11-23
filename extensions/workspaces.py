@@ -27,10 +27,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vqro_ext import Extension, VqroError, views_in  # noqa: E402
 from vqro_views import title  # noqa: E402
 from vqro_process import background_kwargs  # noqa: E402
+from vqro_scratch import FirstShell, empty as scratch_empty, shell_tree
 
-ext = Extension("workspaces", event_types=["entries"])  # no resource events: not used here
+ext = Extension("workspaces", event_types=["entries", "provider"])  # no resource events: not used here
 LIST = "doc/workspaces/list"
 MAIN = "main"
+PREFS = "doc/settings/workspaces"
+bootstrap_lock = threading.Lock()
+decorate_pending = [False]
 REFRESH_SECS = 20
 lock = threading.Lock()
 last_data = [[]]  # what scan() last published (this extension doesn't receive its own live data)
@@ -125,6 +129,12 @@ def scan():
 def on_event(t, d):
     if t == "missed" or t == "entries" and any(c["key"] == LIST for c in d["changes"]):
         threading.Thread(target=scan, daemon=True).start()
+    if t in ("provider", "missed") or t == "entries" and any(c["key"] == PREFS for c in d["changes"]):
+        # Do not perform effects on the SDK listener: it must keep caches moving, and layout-only
+        # CAS retries after an observed spawn must not be reduced to a deferred listener replay.
+        threading.Thread(target=refresh_startup, daemon=True).start()
+    if t == "entries" and any(c["key"] in ("view/sidebar", "layout/main") for c in d["changes"]):
+        decorate_scratch()
 
 
 def save(items, note, extra=()):
@@ -215,26 +225,118 @@ def walk(node):
         yield from walk(t["node"])
 
 
-def open_layout(name, cwd, label, args=None):
+def open_layout(name, cwd, label, args=None, first_shell=None):
     """Show layout `name` in the invoking window and make it the shared default, creating it with one shell
     (in `cwd`) if missing. Returns (result, created).
 
     The shell is spawned at most once; only the layout write is retried (compare-and-set), recomputed
     from fresh state, never a second spawn."""
-    if ext.value(f"layout/{name}") is not None:
+    if ext.value(f"layout/{name}") is not None and first_shell is None:
         def switch():
             if ext.value(f"layout/{name}") is None:
                 raise VqroError("that workspace's layout was removed meanwhile", "conflict")
             ops = select(name)
             return ext.apply(ops, f"workspaces: switch to {label}") if ops else {}
         return shown_in_window(ext.retrying(switch, attempts=8), name), False
-    resource = ext.vqro.call("resource.spawn", {"cwd": cwd} if cwd else {})["resource"]
+    spawn = {"cwd": cwd} if cwd else {}
+    resource = first_shell.spawn(spawn) if first_shell is not None else ext.vqro.call("resource.spawn", spawn)["resource"]
 
     def attempt():
         if ext.value(f"layout/{name}") is None:
-            return ext.apply(create(name, cwd, label, resource, args), f"workspaces: open {label}")
-        return ext.apply(add_tab(name, resource), f"workspaces: open {label}")
+            ops = create(name, cwd, label, resource, args)
+        elif first_shell is not None:
+            view = f"term-{resource['id']}"
+            root = shell_tree(ext, ext.value(f"layout/{name}"), {"title": title(resource, {}), "node": {"view": view}})
+            ops = [{"op": "set", "key": f"view/{view}", "value": {"kind": "terminal", "resource": resource["id"]}},
+                   {"op": "set", "key": f"layout/{name}", "value": root, "expect": ext.version(f"layout/{name}")}] + select(name)
+        else:
+            ops = add_tab(name, resource)
+        if first_shell is not None:
+            ops += first_shell.finish_ops()
+        return ext.apply(ops, f"workspaces: open {label}")
     return shown_in_window(ext.retrying(attempt, attempts=8), name), True
+
+
+# -- empty Scratch startup policy -----------------------------------------------------------------
+
+startup_notice = [""]
+
+
+def startup_prefs():
+    prefs = ext.value(PREFS)
+    return prefs if isinstance(prefs, dict) else {}
+
+
+def open_when_empty():
+    return startup_prefs().get("open_shell_when_empty", True) is not False
+
+
+def publish_settings():
+    ext.publish("settings.page.workspaces", {"title": "Workspaces", "items": [
+        {"type": "toggle", "text": "Open a shell in an empty Scratch", "checked": open_when_empty(),
+         "detail": startup_notice[0] or "Also applies when the core starts without a UI",
+         "command": "workspaces.startup", "args": {"value": not open_when_empty()}}]})
+
+
+def decorate_scratch():
+    if not decorate_pending[0] or ext.value("view/sidebar") is None:
+        return
+    def attempt():
+        root = ext.value("layout/main")
+        if root is None or scratch_empty(ext):
+            return
+        if "sidebar" not in views_in(root):
+            ext.apply([{"op": "set", "key": "layout/main", "value": {"split": "h", "children": [
+                {"view": "sidebar"}, root], "sizes": [1, 3]}, "expect": ext.version("layout/main")}], "Scratch: initial sidebar")
+        decorate_pending[0] = False
+    ext.retrying(attempt, attempts=8)
+
+
+def refresh_startup():
+    bootstrap()
+    publish_settings()
+
+
+def bootstrap():
+    # Queue availability behind an in-flight attempt rather than dropping the only ready event.
+    # Centrally owned by this extension, not once per client. Never override a selected workspace.
+    bootstrap_lock.acquire()
+    try:
+        ext.fresh()
+        selected = (ext.value("workspace/active") or {}).get("layout")
+        if not open_when_empty() or selected not in (None, MAIN) and ext.value(f"layout/{selected}") is not None:
+            decorate_pending[0] = False
+            return
+        if not scratch_empty(ext):
+            return
+        decorate_pending[0] = True
+        try:
+            with FirstShell(ext) as first:
+                if first is None:
+                    return
+                open_layout(MAIN, None, "Scratch", first_shell=first)
+            startup_notice[0] = ""
+            ext.fresh()
+            decorate_scratch()
+        except VqroError as error:
+            startup_notice[0] = f"No Scratch shell opened: {error}. Inspect terminals before retrying an unconfirmed start."
+            ext.notify(startup_notice[0], "warn")
+    finally:
+        bootstrap_lock.release()
+
+
+@ext.command("workspaces.startup", "Set whether empty Scratch starts with a shell (args: value)")
+def set_startup(args):
+    if not isinstance(args.get("value"), bool):
+        raise VqroError("value must be true or false", "invalid")
+    def attempt():
+        prefs = dict(startup_prefs(), open_shell_when_empty=args["value"])
+        return ext.apply([{"op": "set", "key": PREFS, "value": prefs, "expect": ext.version(PREFS)}], "workspaces: startup preference")
+    result = ext.retrying(attempt, attempts=8)
+    ext.fresh()
+    bootstrap()
+    publish_settings()
+    return result
 
 
 # -- commands -------------------------------------------------------------------------------------
@@ -319,6 +421,12 @@ def shell(args):
 
 @ext.command("workspaces.main", "Switch to the main tabs (terminals not in a workspace)")
 def main_layout(args):
+    if scratch_empty(ext):
+        with FirstShell(ext) as first:
+            if first is None:
+                return {}
+            result, _ = open_layout(MAIN, None, None, args, first_shell=first)
+            return result
     result, _ = open_layout(MAIN, None, None, args)
     return result
 
@@ -388,5 +496,7 @@ ext.contribute({
                                 "icon": {"name": "folder", "text": "▫"}, "command": "workspaces.switch", "order": 1},
 })
 scan()
+bootstrap()
+publish_settings()
 threading.Thread(target=timer, daemon=True).start()
 ext.run()
