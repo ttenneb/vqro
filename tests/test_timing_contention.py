@@ -39,14 +39,50 @@ class TimingFacts(unittest.TestCase):
                 patch.object(sampler.Path, 'read_text', return_value='procs_running 1\n'), \
                 patch.object(sampler.os, 'cpu_count', return_value=8), \
                 patch.object(sampler.os, 'pidfd_open', return_value=99, create=True), \
-                patch.object(sampler.select, 'select') as wait, patch.object(sampler.os, 'close') as close:
+                patch.object(sampler.select, 'select', side_effect=[([], [], []), ([], [], []), ([99], [], [])]) as wait, \
+                patch.object(sampler.os, 'close') as close:
             facts = sampler.sample(42)
-        wait.assert_called_once_with([99], [], [], 1.0)
+        self.assertEqual([call.args[3] for call in wait.call_args_list], [0, 0, 1.0])
         close.assert_called_once_with(99)
         self.assertEqual(facts['status'], 'available', facts)
         self.assertFalse(facts['contended'], facts)
         self.assertEqual(facts['runtime_ns'], 100)
-        self.assertEqual(facts['sample_count'], 2)
+        self.assertEqual(facts['sample_count'], 1)
+        self.assertEqual(facts['end_observation'], 'pidfd_exit')
+
+    def test_pidfd_exit_excludes_a_later_gate_lock_from_contention(self):
+        with patch.object(sampler, 'identity', side_effect=[('birth', 'R'), ('birth', 'R'), FileNotFoundError]), \
+                patch.object(sampler, 'tree_schedstat', return_value={(42, 42, 'birth'): (100, 20)}), \
+                patch.object(sampler, 'slot_sample', side_effect=[[], ['later-gate.lock']]) as slots, \
+                patch.object(sampler.Path, 'read_text', return_value='procs_running 1\n'), \
+                patch.object(sampler.os, 'cpu_count', return_value=8), \
+                patch.object(sampler.os, 'pidfd_open', return_value=99, create=True), \
+                patch.object(sampler.select, 'select', side_effect=[([], [], []), ([], [], []), ([99], [], [])]), \
+                patch.object(sampler.os, 'close'):
+            facts = sampler.sample(42)
+        self.assertEqual(facts['status'], 'available', facts)
+        self.assertFalse(facts['contended'], facts)
+        self.assertEqual(sampler.grade(78, facts, False)[0], 1, facts)
+        slots.assert_called_once()
+        self.assertEqual(facts['sample_count'], 1)
+
+    def test_exit_during_snapshot_discards_a_post_exit_lock_and_runnable_count(self):
+        with patch.object(sampler, 'identity', return_value=('birth', 'R')), \
+                patch.object(sampler, 'tree_schedstat', return_value={(42, 42, 'birth'): (100, 20)}), \
+                patch.object(sampler, 'slot_sample', side_effect=[[], ['later-gate.lock']]), \
+                patch.object(sampler.Path, 'read_text', side_effect=['procs_running 1\n', 'procs_running 99\n']), \
+                patch.object(sampler.os, 'cpu_count', return_value=8), \
+                patch.object(sampler.os, 'pidfd_open', return_value=99, create=True), \
+                patch.object(sampler.select, 'select', side_effect=[([], [], []), ([], [], []), ([], [], []),
+                                                                 ([], [], []), ([99], [], [])]), \
+                patch.object(sampler.os, 'close'):
+            facts = sampler.sample(42)
+        self.assertEqual(facts['status'], 'available', facts)
+        self.assertFalse(facts['contended'], facts)
+        self.assertEqual(facts['sample_count'], 1)
+        self.assertEqual(facts['post_exit_samples_discarded'], 1)
+        self.assertEqual(facts['median_procs_running'], 1)
+        self.assertEqual(facts['end_observation'], 'exit_during_snapshot')
 
     def test_tree_accounts_for_worker_threads_and_their_children(self):
         with tempfile.TemporaryDirectory() as temp:

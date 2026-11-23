@@ -106,37 +106,60 @@ def sample(pid, interval=1.0):
     except (OSError, ValueError, IndexError):
         birth = None
         unavailable.add("step exited before schedstat observation")
+    def root_live():
+        if birth is None:
+            return False
+        try:
+            now_birth, state = identity(pid)
+            return now_birth == birth and state not in ("Z", "X")
+        except (FileNotFoundError, ProcessLookupError):
+            return False  # Normal completion is not missing sampler evidence.
+        except (OSError, ValueError, IndexError):
+            unavailable.add("root liveness unavailable")
+            return False
+
+    def exited():
+        return notification is not None and bool(select.select([notification], [], [], 0)[0])
+
+    discarded, end = 0, "root_exit"
     while True:
+        # Bookend each retained snapshot. A row gathered across root exit cannot
+        # attribute a later gate's lock/runnable count to this step's lifetime.
+        if exited():
+            end = "pidfd_exit"
+            break
+        if not root_live():
+            break
         row = {"after_s": round(time.monotonic() - started, 3), "other_slots": [], "procs_running": None}
+        row_errors, latest = set(), {}
         try:
             row["other_slots"] = slot_sample(directory, held)
         except (OSError, ImportError) as error:
-            unavailable.add(str(error))
+            row_errors.add(str(error))
         try:
             row["procs_running"] = int(next(line.split()[1] for line in Path("/proc/stat").read_text().splitlines()
                                            if line.startswith("procs_running ")))
         except (OSError, ValueError, StopIteration):
-            unavailable.add("procs_running unavailable")
-        alive = False
-        if birth is not None:
-            try:
-                now_birth, state = identity(pid)
-                alive = now_birth == birth and state not in ("Z", "X")
-                if alive:
-                    for key, value in tree_schedstat(pid).items():
-                        previous = totals.get(key, (0, 0))
-                        totals[key] = tuple(max(a, b) for a, b in zip(previous, value))
-            except (FileNotFoundError, ProcessLookupError):
-                pass  # Normal final PID disappearance is completion, not missing facts.
-            except (OSError, ValueError, IndexError):
-                unavailable.add("process-tree schedstat unavailable")
+            row_errors.add("procs_running unavailable")
+        try:
+            latest = tree_schedstat(pid)
+            if not latest:
+                row_errors.add("process-tree schedstat unavailable")
+        except (OSError, ValueError, IndexError):
+            row_errors.add("process-tree schedstat unavailable")
+        if exited() or (notification is None and not root_live()):
+            discarded += 1
+            end = "exit_during_snapshot"
+            break  # Neither the row nor its errors/counters describe a known live window.
         samples.append(row)
-        if not alive:
-            break
+        unavailable.update(row_errors)
+        for key, value in latest.items():
+            previous = totals.get(key, (0, 0))
+            totals[key] = tuple(max(a, b) for a, b in zip(previous, value))
         if notification is not None:
-            # Wake at real exit, not up to a second later: a competing gate that
-            # starts after this step ended is not contention during its window.
-            select.select([notification], [], [], interval)
+            if select.select([notification], [], [], interval)[0]:
+                end = "pidfd_exit"
+                break  # Do not take a post-exit lock/procs sample.
         else:
             time.sleep(interval)
     if notification is not None:
@@ -152,6 +175,8 @@ def sample(pid, interval=1.0):
             "median_procs_running": median, "runtime_ns": runtime_ns, "runqueue_wait_ns": wait_ns,
             "observed_tasks": len(totals), "sample_count": len(samples),
             "samples": samples[:600], "samples_truncated": len(samples) > 600,
+            "end_observation": end, "post_exit_samples_discarded": discarded,
+            "coverage": "retained snapshots bracketed by root liveness; final counters may precede exit",
             "elapsed_s": round(time.monotonic() - started, 3)}
 
 

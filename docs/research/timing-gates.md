@@ -48,13 +48,20 @@ explicitly contended, never quiet evidence and never a pass for a budget breach.
 
 ## Sampling and admission
 
-Each second, including a start and final observation, `timing_contention.py` records:
+Each second while the root is observed live, `timing_contention.py` records:
 other held full/quick lock files, `/proc/stat` procs_running, and the step's observed
 process-tree **per-thread** schedstat runtime/runqueue wait. TID birth fences reuse;
-observed cumulative maxima retain tasks after exit. A pidfd wakes the final sample
-at actual process exit rather than charging another gate's later start to this
-window. Missing exit notification is explicitly unavailable. Tasks living entirely
-between samples are not claimed as measured. The JSON retains at most 600 sample rows.
+observed cumulative maxima retain tasks after exit. Pidfd readiness ends sampling
+without a post-exit lock/procs read. A row gathered across an observed exit is
+discarded, including its counters/errors; such later facts cannot become measured
+contention. Missing exit notification is explicitly unavailable.
+
+These are retained snapshots bracketed by root liveness, not atomic kernel event
+accounting. Final counters can precede exit and tasks living entirely between
+samples are not measured. Observer elapsed time can extend beyond actual exit
+while waiting to be scheduled. The JSON labels end observation, discarded rows
+and coverage, and retains at most 600 sample rows. No exact end-counter or complete
+CPU/IO exclusivity claim is made.
 
 A window is contended if any other slot is held, median procs_running > cores/2,
 runqueue wait > runtime, or any required source is unavailable. Linux implements
