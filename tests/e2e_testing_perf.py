@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time
 
-from e2e_testing_integration import Checks, Driver, Source, all_rows, process_group_members, root_paths
+from e2e_testing_integration import Checks, Driver, Source, all_rows, process_group_members, root_paths, validate_launcher
 
 REPO = Path(__file__).resolve().parents[1]
 BASE = '''import json, os, threading, time
@@ -383,7 +383,7 @@ def main():
         for name, script in (("base", BASE), ("idle", IDLE), ("slow", SLOW), ("controlled", CONTROL_BASE)):
             compile(script, name, "exec")
         driver = PerfDriver(root, source, checks, args.timeout)
-        compile(driver.launcher.read_text(), "audit-launcher", "exec")
+        validate_launcher(driver.launcher, source.command)
         checks.check("source: fixtures compile", True)
         if not args.source_only:
             if not (source.ext / "testing_perf.py").is_file():

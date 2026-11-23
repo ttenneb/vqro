@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import signal
 import subprocess
@@ -181,6 +182,24 @@ def process_group_members(group):
             except (ProcessLookupError, PermissionError, FileNotFoundError):
                 pass
     return found
+
+
+def validate_launcher(launcher, command):
+    """Validate both layers of our literal shell_fixture, or legacy Python source."""
+    source = launcher.read_text()
+    header, _, body = source.partition("\n")
+    interpreter = shlex.split(header[2:]) if header.startswith("#!") else []
+    shell = interpreter[-1] if interpreter else ""
+    if Path(shell).name in ("sh", "bash", "dash", "ksh"):
+        command([shell, "-n", str(launcher)], timeout=10).check_returncode()
+        words = shlex.split(body, comments=True)
+        # shell_fixture deliberately emits one literal exec <python> -c <source>
+        # "$@". Refuse an unfamiliar wrapper rather than silently miss a payload.
+        if len(words) != 5 or words[0] != "exec" or words[2] != "-c" or words[4] != "$@":
+            raise ValueError("unrecognized audit shell wrapper; embedded Python was not validated")
+        compile(words[3], str(launcher) + ":embedded-python", "exec")
+    else:
+        compile(source, str(launcher), "exec")
 
 
 class Driver:
@@ -444,8 +463,9 @@ def main():
         checks.check("source: all controls stopped", all(not row.get("running") for row in source.call("extension.list")["extensions"].values()))
         driver = Driver(root, source, checks, args.timeout)
         for name, script in (("inspect", INSPECT), ("candidate", CANDIDATE), ("regression", REGRESSION),
-                             ("linger", LINGER), ("bigview", BIGVIEW), ("launcher", driver.launcher.read_text())):
+                             ("linger", LINGER), ("bigview", BIGVIEW)):
             compile(script, "control-fixture-" + name, "exec")
+        validate_launcher(driver.launcher, source.command)
         checks.check("source: fixture and launcher syntax valid", True)
         version = source.command([str(driver.launcher), "--version"])
         checks.check("source: audited exec shim reaches worktree binary", version.returncode == 0 and "vqro" in version.stdout,
