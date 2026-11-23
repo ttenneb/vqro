@@ -113,6 +113,24 @@ class CredentialRoutes(unittest.TestCase):
                 self.assertIsNotNone(popup)
                 self.assertNotIn(policy.CURSORS + 'claude', core.entries)
 
+    def test_real_most_capacity_preserves_restrictive_and_unknown_alias_reports(self):
+        import accounts_policy as policy
+        from test_account_capacity import resource, NOW
+        for case in ('exhausted', 'missing', 'incomplete', 'stale'):
+            with self.subTest(case=case):
+                a, alias = row(), row('alias')
+                core = self.core([a, alias])
+                core.entries[policy.POLICY] = {'version': 1, 'value': {'new_agents': 'most_remaining_capacity'}}
+                core.resources['healthy-a'] = resource('healthy-a', a, 10)
+                report = resource('alias-report', alias, None if case == 'missing' else 100 if case == 'exhausted' else 10)
+                if case == 'incomplete': report['data']['agent']['incomplete'] = ['usage_limits']
+                if case == 'stale': report['data']['agent']['usage_limits'][0]['observed_at_ms'] = NOW - policy.MAX_AGE_MS - 1
+                core.resources['alias-report'] = report
+                with patch('accounts_policy.now_ms', return_value=NOW):
+                    selected, popup = choose(core, {}, 'claude', 'fake.new')
+                self.assertIsNone(selected)
+                self.assertIsNotNone(popup)
+
     def test_fresh_id_selection_needs_no_revision_but_supplied_revision_is_strict(self):
         account = row()
         core = self.core([account])

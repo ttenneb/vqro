@@ -83,14 +83,23 @@ def number(value):
     except OverflowError: return False
 
 
-def capacities(rows, candidates):
+def capacities(rows, candidates, *, credential_identities=None):
     """Minimum fresh reported percentage headroom, NOT an availability/entitlement guarantee.
     Positive counts without a denominator are incomparable and never ranked as percentages.
     """
-    ids={a['id'] for a in candidates};samples={ident:{} for ident in ids};clock=now_ms();unknown=set()
+    ids={a['id'] for a in candidates};representatives={}
+    identities=credential_identities or {}
+    for candidate in candidates:
+        identity=identities.get(candidate['id'])
+        if identity is not None: representatives.setdefault(identity,candidate['id'])
+    def canonical(ident):
+        identity=identities.get(ident)
+        return representatives.get(identity,ident) if identity is not None else ident
+    groups={canonical(ident) for ident in ids}
+    samples={ident:{} for ident in groups};clock=now_ms();unknown=set()
     for resource in rows:
-        ident=configured_id(resource)
-        if ident not in ids or not live(resource): continue
+        native_ident=configured_id(resource);ident=canonical(native_ident)
+        if ident not in groups or not live(resource): continue
         native=facts(resource);incomplete=native.get('incomplete',[])
         if not isinstance(incomplete,list) or any(not isinstance(field,str) or field=='usage_limits'
                 or field.startswith(('usage_limits.','usage_limits[')) for field in incomplete):
@@ -101,7 +110,7 @@ def capacities(rows, candidates):
         for row in limits if isinstance(limits,list) else []:
             if not isinstance(row,dict): unknown.add(ident);continue
             scope=row.get('scope');observed=row.get('observed_at_ms');source=row.get('source')
-            if not isinstance(scope,dict) or scope.get('kind')!='account' or scope.get('account')!=ident:
+            if not isinstance(scope,dict) or scope.get('kind')!='account' or scope.get('account')!=native_ident:
                 unknown.add(ident);continue
             if not isinstance(source,str) or not source or len(source)>128 or not number(observed):
                 unknown.add(ident);continue  # cannot order/replace an unidentified constraint
@@ -117,11 +126,11 @@ def capacities(rows, candidates):
             elif observed==old[0]:
                 samples[ident][key]=(observed,None if headroom is None or old[1] is None else min(headroom,old[1]))
     result={}
-    blocked_ids={configured_id(row) for row in rows if blocked(row)}
+    blocked_ids={canonical(configured_id(row)) for row in rows if blocked(row)}
     for ident,windows in samples.items():
         values=[sample[1] for sample in windows.values()]
         result[ident]=min(values) if values and None not in values and ident not in blocked_ids|unknown else None
-    return result
+    return {ident:result[canonical(ident)] for ident in ids}
 
 
 def pick_new(ext, candidates, runtime, *, credential_identities=None):
@@ -142,7 +151,7 @@ def pick_new(ext, candidates, runtime, *, credential_identities=None):
             seen.add(identity);distinct.append(row)
         eligible=distinct
     if mode=='most_remaining_capacity':
-        scores=capacities(observed,eligible)
+        scores=capacities(observed,eligible,credential_identities=credential_identities)
         eligible=[row for row in eligible if scores.get(row['id']) is not None and scores[row['id']]>0]
         return max(eligible,key=lambda row:scores[row['id']]) if eligible else None
     if not eligible: return None
