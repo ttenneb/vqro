@@ -2,3 +2,5 @@
 LICENSE -text
 scripts/license-texts/*.txt -text
 THIRD_PARTY_LICENSES.md -text -whitespace
+# The vendor inventory hashes exact upstream bytes; autocrlf must not rewrite them.
+vendor/** -text
