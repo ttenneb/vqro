@@ -1630,9 +1630,12 @@ Windows selection remains native PATH discovery without executable/version probe
 `backend_notice` (string or null). Null clears a previous notice; absent fields from older cores leave it unchanged.
 Before the configured default provider registers, a successfully started extension has a three-second notice
 window: `connecting to <extension name>…`. This is not readiness; routing still rejects unavailable operations.
-Registration/readiness clears or replaces that notice. Expiry or an observed startup/exit failure reports the
-ordinary unavailable notice immediately (automatic crash retries do not reopen the window). Explicit restart or
-a changed declaration can start a new window. The core emits an `extension` event on expiry, so clients need not poll.
+Registration by the current supervised generation clears or replaces that notice, including a registration
+that is not ready or disconnects. Retained registrations from a previous generation do not suppress a fresh window.
+Expiry or an observed startup/exit failure reports the ordinary unavailable notice immediately (automatic crash
+retries do not reopen the window). Explicit restart or a changed declaration can start a new window. The notice
+predicate and expiry timer share one absolute deadline captured at spawn, not at the supervisor task's first poll.
+The core emits an `extension` event on expiry, so clients need not poll; scheduler delays can still delay delivery.
 The status bar prioritizes this recovery warning over contributed status buttons, including when an alternative
 backend is connected but the configured default is unavailable.
 Only unchanged installed defaults with an old absolute program path are normalized; custom/edited entries stay intact. `defaults.json` is versioned (`version`; entries may carry

@@ -28,6 +28,31 @@ async fn slow_provider_connects_then_clears_notice() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }).await.unwrap();
+    {
+        let mut c = core.lock().unwrap();
+        c.on_adapter_event("herdr", vqro::adapter::AdapterEvent::Connected(false, Some("control: current registration disconnected".into())));
+        assert!(!c.backend_notice().unwrap().starts_with("connecting to"), "a failed current-attempt registration must not be hidden by grace");
+    }
+    vqro::ext::restart(&core, "herdr").unwrap();
+    {
+        let c = core.lock().unwrap();
+        assert!(c.providers.contains_key("herdr"), "the previous backend record is deliberately retained");
+        assert!(!c.providers["herdr"].owner.as_ref().unwrap().is_live());
+        assert_eq!(c.backend_notice().as_deref(), Some("connecting to herdr…"), "the retired registration must not suppress the fresh start window");
+        assert!(c.provider_route(None, "terminal.spawn").is_err(), "the fresh notice is not readiness");
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let c = core.lock().unwrap();
+            let ready = c.providers.get("herdr").is_some_and(|p| p.synced && p.owner.as_ref().is_some_and(|o| o.is_live()));
+            if ready {
+                assert!(c.backend_notice().is_none());
+                break;
+            }
+            drop(c);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
     server::shutdown(&core).await;
 }
 

@@ -396,7 +396,10 @@ impl Core {
             let preferred = self.store.entries().iter().find_map(|(key, entry)|
                 (entry.value["kind"] == "provider" && entry.value["default"] == true).then(|| key.strip_prefix("extension/")).flatten());
             if let Some(name) = preferred {
-                let registered = self.providers.iter().any(|(id, p)| id == name || p.metadata["owner_extension"].as_str() == Some(name));
+                // Backend records survive disconnects. Only this supervised attempt's registration
+                // ends its startup window; a retained previous generation is not new evidence.
+                let registered = self.providers.values().any(|p| p.owner.as_ref().is_some_and(|owner|
+                    owner.name == name && crate::ext::owner_valid(self, owner)));
                 if !registered && self.exts.get(name).is_some_and(|rt| rt.is_starting()) {
                     return format!("connecting to {name}…");
                 }

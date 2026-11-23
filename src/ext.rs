@@ -33,7 +33,7 @@ pub struct ExtRuntime {
     failure: Option<Value>,
     last_exits: VecDeque<Value>, // Last three exits survive budget aging/reset, bounded independently.
     pub running: bool,
-    startup_started: Option<Instant>,
+    startup_deadline: Option<Instant>,
     stop: Option<oneshot::Sender<()>>,
     token: String,
     live: Arc<AtomicBool>,
@@ -41,7 +41,7 @@ pub struct ExtRuntime {
 
 impl ExtRuntime {
     pub(crate) fn is_starting(&self) -> bool {
-        self.running && self.status == "running" && self.startup_started.is_some_and(|at| at.elapsed() < PROVIDER_STARTUP_WINDOW)
+        self.running && self.status == "running" && self.startup_deadline.is_some_and(|deadline| Instant::now() < deadline)
     }
 
     fn fail(&mut self, kind: &str, reason: String) {
@@ -122,7 +122,7 @@ pub fn reconcile(core: &Shared) {
             failure: None,
             last_exits: VecDeque::new(),
             running: false,
-            startup_started: None,
+            startup_deadline: None,
             stop: None,
             token: String::new(),
             live:Arc::new(AtomicBool::new(false)),
@@ -211,7 +211,8 @@ pub fn reconcile(core: &Shared) {
                 rt.pid = child.id();
                 rt.status = "running".into();
                 // Automatic retries after an observed failure must not hide that failure.
-                rt.startup_started = rt.crashes.is_empty().then(Instant::now);
+                rt.startup_deadline = rt.crashes.is_empty().then(|| Instant::now() + PROVIDER_STARTUP_WINDOW);
+                let startup_deadline = rt.startup_deadline;
                 let j = rt.to_json();
                 c.emit("extension", json!({"name": name, "state": j}));
                 let core = core.clone();
@@ -221,9 +222,10 @@ pub fn reconcile(core: &Shared) {
                     // keep an abandoned reader alive forever by retaining stdout/stderr.
                     let mut logging=tokio::task::JoinSet::new();
                     logging.spawn(crate::ext_log::drain(stdout,stderr,log));
-                    let deadline = tokio::time::sleep(PROVIDER_STARTUP_WINDOW);
+                    // The task may first be polled well after spawn; never open a second window.
+                    let deadline = tokio::time::sleep_until(startup_deadline.unwrap_or_else(Instant::now).into());
                     tokio::pin!(deadline);
-                    let mut pending_notice = true;
+                    let mut pending_notice = startup_deadline.is_some();
                     let mut stop_rx = stop_rx;
                     loop { tokio::select! {
                         _ = &mut deadline, if pending_notice => {
@@ -359,7 +361,7 @@ mod qa2_tests {
 
     fn runtime_with_crashes(crashes: VecDeque<Instant>) -> ExtRuntime {
         ExtRuntime { status: "failed".into(), pid: None, spec_version: 1, generation: 7, crashes_total: crashes.len() as u64, crashes,
-            last_exit: Some("historical failure".into()), failure:None, last_exits:VecDeque::new(), running: false, startup_started: None, stop: None, token: String::new(), live:Arc::new(AtomicBool::new(false)) }
+            last_exit: Some("historical failure".into()), failure:None, last_exits:VecDeque::new(), running: false, startup_deadline: None, stop: None, token: String::new(), live:Arc::new(AtomicBool::new(false)) }
     }
 
     #[test]
@@ -453,6 +455,36 @@ mod qa2_tests {
         assert!(done.exists(),"500ms grace killed a cooperative provider during its bounded cleanup");
         assert!(core.lock().unwrap().exts.values().all(|rt|rt.pid.is_none()));
     }
+    #[tokio::test(flavor = "current_thread")]
+    async fn late_first_supervisor_poll_uses_spawn_deadline_for_notice_event() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = crate::store::Store::in_memory();
+        store.apply("test", None, vec![crate::store::Op::Set {
+            key: "extension/late".into(), value: json!({"argv":["/bin/cat"],"kind":"provider","default":true}), expect: None
+        }]).unwrap();
+        let core = Arc::new(std::sync::Mutex::new(crate::core::Core::new(store, None, root.path().join("s"), false).unwrap()));
+        reconcile(&core);
+        let seq = {
+            let c = core.lock().unwrap();
+            assert_eq!(c.backend_notice().as_deref(), Some("connecting to late…"));
+            c.seq
+        };
+        // No await before this sleep: on the current-thread runtime the spawned supervisor
+        // cannot have been polled. Its first poll occurs after the actual spawn window expired.
+        std::thread::sleep(PROVIDER_STARTUP_WINDOW + Duration::from_millis(50));
+        assert!(!core.lock().unwrap().backend_notice().unwrap().starts_with("connecting to"));
+        let published = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let expired = core.lock().unwrap().events_since(seq).unwrap().iter().any(|e|
+                    e["type"] == "extension" && e["data"]["backend_notice"].as_str().is_some_and(|s| s.contains("not connected")));
+                if expired { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await;
+        shutdown(&core).await;
+        assert!(published.is_ok(), "an event-only client must not retain connecting for another full window after first poll");
+    }
+
     #[tokio::test]
     async fn repeated_reconciliation_prunes_finished_supervisor_handles() {
         let core=std::sync::Arc::new(std::sync::Mutex::new(crate::core::Core::new(crate::store::Store::in_memory(),None,"unused".into(),false).unwrap()));
