@@ -21,6 +21,17 @@ class Budgets(unittest.TestCase):
         for name, (limit, _) in probe.BUDGETS.items():
             self.assertEqual(probe.exceeded({**self.within, name: limit + 1}), [name])
 
+    def test_only_pure_key_latency_breach_has_budget_exit(self):
+        receipt = dict(result='fail', correctness_ok=True, leftover_processes=[],
+                       tui=dict(self.within), keys={'p99_ms': 171}, budgets_exceeded=['key_p99_ms'])
+        self.assertEqual(probe.timing_exit(receipt), 78)
+        for change in [dict(correctness_ok=False), dict(leftover_processes=[123]), dict(error='bad workload'),
+                       dict(budgets_exceeded=['key_p99_ms', 'rss_peak_mib']), dict(keys={'p99_ms': None}),
+                       dict(keys={'p99_ms': float('nan')})]:
+            with self.subTest(change=change):
+                self.assertEqual(probe.timing_exit({**receipt, **change}), 1)
+        self.assertEqual(probe.timing_exit(dict(result='pass')), 0)
+
     def test_a_missing_measurement_is_not_a_pass(self):
         for name in probe.BUDGETS:
             self.assertIn(name, probe.exceeded({k: v for k, v in self.within.items() if k != name}))

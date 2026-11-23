@@ -12,6 +12,7 @@ dropped counts; missing or truncated metadata is labelled incomplete and is not 
 import argparse
 from collections import deque
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -144,6 +145,23 @@ class KeyLedger:
 def exceeded(measured):
     """Budget names whose measured value is above its limit (a missing measurement counts as exceeded)."""
     return sorted(name for name, (limit, _) in BUDGETS.items() if not measured.get(name) or measured[name] > limit)
+
+
+def timing_exit(receipt):
+    """78 is ONLY a finite key-latency breach after correctness/cleanup passed.
+
+    Memory/CPU/frame caps, missing measurements, invalid workload, lost inputs,
+    exceptions and leftovers remain hard failures, even on a contended machine.
+    """
+    if receipt.get("result") == "pass":
+        return 0
+    if receipt.get("error") or receipt.get("leftover_processes") or not receipt.get("correctness_ok"):
+        return 1
+    measured = {**receipt.get("tui", {}), "key_p99_ms": receipt.get("keys", {}).get("p99_ms")}
+    if all(isinstance(measured.get(key), (int, float)) and math.isfinite(measured[key]) and measured[key] > 0
+           for key in BUDGETS) and receipt.get("budgets_exceeded") == ["key_p99_ms"]:
+        return 78
+    return 1
 
 
 class Peer:
@@ -360,7 +378,8 @@ def main():
             "metrics": metrics})
         over = exceeded({**receipt["tui"], "key_p99_ms": receipt["keys"]["p99_ms"]})
         receipt["budgets_exceeded"] = over
-        receipt["result"] = "pass" if workload_valid and not keys["missed_deadline"] and not keys["ledger_dropped"] and keys["stream_evidence_complete"] and not events["missed"] and keys["samples"] and not over and end_snapshot["extensions"]["sidebar"]["status"] == "running" and end_snapshot["extensions"]["sidebar"]["crashes"] == 0 else "fail"
+        receipt["correctness_ok"] = bool(workload_valid and not keys["missed_deadline"] and not keys["ledger_dropped"] and keys["stream_evidence_complete"] and not events["missed"] and keys["samples"] and end_snapshot["extensions"]["sidebar"]["status"] == "running" and end_snapshot["extensions"]["sidebar"]["crashes"] == 0)
+        receipt["result"] = "pass" if receipt["correctness_ok"] and not over else "fail"
     except Exception as error:
         receipt.update(result="fail", error=f"{type(error).__name__}: {error}")
         try:
@@ -409,12 +428,14 @@ def main():
             receipt["keys"] = ledger.summary(metrics, resources[-1], resources[args.agents],
                                               elapsed if elapsed is not None else time.monotonic() - start)
         shutil.rmtree(root)
+    code = timing_exit(receipt)
+    receipt["failure_class"] = {0: "pass", 78: "budget"}.get(code, "correctness")
     wire = json.dumps(receipt, indent=2) + "\n"
     if args.receipt:
         args.receipt.parent.mkdir(parents=True, exist_ok=True)
         args.receipt.write_text(wire)
     print(wire)
-    return 0 if receipt["result"] == "pass" else 1
+    return code
 
 
 if __name__ == "__main__":

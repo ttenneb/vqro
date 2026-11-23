@@ -312,6 +312,39 @@ struct Observed {
     probe: Option<(String, Instant, oneshot::Sender<Duration>)>,
 }
 
+// Only these finite latency measurements may be graded externally under contention.
+// Capacity, loss, missing samples, invalid workloads and cleanup stay hard failures.
+fn scale_failure_class(measured: &BTreeMap<&str, (f64, f64, bool)>, correctness_ok: bool) -> &'static str {
+    if !correctness_ok { return "correctness"; }
+    let mut breached = false;
+    for (name, (value, _, ok)) in measured {
+        if *ok { continue; }
+        breached = true;
+        if !value.is_finite() || !matches!(*name, "spawn_p99_ms" | "txn_p50_ms" | "txn_p99_ms" |
+            "echo_p99_ms" | "event_lag_p99_ms" | "final_snapshot_ms" |
+            "slow_echo_startup_max_ms" | "slow_echo_p99_ms" | "slow_echo_max_ms") {
+            return "correctness";
+        }
+    }
+    if breached { "budget" } else { "pass" }
+}
+
+#[test]
+fn timing_grade_never_excuses_correctness_or_missing_measurements() {
+    let mut measures = BTreeMap::from([("echo_p99_ms", (11.0, 10.0, false))]);
+    assert_eq!(scale_failure_class(&measures, true), "budget");
+    assert_eq!(scale_failure_class(&measures, false), "correctness");
+    measures.insert("echo_p99_ms", (f64::NAN, 10.0, false));
+    assert_eq!(scale_failure_class(&measures, true), "correctness");
+    measures.insert("echo_p99_ms", (1.0, 10.0, true));
+    assert_eq!(scale_failure_class(&measures, true), "pass");
+    for key in ["missed", "leaked_processes", "core_rss_peak_mb", "slow_echo_samples", "slow_echo_timeouts", "status_delivered_ratio"] {
+        measures.insert(key, (1.0, 0.0, false));
+        assert_eq!(scale_failure_class(&measures, true), "correctness", "{key}");
+        measures.remove(key);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
 async fn scale_load() {
@@ -611,6 +644,10 @@ async fn scale_load() {
     ]);
     measured.extend(slow_measurements(&slow,prof.slow_clients));
     let failed: Vec<&str> = measured.iter().filter(|(_, (_, _, ok))| !ok).map(|(k, _)| *k).collect();
+    let correctness_ok = txn_errors == 0 && echo_lost == 0 && !txn_ms.is_empty() && !echo_ms.is_empty()
+        && !o.event_lag_ms.is_empty() && snap.is_ok() && resources_seen == prof.terminals
+        && cleanup.core_exit.ends_with("exit status: 0");
+    let failure_class = scale_failure_class(&measured, correctness_ok);
     let commit = std::process::Command::new("git").args(["describe", "--always", "--dirty"]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
 
     let receipt = json!({
@@ -618,7 +655,8 @@ async fn scale_load() {
         "commit": commit, "at_unix_ms": unix_ms(), "release_build": !cfg!(debug_assertions),
         "profile": prof.to_json(),
         "budgets_are_placeholders": false,
-        "result": if failed.is_empty() { "pass" } else { "fail" },
+        "result": if failure_class == "pass" { "pass" } else { "fail" },
+        "failure_class": failure_class, "correctness_ok": correctness_ok,
         "exceeded": failed,
         "budgets": measured.iter().map(|(k, (v, b, ok))| (k.to_string(), json!({"measured": v, "budget": b, "ok": ok}))).collect::<serde_json::Map<_, _>>(),
         "setup": {"seconds": setup_s, "spawn": stats(&spawn_ms), "resources_in_final_snapshot": resources_seen},
@@ -650,7 +688,11 @@ async fn scale_load() {
     let path = std::env::var("VQRO_SCALE_RECEIPT").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("scale-receipt.json"));
     std::fs::write(&path, &text).unwrap();
     println!("{text}\nreceipt: {}", path.display());
-    assert!(failed.is_empty(), "scale budgets exceeded: {failed:?} (receipt: {})", path.display());
+    // check.sh may grade pure latency breaches after collecting contention facts.
+    // Direct cargo runs retain strict grading, and correctness can never be deferred.
+    let deferred = failure_class == "budget" && std::env::var("VQRO_SCALE_DEFER_TIMING_GRADE").as_deref() == Ok("1");
+    assert!(failure_class == "pass" || deferred,
+        "scale {failure_class} failure: {failed:?} (receipt: {})", path.display());
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
