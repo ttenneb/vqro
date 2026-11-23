@@ -11,7 +11,13 @@ fn append(path:&Path,bytes:&[u8])->io::Result<()> {
     let _guard=APPEND.lock().unwrap_or_else(|e|e.into_inner());
     let mut file=std::fs::OpenOptions::new().create(true).append(true).open(path)?;
     let mut len=file.metadata()?.len();
-    if len>LOG_BYTES { file.set_len(LOG_BYTES)?; len=LOG_BYTES; }
+    if len>LOG_BYTES {
+        #[cfg(unix)]
+        file.set_len(LOG_BYTES)?;
+        #[cfg(windows)]
+        trim_with_write_handle(path)?;
+        len=LOG_BYTES;
+    }
     if len.saturating_add(bytes.len() as u64)>LOG_BYTES {
         drop(file);
         let backup=path.with_extension("log.1");
@@ -20,6 +26,13 @@ fn append(path:&Path,bytes:&[u8])->io::Result<()> {
         file=std::fs::OpenOptions::new().create(true).append(true).open(path)?;
     }
     file.write_all(bytes)
+}
+
+#[cfg(any(windows,test))]
+fn trim_with_write_handle(path:&Path)->io::Result<()> {
+    // Rust append handles omit FILE_WRITE_DATA, which FileEndOfFileInfo requires.
+    // Use a short-lived write-capable handle; keep normal writes append-only.
+    std::fs::OpenOptions::new().write(true).open(path)?.set_len(LOG_BYTES)
 }
 
 pub(crate) async fn drain(mut stdout:tokio::process::ChildStdout,mut stderr:tokio::process::ChildStderr,mut path:Option<PathBuf>) {
@@ -44,6 +57,31 @@ pub(crate) async fn drain(mut stdout:tokio::process::ChildStdout,mut stderr:toki
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn write_handle_caps_legacy_file_without_replacing_it() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("ext-legacy.log");
+        std::fs::write(&path,vec![b'x';2*LOG_BYTES as usize]).unwrap();
+        let reader=std::fs::File::open(&path).unwrap();
+        trim_with_write_handle(&path).unwrap();
+        assert_eq!(reader.metadata().unwrap().len(),LOG_BYTES);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(),1);
+        assert_eq!(std::fs::read(&path).unwrap(),vec![b'x';LOG_BYTES as usize]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn oversized_log_is_trimmed_with_write_data_access_before_rotation() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("ext-legacy.log");
+        std::fs::write(&path,vec![b'x';2*LOG_BYTES as usize]).unwrap();
+        let append_only=std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        assert_eq!(append_only.set_len(LOG_BYTES).unwrap_err().kind(),io::ErrorKind::PermissionDenied,
+            "control: Windows append-only rights cannot resize");
+        drop(append_only);
+        append(&path,b"new output").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(),b"new output");
+        assert_eq!(std::fs::metadata(path.with_extension("log.1")).unwrap().len(),LOG_BYTES);
+    }
+
     #[test]
     fn one_generation_and_overlapping_writers_stay_within_two_fixed_files() {
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("ext-noisy.log");
