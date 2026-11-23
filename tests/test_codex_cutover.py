@@ -233,6 +233,30 @@ class Tests(unittest.TestCase):
         names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
         self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.switch']*2+['_account.restore']*2+['_account.release']*2)
         self.assertFalse(any(a.get('op')=='agent.send' for m,a in ext.calls if m=='resource.invoke'))
+    def test_resume_failure_after_revocation_releases_known_peer_without_retrying_unknown(self):
+        ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p)
+        def revoke_and_fail(op,args):
+            if op=='_account.resume' and args['resource']=='x':ext.consent={'setups':{}}
+            if op=='_account.resume' and args['resource']=='y':raise VqroError('unknown resume','indeterminate')
+        ext.hook=revoke_and_fail
+        with self.assertRaises(VqroError):c.cutover(args)
+        calls=[a for m,a in ext.calls if m=='resource.invoke']
+        self.assertEqual([a['resource'] for a in calls if a['args']['name']=='_account.resume'],['x','y'])
+        self.assertEqual([a['resource'] for a in calls if a['args']['name']=='_account.release'],['x'])
+        self.assertTrue(next(a for a in calls if a['args']['name']=='_account.release')['args']['args']['revoked'])
+        self.assertFalse(any(a.get('op')=='agent.send' for a in calls))
+    def test_release_failure_still_releases_other_known_peer_once(self):
+        ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p)
+        def revoke_and_fail(op,args):
+            if op=='_account.release' and args['resource']=='x':
+                ext.consent={'setups':{}};raise VqroError('unknown release','indeterminate')
+        ext.hook=revoke_and_fail
+        with self.assertRaises(VqroError):c.cutover(args)
+        calls=[a for m,a in ext.calls if m=='resource.invoke']
+        self.assertEqual([a['resource'] for a in calls if a['args']['name']=='_account.resume'],['x','y'])
+        self.assertEqual([a['resource'] for a in calls if a['args']['name']=='_account.release'],['x','y'])
+        self.assertTrue([a for a in calls if a['args']['name']=='_account.release'][-1]['args']['args']['revoked'])
+        self.assertFalse(any(a.get('op')=='agent.send' for a in calls))
     def test_unknown_restore_keeps_uncertainty_but_releases_other_confirmed_host(self):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p)
         def revoke_and_fail(op,args):

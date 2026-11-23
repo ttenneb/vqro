@@ -316,13 +316,19 @@ class Cutover:
             raise
         issue = self._authority_issue(claim)
         if issue:return self._restore_revoked(fenced,hosts,payload,prepared,issue)
+        resumed, failed = [], False
         for row, _ in fenced:
-            result = self._invoke(row, '_account.resume', payload)
-            if result.get('resumed') is not True: fail('same-thread native resume unconfirmed', 'indeterminate')
+            try:
+                result = self._invoke(row, '_account.resume', payload)
+                if result.get('resumed') is not True:fail('same-thread native resume unconfirmed','indeterminate')
+                resumed.append(row)
+            except Exception:failed = True  # Never replay this host; restore the other known peers.
             issue = issue or self._authority_issue(claim)
-        for row, _ in fenced:
+        for row in resumed:
             issue = issue or self._authority_issue(claim)
-            self._invoke(row, '_account.release', dict(payload,revoked=bool(issue),revocation_kind=issue))
+            try:self._invoke(row, '_account.release', dict(payload,revoked=bool(issue),revocation_kind=issue))
+            except Exception:failed = True  # A failed release cannot strand another confirmed peer.
+        if failed:fail('native lifecycle partly unconfirmed; other confirmed peers processed, no continuation','indeterminate')
         issue = issue or self._authority_issue(claim)
         expected = {m['resource']:target['id'] for m in prepared['affected']}
         result = self._observed(prepared,expected,bool(issue))
