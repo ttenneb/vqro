@@ -120,3 +120,74 @@ async fn automatic_response_written_same_id_never_rearms() {
 async fn automatic_response_post_write_failure_same_id_never_rearms() {
     automatic_reply_fence(true).await;
 }
+
+#[tokio::test]
+async fn human_pending_claim_actual_writer_write_wins_or_revoke_wins() {
+    for write_wins in [false, true] {
+        let mut book = Requests::default();
+        let frame = serde_json::json!({"type":"control_request","request_id":"human-1","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"tool-human","input":{"command":"first"}}});
+        let old = book.observe(&frame, None).changes.remove(0).id;
+        let answer = book
+            .answer(&old, 1, &serde_json::json!({"action":"decline"}))
+            .unwrap();
+        let token = book.answer_token(&old).unwrap();
+        // Model the stale pre-read, then let the actual byte writer win before revocation.
+        // We do NOT claim this instruments an interleaving inside Requests::observe.
+        assert!(!token.write_begun());
+        let (state, receiver) = inner();
+        state.exit.send_replace(None);
+        state.dead.store(false, Ordering::SeqCst);
+        let permit = state.budget.clone().acquire_many_owned(64).await.unwrap();
+        let mut line = serde_json::to_vec(&answer).unwrap();
+        line.push(b'\n');
+        state
+            .writes
+            .try_send(Write {
+                id: None,
+                line: line.clone(),
+                deadline: Instant::now() + Duration::from_secs(3),
+                phase: token.phase.clone(),
+                _permit: permit,
+            })
+            .unwrap_or_else(|_| panic!("fixture queue full"));
+        let (a, mut b) = tokio::io::duplex(1024);
+        let mut changed = frame.clone();
+        changed["request"]["input"]["command"] = serde_json::json!("changed while answer pending");
+        let writer = if write_wins {
+            let writer = tokio::spawn(write_native(a, receiver, state.clone()));
+            let _released = state.budget.clone().acquire_many_owned(64).await.unwrap();
+            assert!(token.write_begun());
+            let result = book.observe(&changed, None);
+            assert_eq!(result.changes.len(), 1);
+            assert_eq!(result.changes[0].id, old);
+            assert_eq!(result.changes[0].value["incomplete"], true);
+            assert!(
+                book.summaries().is_empty(),
+                "writer-won claim cannot rearm even before dispatched bookkeeping"
+            );
+            assert!(
+                book.answer(&old, 1, &serde_json::json!({"action":"decline"}))
+                    .is_err()
+            );
+            writer
+        } else {
+            let result = book.observe(&changed, None);
+            assert_eq!(result.changes.len(), 2);
+            assert_ne!(result.changes[1].id, old);
+            assert_eq!(book.summaries().len(), 1);
+            assert_eq!(token.phase.load(Ordering::SeqCst), CANCELLED);
+            let writer = tokio::spawn(write_native(a, receiver, state.clone()));
+            let _released = state.budget.clone().acquire_many_owned(64).await.unwrap();
+            writer
+        };
+        writer.abort();
+        let _ = writer.await;
+        let mut bytes = Vec::new();
+        b.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(
+            bytes,
+            if write_wins { line } else { Vec::new() },
+            "only the winner at the real writer commit may reach native bytes"
+        );
+    }
+}

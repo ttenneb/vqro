@@ -145,9 +145,11 @@ impl Requests {
                 }
             }
             if let Some(mut old) = self.pending.remove(&old_id) {
+                // Revoke atomically FIRST. The independent writer can commit after a phase
+                // pre-read; only post-revocation classification can retain the winner honestly.
+                old.token.cancel_before_write();
                 let unsettled_claim =
                     old.claimed && (old.value["status"] != "pending" || old.token.write_begun());
-                old.token.cancel_before_write();
                 old.value["status"] = json!("expired");
                 if unsettled_claim {
                     // A changed snapshot/reused native ID is not an independent settlement of a
@@ -572,6 +574,24 @@ mod tests {
         assert!(!token.write_begun());
         assert!(!token.cancel_before_write(), "already revoked by reuse");
         assert!(book.answer(&id, 1, &json!({"action":"decline"})).is_err());
+    }
+    #[test]
+    fn changed_human_claim_revokes_before_reading_write_phase() {
+        // Source-order control for the independent writer's permitted interleaving. The memory
+        // writer controls cover both winners; this guard prevents a stale pre-revoke phase read.
+        let source = include_str!("requests.rs");
+        let branch = source
+            .split("if let Some(mut old) = self.pending.remove(&old_id) {")
+            .nth(1)
+            .unwrap()
+            .split("if unsettled_claim {")
+            .next()
+            .unwrap();
+        assert!(
+            branch.find("old.token.cancel_before_write()").unwrap()
+                < branch.find("old.token.write_begun()").unwrap(),
+            "human claim must revoke BEFORE reading possible-write phase; a pre-read can become stale"
+        );
     }
     #[test]
     fn unsupported_reply_token_is_revoked_by_id_reuse_not_replayed_from_outbox() {
