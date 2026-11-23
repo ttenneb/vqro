@@ -7,11 +7,12 @@ use tokio::sync::OwnedMutexGuard;
 #[path = "cutover_tests.rs"]
 mod tests;
 
-pub(super) const COMMANDS: [&str; 7] = [
+pub(super) const COMMANDS: [&str; 8] = [
     "_account.fence",
     "_account.status",
     "_account.switch",
     "_account.resume",
+    "_account.restore",
     "_account.release",
     "_account.abort",
     "_account.list",
@@ -89,8 +90,19 @@ impl Runtime {
         workspace: &str,
         deadline: Instant,
     ) -> Result<u64, Fault> {
-        // Metadata can change on sibling switches. Bound read-only settling; never repeat
-        // a credential switch or resume merely because an acknowledgement is uncertain.
+        let (login, revision) = self.read_current_login(deadline).await?;
+        if login.0 != session || login.1 != workspace {
+            return Err(unknown());
+        }
+        Ok(revision)
+    }
+
+    async fn read_current_login(
+        &self,
+        deadline: Instant,
+    ) -> Result<((String, String), u64), Fault> {
+        // One fenced metadata implementation for confirmation and lifecycle cleanup.
+        // Bound read-only settling; never repeat a credential switch or resume.
         for _ in 0..2 {
             self.sync_account_notifications(deadline).await?;
             let revision = self.auth_revision.load(Ordering::Acquire);
@@ -104,9 +116,25 @@ impl Runtime {
                 .await
                 .map_err(|_| unknown())?;
             self.sync_account_notifications(deadline).await?;
-            require_login(&value, session, workspace, true)?;
+            let projected = project_logins(&value)?;
+            let active: Vec<_> = projected["logins"]
+                .as_array()
+                .ok_or_else(unknown)?
+                .iter()
+                .filter(|r| r["active"] == true)
+                .collect();
+            if active.len() != 1 {
+                return Err(unknown());
+            }
+            let session = bounded(&active[0]["sessionId"], 256)
+                .ok_or_else(unknown)?
+                .to_owned();
+            let workspace = bounded(&active[0]["accountId"], 256)
+                .ok_or_else(unknown)?
+                .to_owned();
+            require_login(&value, &session, &workspace, true)?;
             if self.auth_revision.load(Ordering::Acquire) == revision {
-                return Ok(revision);
+                return Ok(((session, workspace), revision));
             }
         }
         Err(unknown())
@@ -126,7 +154,7 @@ impl Runtime {
             (
                 b.auth_revision,
                 b.login_ref.clone().ok_or_else(unknown)?,
-                b.account.clone().ok_or_else(unknown)?,
+                b.account.clone(),
             )
         };
         let current = self.auth_revision.load(Ordering::Acquire);
@@ -141,7 +169,7 @@ impl Runtime {
             }
             self.account_projection_revision
                 .fetch_add(1, Ordering::AcqRel);
-            *projection = Some(account);
+            *projection = account;
         }
         self.cutover
             .lock()
@@ -181,7 +209,7 @@ impl Runtime {
         let p = &args["args"];
         let _native_permit = if matches!(
             name,
-            "_account.list" | "_account.switch" | "_account.resume"
+            "_account.list" | "_account.switch" | "_account.resume" | "_account.restore"
         ) {
             Some(
                 self.native_admissions
@@ -380,8 +408,76 @@ impl Runtime {
                     json!({"operation":operation,"account_confirmed":true}),
                 )))
             }
-            "_account.resume" => {
-                if stage != "switched" {
+            "_account.resume" | "_account.restore" => {
+                if name == "_account.restore" {
+                    // Lifecycle teardown only: never select or roll credentials back. Match the
+                    // current native login against the pre-effect source or confirmed target.
+                    if !matches!(stage, "fenced" | "checking" | "switched") {
+                        return Err(reject("restore cannot replay an uncertain switch/resume"));
+                    }
+                    let allowed = p["accounts"]
+                        .as_array()
+                        .filter(|v| !v.is_empty() && v.len() <= 2)
+                        .ok_or_else(|| {
+                            Fault::invalid("bounded source/target restore references required")
+                        })?;
+                    let mut candidates = Vec::new();
+                    for candidate in allowed {
+                        let session = bounded(&candidate["login_ref"]["sessionId"], 256)
+                            .ok_or_else(|| Fault::invalid("restore login reference required"))?
+                            .to_owned();
+                        let workspace = bounded(&candidate["login_ref"]["accountId"], 256)
+                            .ok_or_else(|| Fault::invalid("restore workspace reference required"))?
+                            .to_owned();
+                        let account = if candidate["account"].is_null() {
+                            None
+                        } else {
+                            Some(account_fact(&candidate["account"])?)
+                        };
+                        candidates.push(((session, workspace), account));
+                    }
+                    self.cutover
+                        .lock()
+                        .unwrap()
+                        .as_mut()
+                        .filter(|b| {
+                            b.operation == operation
+                                && matches!(b.stage, "fenced" | "checking" | "switched")
+                        })
+                        .ok_or_else(unknown)?
+                        .stage = "restoring";
+                    let (login, revision) = self.read_current_login(deadline).await?;
+                    let account = candidates
+                        .into_iter()
+                        .find(|(expected, _)| expected == &login)
+                        .ok_or_else(unknown)?
+                        .1;
+                    {
+                        let mut projection = self.launcher_account.lock().unwrap();
+                        if self.auth_revision.load(Ordering::Acquire) != revision {
+                            return Err(unknown());
+                        }
+                        self.account_projection_revision
+                            .fetch_add(1, Ordering::AcqRel);
+                        *projection = account.clone();
+                    }
+                    {
+                        let mut barrier = self.cutover.lock().unwrap();
+                        let b = barrier
+                            .as_mut()
+                            .filter(|b| b.operation == operation && b.stage == "restoring")
+                            .ok_or_else(unknown)?;
+                        b.account = account;
+                        b.login_ref = Some(login);
+                        b.auth_revision = Some(revision);
+                        b.stage = "switched";
+                    }
+                    for (i, slot) in self.slots.iter().enumerate() {
+                        let mut e = slot.endpoint.lock().unwrap();
+                        e.reset_availability();
+                        self.emit(i, &e, vec![e.state_entity()], false);
+                    }
+                } else if stage != "switched" {
                     return Err(reject(
                         "native account not confirmed or resume already attempted",
                     ));
@@ -431,7 +527,7 @@ impl Runtime {
                     .ok_or_else(unknown)?
                     .stage = "resumed";
                 Ok(Outcome::Observed(Some(
-                    json!({"operation":operation,"resumed":true}),
+                    json!({"operation":operation,"resumed":true,"account_confirmed":true,"account":self.launcher_account.lock().unwrap().clone()}),
                 )))
             }
             "_account.release" => {
@@ -443,15 +539,26 @@ impl Runtime {
                 self.refresh_account_confirmation(operation, deadline)
                     .await?;
                 let mut b = self.cutover.lock().unwrap().take().ok_or_else(unknown)?;
-                let label = b
+                let account_name = b
                     .account
                     .as_ref()
                     .and_then(|a| a["label"].as_str())
-                    .unwrap_or("selected account");
+                    .map(|label| format!("account {label}"))
+                    .unwrap_or_else(|| "the previously observed native account".to_owned());
+                let notice = if p["revoked"] == true {
+                    let reason = if p["revocation_kind"] == "unconfirmed" {
+                        "switch authorization could no longer be confirmed"
+                    } else {
+                        "automatic switching was turned off during the switch"
+                    };
+                    format!("{reason}: resumed on {account_name}; no continuation sent")
+                } else {
+                    format!("continued on {account_name}")
+                };
                 for (i, slot) in self.slots.iter().enumerate() {
                     let mut e = slot.endpoint.lock().unwrap();
                     e.next_request += 1;
-                    self.emit(i, &e, vec![Change::new("message", format!("_account_{}", e.next_request), json!({"role":"system","content":[{"type":"text","format":"plain","text":format!("continued on account {label}")}],"final":true,"notice":{"kind":"account_switch","source":"vqro"}}))], false);
+                    self.emit(i, &e, vec![Change::new("message", format!("_account_{}", e.next_request), json!({"role":"system","content":[{"type":"text","format":"plain","text":notice}],"final":true,"notice":{"kind":"account_switch","source":"vqro"}}))], false);
                 }
                 b.guards.clear();
                 Ok(Outcome::Observed(Some(

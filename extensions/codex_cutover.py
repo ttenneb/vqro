@@ -10,7 +10,7 @@ from vqro_ext import VqroError
 
 SETTINGS = 'doc/settings/codex-cutover'
 MAX_MEMBERS = 200
-HOST_COMMANDS = {'_account.fence','_account.status','_account.switch','_account.resume','_account.release','_account.abort'}
+HOST_COMMANDS = {'_account.fence','_account.status','_account.switch','_account.resume','_account.restore','_account.release','_account.abort','_account.list'}
 
 
 class _NativeRejected(VqroError):
@@ -238,11 +238,18 @@ class Cutover:
             target = next(r for r in targets if r['id']==args['account'])
             active = []
             # Prove the target exists on EVERY native host before changing ANY login.
-            for row,_ in fenced:
+            for row,state in fenced:
                 logins = self._invoke(row,'_account.list',payload).get('logins')
                 matches = [r for r in logins if isinstance(r,dict) and all(r.get(k)==v for k,v in target['login_ref'].items())] if isinstance(logins,list) else []
                 if len(matches)!=1 or type(matches[0].get('active')) is not bool:
                     fail('target saved login/workspace is not uniquely available on every managed host','unavailable')
+                original = [r for r in logins if isinstance(r,dict) and r.get('active') is True]
+                if len(original)!=1 or not all(text(original[0].get(k)) for k in ('sessionId','accountId')):
+                    fail('original saved login is not uniquely evidenced; cannot restore safely','unavailable')
+                original_ref = {k:original[0][k] for k in ('sessionId','accountId')}
+                source = next((r for r in targets if r.get('login_ref')==original_ref and r.get('kind')=='subscription' and not selection_problem(r)),None)
+                state['_restore_accounts'] = [{'login_ref':target['login_ref'],'account':fact(target)},
+                    {'login_ref':original_ref,'account':fact(source) if source else None}]
                 active.append(matches[0]['active'])
             if args['automatic'] and all(active):
                 fail('target native account is already active everywhere; no automatic restart loop','stale')
@@ -285,7 +292,10 @@ class Cutover:
         switched, attempted = [], False
         try:
             for row, _ in fenced:
-                self._authorization(claim)
+                issue = self._authority_issue(claim)
+                if issue:
+                    if switched:return self._restore_revoked(fenced,hosts,payload,prepared,issue)
+                    self._authorization(claim)  # No credential effect: the outer path aborts local fences.
                 attempted = True
                 result = self._invoke(row, '_account.switch', dict(payload, login_ref=target['login_ref'], account=fact(target)))
                 if result.get('account_confirmed') is not True: fail('native account readback unconfirmed', 'indeterminate')
@@ -296,14 +306,49 @@ class Cutover:
                     try:self._invoke(row,'_account.abort',payload)
                     except Exception:pass
             raise
+        issue = self._authority_issue(claim)
+        if issue:return self._restore_revoked(fenced,hosts,payload,prepared,issue)
         for row, _ in fenced:
             result = self._invoke(row, '_account.resume', payload)
             if result.get('resumed') is not True: fail('same-thread native resume unconfirmed', 'indeterminate')
+            issue = issue or self._authority_issue(claim)
         for row, _ in fenced:
-            self._invoke(row, '_account.release', payload)
-        # Native acknowledgements can precede the provider's core fact publication.
-        # Wait read-only for exact resumed epochs + confirmed revisioned account before
-        # returning an AUTO continuation target. Never send against the old epoch.
+            issue = issue or self._authority_issue(claim)
+            self._invoke(row, '_account.release', dict(payload,revoked=bool(issue),revocation_kind=issue))
+        issue = issue or self._authority_issue(claim)
+        expected = {m['resource']:target['id'] for m in prepared['affected']}
+        result = self._observed(prepared,expected,bool(issue))
+        # A final read also covers revocation during read-only publication settling.
+        if not issue and self._authority_issue(claim):result.update(restored_only=True,continuation_allowed=False)
+        return result
+
+    def _authority_issue(self,claim):
+        try:self._authorization(claim)
+        except VqroError as error:return 'disabled' if claim.get('automatic') is True and error.kind=='offer_required' else 'unconfirmed'
+        return None
+
+    def _restore_revoked(self,fenced,hosts,payload,prepared,issue):
+        expected, restored, failed = {}, [], False
+        # Finish every known host independently, never retrying an uncertain effect.
+        for row,state in fenced:
+            try:
+                result = self._invoke(row,'_account.restore',dict(payload,accounts=state['_restore_accounts']))
+                if result.get('resumed') is not True or result.get('account_confirmed') is not True:
+                    fail('native lifecycle restore unconfirmed','indeterminate')
+                account = result.get('account')
+                ident = account.get('id') if isinstance(account,dict) else None
+                hostkey = (row['host'],native(row)['host']['id'])
+                for member in hosts[hostkey]:expected[member['resource']] = ident
+                restored.append(row)
+            except Exception:failed = True
+        for row in restored:
+            try:self._invoke(row,'_account.release',dict(payload,revoked=True,revocation_kind=issue))
+            except Exception:failed = True
+        if failed:fail('switch authorization changed; lifecycle restoration partly unconfirmed, no continuation','indeterminate')
+        return self._observed(prepared,expected,True)
+
+    def _observed(self,prepared,expected,restored_only):
+        # Native ACKs can precede core facts. Do not return an old epoch or an invented account.
         end = time.monotonic() + 3
         while True:
             current = {r['id']:r for r in self.resources()}
@@ -313,15 +358,17 @@ class Cutover:
                 fail('Codex group changed during native cutover; partial outcome, no continuation','indeterminate')
             affected = []
             for member in prepared['affected']:
-                row = current.get(member['resource']); a = native(row) if row else {}
-                selected = a.get('account') or {}
+                row = current.get(member['resource']); a = native(row) if row else {}; selected = a.get('account') or {}
+                ident = expected[member['resource']]
                 if not row or row.get('host') != member['host'] or row.get('incarnation') != member['incarnation'] \
                         or (a.get('session') or {}).get('id') != member['session'] \
                         or a.get('epoch') == member['epoch'] or not text(a.get('epoch')) \
-                        or selected.get('id') != target['id'] or type(selected.get('rev')) is not int or selected['rev'] < 1:
+                        or selected.get('id') != ident or (ident is not None and (type(selected.get('rev')) is not int or selected['rev'] < 1)):
                     break
-                affected.append(dict(member, epoch=a['epoch'], session_confirmed=True, resumed=True))
-            if len(affected) == len(prepared['affected']): break
-            if time.monotonic() >= end: fail('resumed thread/account publication unconfirmed; no continuation','indeterminate')
+                affected.append(dict(member,account=ident,epoch=a['epoch'],session_confirmed=True,resumed=True))
+            if len(affected) == len(prepared['affected']):break
+            if time.monotonic() >= end:fail('resumed thread/account publication unconfirmed; no continuation','indeterminate')
             time.sleep(.05)
-        return dict(outcome='observed', account=target['id'], setup_id=prepared['setup_id'], affected=affected)
+        return dict(outcome='observed',setup_id=prepared['setup_id'],affected=affected,
+            restored_only=restored_only,continuation_allowed=not restored_only,
+            account=next(iter(expected.values())) if len(set(expected.values()))==1 else None)

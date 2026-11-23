@@ -31,12 +31,13 @@ class Ext:
             'source':'codex.account/rateLimits','observed_at_ms':now,'resets_at_ms':now+60000}]
         self.rows.append(probe)
         self.registry={'accounts':[{'id':'b','label':'B','runtime':'codex','kind':'subscription',
-            'login_ref':{'sessionId':'saved-b','accountId':'workspace-b'}}]}
+            'login_ref':{'sessionId':'saved-b','accountId':'workspace-b'}},
+            {'id':'a','label':'A','runtime':'codex','kind':'subscription','login_ref':{'sessionId':'saved-a','accountId':'workspace-a'}}]}
         self.consent={'setups':{'shared':{'automatic_login_switch':True}}};self.claim=None;self.fail=None;self.counter=0
         self.owner={'value':'human-owner','version':5}
         self.policy=dict(DEFAULTS,blocked='auto_restart')
         self.registry_revision=3;self.hook=None;self.skip_publication=False;self.reject=None
-        self.all_active=False;self.missing_on=None
+        self.all_active=False;self.missing_on=None;self.selected={'x':'a','y':'a'}
     def command(self,*_):return lambda fn:fn
     def call(self,method,args):
         self.calls.append((method,copy.deepcopy(args)))
@@ -53,12 +54,17 @@ class Ext:
             if self.hook:self.hook(op,args)
             if self.fail==op:raise VqroError('unknown native effect','indeterminate')
             if self.reject==op:return {'outcome':'rejected','error':{'kind':'stale','message':'native precondition rejected'}}
-            if op=='_account.resume' and not self.skip_publication:
+            if op=='_account.switch':self.selected[args['resource']]='b'
+            ident=self.selected[args['resource']]
+            account={'id':ident,'label':ident.upper(),'kind':'subscription','rev':1}
+            if op in ('_account.resume','_account.restore') and not self.skip_publication:
                 target=next(r for r in self.rows if r['id']==args['resource'])
-                target['data']['agent'].update(epoch='resumed-'+target['id'],account={'id':'b','rev':1})
+                target['data']['agent'].update(epoch='resumed-'+target['id'],account=account)
             return {'outcome':'observed','data':{'quiescent':True,'operation':args['args']['args'].get('operation'),
-                'account_confirmed':True,'resumed':True,
-                'logins':[] if args['resource']==self.missing_on else [{'sessionId':'saved-b','accountId':'workspace-b','active':self.all_active}]}}
+                'account_confirmed':True,'resumed':True,'account':account,
+                'logins':[] if args['resource']==self.missing_on else [
+                    {'sessionId':'saved-a','accountId':'workspace-a','active':ident=='a' and not self.all_active},
+                    {'sessionId':'saved-b','accountId':'workspace-b','active':ident=='b' or self.all_active}]}}
         raise AssertionError((method,args))
 
 class Tests(unittest.TestCase):
@@ -172,7 +178,7 @@ class Tests(unittest.TestCase):
         self.assertFalse(any(a['args']['name']=='_account.switch' for m,a in ext.calls if m=='resource.invoke'))
     def test_known_source_credential_alias_is_not_a_different_target(self):
         ext=Ext();alias=copy.deepcopy(ext.registry['accounts'][0]);alias.update(id='a',label='A alias')
-        ext.registry['accounts'].append(alias)
+        ext.registry['accounts'][1]=alias
         with self.assertRaises(VqroError):Cutover(ext).prepare(self.args())
     def test_incomplete_target_route_is_visible_but_cannot_be_selected(self):
         ext=Ext();ext.registry['accounts'][0]['host']='unpaired-host'
@@ -196,14 +202,43 @@ class Tests(unittest.TestCase):
         with self.assertRaises(VqroError):c.cutover(args)
         names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
         self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.abort']*2)
-    def test_consent_revocation_after_first_switch_stops_further_effects_no_rollback(self):
+    def test_consent_revocation_between_switches_restores_b_and_a_without_rollback_or_continuation(self):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p)
         def revoke(op,_):
             if op=='_account.switch':ext.consent={'setups':{}}
         ext.hook=revoke
-        with self.assertRaises(VqroError):c.cutover(args)
+        result=c.cutover(args)
+        self.assertTrue(result['restored_only']);self.assertFalse(result['continuation_allowed'])
+        self.assertEqual([r['account'] for r in result['affected']],['b','a'])
         names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
-        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.switch'])
+        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.switch']+['_account.restore']*2+['_account.release']*2)
+        self.assertFalse(any(a.get('op')=='agent.send' for m,a in ext.calls if m=='resource.invoke'))
+    def test_consent_revocation_after_last_switch_restores_all_b_without_continuation(self):
+        ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p);switched=[]
+        def revoke(op,_):
+            if op=='_account.switch':
+                switched.append(op)
+                if len(switched)==2:ext.consent={'setups':{}}
+        ext.hook=revoke
+        result=c.cutover(args)
+        self.assertTrue(result['restored_only']);self.assertFalse(result['continuation_allowed'])
+        self.assertEqual([r['account'] for r in result['affected']],['b','b'])
+        names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
+        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.switch']*2+['_account.restore']*2+['_account.release']*2)
+        self.assertFalse(any(a.get('op')=='agent.send' for m,a in ext.calls if m=='resource.invoke'))
+    def test_unknown_restore_keeps_uncertainty_but_releases_other_confirmed_host(self):
+        ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p)
+        def revoke_and_fail(op,args):
+            if op=='_account.switch':ext.consent={'setups':{}}
+            if op=='_account.restore' and args['resource']=='x':raise VqroError('uncertain restore','indeterminate')
+        ext.hook=revoke_and_fail
+        with self.assertRaises(VqroError) as error:c.cutover(args)
+        self.assertEqual(error.exception.kind,'indeterminate')
+        calls=[a for m,a in ext.calls if m=='resource.invoke']
+        self.assertEqual(sum(a['args']['name']=='_account.switch' for a in calls),1)
+        self.assertEqual(sum(a['args']['name']=='_account.restore' for a in calls),2)
+        self.assertEqual([a['resource'] for a in calls if a['args']['name']=='_account.release'],['y'])
+        self.assertFalse(any(a.get('op')=='agent.send' for a in calls))
     def test_source_native_thread_witness_required(self):
         ext=Ext();ext.rows[0]['data']['agent']['availability']['native']['threadId']='foreign'
         with self.assertRaises(VqroError):Cutover(ext).prepare(self.args())

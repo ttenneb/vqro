@@ -155,6 +155,76 @@ fn target() -> Value {
     json!({"login_ref":{"sessionId":"saved-b","accountId":"workspace-b"},"account":{"id":"b","label":"B","kind":"subscription"}})
 }
 
+fn restore_accounts() -> Value {
+    json!({"accounts":[target(),{"login_ref":{"sessionId":"saved-a","accountId":"workspace-a"},"account":{"id":"a","label":"A","kind":"subscription"}}]})
+}
+
+#[tokio::test]
+async fn revoked_consent_restores_current_a_or_b_without_any_credential_rollback_or_input() {
+    for switched in [false, true] {
+        let f = fake("ok").await;
+        fence(&f).await;
+        if switched {
+            command(&f, "_account.switch", target()).await.unwrap();
+        }
+        let before = f.methods.lock().unwrap().len();
+        assert!(matches!(
+            command(&f, "_account.restore", restore_accounts())
+                .await
+                .unwrap(),
+            Outcome::Observed(_)
+        ));
+        assert!(matches!(
+            command(&f, "_account.release", json!({"revoked":true}))
+                .await
+                .unwrap(),
+            Outcome::Observed(_)
+        ));
+        let fact = f.runtime.fact("endpoint-1").unwrap();
+        assert_eq!(fact["data"]["agent"]["session"]["id"], "thread-a");
+        assert_ne!(fact["data"]["agent"]["epoch"], "epoch-a");
+        assert_eq!(
+            fact["data"]["agent"]["account"]["id"],
+            if switched { "b" } else { "a" }
+        );
+        assert!(f.runtime.cutover.lock().unwrap().is_none());
+        assert!(f.runtime.slots[0].admission.try_lock().is_ok());
+        assert_eq!(
+            f.methods.lock().unwrap()[before..],
+            ["accountSession/list", "thread/resume"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn restore_never_replays_an_uncertain_switch_or_adopts_a_foreign_login() {
+    for mode in ["browser", "already_active"] {
+        let f = fake(mode).await;
+        fence(&f).await;
+        if mode == "browser" {
+            assert!(command(&f, "_account.switch", target()).await.is_err());
+        } else {
+            f.foreign.store(true, Ordering::Release);
+        }
+        assert!(
+            matches!(
+                command(&f, "_account.restore", restore_accounts()).await,
+                Err(_) | Ok(Outcome::Rejected { .. })
+            ),
+            "{mode}"
+        );
+        assert!(f.runtime.cutover.lock().unwrap().is_some());
+        assert!(f.runtime.slots[0].admission.try_lock().is_err());
+        assert!(
+            !f.methods
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m == "thread/resume" || m == "turn/start")
+        );
+    }
+}
+
 #[tokio::test]
 async fn all_slot_fence_native_switch_readback_and_exact_resume_never_sends_input() {
     let f = fake("ok").await;

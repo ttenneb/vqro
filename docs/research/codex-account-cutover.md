@@ -53,12 +53,24 @@ Setup-enabled endpoints advertise generic `agent.command` entries:
   login/workspace through a separate native `accountSession/list`. Browser/SSO/error/timeout stays unknown/fenced.
 - `_account.resume`: consumes phase, resumes every exact original thread ID, rejects a different returned ID.
   No `turn/start` is issued. Native auth notifications drain before confirmation; newer auth revisions invalidate it.
+- `_account.restore`: lifecycle cleanup after revoked authorization, only from a known pre-switch or confirmed
+  switch phase. Reads the current native login under the same before/after auth-revision fence and accepts only
+  the previously observed source or intended target. Resumes the exact original threads on that actual login;
+  never selects credentials, rolls back, or retries an uncertain switch/resume. An unregistered source stays
+  unlabelled rather than being called B.
 - `_account.release`: only after all exact resumes; emits **continued on account B** as a visible system notice,
   then releases local admission guards. The callback waits for new epochs and revisioned account publication
   before returning affected targets for a separately authorized common continuation.
 - `_account.abort`: releases local guards ONLY before a native switch was attempted. It cannot cancel, retry or
-  roll back a native credential effect. Post-switch partial/unknown groups remain explicitly fenced, with zero
+  roll back a native credential effect. Actual native uncertainty remains explicitly fenced, with zero
   continuation authorization. No uncertain native switch/resume is replayed.
+
+Revoking automatic consent after a known switch stops every further credential switch, but does not strand
+conversations: restore/release all evidenced hosts on B or their original native account, with no continuation.
+The callback returns `restored_only:true`, `continuation_allowed:false`, and actual confirmed accounts/new epochs
+for every member. Common orchestration validates restoration before its normal target-B validator, completes the
+root and clears its setup group without creating continuation child intents. Failed/unknown restoration is not
+blanket-cleared. A visible notice reports the revocation, actual restored account and **no continuation sent**.
 
 There are at most64 consumed cutover-operation witnesses per native host lifetime; exhaustion refuses rather
 than evicting uncertain intent and allowing replay. Common durable episode/continuation intent survives a host
@@ -66,7 +78,9 @@ restart and remains the policy authority. Native bridge commands are mechanism, 
 
 `data.agent.account.rev` is monotonic for confirmed in-process account projections. Native auth changes clear
 old configured account projection before new usage can be labelled; unknown remains unknown. A new account fact
-is installed only after native saved-login/workspace readback, not merely from the requested account's label.
+for a cutover is installed only after native saved-login/workspace readback, not merely from the requested
+account's label. Initial launcher metadata remains a configured hint, not native login/authentication proof;
+initial attribution needs native active-reference verification before it can establish a quota source.
 
 ## Evidence and limits
 

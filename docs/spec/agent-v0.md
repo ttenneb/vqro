@@ -195,12 +195,16 @@ old account. Configured registry IDs remain distinct from native saved-login/wor
 
 A Codex host with an explicitly declared setup exposes native saved-login cutover through ordinary advertised
 `agent.command` names `_account.list`, `_account.fence`, `_account.status`, `_account.switch`, `_account.resume`,
-`_account.release`, and `_account.abort`. These native mechanism commands fence all endpoints of that app-server,
+`_account.restore`, `_account.release`, and `_account.abort`. These native mechanism commands fence all endpoints of that app-server,
 confirm a selected saved login/workspace and resume the exact old thread IDs without `turn/start`. Unknown
 commands/sources/setup facts are not synthesized by other adapters. Cross-host membership, explicit shared-login
 consent, protected policy claims and the one new labelled AUTO continuation are accounts-extension policy, not
 core transaction state or a bridge replay queue. Notify never switches; offer requires human click authority.
-A visible system notice says `continued on account B` only after confirmed native resume. Actual cross-account
+A visible system notice says `continued on account B` only after confirmed native resume. Revoked consent stops
+further credential selection, not lifecycle cleanup: `_account.restore` reads the current original/target login
+without changing credentials, resumes exact conversations and permits fence release. It never replays an
+uncertain effect. A callback result with `restored_only:true, continuation_allowed:false` reports actual restored
+accounts and suppresses all continuation intents/sends; failed restoration remains uncertain. Actual cross-account
 Codex0.170 resume acceptance remains unverified by fake tests. See [Codex account cutover](../research/codex-account-cutover.md).
 
 Pi's Rust bridge publishes the known controlled-launch working directory as `session.cwd` unless native state
