@@ -70,6 +70,13 @@ class Cutover:
         self.ext.apply([{'op':'set','key':SETTINGS,'expect':entry['version'] if entry else 0,'value':{'setups':setups}}], 'codex: explicit shared-login consent')
         return self.settings({})
 
+    def _automatic_allowed(self, setup):
+        entry = self.ext.vqro.call('workspace.get',{'key':SETTINGS})
+        value = entry.get('value',{}) if isinstance(entry,dict) else {}
+        setups = value.get('setups',{}) if isinstance(value,dict) else {}
+        setting = setups.get(setup,{}) if isinstance(setups,dict) else {}
+        return isinstance(setting,dict) and setting.get('automatic_login_switch') is True
+
     def resources(self):
         rows = self.ext.vqro.call('resource.list', {}).get('resources', [])
         if not isinstance(rows, list): fail('Codex membership unavailable')
@@ -123,13 +130,7 @@ class Cutover:
             headroom = capacities(rows, [target], credential_identities=identities).get(target['id'])
             if headroom is None or headroom <= 0:
                 fail('target capacity is unknown, stale or blocked; use offer, no automatic switch','stale')
-        entry = self.ext.vqro.call('workspace.get', {'key': SETTINGS})
-        settings = entry.get('value', {}) if isinstance(entry, dict) else {}
-        setups = settings.get('setups', {}) if isinstance(settings,dict) else {}
-        setting = setups.get(setup,{}) if isinstance(setups,dict) else {}
-        consent = isinstance(setting,dict) and setting.get('automatic_login_switch') is True
-        if args.get('automatic') is True and not consent:
-            fail('Automatic login switching is off for this Codex setup; use notify/offer. Switching also affects Codex CLI/IDE outside vqro.', 'forbidden')
+        consent = self._automatic_allowed(setup)
         affected = []
         for row in rows:
             b = native(row)
@@ -184,6 +185,8 @@ class Cutover:
         configured = settings(self.ext)
         mode = configured['blocked']
         if claim.get('automatic') is True:
+            if not self._automatic_allowed(claim['setup_id']):
+                fail('Automatic shared-login consent was revoked; offer instead','offer_required')
             maximum = configured.get('auto_cutover_max_per_hour',3)
             if mode!='auto_restart' or type(maximum) is not int or maximum<1:
                 fail('AUTO policy was revoked or disabled; offer instead, no native switch','offer_required')
@@ -201,6 +204,8 @@ class Cutover:
             setup_id=prepared['setup_id'],membership_revision=prepared['membership_revision'],affected=prepared['affected'],
             native_episode=prepared['native_episode'],episode=episode(source),session=(a.get('session') or {}).get('id'),
             source_incarnation=source.get('incarnation'),source_epoch=a.get('epoch'),source_account=configured_id(source))
+        if args['automatic'] and prepared['automatic_allowed'] is not True:
+            fail('Automatic switching consent is off; use notify/offer. Shared login also affects external Codex clients.','offer_required')
         if args.get('episode')!=prepared['native_episode'] or any(claim.get(k)!=v for k,v in expected.items()):
             fail('protected Codex claim or source membership changed; no native effect','stale')
         if type(claim.get('version')) is not int or claim['version']<1:fail('claim acknowledgement unavailable','forbidden')

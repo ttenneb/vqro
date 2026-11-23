@@ -76,9 +76,12 @@ class Tests(unittest.TestCase):
         self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
         self.assertTrue(all(r['account']=='b' and r['host']=='execution' for r in p['affected']))
     def test_auto_requires_explicit_setup_consent_manual_offer_does_not(self):
-        ext=Ext();ext.consent={'setups':{}}
-        with self.assertRaises(VqroError):Cutover(ext).prepare(self.args())
-        p=Cutover(ext).prepare(dict(self.args(),automatic=False));self.assertFalse(p['automatic_allowed'])
+        ext=Ext();ext.consent={'setups':{}};c=Cutover(ext)
+        p=c.prepare(self.args());self.assertFalse(p['automatic_allowed'])
+        with self.assertRaises(VqroError) as error:c.cutover(self.claimed(ext,p))
+        self.assertEqual(error.exception.kind,'offer_required')
+        self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
+        p=c.prepare(dict(self.args(),automatic=False));self.assertFalse(p['automatic_allowed'])
     def test_group_fenced_before_switches_and_never_sends_continuation(self):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());result=c.cutover(self.claimed(ext,p))
         self.assertEqual(result['outcome'],'observed');self.assertEqual(len(result['affected']),2)
@@ -107,7 +110,7 @@ class Tests(unittest.TestCase):
     def test_malformed_consent_never_enables_auto(self):
         for value in [None, [], {'setups':[]}, {'setups':{'shared':True}}]:
             ext=Ext();ext.consent=value
-            with self.assertRaises(VqroError):Cutover(ext).prepare(self.args())
+            self.assertFalse(Cutover(ext).prepare(self.args())['automatic_allowed'])
     def test_manual_effect_requires_current_recorded_human_authority(self):
         for changed in [False,True]:
             ext=Ext();c=Cutover(ext);p=c.prepare(dict(self.args(),automatic=False));args=self.claimed(ext,p,automatic=False)
@@ -193,6 +196,14 @@ class Tests(unittest.TestCase):
         with self.assertRaises(VqroError):c.cutover(args)
         names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
         self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.abort']*2)
+    def test_consent_revocation_after_first_switch_stops_further_effects_no_rollback(self):
+        ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p)
+        def revoke(op,_):
+            if op=='_account.switch':ext.consent={'setups':{}}
+        ext.hook=revoke
+        with self.assertRaises(VqroError):c.cutover(args)
+        names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
+        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.switch'])
     def test_source_native_thread_witness_required(self):
         ext=Ext();ext.rows[0]['data']['agent']['availability']['native']['threadId']='foreign'
         with self.assertRaises(VqroError):Cutover(ext).prepare(self.args())
