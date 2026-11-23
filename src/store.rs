@@ -255,14 +255,17 @@ fn backup_quarantine_with_publish(path: &Path, publish: impl FnOnce(&Path, &Path
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     // Reserve a unique final name and retain its guard until publication succeeds. The copy is
     // staged separately: merely syncing the final file is not a publication barrier on Windows.
-    let backup = tempfile::Builder::new().prefix("workspace.quarantine-").suffix(".json").tempfile_in(parent)?;
+    // Close the reserved destination handle before MoveFileExW replaces it. Native Windows
+    // refuses replacement of this open tempfile even with delete sharing (ERROR_ACCESS_DENIED).
+    // TempPath retains exclusive-name cleanup without retaining an open file handle.
+    let backup = tempfile::Builder::new().prefix("workspace.quarantine-").suffix(".json").tempfile_in(parent)?.into_temp_path();
     let mut staged = tempfile::Builder::new().prefix(".vqro-").tempfile_in(parent)?;
     std::io::copy(&mut std::fs::File::open(path)?, &mut staged)?;
     #[cfg(windows)]
     clear_temporary_attribute(staged.path())?;
     staged.as_file().sync_all()?;
-    publish(staged.path(), backup.path())?;
-    let (_file, backup) = backup.keep().map_err(|error| error.error)?;
+    publish(staged.path(), &backup)?;
+    let backup = backup.keep().map_err(|error| error.error)?;
     Ok(backup)
 }
 
