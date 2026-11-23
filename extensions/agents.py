@@ -16,6 +16,7 @@ from vqro_views import ended, unknown_since
 from vqro_items import ItemView
 from agent_request_routes import REQUEST_ROUTES, request_key
 import agent_transcript
+import agent_work
 
 EFFECTS = {"prompt": "Prompt", "steer": "Steer", "follow_up": "Follow-up", "abort": "Abort",
            "clear_queue": "Clear queue", "answer": "Answer pending request"}
@@ -298,7 +299,7 @@ COMPOSER_ROWS = 8
 VIEW_DEFAULTS = "doc/settings/agents"  # {"view": {...}}: defaults for new agent panes (agent_transcript.view_settings)
 VIEW_PANE = "doc/agents/view/"  # + rid: this agent pane's own view settings (AS10d: per pane, workspace defaults)
 OWNED_PREFIXES = ("view/agents-requests-", "view/agents-settings-", "view/agents-stop-", "view/agents-send-", "view/agents-pane-",
-                  "view/agents-tools-", "view/agents-")
+                  "view/agents-tools-", "view/agents-children-", "view/agents-")
 
 
 def host_of(resources, r):
@@ -487,6 +488,7 @@ class Agents:
         # bug still fails them); logged: the last failure logged per (agent, step), to log each distinct one once.
         self.strict, self.logged, self.log_lock = bool(getattr(ext, "strict_render", False)), {}, threading.Lock()
         self.open_requests = set()
+        self.open_children = {}  # parent resource -> selected native child scope (read-only popup)
         self.open_settings = set()
         self.settings_inventory = {}
         self.open_pane, self.published_pane = set(), {}
@@ -503,6 +505,7 @@ class Agents:
         self.tier1_dirty = self.tier1_publishing = False
         ext.command("agents.status", "Report a tier-1 agent's state for its terminal (args: terminal, app, state, seq, facts?)")(self.report_status)
         for name, fn, title in [("list", self.list_agents, "Show agents"), ("show", self.show, "Show an agent in a tab"),
+                                ("child_view", self.child_view, "Open an observed child's endpoint or read-only scoped view"),
                                 ("config", self.settings, "Agent settings and commands (popup)"),
                                 ("configure", self.configure, "Change an agent setting (args: id, value)"),
                                 ("command", self.command, "Run an agent command (args: name, text?)"),
@@ -852,7 +855,7 @@ class Agents:
         if c is None:
             return {"title": title, "items": [{"type": "text", "style": "dim", "text": "This agent doesn't stream its conversation."}]}
         with c.lock:
-            run = agent_transcript.tool_runs(c.view.entities).get(run_id, [])
+            run = agent_transcript.tool_runs(agent_work.transcript_entities(c.view.entities)).get(run_id, [])
         return agent_transcript.tools_table(run, title, session.get("cwd") if isinstance(session.get("cwd"), str) else None)
 
     def tools_table(self, args):
@@ -988,8 +991,9 @@ class Agents:
                 notes.append({"type": "text", "style": "warn", "text": "Retained conversation and customization inventory may be stale; waiting for valid reconstruction on this stream."})
             session = agent_facts(r).get("session") if isinstance(agent_facts(r).get("session"), dict) else {}
             live = agent_transcript.notice_rows(c.notices, names.agent_name(r["id"]))
-            out = notes + agent_transcript.rows(c.view.entities, names, c.view.coverage, self.view_of(r["id"]),
+            out = notes + agent_transcript.rows(agent_work.transcript_entities(c.view.entities), names, c.view.coverage, self.view_of(r["id"]),
                                                 session.get("cwd") if isinstance(session.get("cwd"), str) else None) + live
+            out += agent_work.work_rows(c.view.entities, r["id"])
         if c.stream is None and r.get("available") is not False and not c.incompatible:  # stopped: the note says so
             out.append({"type": "text", "style": "dim", "text": "Reconnecting to the conversation…"})
         return out or [{"type": "text", "style": "dim", "text": "No messages yet."}]  # complete coverage only: rows() discloses others
@@ -1129,6 +1133,81 @@ class Agents:
         self.publish_panel(r)
         result = self.ext.invoke("tabs.show", {"view": view(r["id"]), "title": label(r.get("name") or "Agent")+" "+r["id"]})
         return {"resource": r["id"], "view": view(r["id"]), "tab": result, "client": {"close": True, "focus": {"view": view(r["id"])}}}
+
+    def child_snapshot(self, r):
+        c = self.conversations.get(r["id"])
+        if c is None:
+            return {}, False, None
+        with c.lock:
+            return dict(c.view.entities), bool(c.reconstruction_ready and r.get("available") and r.get("state") == "live"), c.view.coverage
+
+    def child_panel(self, r, child):
+        entities, ready, coverage = self.child_snapshot(r)
+        value = entities.get(("child", child), (None, {}))[1]
+        value = value if isinstance(value, dict) else {}
+        name = agent_work.shown(value.get("name")) or "Child " + label(child)
+        rows = [{"type": "text", "style": "dim", "text": "Read-only child view; Esc returns. Requests use the parent agent's existing controls."}]
+        if value:
+            state = agent_work.shown(value.get("status")) or "not reported"
+            rows.append({"type": "text", "style": "dim", "text": "Reported child status: " + state})
+            if isinstance(value.get("usage"), dict) and value["usage"]:
+                usage = agent_transcript.facts_footer({"usage": value["usage"]}, "Reported child usage")
+                usage.pop("pin", None)
+                rows.append(usage)
+        if not ready:
+            rows.append({"type": "text", "style": "warn", "text": "Retained child activity may be stale; waiting for valid reconstruction."})
+        if not value and child not in agent_work.scoped_ids(entities):
+            return {"title": name, "items": rows + [{"type": "text", "text": "Child no longer reported; nothing sent.", "style": "warn"}]}
+        if not value:
+            rows.append({"type": "text", "style": "dim", "text": "Child metadata not reported; showing explicitly tagged activity only."})
+        elif value.get("items") != "scoped":
+            rows.append({"type": "text", "style": "warn", "text": "Child no longer reports a scoped view; this is retained tagged activity. Open the current view from the parent."})
+        resources = dict(self.ext.resources)
+        resources[r["id"]] = dict(r, name=name)
+        names = agent_transcript.Names(resources, r["id"], self.ext.owner())
+        activity = agent_transcript.rows(agent_work.transcript_entities(entities, child), names, coverage, self.view_of(r["id"]))
+        # Scoped tools remain inline; the parent's turn-table command has no child-scope contract.
+        def inline_only(items):
+            for item in items:
+                for key in ("actions", "menu"):
+                    if isinstance(item.get(key), list):
+                        item[key] = [entry for entry in item[key] if entry.get("command") != "agents.tools"]
+                if isinstance(item.get("children"), list):
+                    inline_only(item["children"])
+                fallback = item.get("fallback")
+                if isinstance(fallback, list):
+                    inline_only(fallback)
+                elif isinstance(fallback, dict):
+                    inline_only([fallback])
+        inline_only(activity)
+        rows += activity
+        for (kind, eid), (_, request) in entities.items():
+            if kind == "request" and isinstance(request, dict) and request.get("child") == child:
+                rows.append({"type": "text", "style": "warn", "text": "Request: " + label(request.get("title") or eid)})
+        rows += agent_work.work_rows(entities, r["id"], scope=child)
+        return {"title": name + " · scoped child", "follow": True, "search": True, "items": rows}
+
+    def child_view(self, args):
+        """Observe native child scope; opening a view confers no parent/child control authority."""
+        self.ext.fresh()
+        r = self.agent(args, inspect=True)
+        child = args.get("child")
+        if not isinstance(child, str) or not child or len(child.encode()) > 256:
+            raise VqroError("choose a reported child", "invalid")
+        entities, _, _ = self.child_snapshot(r)
+        value = entities.get(("child", child), (None, {}))[1]
+        value = value if isinstance(value, dict) else {}
+        if value.get("items") == "endpoint":
+            endpoint = self.ext.resources.get(value.get("endpoint")) if isinstance(value.get("endpoint"), str) else None
+            if endpoint is None or endpoint.get("kind") != "agent" or endpoint["id"] == r["id"]:
+                raise VqroError("child endpoint view is not available; nothing sent", "unavailable")
+            return self.show({"resource": endpoint["id"]})
+        if value.get("items") != "scoped" and not (not value and child in agent_work.scoped_ids(entities)):
+            raise VqroError("this child reports no scoped or endpoint view", "unsupported")
+        self.open_children[r["id"]] = child
+        target = "agents-children-" + r["id"]
+        self.ext.publish(target, self.child_panel(r, child))
+        return {"client": {"popup": {"view": target, "width": 120}}}
 
     def stop(self, args):
         # Close owns consent for auto; unlike the standalone Stop command it must never open a popup.
@@ -1952,7 +2031,7 @@ class Agents:
             # client must already know: a view written by the same click can reach a client after the reply, and the
             # popup is then dropped ("popup: no view"). Opening a popup writes no workspace state.
             for popup, title in (("stop", "Stop agent"), ("requests", "Pending requests"), ("settings", "Agent settings"),
-                                 ("send", "Send to agent"), ("pane", "Agent pane"), ("tools", "Tools")):
+                                 ("send", "Send to agent"), ("pane", "Agent pane"), ("tools", "Tools"), ("children", "Child agent")):
                 entries[f"view/agents-{popup}-{rid}"] = {"kind": "panel", "title": f"{title} {rid}", "items": [
                     {"type": "text", "text": "Loading… (stays if the agents extension is not running)"}]}
             # Static mouse-only entries; clients join the panel's live scalars as menu.<key>.
@@ -2025,6 +2104,8 @@ class Agents:
             if self.published.get(rid) != content:
                 self.ext.publish(view(rid), content)
                 self.published[rid] = content
+            if rid in self.open_children:
+                self.ext.publish("agents-children-" + rid, self.child_panel(resource, self.open_children[rid]))
             if rid in self.open_tools:
                 try:
                     table = self.tools_panel(resource, self.open_tools[rid])
@@ -2056,6 +2137,9 @@ class Agents:
         self.open_pane.discard(rid)
         self.published_pane.pop(rid, None)
         self.open_tools.pop(rid, None)
+        if rid in self.open_children:
+            self.ext.publish("agents-children-" + rid, {"items": [{"type": "text", "style": "warn", "text": "Parent agent gone; child activity is no longer current."}]})
+        self.open_children.pop(rid, None)
         self.published_tools.pop(rid, None)
         entry = self.ext.entries.get("view/"+view(rid), {})
         if entry.get("value", {}).get("owner") == "agents":

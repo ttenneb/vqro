@@ -652,6 +652,64 @@ class AgentPane(unittest.TestCase):
         self.agents.later = lambda delay, rid: self.timers.append((delay, rid))
         self.agents.flush_conversations()
 
+    def test_native_work_and_scoped_child_popup_follow_item_only_updates(self):
+        values = {
+            ('child', 'review'): {'parent': None, 'name': 'Reviewer', 'status': 'running', 'items': 'scoped'},
+            ('child', 'thread'): {'parent': 'review', 'name': 'Thread', 'status': 'waiting', 'items': 'endpoint', 'endpoint': 'r7'},
+            ('task', 'tests'): {'title': 'Run tests', 'owner': 'review', 'status': 'running'},
+            ('plan', 'current'): {'owner': None, 'source': 'native', 'update': 'whole',
+                                  'items': [{'text': 'Verify change', 'status': 'in_progress'}]},
+            ('message', 'root'): {'position': 1, 'role': 'assistant', 'content': text('ROOT ONLY')},
+            ('message', 'kid'): {'position': 2, 'child': 'review', 'role': 'assistant', 'content': text('CHILD ONLY')},
+        }
+        self.feed(snapshot(values))
+        parent = json.dumps(self.core.live['agents-r2'])
+        self.assertIn('Run tests', parent)
+        self.assertIn('Verify change', parent)
+        self.assertNotIn('CHILD ONLY', parent)
+        self.assertIn('ROOT ONLY', parent)
+        popup = self.agents.child_view({'resource': 'r2', 'child': 'review'})
+        self.assertEqual(popup['client']['popup']['view'], 'agents-children-r2')
+        child = json.dumps(self.core.live['agents-children-r2'])
+        self.assertIn('CHILD ONLY', child)
+        self.assertNotIn('ROOT ONLY', child)
+        self.assertNotIn('composer', child)
+        self.feed(line({'op': 'put', 'kind': 'task', 'id': 'tests', 'rev': 2, 'seq': 1,
+                        'value': {'title': 'Run tests', 'owner': 'review', 'status': 'completed'}}))
+        self.assertIn('completed', json.dumps(self.core.live['agents-children-r2']))
+        self.feed(line({'op': 'remove', 'kind': 'child', 'id': 'review', 'rev': 2, 'seq': 2}))
+        # Tagged activity remains readable even if the metadata disappears.
+        self.assertIn('metadata not reported', json.dumps(self.core.live['agents-children-r2']))
+        self.assertFalse(any(method == 'resource.invoke' for method, _ in self.core.calls))
+
+    def test_child_endpoint_navigation_uses_existing_agent_view_without_parent_authority(self):
+        self.feed(snapshot({('child', 'thread'): {'parent': None, 'items': 'endpoint', 'endpoint': 'r7'}}))
+        result = self.agents.child_view({'resource': 'r2', 'child': 'thread'})
+        self.assertEqual(result['resource'], 'r7')
+        self.assertEqual(result['view'], 'agents-r7')
+        self.assertFalse(any(method == 'resource.invoke' for method, _ in self.core.calls))
+        self.feed(snapshot({('child', 'display'): {'parent': None, 'items': 'none', 'name': 'Display only'}}))
+        with self.assertRaises(VqroError):
+            self.agents.child_view({'resource': 'r2', 'child': 'display'})
+
+    def test_parent_tool_table_and_scoped_inline_tools_do_not_cross_scopes(self):
+        self.feed(snapshot({
+            ('child', 'review'): {'parent': None, 'items': 'scoped'},
+            ('tool', 'root-tool'): {'position': 1, 'title': 'read', 'status': 'completed', 'input': {'path': 'ROOT FILE'}},
+            ('tool', 'child-tool'): {'position': 2, 'child': 'review', 'title': 'read', 'status': 'completed', 'input': {'path': 'CHILD FILE'}},
+        }))
+        parent_table = json.dumps(self.agents.tools_panel(self.core.resources['r2'], 'root-tool'))
+        self.assertIn('ROOT FILE', parent_table)
+        self.assertNotIn('CHILD FILE', parent_table)
+        self.agents.child_view({'resource': 'r2', 'child': 'review'})
+        child = json.dumps(self.core.live['agents-children-r2'])
+        self.assertIn('CHILD FILE', child)
+        self.assertNotIn('ROOT FILE', child)
+        self.assertNotIn('agents.tools', child)
+        self.core.resources['r2']['available'] = False
+        self.agents.publish_panel(self.core.resources['r2'])
+        self.assertIn('may be stale', json.dumps(self.core.live['agents-children-r2']))
+
     def compose_submit(self, text, mode='auto', **extra):
         r = self.core.resources['r2']
         row = next(row for row in self.agents.bottom_rows(r) if row.get('id') == 'compose')

@@ -3,7 +3,7 @@
   "summary":"Inspect agents and use the operations their runtimes expose.",
   "description":"Builds agent lists and live panels for prompts, steering, queues, requests and transcripts, using each runtime's advertised capabilities. It does not launch Pi itself. Turn it off to lose these controls and panels; backend-owned agents and their bridges keep running.",
   "requires":{"protocol":1,"client_features":["items","chips","input","menu"]},
-  "provides":["command/agents.list","command/agents.show","command/agents.config","command/agents.configure","command/agents.command",
+  "provides":["command/agents.list","command/agents.show","command/agents.child_view","command/agents.config","command/agents.configure","command/agents.command",
               "command/agents.prompt","command/agents.steer","command/agents.follow_up","command/agents.abort","command/agents.clear_queue",
               "command/agents.answer","command/agents.send","command/agents.compose","command/agents.view","command/agents.stop","command/agents.pane","command/agents.tools","command/agents.forget","command/agents.status","data/agents.terminal_status","view/agents-*","doc/settings/agents","doc/agents/view/*"],
   "needs":[{"cap":"ability/vqro.agents","suggest":"pi","why":"Agents come from a runtime integration such as the Pi launcher"},
@@ -17,5 +17,5 @@
                 {"cap":"ui/vqro.follow","without":"The conversation doesn't keep its view on the newest output"},
                 {"cap":"ui/vqro.composer","without":"Messages are written in a one-line or multi-line prompt instead of a box in the pane"},
                 {"cap":"command/links.open","suggest":"links","without":"Files named in tool calls can't be opened in an editor from the conversation"}],
-  "contributes":{"commands":["agents.*: capability-driven controls"],"keys":["Prefix A: agents list","Prefix p: prompt the focused agent","Prefix P: agent settings for the focused agent","In an agent pane: y copy, i write, t/T/s cycle thinking/tools/system, / search","In the message box: Alt-S send as steer, Alt-F send as follow-up"],"menu_items":["Per-agent actions"],"panels":["Agent list","Agent details (the conversation from an item stream, with a facts line)","Pending requests","Agent settings (declared model, thinking, commands)","Stop agent confirmation"]}
+  "contributes":{"commands":["agents.*: capability-driven controls"],"keys":["Prefix A: agents list","Prefix p: prompt the focused agent","Prefix P: agent settings for the focused agent","In an agent pane: y copy, i write, t/T/s cycle thinking/tools/system, / search","In the message box: Alt-S send as steer, Alt-F send as follow-up"],"menu_items":["Per-agent actions"],"panels":["Agent list","Agent details (the conversation from an item stream, with a facts line)","Pending requests","Agent settings (declared model, thinking, commands)","Read-only scoped child activity","Stop agent confirmation"]}
 }
