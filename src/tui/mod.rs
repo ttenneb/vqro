@@ -4828,6 +4828,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connecting_notice_is_drawn_and_extension_expiry_replaces_it() {
+        let (mut app, _) = app();
+        app.load(&json!({"epoch":"boot","seq":1,"entries":{},"backend_notice":"connecting to herdr…"}));
+        let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(100,24)).unwrap();
+        terminal.draw(|f|app.draw(f)).unwrap();
+        let screen:String=terminal.backend().buffer().content.iter().map(|c|c.symbol()).collect();
+        assert!(screen.contains("connecting to herdr…"),"{screen}");
+        app.on_event_record(&json!({"epoch":"boot","seq":2,"type":"extension","data":{
+            "name":"herdr","state":{"status":"running"},"backend_notice":"herdr is not connected"}}));
+        terminal.draw(|f|app.draw(f)).unwrap();
+        let screen:String=terminal.backend().buffer().content.iter().map(|c|c.symbol()).collect();
+        assert!(!screen.contains("connecting to herdr…"));
+        assert!(screen.contains("herdr is not connected"),"{screen}");
+    }
+
+    #[tokio::test]
     async fn key_labels_default_full_short_and_unknown_work_without_extensions() {
         let (mut app,_)=app();
         app.ws.safe_mode=true;

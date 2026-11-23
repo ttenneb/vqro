@@ -1621,8 +1621,13 @@ platform, else `python3` on Unix; on Windows, which has no python.org `python3`,
 No candidate means an actionable discovery failure for extensions and UI clients, not a retry through bare `python3`.
 This is native PATH selection, not interpreter identity/version validation; no executable probes run. An unavailable program reports
 `failed` and an actionable diagnostic; hello/snapshot `backend_notice` and the built-in status bar expose unavailable backends.
-`entries`, `provider` (and compatibility `adapter`), and `safe_mode` event data also carry the current
+`entries`, `provider` (and compatibility `adapter`), `extension`, and `safe_mode` event data also carry the current
 `backend_notice` (string or null). Null clears a previous notice; absent fields from older cores leave it unchanged.
+Before the configured default provider registers, a successfully started extension has a three-second notice
+window: `connecting to <extension name>…`. This is not readiness; routing still rejects unavailable operations.
+Registration/readiness clears or replaces that notice. Expiry or an observed startup/exit failure reports the
+ordinary unavailable notice immediately (automatic crash retries do not reopen the window). Explicit restart or
+a changed declaration can start a new window. The core emits an `extension` event on expiry, so clients need not poll.
 The status bar prioritizes this recovery warning over contributed status buttons, including when an alternative
 backend is connected but the configured default is unavailable.
 Only unchanged installed defaults with an old absolute program path are normalized; custom/edited entries stay intact. `defaults.json` is versioned (`version`; entries may carry

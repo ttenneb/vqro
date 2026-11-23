@@ -16,6 +16,8 @@ use crate::core::Shared;
 const BUDGET: usize = 3;
 pub(crate) const CRASH_WINDOW: Duration = Duration::from_secs(300);
 const RESTART_DELAY: Duration = Duration::from_millis(500);
+// A notice window only: never delay routing, failure reporting or recovery.
+pub(crate) const PROVIDER_STARTUP_WINDOW: Duration = Duration::from_secs(3);
 // Cooperative providers (vqro-tmux) allow up to1s for their private backend to exit.
 // Leave a cleanup margin inside the supervisor's2s overall shutdown bound.
 const STOP_GRACE: Duration = Duration::from_millis(1500);
@@ -31,12 +33,17 @@ pub struct ExtRuntime {
     failure: Option<Value>,
     last_exits: VecDeque<Value>, // Last three exits survive budget aging/reset, bounded independently.
     pub running: bool,
+    startup_started: Option<Instant>,
     stop: Option<oneshot::Sender<()>>,
     token: String,
     live: Arc<AtomicBool>,
 }
 
 impl ExtRuntime {
+    pub(crate) fn is_starting(&self) -> bool {
+        self.running && self.status == "running" && self.startup_started.is_some_and(|at| at.elapsed() < PROVIDER_STARTUP_WINDOW)
+    }
+
     fn fail(&mut self, kind: &str, reason: String) {
         self.status="failed".into();
         let now=Instant::now();
@@ -115,6 +122,7 @@ pub fn reconcile(core: &Shared) {
             failure: None,
             last_exits: VecDeque::new(),
             running: false,
+            startup_started: None,
             stop: None,
             token: String::new(),
             live:Arc::new(AtomicBool::new(false)),
@@ -202,6 +210,8 @@ pub fn reconcile(core: &Shared) {
                 rt.running = true;
                 rt.pid = child.id();
                 rt.status = "running".into();
+                // Automatic retries after an observed failure must not hide that failure.
+                rt.startup_started = rt.crashes.is_empty().then(Instant::now);
                 let j = rt.to_json();
                 c.emit("extension", json!({"name": name, "state": j}));
                 let core = core.clone();
@@ -211,8 +221,20 @@ pub fn reconcile(core: &Shared) {
                     // keep an abandoned reader alive forever by retaining stdout/stderr.
                     let mut logging=tokio::task::JoinSet::new();
                     logging.spawn(crate::ext_log::drain(stdout,stderr,log));
-                    tokio::select! {
-                        _ = stop_rx => {
+                    let deadline = tokio::time::sleep(PROVIDER_STARTUP_WINDOW);
+                    tokio::pin!(deadline);
+                    let mut pending_notice = true;
+                    let mut stop_rx = stop_rx;
+                    loop { tokio::select! {
+                        _ = &mut deadline, if pending_notice => {
+                            pending_notice = false;
+                            let mut c = core.lock().unwrap();
+                            if let Some(rt) = c.exts.get(&name).filter(|rt| rt.generation == generation && rt.running) {
+                                let state = rt.to_json();
+                                c.emit("extension", json!({"name": name, "state": state}));
+                            }
+                        }
+                        _ = &mut stop_rx => {
                             // Cooperative extensions see EOF and can close owned private backends.
                             // An uncooperative extension is still bounded and reaped.
                             drop(lifetime.take());
@@ -221,6 +243,7 @@ pub fn reconcile(core: &Shared) {
                             if let Some(rt) = c.exts.get_mut(&name) {
                                 if rt.generation == generation + 1 && !rt.running { rt.pid = None; rt.status = "stopped".into(); }
                             }
+                            break;
                         }
                         status = child.wait() => {
                             let why = match status {
@@ -232,8 +255,9 @@ pub fn reconcile(core: &Shared) {
                                 tokio::time::sleep(RESTART_DELAY).await;
                                 reconcile(&core);
                             }
+                            break;
                         }
-                    }
+                    } }
                     drop(lifetime); // retain the writer across the whole child lifetime
                     let _=tokio::time::timeout(Duration::from_millis(100),logging.join_next()).await;
                 }));
@@ -335,7 +359,7 @@ mod qa2_tests {
 
     fn runtime_with_crashes(crashes: VecDeque<Instant>) -> ExtRuntime {
         ExtRuntime { status: "failed".into(), pid: None, spec_version: 1, generation: 7, crashes_total: crashes.len() as u64, crashes,
-            last_exit: Some("historical failure".into()), failure:None, last_exits:VecDeque::new(), running: false, stop: None, token: String::new(), live:Arc::new(AtomicBool::new(false)) }
+            last_exit: Some("historical failure".into()), failure:None, last_exits:VecDeque::new(), running: false, startup_started: None, stop: None, token: String::new(), live:Arc::new(AtomicBool::new(false)) }
     }
 
     #[test]

@@ -256,7 +256,7 @@ impl Core {
     /// Append to the event log and broadcast.
     pub fn emit(&mut self, ty: &str, mut data: Value) {
         // Authoritative recovery notices follow readiness/default changes without a snapshot poll.
-        if matches!(ty, "entries" | "provider" | "adapter" | "safe_mode") {
+        if matches!(ty, "entries" | "provider" | "adapter" | "safe_mode" | "extension") {
             data["backend_notice"] = json!(self.backend_notice());
         }
         self.seq += 1;
@@ -392,7 +392,17 @@ impl Core {
 
     pub fn backend_notice(&self) -> Option<String> {
         if self.safe_mode { return None; }
-        self.provider_route(None,"terminal.spawn").err().map(|error|format!("No default backend is ready: {}. Use recovery choices.",error.message))
+        self.provider_route(None,"terminal.spawn").err().map(|error| {
+            let preferred = self.store.entries().iter().find_map(|(key, entry)|
+                (entry.value["kind"] == "provider" && entry.value["default"] == true).then(|| key.strip_prefix("extension/")).flatten());
+            if let Some(name) = preferred {
+                let registered = self.providers.iter().any(|(id, p)| id == name || p.metadata["owner_extension"].as_str() == Some(name));
+                if !registered && self.exts.get(name).is_some_and(|rt| rt.is_starting()) {
+                    return format!("connecting to {name}…");
+                }
+            }
+            format!("No default backend is ready: {}. Use recovery choices.",error.message)
+        })
     }
 
     pub fn has_resource_identity(&self, id: &str) -> bool { self.identities.active(id) }
