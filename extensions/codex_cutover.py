@@ -5,7 +5,7 @@ import hashlib
 import json
 import time
 import threading
-from account_credentials import snapshot, fact
+from account_credentials import snapshot, fact, selection_problem, credential_identity, eligible_alternatives
 from vqro_ext import VqroError
 
 SETTINGS = 'doc/settings/codex-cutover'
@@ -110,11 +110,17 @@ class Cutover:
         target = next((r for r in target_rows if r['id'] == args.get('account')), None)
         if not target or target['runtime'] != 'codex' or target['kind'] != 'subscription' or not target.get('login_ref'):
             fail('target needs a native Codex saved-login/workspace reference', 'unsupported')
+        from accounts_policy import blocked, configured_id
+        eligible = eligible_alternatives(target_rows, configured_id(source),
+            {configured_id(r) for r in rows if blocked(r)}, allow_api_key=False)
+        if selection_problem(target) or target not in eligible:
+            fail('target route is incomplete, blocked, duplicated or aliases the source account','stale')
         if args.get('automatic') is True:
             if (a.get('account') or {}).get('kind') != 'subscription':
                 fail('current subscription selection is unknown; use notify/offer, not automatic switching','unavailable')
             from accounts_policy import capacities
-            headroom = capacities(rows, [target]).get(target['id'])
+            identities = {r['id']:credential_identity(r) for r in target_rows}
+            headroom = capacities(rows, [target], credential_identities=identities).get(target['id'])
             if headroom is None or headroom <= 0:
                 fail('target capacity is unknown, stale or blocked; use offer, no automatic switch','stale')
         entry = self.ext.vqro.call('workspace.get', {'key': SETTINGS})

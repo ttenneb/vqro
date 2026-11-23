@@ -165,6 +165,20 @@ class Tests(unittest.TestCase):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p);ext.all_active=True
         with self.assertRaises(VqroError):c.cutover(args)
         self.assertFalse(any(a['args']['name']=='_account.switch' for m,a in ext.calls if m=='resource.invoke'))
+    def test_known_source_credential_alias_is_not_a_different_target(self):
+        ext=Ext();alias=copy.deepcopy(ext.registry['accounts'][0]);alias.update(id='a',label='A alias')
+        ext.registry['accounts'].append(alias)
+        with self.assertRaises(VqroError):Cutover(ext).prepare(self.args())
+    def test_incomplete_target_route_is_visible_but_cannot_be_selected(self):
+        ext=Ext();ext.registry['accounts'][0]['host']='unpaired-host'
+        with self.assertRaises(VqroError):Cutover(ext).prepare(self.args())
+    def test_alias_missing_capacity_poisoning_is_preserved_at_native_boundary(self):
+        ext=Ext();alias=copy.deepcopy(ext.registry['accounts'][0]);alias.update(id='b-alias',label='B alias')
+        ext.registry['accounts'].append(alias)
+        missing=copy.deepcopy(ext.rows[-1]);missing.update(id='alias-observer',incarnation='alias-inc')
+        missing['data']['agent'].update(account={'id':'b-alias'},usage_limits=None)
+        ext.rows.append(missing)
+        with self.assertRaises(VqroError):Cutover(ext).prepare(self.args())
     def test_source_native_thread_witness_required(self):
         ext=Ext();ext.rows[0]['data']['agent']['availability']['native']['threadId']='foreign'
         with self.assertRaises(VqroError):Cutover(ext).prepare(self.args())
