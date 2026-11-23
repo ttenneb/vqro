@@ -26,25 +26,35 @@ use std::{mem, ptr, slice};
 
 use super::emulator::{CursorShape, Effect, Engine, MouseEncoding, MouseMode, MAX_EFFECTS};
 
-/// A libghostty-vt call that didn't succeed (its `GhosttyResult`).
+/// A libghostty-vt failure or a refused snapshot decode budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Error(ffi::GhosttyResult);
+pub enum Error {
+    Native(ffi::GhosttyResult),
+    SnapshotBudget,
+}
 
 impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "libghostty-vt error {}", self.0) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Native(code) => write!(f, "libghostty-vt error {code}"),
+            Self::SnapshotBudget => f.write_str("Rex snapshot exceeds decoded row/cell budget"),
+        }
+    }
 }
 
 trait Ok_ {
     fn ok(self) -> Result<(), Error>;
 }
 impl Ok_ for ffi::GhosttyResult {
-    fn ok(self) -> Result<(), Error> { if self == ffi::GHOSTTY_SUCCESS { Ok(()) } else { Err(Error(self)) } }
+    fn ok(self) -> Result<(), Error> { if self == ffi::GHOSTTY_SUCCESS { Ok(()) } else { Err(Error::Native(self)) } }
 }
 
 /// Decode a complete Ghostty snapshot (`GHOSTSNP`, as Rex sends at the start of a terminal data channel) and format
 /// its terminal as VT sequences that redraw it: screen, history, styles, modes, cursor and the other formatter
 /// extras. For `vqro-rex`, whose viewers' engines (vt100 or libghostty) take ordinary VT, not Ghostty's format.
 ///
+/// Decoding checks both advisory history and actual incremental row counts against a request-derived budget
+/// (at most 4 million cells / 64 thousand rows). Oversized snapshots fail without returning any repaint.
 /// History is bounded to about `history_lines` rows: the formatted terminal is replayed into a fresh one with that
 /// limit (page-granular, so somewhat more may be kept) and formatted again, because a limit set on the decoded
 /// terminal does not drop history it already holds. The terminal's default palette is not sent: the viewer keeps
@@ -57,26 +67,76 @@ pub fn snapshot_to_vt(snapshot: &[u8], history_lines: usize) -> Result<Vec<u8>, 
             unsafe { ffi::ghostty_terminal_free(self.0) };
         }
     }
-    let mut decoder: ffi::GhosttySnapshotDecoder = ptr::null_mut();
-    // SAFETY: `snapshot` outlives the decoder, which is freed below before returning.
-    unsafe { ffi::ghostty_snapshot_decoder_new_buf(ptr::null(), &mut decoder, snapshot.as_ptr(), snapshot.len()) }.ok()?;
-    let mut terminal: ffi::GhosttyTerminal = ptr::null_mut();
-    // SAFETY: a live decoder and an out-pointer of the documented type; the decoder is freed once.
-    let decoded = unsafe { ffi::ghostty_snapshot_decoder_decode(decoder, &mut terminal) }.ok();
-    unsafe { ffi::ghostty_snapshot_decoder_free(decoder) };
-    decoded?;
-    let decoded = Decoded(terminal);
+    struct Decoder(ffi::GhosttySnapshotDecoder);
+    impl Drop for Decoder {
+        fn drop(&mut self) {
+            // SAFETY: freed once, before the terminal it borrows.
+            unsafe { ffi::ghostty_snapshot_decoder_free(self.0) };
+        }
+    }
+    // Declare the terminal first: on every early return the decoder must be freed before it.
+    let mut decoded = Decoded(ptr::null_mut());
+    let mut decoder = Decoder(ptr::null_mut());
+    // SAFETY: `snapshot` outlives the decoder; READY returns a caller-owned terminal, kept until decoder drop.
+    unsafe {
+        ffi::ghostty_snapshot_decoder_new_buf(ptr::null(), &mut decoder.0, snapshot.as_ptr(), snapshot.len()).ok()?;
+        ffi::ghostty_snapshot_decoder_ready(decoder.0, &mut decoded.0).ok()?;
+    }
     let (mut cols, mut rows) = (0u16, 0u16);
     // SAFETY: COLS and ROWS write a uint16_t (terminal.h) into a live terminal's out-pointers.
     unsafe {
         ffi::ghostty_terminal_get(decoded.0, ffi::GHOSTTY_TERMINAL_DATA_COLS, (&mut cols as *mut u16).cast()).ok()?;
         ffi::ghostty_terminal_get(decoded.0, ffi::GHOSTTY_TERMINAL_DATA_ROWS, (&mut rows as *mut u16).cast()).ok()?;
     }
+    let mut budget = SnapshotBudget::new(history_lines, cols, rows);
+    let (mut primary, mut alternate) = (0u64, 0u64);
+    // SAFETY: snapshot.h specifies uint64_t for these READY-only advisory counts. An absent alternate is valid.
+    unsafe {
+        ffi::ghostty_snapshot_decoder_get(decoder.0, ffi::GHOSTTY_SNAPSHOT_DECODER_DATA_HISTORY_ROWS_PRIMARY, (&mut primary as *mut u64).cast()).ok()?;
+        let result = ffi::ghostty_snapshot_decoder_get(decoder.0, ffi::GHOSTTY_SNAPSHOT_DECODER_DATA_HISTORY_ROWS_ALTERNATE, (&mut alternate as *mut u64).cast());
+        if result != ffi::GHOSTTY_NO_VALUE { result.ok()?; }
+    }
+    budget.check(primary.saturating_add(alternate).saturating_add(budget.used))?;
+    loop {
+        // SAFETY: live decoder borrowing the unchanged READY terminal. Only FINISH permits formatting.
+        let result = unsafe { ffi::ghostty_snapshot_decoder_next(decoder.0) };
+        if result == ffi::GHOSTTY_NO_VALUE { break; }
+        result.ok()?;
+        let mut progress = 0usize;
+        // SAFETY: snapshot.h specifies size_t. Image records have no row count (Kitty is disabled in our build).
+        let result = unsafe { ffi::ghostty_snapshot_decoder_get(decoder.0, ffi::GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_ROWS, (&mut progress as *mut usize).cast()) };
+        if result != ffi::GHOSTTY_NO_VALUE {
+            result.ok()?;
+            budget.add(progress as u64)?;
+        }
+    }
+    drop(decoder);
     let full = format_vt(decoded.0)?;
     drop(decoded);
     let mut bounded = Ghostty::new(cols, rows, history_lines)?;
     bounded.process(&full);
     format_vt(bounded.raw)
+}
+
+// Bound decoded cells, not encoded bytes: blank wide history can amplify by hundreds of times. Allow page
+// granularity and modest excess history, but never let a large request remove the hard cap. This is a row/cell
+// bound, not an exact byte bound: READY and one next() page are allocated before we can inspect their counts.
+const SNAPSHOT_MAX_CELLS: u64 = 4_000_000;
+const SNAPSHOT_MAX_ROWS: u64 = 64_000;
+struct SnapshotBudget { limit: u64, used: u64 }
+impl SnapshotBudget {
+    fn new(history: usize, cols: u16, rows: u16) -> Self {
+        let screen_rows = u64::from(rows) * 2; // both screens, whether or not alternate is present
+        let requested = (history as u64).saturating_add(screen_rows).saturating_add(256).saturating_mul(4);
+        Self { limit: requested.min(SNAPSHOT_MAX_ROWS).min(SNAPSHOT_MAX_CELLS / u64::from(cols.max(1))), used: screen_rows }
+    }
+    fn check(&self, rows: u64) -> Result<(), Error> {
+        if rows > self.limit { Err(Error::SnapshotBudget) } else { Ok(()) }
+    }
+    fn add(&mut self, rows: u64) -> Result<(), Error> {
+        self.used = self.used.saturating_add(rows);
+        self.check(self.used)
+    }
 }
 
 /// The terminal's active screen and history as VT (no trimming, every extra except the default palette and the
@@ -312,7 +372,7 @@ impl Ghostty {
         let mut raw = ptr::null_mut();
         // SAFETY: a valid out-pointer; a null allocator means the library's default allocator.
         unsafe { ffi::ghostty_terminal_new(ptr::null(), &mut raw, cols.max(1), rows.max(1)) }.ok()?;
-        if raw.is_null() { return Err(Error(ffi::GHOSTTY_INVALID_VALUE)); }
+        if raw.is_null() { return Err(Error::Native(ffi::GHOSTTY_INVALID_VALUE)); }
         let mut engine = Self { raw, collected: Box::default(), notes: Notifications::default(), cursor_set: CursorSet::default(),
                                 effects: Vec::new(), scrollback, dropped: 0, tracked: ptr::null_mut(), tracked_y: 0 };
         let userdata = (&mut *engine.collected as *mut Collected).cast::<c_void>();
@@ -816,6 +876,96 @@ mod tests {
         // would reach the formatter's `unreachable`. It is formatted (or refused) without aborting.
         let malformed = include_bytes!("../../../tests/fixtures/rex/snapshot-malformed-gr-g0.bin");
         let _ = snapshot_to_vt(malformed, 100);
+    }
+
+    fn encode_snapshot(source: &Ghostty) -> Vec<u8> {
+        let (mut out, mut len) = (ptr::null_mut(), 0usize);
+        // SAFETY: a live terminal at parser ground, typed out-pointers, same default allocator for free.
+        unsafe { ffi::ghostty_snapshot_encode_alloc(source.raw, ptr::null(), &mut out, &mut len) }.ok().unwrap();
+        let bytes = unsafe { slice::from_raw_parts(out, len) }.to_vec();
+        unsafe { ffi::ghostty_free(ptr::null(), out, len) };
+        bytes
+    }
+
+    #[test]
+    fn incremental_snapshot_history_is_complete_before_repaint() {
+        let mut source = Ghostty::new(80, 24, 6000).unwrap();
+        for i in 0..4000 { source.process(format!("history {i}\r\n").as_bytes()); }
+        let snapshot = encode_snapshot(&source);
+        let vt = snapshot_to_vt(&snapshot, 1000).unwrap();
+        let text = String::from_utf8_lossy(&vt);
+        assert!(text.contains("history 3999"));
+        assert!(!text.contains("history 100\r"), "replay still bounds retained history");
+        assert!(snapshot_to_vt(&snapshot[..snapshot.len() - 3], 1000).is_err(), "no repaint before FINISH validates");
+    }
+
+    #[test]
+    fn snapshot_budgets_saturate_and_include_both_screens() {
+        let mut b = SnapshotBudget::new(usize::MAX, 2000, 500);
+        assert_eq!(b.limit, 2000, "a huge request cannot evade the cell cap");
+        assert!(b.check(2001).is_err());
+        assert!(b.add(u64::MAX).is_err());
+        assert!(SnapshotBudget::new(usize::MAX, 1, 1).check(SNAPSHOT_MAX_ROWS + 1).is_err());
+        assert!(SnapshotBudget::new(0, 65535, 65535).check(131070).is_err());
+        let b = SnapshotBudget::new(100, 80, 24);
+        assert!(b.check(48).is_ok());
+        assert!(b.check(b.limit + 1).is_err());
+    }
+
+    // Run only decoding in a fresh process: encoding the source terminal must not contaminate peak RSS.
+    #[test]
+    fn snapshot_budget_decode_child() {
+        let Some(path) = std::env::var_os("VQRO_SNAPSHOT_BUDGET_INPUT") else { return; };
+        let snapshot = std::fs::read(path).unwrap();
+        let error = snapshot_to_vt(&snapshot, 1000).unwrap_err();
+        assert_eq!(error, Error::SnapshotBudget);
+        assert!(error.to_string().contains("decoded row/cell budget"));
+        #[cfg(target_os = "linux")]
+        {
+            let status = std::fs::read_to_string("/proc/self/status").unwrap();
+            let peak = status.lines().find(|line| line.starts_with("VmHWM:")).unwrap();
+            println!("snapshot={} bytes; {peak}", snapshot.len());
+            let kb: usize = peak.split_whitespace().nth(1).unwrap().parse().unwrap();
+            assert!(kb < 64 * 1024, "refusal must not decode the entire amplifying history: {peak}");
+        }
+    }
+
+    #[test]
+    fn an_amplifying_snapshot_is_refused_in_a_fresh_process() {
+        let mut source = Ghostty::new(2000, 500, 30_000).unwrap();
+        for _ in 0..20_000 { source.process(b"\r\n"); }
+        let mut snapshot = encode_snapshot(&source);
+        drop(source);
+        assert!(snapshot.len() < 200_000, "small encoded input, millions of decoded cells");
+        let root = tempfile::tempdir().unwrap();
+        for understated in [false, true] {
+            if understated {
+                // SCREEN tag 2: key u16, page_count u16, advisory history_rows u64 (screen.zig Header).
+                // Recompute record CRC32C over tag + length + payload, excluding the CRC field.
+                let mut offset = 10;
+                while offset < snapshot.len() {
+                    let len = u32::from_le_bytes(snapshot[offset+2..offset+6].try_into().unwrap()) as usize;
+                    if u16::from_le_bytes(snapshot[offset..offset+2].try_into().unwrap()) == 2 {
+                        snapshot[offset+14..offset+22].fill(0);
+                        let mut crc = !0u32;
+                        for byte in snapshot[offset..offset+6].iter().chain(snapshot[offset+10..offset+10+len].iter()) {
+                            crc ^= u32::from(*byte);
+                            for _ in 0..8 { crc = (crc >> 1) ^ if crc & 1 != 0 { 0x82F6_3B78 } else { 0 }; }
+                        }
+                        snapshot[offset+6..offset+10].copy_from_slice(&(!crc).to_le_bytes());
+                    }
+                    offset += 10 + len;
+                }
+            }
+            let path = root.path().join("snapshot.bin");
+            std::fs::write(&path, &snapshot).unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .env_clear().env("VQRO_SNAPSHOT_BUDGET_INPUT", path)
+                .args(["--exact", "tui::ghostty::tests::snapshot_budget_decode_child", "--nocapture"])
+                .output().unwrap();
+            println!("understated={understated}: {}", String::from_utf8_lossy(&result.stdout));
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        }
     }
 
     /// ghostty-audit P3-1: images are not kept (vqro draws none).

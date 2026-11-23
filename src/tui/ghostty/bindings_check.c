@@ -68,6 +68,12 @@ SAME(offsetof(GhosttyClipboardWrite, contents_len), 16); SAME(offsetof(GhosttyCl
 SAME(offsetof(GhosttyClipboardWrite, granted), 40); SAME(offsetof(GhosttyClipboardWrite, can_remember), 41);
 SAME(offsetof(GhosttyClipboardWrite, ctx), 48); SAME(offsetof(GhosttyClipboardWrite, reply), 56);
 
+/* snapshot.h (vqro-rex) */
+SAME(GHOSTTY_NO_VALUE, -4); SAME(sizeof(GhosttySnapshotDecoderData), 4);
+SAME(GHOSTTY_SNAPSHOT_DECODER_DATA_HISTORY_ROWS_PRIMARY, 3);
+SAME(GHOSTTY_SNAPSHOT_DECODER_DATA_HISTORY_ROWS_ALTERNATE, 4);
+SAME(GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_ROWS, 6);
+
 /* formatter.h, types.h (vqro-rex) */
 SAME(GHOSTTY_FORMATTER_OPT_EMIT, 1); SAME(GHOSTTY_FORMATTER_OPT_TRIM, 3); SAME(GHOSTTY_FORMATTER_OPT_EXTRAS, 5);
 SAME(sizeof(GhosttyFormatterOption), 4); SAME(GHOSTTY_FORMATTER_FORMAT_VT, 1); SAME(sizeof(GhosttyFormatterFormat), 4);
@@ -94,7 +100,10 @@ static GhosttyResult (*const f_uri)(const GhosttyGridRef*, uint8_t*, size_t, siz
 static GhosttyResult (*const f_cell_get)(GhosttyCell, GhosttyCellData, void*) = ghostty_cell_get;
 static GhosttyResult (*const f_row_get)(GhosttyRow, GhosttyRowData, void*) = ghostty_row_get;
 static GhosttyResult (*const f_snap_new)(const GhosttyAllocator*, GhosttySnapshotDecoder*, const uint8_t*, size_t) = ghostty_snapshot_decoder_new_buf;
-static GhosttyResult (*const f_snap_decode)(GhosttySnapshotDecoder, GhosttyTerminal*) = ghostty_snapshot_decoder_decode;
+static GhosttyResult (*const f_snap_ready)(GhosttySnapshotDecoder, GhosttyTerminal*) = ghostty_snapshot_decoder_ready;
+static GhosttyResult (*const f_snap_next)(GhosttySnapshotDecoder) = ghostty_snapshot_decoder_next;
+static GhosttyResult (*const f_snap_get)(GhosttySnapshotDecoder, GhosttySnapshotDecoderData, void*) = ghostty_snapshot_decoder_get;
+static GhosttyResult (*const f_snap_encode)(GhosttyTerminal, const GhosttyAllocator*, uint8_t**, size_t*) = ghostty_snapshot_encode_alloc;
 static void (*const f_snap_free)(GhosttySnapshotDecoder) = ghostty_snapshot_decoder_free;
 static GhosttyResult (*const f_fmt_new)(const GhosttyAllocator*, GhosttyFormatter*, GhosttyTerminal) = ghostty_formatter_terminal_new;
 static GhosttyResult (*const f_fmt_set)(GhosttyFormatter, GhosttyFormatterOption, const void*) = ghostty_formatter_set;
