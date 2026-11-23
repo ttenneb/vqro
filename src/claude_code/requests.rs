@@ -186,6 +186,13 @@ impl Requests {
             Some(Change { id, value: pending.value })
         }).collect()
     }
+    /// A full request that could not be published must not remain approvable through summaries.
+    pub fn unrepresentable(&mut self, id: &str) -> Option<Value> {
+        let pending = self.pending.remove(id)?;
+        self.native.remove(&pending.native);
+        self.remember(&pending.native, &pending.request);
+        Some(error_response(&pending.native))
+    }
     pub fn expire(&mut self) -> Vec<Change> {
         self.native.clear();
         self.recent.clear();

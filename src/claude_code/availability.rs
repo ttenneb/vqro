@@ -4,15 +4,17 @@ use serde_json::{Value, json};
 #[derive(Default)]
 pub struct Availability { causes: BTreeMap<&'static str, Value>, pub rate_info: Option<Value>, pub limit_episode: Option<Value>, reported: bool }
 impl Availability {
-    pub fn observe(&mut self, frame: &Value) {
+    pub fn observe(&mut self, frame: &Value, active: bool) {
         if frame["type"] == "rate_limit_event" {
             let info = &frame["rate_limit_info"];
             match info["status"].as_str() {
                 Some("rejected") => {
-                    self.reported = true;
+                    // No independent no-prompt recovery is established for this snapshot. It
+                    // blocks only observed live work; the native result ends that block scope.
+                    if active { self.reported = true; }
                     // This native type is documented for claude.ai subscription rate limits.
                     let reason = if info["errorCode"] == "credits_required" || info["overageDisabledReason"] == "out_of_credits" { "quota" } else { "rate_limited" };
-                    self.causes.insert("rate_snapshot",json!({"reason":reason,"source":"rate_limit_event","rate_limit_info":info}));
+                    if active { self.causes.insert("rate_snapshot",json!({"reason":reason,"source":"rate_limit_event","rate_limit_info":info})); }
                     self.rate_info = Some(info.clone());
                 }
                 Some("allowed" | "allowed_warning") => {
@@ -26,7 +28,7 @@ impl Availability {
             }
         }
         if frame["type"] == "assistant" {
-            if let Some(error) = frame["error"].as_str() { self.native_error(error); }
+            if active { if let Some(error) = frame["error"].as_str() { self.native_error(error); } }
         }
         if frame["type"] == "system" && frame["subtype"] == "api_retry" {
             self.reported = true;
@@ -39,8 +41,10 @@ impl Availability {
         }
         if frame["type"] == "result" {
             self.limit_episode = None;
-            // A native terminal result ends this query's retrying state, not rate/auth blocking.
-            self.causes.remove("retry");
+            self.reported = true;
+            // All published blocks are TURN scoped. Native query termination is the independent
+            // clear; never wedge mail behind a block that needs another prompt to recover.
+            self.causes.clear();
             if frame["terminal_reason"] == "blocking_limit" && self.rate_info.as_ref().is_some_and(|info| info["status"] == "rejected") {
                 if let (Some(uuid),Some(session)) = (frame["uuid"].as_str(),frame["session_id"].as_str()) {
                     if uuid.len()<=128 && session.len()<=128 {
@@ -48,12 +52,6 @@ impl Availability {
                             "terminal_reason":"blocking_limit","subscription_limit":true}));
                     }
                 }
-            }
-            // Positive native main-loop output on a normally completed model turn establishes
-            // that this process's auth worked. A synthetic/hook-only zero-model turn does not.
-            if frame["terminal_reason"] == "completed" && frame["is_error"] == false
-                && frame["usage"]["output_tokens"].as_u64().is_some_and(|v|v>0) {
-                self.causes.remove("auth"); self.causes.remove("overloaded");
             }
         }
     }
@@ -73,7 +71,7 @@ impl Availability {
         let reason = ["auth","quota","rate_limited","overloaded","_native_error","_retrying"].into_iter()
             .find(|reason| self.causes.values().any(|cause| cause["reason"] == *reason));
         let mut value = json!({"state":if reason.is_some(){"blocked"}else{"available"},
-            "native":{"causes":self.causes.values().collect::<Vec<_>>()}});
+            "native":{"block_scope":"turn","causes":self.causes.values().collect::<Vec<_>>()}});
         if let Some(reason) = reason { value["reason"] = json!(reason); }
         if let Some(info) = &self.rate_info { value["native"]["rate_limit_info"] = info.clone(); }
         if let Some(episode) = &self.limit_episode {
@@ -88,20 +86,22 @@ mod tests {
     #[test]
     fn native_rate_clear_does_not_clear_auth_and_percent_does_not_block() {
         let mut a = Availability::default();
-        a.observe(&json!({"type":"rate_limit_event","rate_limit_info":{"utilization":1.0}})); assert!(a.value().is_none());
-        a.observe(&json!({"type":"assistant","error":"authentication_failed"}));
-        a.observe(&json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}));
-        a.observe(&json!({"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}));
+        a.observe(&json!({"type":"rate_limit_event","rate_limit_info":{"utilization":1.0}}),false); assert!(a.value().is_none());
+        a.observe(&json!({"type":"assistant","error":"authentication_failed"}),true);
+        a.observe(&json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}),true);
+        a.observe(&json!({"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}),true);
         assert_eq!(a.value().unwrap()["reason"],"auth");
     }
     #[test]
     fn automatic_subscription_episode_requires_native_terminal_and_subscription_evidence() {
         let mut a = Availability::default();
         let terminal = json!({"type":"result","uuid":"result1","session_id":"s1","terminal_reason":"blocking_limit"});
-        a.observe(&terminal); assert!(a.limit_episode.is_none());
-        a.observe(&json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"}}));
-        a.observe(&terminal); assert_eq!(a.limit_episode.as_ref().unwrap()["episode"],"result1");
-        a.observe(&json!({"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning"}}));
+        a.observe(&terminal,false); assert!(a.limit_episode.is_none());
+        a.observe(&json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"}}),true);
+        a.observe(&terminal,false); assert_eq!(a.limit_episode.as_ref().unwrap()["episode"],"result1");
+        assert_eq!(a.value().unwrap()["state"],"available");
+        assert_eq!(a.value().unwrap()["native"]["subscription_limit"],true);
+        a.observe(&json!({"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning"}}),false);
         assert!(a.limit_episode.is_none());
     }
 }

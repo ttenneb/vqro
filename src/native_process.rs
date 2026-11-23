@@ -79,6 +79,7 @@ struct Inner {
     stopping: AtomicBool,
     stop: watch::Sender<bool>,
     exit: watch::Sender<Option<Exit>>,
+    drained: watch::Sender<bool>,
     stderr: Mutex<VecDeque<u8>>,
     stderr_total: AtomicU64,
     observe: Observe,
@@ -164,9 +165,10 @@ impl Process {
         let (writes, receiver) = mpsc::channel(32);
         let (stop, mut stopping) = watch::channel(false);
         let (exit, _) = watch::channel(None);
+        let (drained, _) = watch::channel(false);
         let inner = Arc::new(Inner { pending:Mutex::new(HashMap::new()), writes, budget:Arc::new(Semaphore::new(MAX_RECORD)),
             serial:AtomicU64::new(1),dead:AtomicBool::new(false),broken:AtomicBool::new(false),stopping:AtomicBool::new(false),
-            stop,exit,stderr:Mutex::new(VecDeque::new()),stderr_total:AtomicU64::new(0),observe,codec });
+            stop,exit,drained,stderr:Mutex::new(VecDeque::new()),stderr_total:AtomicU64::new(0),observe,codec });
         tokio::spawn(write_native(stdin, receiver, inner.clone()));
         tokio::spawn(read_native(stdout, inner.clone()));
         tokio::spawn(read_stderr(stderr, inner.clone()));
@@ -200,6 +202,13 @@ impl Process {
             if let Some(result) = exit.borrow().clone() { return result; }
             if exit.changed().await.is_err() { return Exit { code:None,success:false }; }
         }
+    }
+    /// All native stdout records before EOF/the bounded post-exit drain have been observed.
+    /// Distinct from process exit: an adapter can publish its final items before announcing gone.
+    pub async fn drained(&self) {
+        let mut drained = self.inner.drained.subscribe();
+        if *drained.borrow() { return; }
+        let _ = drained.wait_for(|done| *done).await;
     }
     pub fn submit(&self, command: &str, args: Value, deadline: Instant) -> Result<Ticket, Error> {
         if !self.alive() { return Err(Error::new("unavailable", format!("native {} is not available", self.inner.codec.name()))); }
@@ -343,6 +352,7 @@ async fn read_native(stdout: tokio::process::ChildStdout, state: Arc<Inner>) {
         let _ = tokio::time::timeout(Duration::from_millis(100),exit.wait_for(|value|value.is_some())).await;
         if !state.dead.load(Ordering::SeqCst) { state.protocol_error("native stdout closed while process remains alive"); }
     }
+    state.drained.send_replace(true);
 }
 
 #[cfg(test)]
