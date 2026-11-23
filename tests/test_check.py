@@ -132,6 +132,21 @@ class CheckTests(unittest.TestCase):
         result = subprocess.run([BASH, '-c', body], env=env, capture_output=True, text=True, timeout=10)
         return result, logs, target, current, ran
 
+    def test_non_linux_clean_path_keeps_selected_bash_without_tmux(self):
+        tools = self.root/'selected-bash'
+        tools.mkdir()
+        (tools/'bash').symlink_to(BASH)
+        for name in ('env', 'dirname'):
+            (tools/name).symlink_to('/usr/bin/' + name)
+        arrays = SOURCE[SOURCE.index('CARGO=(env'):SOURCE.index('STEPS=$LOGS/steps.tsv')]
+        body = '\n'.join(['set -u', 'CHECK_SYSTEM=Darwin', 'TARGET=$HOME/target',
+                          'command -v tmux && exit 49', arrays,
+                          '"${CLEAN[@]}" bash -c \'printf "%s\\n" "$BASH"\''])
+        env = dict(self.env, PATH=str(tools))  # No tmux or system directories at discovery.
+        result = subprocess.run([str(tools/'bash'), '-c', body], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), str(tools/'bash'))
+
     def test_zig_reaches_clean_build_arrays_and_windows_cross_check(self):
         fake = self.root/'bin'
         fake.mkdir()

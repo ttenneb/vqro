@@ -88,6 +88,8 @@ CARGO=(env -i HOME="$HOME" PATH="$PATH" CARGO_TARGET_DIR="$TARGET")
 CLEAN_PATH=/usr/bin:/bin
 # Portable suites may resolve tmux from PATH (e.g. Homebrew); pinned Linux harnesses do not.
 if [ "$CHECK_SYSTEM" != Linux ]; then
+  # Keep the interpreter that passed bootstrap discoverable even without optional tmux.
+  CLEAN_PATH="$(dirname "$BASH"):$CLEAN_PATH"
   CHECK_TMUX=$(command -v tmux || :)
   if [ -n "$CHECK_TMUX" ]; then CLEAN_PATH="$(dirname "$CHECK_TMUX"):$CLEAN_PATH"; fi
 fi
