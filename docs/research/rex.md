@@ -60,8 +60,10 @@ community clients and observing our own private server's traffic; the Rex binary
   (`--rex-socket`), never started or stopped. Every `rex` call passes `--autostart=false`: by default `rex` starts
   a server for the user. Stop requires non-empty instance IDs on both status reads and confirmation. This is
   **not atomic**: native `server stop` is unconditional; replacement after the second read can stop a different
-  server. No conditional-stop API is evidenced. Socket reachability in the selected directory is not ownership
-  authentication; same-user path/symlink replacement remains a boundary.
+  server. No conditional-stop API is evidenced. The owned directory must contain the `vqro-owned` marker,
+  written only after a successful new owned-server start; an unmarked reachable endpoint is refused, never adopted.
+  Markers and socket reachability are coordination evidence, not ownership authentication; same-user path/symlink
+  replacement remains a boundary.
 - **Terminal environment.** The owned server inherits selected PATH, HOME, LANG, SHELL, USER and LOGNAME values
   from the provider process, not vqro's own variables. These are not a freshly acquired login environment.
 - **Ownership.** Sizing a terminal makes vqro its Rex owner (like any Rex app that resizes it).
@@ -84,8 +86,20 @@ community clients and observing our own private server's traffic; the Rex binary
   missing blocks. Failed attach/list or malformed replies preserve prior facts and streams. A successful session
   list that omits a session retires its blocks. An incomplete initial observation cannot send a full sync.
 - Reconcile refreshes stored title, pwd, program status, process and exit facts for known blocks too, repairing
-  lost events; failed queries retain prior facts. The control reader emits pending lag after queue drain even
+  lost events. Per-block revisions fence the whole candidate snapshot: capture before queries, discard if any
+  event or fact commit advanced the revision while queries were in flight. Fact commit and publication share an
+  async serialization lock so a discarded/older snapshot cannot be queued after a newer event upsert. No blocking
+  mutex crosses I/O, and no publication lock is held across native queries. Failed queries retain prior facts.
+  The event-triggered status query uses the same revision fence. The control reader emits pending lag after queue drain even
   without another native event. It does not cancel a partially parsed WebSocket read to do so.
+- Status replacement requires object records, nullable/string id and textual fields, and nullable/numeric
+  progress; invalid entries or supported field types preserve the old table. Sparse process replies preserve
+  missing names, while explicit nullable names may clear them. An exit requires an integer `last_exit.exit_code`.
+- Newly listed blocks without prior lifecycle evidence are **deferred**, not published as live or finished.
+  A valid process observation is either an integer last-exit code, or a current child with non-empty name/positive
+  pid and no last-exit record. Failed/malformed lifecycle observations cannot complete initial full sync; a spawn
+  with only creation evidence remains outcome-unknown, with its created ref named in the error. Existing blocks
+  retain their prior lifecycle when queries fail. No unavailable state is fabricated into the live|finished contract.
 - Percent escapes are decoded from bytes; malformed Unicode-containing escapes do not panic.
 - A created terminal whose follow-up observation is unavailable produces a backend outcome-unknown error naming
   the created ref and warning not to retry spawn, never a fabricated observed exit.
@@ -94,6 +108,12 @@ community clients and observing our own private server's traffic; the Rex binary
   regardless of kind (`src/provider_wire.rs:402`, `src/server.rs:1068`), these cases end output with a
   `backend_dropped` gap and log uncertainty, not a no-effect claim. The core currently has no unknown-outcome
   stream-error mechanism; a gap is the available honest failure surface.
+- Owned-server stop holds `<state>/rex/vqro-rex.lock` across its final instance recheck, inventory and stop.
+  Owned ensure/start, control connect, attach, session/window creation and viewer attach/ownership use the same
+  lock; external `--rex-socket` mode never uses it. Acquisition is asynchronous polling of stdlib file try-lock
+  (flock on Unix, Windows equivalent; Windows runtime unverified). Human confirmation occurs before acquisition.
+  The stop reports checked session/terminal counts and warns that clients outside vqro can attach/create in the
+  window and would be stopped too. The lock excludes vqro, not those clients: the unconditional-stop TOCTOU remains.
 - Powerless fake-control/fake-core tests cover all six review findings; a separate unit control proves lag delivery
   after queue drain. No real Rex server is needed for these regression controls.
 

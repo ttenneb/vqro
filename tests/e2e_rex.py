@@ -225,7 +225,10 @@ try:
                                        capture_output=True, text=True).stdout or "{}")
     stop = subprocess.run([PREX, "server", "stop", "--state-dir", f"{R}/st", "--rex", REX, "--expect-instance", str(status.get("instance"))],
                           env=ENV, capture_output=True, text=True)
-    check("owned server stops only with its instance confirmed", stop.returncode == 0, stop.stderr)
+    stopped = json.loads(stop.stdout or "{}")
+    check("owned server stops only with its instance confirmed and reports checked inventory",
+          stop.returncode == 0 and stopped.get("checked", {}).get("sessions", 0) >= 1
+          and stopped.get("checked", {}).get("terminals", 0) >= 1 and "outside vqro" in stopped.get("warning", ""), stop.stderr)
     pids = provider_pid(core)
     for p in pids:
         os.kill(p, 9)  # the supervisor restarts it, which starts the owned server again

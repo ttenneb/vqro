@@ -65,7 +65,9 @@ fn args() -> Result<Args, String> {
                 println!("vqro-rex [--rex-socket PATH] [--session LABEL] [--rex BIN] [--name NAME] [--history LINES]\n\
                     Without --rex-socket: a vqro-owned Rex server under the core's state directory (started if needed).\n\
                     --session: the Rex session new terminals go to (created when first needed; default vqro).\n\
-                    Connects to $VQRO_SOCKET.\nvqro-rex server status|stop [--state-dir PATH] [--rex BIN]");
+                    Connects to $VQRO_SOCKET.\nvqro-rex server status|stop [--state-dir PATH] [--rex BIN]\n\
+                    Administration requires a marked vqro-owned directory; --rex-socket external servers cannot be stopped.\n\
+                    Stop checks sessions/terminals; clients outside vqro attaching after the check would be stopped too.");
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument {other}")),
@@ -80,6 +82,8 @@ struct Block {
 }
 
 struct State {
+    /// Per-block fact/event revisions fence in-flight native observations, including undiscovered blocks.
+    revisions: HashMap<String, u64>,
     blocks: BTreeMap<String, Block>,
     /// Session id -> label, for sessions this connection is attached to.
     sessions: HashMap<String, String>,
@@ -93,6 +97,8 @@ struct App {
     provider: Provider,
     control: Control,
     socket: PathBuf,
+    /// None for --rex-socket: external servers never use owned coordination/admin paths.
+    owned_dir: Option<PathBuf>,
     spawn_label: String,
     /// The server run (`instance_id`) this registration describes: every block's incarnation.
     run: String,
@@ -101,6 +107,8 @@ struct App {
     reconcile: Notify,
     /// Serializes reconciles (the event task and the timer may both ask).
     reconciling: tokio::sync::Mutex<()>,
+    /// Order fact commits and their outgoing publications; never held during native queries.
+    publishing: tokio::sync::Mutex<()>,
 }
 
 fn unknown(e: control::Error) -> ProviderError {
@@ -139,6 +147,20 @@ fn status_from_records(records: &[Value]) -> Value {
     Value::Object(status)
 }
 
+/// Validate supported fields before replacing the stored table; unknown native fields are ignored.
+fn validated_status(records: &[Value]) -> Option<Value> {
+    let valid = records.iter().all(|record| {
+        let Some(record) = record.as_object() else { return false };
+        record.get("id").is_none_or(|v| v.is_null() || v.as_str().is_some_and(|s| !s.is_empty()))
+            && ["state", "app", "kind", "title", "msg"].iter().all(|key|
+                record.get(*key).is_none_or(|v| v.is_null() || v.is_string()))
+            && record.get("progress").is_none_or(|v| v.is_null() || v.is_number())
+    });
+    valid.then(|| status_from_records(records))
+}
+
+fn integer(value: &Value) -> bool { value.is_i64() || value.is_u64() }
+
 /// A `file://` URL (OSC 7) or a plain path, as a path.
 fn cwd_from_pwd(pwd: &str) -> Option<String> {
     if pwd.is_empty() {
@@ -175,7 +197,20 @@ impl App {
         self.control.call(&format!("{TERMINAL}.{method}"), json!({"session_id": session, "block_id": block, "args": args})).await
     }
 
+    async fn owned_lock(&self) -> Result<Option<std::fs::File>, control::Error> {
+        match &self.owned_dir {
+            Some(dir) => owned_server::lock(dir).await.map(Some).map_err(control::Error::Lost),
+            None => Ok(None),
+        }
+    }
+
     async fn attach(&self, session: &str, label: &str) -> Result<(), control::Error> {
+        let _lock = self.owned_lock().await?;
+        self.attach_locked(session, label).await
+    }
+
+    /// Caller holds the owned lock, or this is an external server.
+    async fn attach_locked(&self, session: &str, label: &str) -> Result<(), control::Error> {
         if self.state.lock().unwrap().sessions.contains_key(session) {
             return Ok(());
         }
@@ -186,9 +221,10 @@ impl App {
 
     /// Refresh stored event-derived facts too: a reconcile repairs dropped events. Failed or malformed
     /// queries retain prior facts, never invent an exit or erase a previously observed status.
-    async fn refresh_facts(&self, session: &str, b: &Value, old: Option<Value>) -> Value {
+    async fn refresh_facts(&self, session: &str, b: &Value, old: Option<Value>) -> Option<Value> {
         let id = b["block_id"].as_str().unwrap_or_default();
         let argv = self.state.lock().unwrap().argv.get(id).cloned().unwrap_or_default();
+        let mut lifecycle_observed = old.is_some();
         let mut facts = old.unwrap_or_else(|| json!({"ref":id,"incarnation":self.run,"kind":"terminal",
             "state":"live","argv":argv,"data":{}}));
         facts["name"] = json!(b["label"].as_str().filter(|s| !s.is_empty()));
@@ -210,26 +246,38 @@ impl App {
                     facts["cwd"] = json!(cwd);
                     pwd_observed = true;
                 },
-                "program_status" => if let Some(records) = value["records"].as_array() {
-                    facts["status"] = status_from_records(records);
-                },
+                "program_status" => if let Some(status) = value["records"].as_array().and_then(|r| validated_status(r)) {
+                    facts["status"] = status;
+                } else { eprintln!("vqro-rex: malformed program_status {id}; keeping prior status"); },
                 "process" if value.is_object() => {
-                    facts["data"]["program"] = value["child"]["name"].clone();
-                    facts["data"]["foreground"] = value["foreground"]["name"].clone();
+                    for (native, field) in [("child", "program"), ("foreground", "foreground")] {
+                        if let Some(process) = value.get(native) {
+                            if process.is_null() { facts["data"][field] = Value::Null; }
+                            else if let Some(name) = process.get("name").filter(|v| v.is_null() || v.is_string()) {
+                                facts["data"][field] = name.clone();
+                            }
+                        }
+                    }
+                    if value.get("last_exit").is_none_or(Value::is_null) && value["child"].as_object().is_some_and(|child|
+                        child.get("name").and_then(Value::as_str).is_some_and(|s| !s.is_empty())
+                        || child.get("pid").and_then(Value::as_u64).is_some_and(|pid| pid > 0)) {
+                        lifecycle_observed = true;
+                    }
                     if !pwd_observed {
                         if let Some(cwd) = value["foreground"]["cwd"].as_str().or(value["child"]["cwd"].as_str()) {
                             facts["cwd"] = json!(cwd);
                         }
                     }
-                    if let Some(exit) = value["last_exit"].as_object() {
+                    if integer(&value["last_exit"]["exit_code"]) {
+                        lifecycle_observed = true;
                         facts["state"] = json!("finished");
-                        facts["exit"] = json!({"reason":"exited","exit_code":exit.get("exit_code")});
+                        facts["exit"] = json!({"reason":"exited","exit_code":value["last_exit"]["exit_code"]});
                     }
                 }
                 _ => eprintln!("vqro-rex: malformed {id} {method}; keeping prior facts"),
             }
         }
-        facts
+        lifecycle_observed.then_some(facts)
     }
 
     /// List every session's blocks and publish the differences. The first call is the full sync.
@@ -271,13 +319,33 @@ impl App {
             return Err("incomplete initial session observation; refusing absence-based full sync".into());
         }
         let known: HashSet<String> = self.state.lock().unwrap().blocks.keys().cloned().collect();
-        let mut upserts = Vec::new();
+        let mut deferred = false;
         for (bid, (session, b)) in &seen {
-            let old = self.state.lock().unwrap().blocks.get(bid).map(|b| b.facts.clone());
-            let facts = self.refresh_facts(session, b, old.clone()).await;
-            self.state.lock().unwrap().blocks.insert(bid.clone(), Block { session:session.clone(), facts:facts.clone() });
-            if old.as_ref() != Some(&facts) { upserts.push(facts); }
+            let (old, revision) = {
+                let st = self.state.lock().unwrap();
+                (st.blocks.get(bid).map(|b| b.facts.clone()), st.revisions.get(bid).copied().unwrap_or(0))
+            };
+            let Some(facts) = self.refresh_facts(session, b, old.clone()).await else {
+                eprintln!("vqro-rex: defer {bid}: no valid lifecycle observation");
+                deferred = true;
+                continue;
+            };
+            let _publish = self.publishing.lock().await;
+            {
+                let mut st = self.state.lock().unwrap();
+                if st.revisions.get(bid).copied().unwrap_or(0) != revision {
+                    // A newer event/commit won. Keep its facts; never publish this stale candidate.
+                    deferred |= old.is_none();
+                    continue;
+                }
+                if old.as_ref() == Some(&facts) { continue; }
+                st.blocks.insert(bid.clone(), Block { session:session.clone(), facts:facts.clone() });
+                st.revisions.insert(bid.clone(), revision.wrapping_add(1));
+            }
+            if !first { self.provider.upsert(facts).await.map_err(|e| e.to_string())?; }
         }
+        if first && deferred { return Err("initial lifecycle observation incomplete; refusing full sync".into()); }
+        let _publish = self.publishing.lock().await;
         let mut gone = Vec::new();
         {
             let mut st = self.state.lock().unwrap();
@@ -286,6 +354,7 @@ impl App {
                 let session = &st.blocks[&bid].session;
                 if !seen.contains_key(&bid) && (!listed.contains(session) || complete.contains(session)) {
                     st.blocks.remove(&bid);
+                    st.revisions.remove(&bid);
                     st.argv.remove(&bid);
                     for n in st.streams.remove(&bid).unwrap_or_default() {
                         n.notify_one();
@@ -297,10 +366,6 @@ impl App {
         if first {
             let all: Vec<Value> = self.state.lock().unwrap().blocks.values().map(|b| b.facts.clone()).collect();
             self.provider.full_sync(all).await.map_err(|e| e.to_string())?;
-        } else {
-            for f in upserts {
-                self.provider.upsert(f).await.map_err(|e| e.to_string())?;
-            }
         }
         for (bid, why) in gone {
             self.provider.gone(&bid, &self.run, json!({"reason": why})).await.map_err(|e| e.to_string())?;
@@ -325,8 +390,12 @@ impl App {
         }
         let Some(bid) = payload["block_id"].as_str() else { return };
         let (name, body) = (payload["name"].as_str().unwrap_or_default(), &payload["payload"]);
+        if !matches!(name, "title_changed" | "pwd_changed" | "child_exited" | "program_status_changed" | "program_status_removed" | "process_changed") { return; }
+        let _publish = self.publishing.lock().await;
         let facts = {
             let mut st = self.state.lock().unwrap();
+            let revision = st.revisions.entry(bid.to_string()).or_default();
+            *revision = revision.wrapping_add(1);
             let Some(block) = st.blocks.get_mut(bid) else { return };
             let f = &mut block.facts;
             let before = f.clone();
@@ -337,7 +406,7 @@ impl App {
                         f["cwd"] = json!(cwd);
                     }
                 }
-                "child_exited" => {
+                "child_exited" if integer(&body["exit_code"]) => {
                     f["state"] = json!("finished");
                     f["exit"] = json!({"reason": "exited", "exit_code": body["exit_code"]});
                 }
@@ -363,19 +432,29 @@ impl App {
     }
 
     async fn refresh_status(self: &Arc<Self>, bid: &str) {
-        let Some(session) = self.state.lock().unwrap().blocks.get(bid).map(|b| b.session.clone()) else { return };
+        let Some((session, revision)) = ({
+            let st = self.state.lock().unwrap();
+            st.blocks.get(bid).map(|b| (b.session.clone(), st.revisions.get(bid).copied().unwrap_or(0)))
+        }) else { return };
         let Ok(s) = self.block_call(&session, bid, "program_status", json!({})).await else { return };
         let Some(records) = s["records"].as_array() else {
             eprintln!("vqro-rex: malformed program_status {bid}; keeping prior status");
             return;
         };
-        let status = status_from_records(records);
+        let Some(status) = validated_status(records) else {
+            eprintln!("vqro-rex: invalid program_status {bid}; keeping prior status");
+            return;
+        };
+        let _publish = self.publishing.lock().await;
         let facts = {
             let mut st = self.state.lock().unwrap();
+            if st.revisions.get(bid).copied().unwrap_or(0) != revision { return; }
             let Some(block) = st.blocks.get_mut(bid) else { return };
             if block.facts["status"] == status { return }
             block.facts["status"] = status;
-            block.facts.clone()
+            let facts = block.facts.clone();
+            st.revisions.insert(bid.to_string(), revision.wrapping_add(1));
+            facts
         };
         let _ = self.provider.upsert(facts).await;
     }
@@ -404,7 +483,7 @@ impl App {
             None => self.control.call("session.create", json!({"label": self.spawn_label})).await?["session_id"]
                 .as_str().map(String::from).ok_or_else(|| control::Error::Lost("session.create returned no id".into()))?,
         };
-        self.attach(&id, &self.spawn_label).await?;
+        self.attach_locked(&id, &self.spawn_label).await?;
         Ok(id)
     }
 
@@ -430,6 +509,7 @@ impl App {
                 return Err(ProviderError::new("invalid", format!("{key} must be a string")));
             }
         }
+        let owned_lock = self.owned_lock().await.map_err(unknown)?;
         let session = self.spawn_session().await.map_err(unknown)?;
         let mut options = json!({"size": {"columns": cols, "rows": rows}});
         if !argv.is_empty() {
@@ -451,6 +531,7 @@ impl App {
         };
         let bid = reply["block_ids"][0].as_str().ok_or_else(|| ProviderError::new("backend", format!("outcome unknown: rex returned {reply}")))?.to_string();
         self.state.lock().unwrap().argv.insert(bid.clone(), argv);
+        drop(owned_lock);
         if let Err(e) = self.reconcile(false).await {
             eprintln!("vqro-rex: reconcile after spawn: {e}");
         }
@@ -494,6 +575,11 @@ impl App {
 
     /// Size the terminal for this viewer: claim the block (Rex follows its owner's size), then resize.
     async fn size(&self, session: &str, bid: &str, cols: u16, rows: u16) -> Result<(), control::Error> {
+        let _lock = self.owned_lock().await?;
+        self.size_locked(session, bid, cols, rows).await
+    }
+
+    async fn size_locked(&self, session: &str, bid: &str, cols: u16, rows: u16) -> Result<(), control::Error> {
         self.control.call("session.own_block", json!({"session_id": session, "block_ids": [bid], "mode": "take"})).await?;
         // Ownership already changed. Even a definite resize refusal is not a no-effect result for this
         // two-step operation; disclose that partial effect instead of emitting a rejected stream.error.
@@ -508,7 +594,11 @@ impl App {
             open.respond(Err(ProviderError::new("not_found", format!("no terminal {bid}"))));
             return;
         };
-        if let Err(e) = self.size(&session, &bid, open.cols, open.rows).await {
+        let owned_lock = match self.owned_lock().await {
+            Ok(lock) => lock,
+            Err(e) => { open.respond(Err(unknown(e))); return; }
+        };
+        if let Err(e) = self.size_locked(&session, &bid, open.cols, open.rows).await {
             open.respond(Err(unknown(e)));
             return;
         }
@@ -520,6 +610,7 @@ impl App {
             }
         };
         // The repaint: the snapshot at the start of the channel, as VT. Output after it is live and complete.
+        drop(owned_lock);
         let mut snapshot = data::Snapshot::default();
         let mut pong = None;
         let (repaint, following) = loop {
@@ -782,28 +873,38 @@ fn main() {
 async fn run() -> Result<(), String> {
     let a = args()?;
     let endpoint = std::env::var("VQRO_SOCKET").map_err(|_| "VQRO_SOCKET is not set")?;
-    let socket = match a.socket.clone() {
-        Some(s) => s,
+    let (socket, owned_dir) = match a.socket.clone() {
+        Some(s) => (s, None),
         None => {
             let dir = owned_server::dir(None, false).await?;
-            owned_server::ensure(&a.rex, &dir)?;
-            owned_server::socket(&dir)
+            {
+                let _lock = owned_server::lock(&dir).await?;
+                owned_server::ensure(&a.rex, &dir)?;
+            }
+            (owned_server::socket(&dir), Some(dir))
         }
     };
     loop {
-        registration(&a, &endpoint, &socket).await?;
+        registration(&a, &endpoint, &socket, owned_dir.as_deref()).await?;
         // The server went away (stopped, restarted or replaced). Wait for it; never start the user's server, and
         // don't restart an owned server someone stopped on purpose.
-        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+        loop {
+            let lock = match &owned_dir { Some(dir) => Some(owned_server::lock(dir).await?), None => None };
+            let reachable = std::os::unix::net::UnixStream::connect(&socket).is_ok();
+            drop(lock);
+            if reachable { break; }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 }
 
 /// One registration for one run of the Rex server. Ok when that run ended (a new registration follows).
-async fn registration(a: &Args, endpoint: &str, socket: &Path) -> Result<(), String> {
+async fn registration(a: &Args, endpoint: &str, socket: &Path, owned_dir: Option<&Path>) -> Result<(), String> {
     let (control, mut events) = loop {
-        match Control::connect(socket, "vqro-rex", CALL_TIMEOUT).await {
+        let lock = match owned_dir { Some(dir) => Some(owned_server::lock(dir).await?), None => None };
+        let result = Control::connect(socket, "vqro-rex", CALL_TIMEOUT).await;
+        drop(lock);
+        match result {
             Ok(c) => break c,
             Err(e) => {
                 eprintln!("vqro-rex: connect {}: {e}", socket.display());
@@ -826,13 +927,15 @@ async fn registration(a: &Args, endpoint: &str, socket: &Path) -> Result<(), Str
         provider: provider.clone(),
         control: control.clone(),
         socket: socket.to_path_buf(),
+        owned_dir: owned_dir.map(Path::to_path_buf),
         spawn_label: a.session.clone(),
         run,
         history: a.history,
-        state: Mutex::new(State { blocks: BTreeMap::new(), sessions: HashMap::new(), killed: HashSet::new(),
+        state: Mutex::new(State { revisions: HashMap::new(), blocks: BTreeMap::new(), sessions: HashMap::new(), killed: HashSet::new(),
             argv: HashMap::new(), streams: HashMap::new() }),
         reconcile: Notify::new(),
         reconciling: tokio::sync::Mutex::new(()),
+        publishing: tokio::sync::Mutex::new(()),
     });
     app.reconcile(true).await?;
     let events_task = {
