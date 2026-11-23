@@ -8,6 +8,7 @@ if sys.platform == "win32":
 import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -23,6 +24,26 @@ MODEL = SOURCE[SOURCE.index("opentui_model() {"):SOURCE.index("\nstep opentui-mo
 RUNNER = SOURCE[SOURCE.index("# Registration order"):SOURCE.index("\nno_warnings()")]
 
 
+def select_bash(path=None, initial='/bin/bash'):
+    """Match check.sh: keep a suitable initial Bash, else first PATH Bash >= 4.4."""
+    path = os.environ.get('PATH', '') if path is None else path
+    candidates = [initial] + [str(Path(directory or '.')/'bash') for directory in path.split(os.pathsep)]
+    for candidate in candidates:
+        try:
+            probe = subprocess.run([candidate, '-c',
+                '(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) ))'],
+                capture_output=True, timeout=5)
+            if probe.returncode == 0:
+                return str(Path(candidate).resolve())
+        except OSError:
+            pass
+    raise unittest.SkipTest('Bash 4.4+ required for gate shell fixtures')
+
+
+# Resolve before fixtures narrow PATH to private fake tools or system-only directories.
+BASH = select_bash()
+
+
 def shell_function(name):
     start = SOURCE.index(name + "() {")
     return SOURCE[start:SOURCE.index("\n}", start) + 2]
@@ -32,7 +53,8 @@ class CheckTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="check-evidence-")
         self.root = Path(self.temporary.name)
-        self.env = {"HOME": str(self.root), "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"}
+        self.env = {"HOME": str(self.root), "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1",
+                    "CHECK_SYSTEM": "Linux"}  # Explicit fixture classification; never inferred by helpers.
         self.env["VQRO_GATE_SLOT_DIR"] = str(self.root / "slots")
         self.env["VQRO_GATE_SLOT_HELD"] = "slot-1.lock"
         self.env["VQRO_GATE_EXCLUSIVE"] = "0"  # Never inherit real caller admission facts.
@@ -56,14 +78,14 @@ class CheckTests(unittest.TestCase):
 
         Only the supplied private commands run; never source the real gate's backend/cgroup setup.
         """
-        body = '\n'.join(['set -u', 'SKIP_EXIT=77', f'MODE={shlex.quote(mode)}',
+        body = '\n'.join(['set -u', 'CHECK_SYSTEM=Linux', 'SKIP_EXIT=77', f'MODE={shlex.quote(mode)}',
                           f'CHECK_JOBS={jobs}', f'REPO={shlex.quote(str(ROOT))}',
                           'LOGS=$1', 'STEPS=$LOGS/steps.tsv', ': > "$STEPS"',
                           RUNNER, shell_function('no_warnings'), commands, 'run_steps', cleanup,
                           'python3 - "$STEPS" "$LOGS/check-receipt.json" "$MODE" fixture "$LOGS" "${LEFT:-}" "${SCOPE:-fixture}" stamp <<\'RECEIPT\'',
                           RECEIPT_PROGRAM, 'RECEIPT'])
         logs = Path(tempfile.mkdtemp(dir=self.root))
-        result = subprocess.run(['/bin/bash', '-c', body, 'gate-fixture', str(logs)],
+        result = subprocess.run([BASH, '-c', body, 'gate-fixture', str(logs)],
                                 capture_output=True, text=True, env=self.env, timeout=15)
         latest = logs/'check-receipt.json'
         receipt = json.loads(latest.read_text()) if latest.exists() else None
@@ -107,7 +129,7 @@ class CheckTests(unittest.TestCase):
             f'TARGET={shlex.quote(str(target))}', f'LOGS={shlex.quote(str(logs))}', f'RUN={shlex.quote(str(root))}',
             f'CARGO=(env -i HOME="$HOME" PATH={shlex.quote(str(bin_dir))}:/usr/bin:/bin CARGO_TARGET_DIR="$TARGET")',
             shell_function('timing_python'), shell_function('scale_harness'), 'scale_harness'])
-        result = subprocess.run(['/bin/bash', '-c', body], env=env, capture_output=True, text=True, timeout=10)
+        result = subprocess.run([BASH, '-c', body], env=env, capture_output=True, text=True, timeout=10)
         return result, logs, target, current, ran
 
     def test_zig_reaches_clean_build_arrays_and_windows_cross_check(self):
@@ -123,7 +145,7 @@ class CheckTests(unittest.TestCase):
         body = '\n'.join(['set -u', 'CHECK_SYSTEM=Linux', 'SKIP_EXIT=77', 'TARGET=$HOME/target', arrays,
                           '"${CARGO[@]}" cargo build', '"${CLEAN[@]}" /bin/sh -c \'test "$ZIG" = "/fixture/compiler with spaces/zig"\'',
                           shell_function('windows_check'), 'windows_check'])
-        result = subprocess.run(['/bin/bash', '-c', body], env=env, capture_output=True, text=True)
+        result = subprocess.run([BASH, '-c', body], env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         lines = (self.root/'invocations').read_text().splitlines()
         self.assertEqual(lines, ['/fixture/compiler with spaces/zig', str(self.root/'target'), 'build'] +
@@ -147,6 +169,34 @@ step portable true
         self.assertEqual(receipt['skipped'], [])
         self.assertIn('opt-in:tmux', receipt['failed'])
 
+    def test_bash_resolver_rejects_43_and_selects_44_before_path_narrowing(self):
+        old, modern = self.root/'old', self.root/'modern'
+        old.mkdir(); modern.mkdir()
+        (old/'bash').write_text('#!/bin/sh\nexit 1\n')  # Simulated 4.3 fails the 4.4 predicate.
+        (modern/'bash').write_text('#!/bin/sh\nexit 0\n')
+        (old/'bash').chmod(0o700); (modern/'bash').chmod(0o700)
+        with self.assertRaises(unittest.SkipTest):
+            select_bash(path=str(old), initial=str(old/'bash'))
+        self.assertEqual(select_bash(path=str(old) + ':' + str(modern), initial=str(old/'bash')),
+                         str((modern/'bash').resolve()))
+        self.assertTrue(Path(BASH).is_absolute())
+        result, _, _ = self.gate('step build-zero-warnings true')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_failed_or_empty_uname_refused_before_work(self):
+        fake = self.root/'uname-bin'
+        fake.mkdir()
+        uname = fake/'uname'
+        for body in ('exit 1', 'exit 0'):
+            uname.write_text('#!/bin/sh\n' + body + '\n')
+            uname.chmod(0o700)
+            env = dict(self.env, PATH=str(fake) + ':' + self.env['PATH'], CARGO_TARGET_DIR=str(self.root/'target'))
+            result = subprocess.run([BASH, str(ROOT/'scripts/check.sh'), 'quick'],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn('cannot determine platform', result.stderr)
+            self.assertFalse((self.root/'target').exists())
+
     def test_non_linux_timing_rejected_before_admission_or_steps(self):
         fake = self.root/'bin'
         fake.mkdir()
@@ -154,7 +204,7 @@ step portable true
         uname.write_text('#!/bin/sh\necho Darwin\n')
         uname.chmod(0o700)
         env = dict(self.env, PATH=str(fake) + ':' + self.env['PATH'], CARGO_TARGET_DIR=str(self.root/'target'))
-        result = subprocess.run(['/bin/bash', str(ROOT/'scripts/check.sh'), 'timing'],
+        result = subprocess.run([BASH, str(ROOT/'scripts/check.sh'), 'timing'],
                                 env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn('timing mode requires Linux (/proc, pidfds)', result.stderr)
@@ -163,7 +213,7 @@ step portable true
 
     def test_non_linux_snapshot_and_leftovers_do_not_probe_proc(self):
         body = 'set -u\nCHECK_SYSTEM=Darwin\npython3() { exit 49; }\n' + shell_function('snapshot') + '\nsnapshot'
-        result = subprocess.run(['/bin/bash', '-c', body], env=self.env, capture_output=True, text=True)
+        result = subprocess.run([BASH, '-c', body], env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         classification = SOURCE[SOURCE.index('LEFT=${LEFT% }'):SOURCE.index('\nrm -rf "$RUN"')]
         result, receipt, _ = self.gate('CHECK_SYSTEM=Darwin\nstep build-zero-warnings true',
@@ -177,19 +227,23 @@ step portable true
         bootstrap = SOURCE[:SOURCE.index('# Release gate.')]
         # Simulate the version values that Apple's Bash would expose. Candidate probes
         # remain untouched and must establish their own version before exec.
-        bootstrap = bootstrap.replace('if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then', 'if true; then', 1)
+        bootstrap = bootstrap.replace('if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then', 'if true; then', 1)
         script = self.root/'bootstrap'
         script.write_text(bootstrap + '\nexit 99\n')
-        env = dict(self.env, PATH=str(self.root/'empty'))
+        old = self.root/'bash43'
+        old.mkdir()
+        (old/'bash').write_text('#!/bin/sh\nexit 1\n')  # 4.3 fails the 4.4 version predicate.
+        (old/'bash').chmod(0o700)
+        env = dict(self.env, PATH=str(old))
         result = subprocess.run(['/bin/bash', str(script)], env=env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 2)
-        self.assertIn('Bash 4.3+', result.stderr)
+        self.assertIn('Bash 4.4+', result.stderr)
         modern = self.root/'modern'
         modern.mkdir()
         candidate = modern/'bash'
         candidate.write_text('#!/bin/sh\nif [ "$1" = -c ]; then exit 0; fi\nprintf "%s\\n" "$@"\nexit 17\n')
         candidate.chmod(0o700)
-        env['PATH'] = str(modern)
+        env['PATH'] = str(old) + ':' + str(modern)
         result = subprocess.run(['/bin/bash', str(script), 'quick', 'two words'], env=env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 17)
         self.assertEqual(result.stdout.splitlines(), [str(script), 'quick', 'two words'])
@@ -288,7 +342,7 @@ else:
         body = '\n'.join(['set -u', 'MODE=timing', 'RUN=fixture', 'TARGET=fixture', 'LOGS=fixture',
                           'CARGO=()', 'CLEAN=()', 'snapshot() { :; }',
                           'step() { printf "%s\\n" "$1"; }', registration])
-        result = subprocess.run(['/bin/bash', '-c', body], env=self.env, capture_output=True, text=True)
+        result = subprocess.run([BASH, '-c', body], env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([line for line in result.stdout.splitlines() if not line.startswith('vqro check')],
                          ['pi-bridge-memory', 'e2e-tui-scale-budgets', 'scale-harness'])
@@ -543,7 +597,7 @@ if kind != 'sensitive':
                           SOURCE[SOURCE.index("BUILD_STEP="):SOURCE.index("\n", SOURCE.index("BUILD_STEP="))],
                           shell_function("sensitive"), shell_function("run_steps"), "run_steps"])
         logs = Path(tempfile.mkdtemp(dir=self.root))
-        r = subprocess.run(["/bin/bash", "-c", body, "sched", str(logs)], capture_output=True, text=True, env=self.env)
+        r = subprocess.run([BASH, "-c", body, "sched", str(logs)], capture_output=True, text=True, env=self.env)
         return r.returncode, r.stdout.split("\n")
 
     def test_the_build_runs_before_every_concurrent_step_wherever_steps_are_inserted(self):
@@ -564,7 +618,7 @@ if kind != 'sensitive':
         body += SCHEDULER
         body += "step passed bash -c 'exit 0'\nstep skipped bash -c 'exit 77'\nstep failed bash -c 'exit 7'\n"
         body += 'for i in 0 1 2; do run_step "$i"; show_ready; done\n'
-        result = subprocess.run(["bash", "-c", body], text=True, capture_output=True, env=self.env)
+        result = subprocess.run([BASH, "-c", body], text=True, capture_output=True, env=self.env)
         self.assertEqual(result.returncode, 0, result.stderr)
         rows = [line.split("\t") for line in self.steps.read_text().splitlines()]
         self.assertEqual([r[1] for r in rows], ["PASS", "SKIP", "FAIL"])
@@ -611,7 +665,7 @@ if kind != 'sensitive':
     def test_same_second_runs_have_distinct_stamps(self):
         assignment = next(line for line in SOURCE.splitlines() if line.startswith("STAMP="))
         body = "date() { printf fixed; }\n" + assignment + '\nprintf "%s\\n" "$STAMP"\n'
-        stamps = [subprocess.check_output(["bash", "-c", body], env=self.env, text=True).strip() for _ in range(2)]
+        stamps = [subprocess.check_output([BASH, "-c", body], env=self.env, text=True).strip() for _ in range(2)]
         self.assertNotEqual(*stamps)
 
     def test_custom_latest_receipt_gets_an_immutable_sibling(self):
@@ -624,14 +678,14 @@ if kind != 'sensitive':
 
     def test_absent_bun_skips_but_a_present_failing_bun_does_not(self):
         missing = 'command() { return 1; }\nSKIP_EXIT=77\n' + MODEL + "\nopentui_model\n"
-        result = subprocess.run(["bash", "-c", missing], text=True, capture_output=True, env=self.env, cwd=ROOT)
+        result = subprocess.run([BASH, "-c", missing], text=True, capture_output=True, env=self.env, cwd=ROOT)
         self.assertEqual(result.returncode, 77)
         self.assertIn("SKIP", result.stdout)
         bun = self.root / "bun"
         bun.write_text("#!/bin/sh\nexit 9\n")
         bun.chmod(0o755)
         present = f"command() {{ printf '%s\\n' {shlex.quote(str(bun))}; }}\nSKIP_EXIT=77\n" + MODEL + "\nopentui_model\n"
-        result = subprocess.run(["bash", "-c", present], text=True, capture_output=True, env=self.env, cwd=ROOT)
+        result = subprocess.run([BASH, "-c", present], text=True, capture_output=True, env=self.env, cwd=ROOT)
         self.assertEqual(result.returncode, 9, "a genuine model-test failure must not become SKIP")
 
     def test_opentui_missing_dependencies_exit_77_before_starting_anything(self):

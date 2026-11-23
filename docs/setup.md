@@ -32,7 +32,8 @@ on the old machine, so everything needed is listed here.
 
 ## Checks on macOS
 
-`scripts/check.sh quick` and `full` require Bash 4.3+ (namerefs); Apple's Bash 3.2 is too old.
+`scripts/check.sh quick` and `full` require Bash 4.4+ (namerefs and safe empty arrays under `set -u`);
+Apple's Bash 3.2 is too old.
 Install a newer Bash, e.g. `brew install bash`, and put it on PATH: the gate re-execs under the
 first suitable PATH Bash, or fails clearly before running checks. Use Python 3.11+ for tests.
 Portable suites can find Homebrew tmux on PATH. Harnesses pinned to `/usr/bin/tmux`, Linux namespaces,

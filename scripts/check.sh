@@ -1,14 +1,15 @@
 #!/bin/bash
-# Apple's /bin/bash is 3.2. Namerefs below require Bash 4.3 or newer.
-if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
+# Apple's /bin/bash is 3.2. Require 4.4: namerefs need 4.3, but empty arrays
+# under set -u (e.g. strict=() below) are safe only since 4.4.
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
   IFS=: read -r -a check_bash_dirs <<< "$PATH"
   for check_bash_dir in "${check_bash_dirs[@]}"; do
     check_bash=${check_bash_dir:-.}/bash
-    if [ -x "$check_bash" ] && "$check_bash" -c '(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3) ))' 2>/dev/null; then
+    if [ -x "$check_bash" ] && "$check_bash" -c '(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) ))' 2>/dev/null; then
       exec "$check_bash" "$0" "$@"
     fi
   done
-  echo 'check: Bash 4.3+ is required; install a modern bash (e.g. brew install bash) and put it on PATH.' >&2
+  echo 'check: Bash 4.4+ is required; install a modern bash (e.g. brew install bash) and put it on PATH.' >&2
   exit 2
 fi
 # Release gate. Run `scripts/check.sh full` before installing.
@@ -24,10 +25,13 @@ fi
 # a JSON receipt to $CHECK_RECEIPT (default <target>/check-receipt.json), plus an exclusive read-only
 # check-receipt-<commit>-<stamp>.json sibling. Exit 77 means an intentional optional-dependency SKIP,
 # never PASS; skips are non-failing and listed explicitly in the table, summary and receipt.
-# Needs: cargo, python3, Bash 4.3+; Linux full harnesses pin /usr/bin/tmux 3.7b
+# Needs: cargo, python3, Bash 4.4+; Linux full harnesses pin /usr/bin/tmux 3.7b
 # and ~/.local/bin/herdr-core. Non-Linux skips are recorded, never PASS.
 set -u
-CHECK_SYSTEM=$(uname -s)
+if ! CHECK_SYSTEM=$(uname -s) || [ -z "$CHECK_SYSTEM" ]; then
+  echo 'check: cannot determine platform: uname -s failed or returned empty output' >&2
+  exit 2
+fi
 # Capture the caller before any subprocess/exec can outlive it during bootstrap.
 CHECK_OWNER_PID=$PPID
 CHECK_OWNER_BIRTH=
@@ -97,7 +101,7 @@ cd "$REPO" || exit 2
 # Processes that belong to test roots: environment or a unix socket under a test root (tmux renames its
 # server to "tmux: server", so its command line no longer shows the socket path).
 snapshot() {
-  [ "${CHECK_SYSTEM:-Linux}" = Linux ] || return 0
+  [ "$CHECK_SYSTEM" = Linux ] || return 0
   python3 - "$RUN" <<'PY'
 import os, sys
 roots = [b"/tmp/pt", b"/tmp/pe2", b"/tmp/ppd", b"/tmp/pps", b"/tmp/pst", b"/tmp/pke", b"/tmp/phc", b"/tmp/pft", b"/tmp/ppe", b"/tmp/pev", b"/tmp/pscale", b"/tmp/vqro-tmux",
@@ -150,7 +154,7 @@ timed() {
 # Keep Linux admission/commands unchanged; these harnesses depend on Linux-only isolation,
 # /proc measurements/cleanup, or an intentionally pinned /usr/bin/tmux, not PATH tmux.
 platform_skip_reason() {
-  [ "${CHECK_SYSTEM:-Linux}" != Linux ] || return 1
+  [ "$CHECK_SYSTEM" != Linux ] || return 1
   case "$1" in
     systemd-supervision) echo 'systemd supervision requires Linux' ;;
     opt-in:tmux|opt-in:tmux_provider|opt-in:undo_attribution|opt-in:provider_wire)
@@ -370,12 +374,12 @@ PY
 }
 
 BEFORE=$(snapshot | cut -f1 | sort)
-if [ "${CHECK_SYSTEM:-Linux}" = Linux ] && [ -n "${VQRO_CHECK_INJECT_LEAK:-}" ]; then
+if [ "$CHECK_SYSTEM" = Linux ] && [ -n "${VQRO_CHECK_INJECT_LEAK:-}" ]; then
   # Self-test of the leftover check: one deliberately leaked, detached process of this run.
   ( setsid sleep 300 < /dev/null > /dev/null 2>&1 & )  # reparented once the subshell exits, like a real leak
 fi
 echo "vqro check ($MODE) at $(git describe --always --dirty 2>/dev/null); logs $LOGS"
-if [ "${CHECK_SYSTEM:-Linux}" != Linux ]; then step systemd-supervision platform_skip 'systemd supervision requires Linux'; fi
+if [ "$CHECK_SYSTEM" != Linux ]; then step systemd-supervision platform_skip 'systemd supervision requires Linux'; fi
 if [ "$MODE" != timing ]; then
 step licenses "${CARGO[@]}" python3 scripts/license_check.py --check
 step vendor-libghostty "${CARGO[@]}" python3 scripts/check_vendor.py
@@ -456,7 +460,7 @@ else
   LEFT=$(comm -13 <(echo "$BEFORE") <(snapshot | cut -f1 | sort) | tr '\n' ' ')
 fi
 LEFT=${LEFT% }
-if [ "${CHECK_SYSTEM:-Linux}" != Linux ]; then
+if [ "$CHECK_SYSTEM" != Linux ]; then
   printf '%-28s SKIP  /proc leftover scan requires Linux\n' "no-leftover-processes"
   printf 'no-leftover-processes\tSKIP\t0\t-\n' >> "$STEPS"
 elif [ -n "$LEFT" ]; then
