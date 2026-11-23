@@ -411,13 +411,13 @@ def self_test(driver, source, checks):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--vqro", type=Path, default=Path.home() / ".local/share/herdr/scratch/testing-lead-target/debug/vqro")
+    parser.add_argument("--vqro", type=Path, default=Path(os.environ.get("CARGO_TARGET_DIR") or REPO / "target") / "debug" / "vqro")
     parser.add_argument("--cases", default="isolation,smoke,comparison,self-test")
     parser.add_argument("--source-only", action="store_true")
     parser.add_argument("--timeout", type=int, default=600)
     args = parser.parse_args()
     checks = Checks()
-    scratch = Path.home() / ".local/share/herdr/scratch"
+    scratch = REPO / ".run"  # ignored scratch space (AGENTS.md)
     scratch.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="ti-", dir=scratch))
     source = None

@@ -353,10 +353,10 @@ def self_control(core, oracle, disabled):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--vqro", type=Path, default=Path.home() / ".local/share/herdr/scratch/testing-lead-target/debug/vqro")
+    parser.add_argument("--vqro", type=Path, default=Path(os.environ.get("CARGO_TARGET_DIR") or REPO / "target") / "debug" / "vqro")
     args = parser.parse_args()
     oracle = Oracle()
-    scratch = Path.home() / ".local/share/herdr/scratch"
+    scratch = REPO / ".run"  # ignored scratch space (AGENTS.md)
     scratch.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="tu-", dir=scratch))
     cores = []
