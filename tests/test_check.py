@@ -201,6 +201,27 @@ class CheckTests(unittest.TestCase):
                          ['/fixture/compiler with spaces/zig', str(self.root/'target/windows'),
                           'check --target x86_64-pc-windows-gnu --all-targets'] * 2)
 
+    def test_claude_launcher_platform_selection_preserves_linux_coverage(self):
+        for system, expected in [('Darwin', 'skip'), ('Linux', 'PASS')]:
+            result, receipt, logs = self.gate('CHECK_SYSTEM=' + system + '\nstep build-zero-warnings true\nstep e2e-claude-launcher bash -c \'echo linux-command-executed\'')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(next(row['result'] for row in receipt['steps'] if row['name'] == 'e2e-claude-launcher'), expected)
+            output = (logs/'e2e-claude-launcher.log').read_text()
+            self.assertEqual('linux-command-executed' in output, system == 'Linux')
+
+    def test_claude_launcher_non_linux_entrypoint_refuses_before_imports_or_effects(self):
+        program = '''import sys,runpy
+from unittest import mock
+sys.platform='darwin'
+sys.argv=['claude_launcher_e2e.py','--run']
+sys.path.insert(0, TESTS)
+with mock.patch('pathlib.Path.mkdir',side_effect=AssertionError('platform guard must precede local effects')), mock.patch('os.readlink',side_effect=AssertionError('platform guard must precede namespace probes')), mock.patch('subprocess.run',side_effect=AssertionError('platform guard must precede subprocesses')):
+    runpy.run_path(ENTRY,run_name='__main__')
+'''.replace('TESTS', repr(str(ROOT/'tests'))).replace('ENTRY', repr(str(ROOT/'tests/claude_launcher_e2e.py')))
+        result = subprocess.run([sys.executable, '-c', program], env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 77, result.stdout + result.stderr)
+        self.assertIn('SKIP claude_launcher_e2e', result.stdout)
+
     def test_platform_skips_are_receipted_and_linux_commands_unchanged(self):
         commands = '''
 step build-zero-warnings true

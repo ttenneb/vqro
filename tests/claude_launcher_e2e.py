@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Private real-core/backend + SYNTHETIC Claude peer. No native CLI/model/auth/profile access."""
+import sys
+if __name__ == '__main__' and sys.platform != 'linux':
+    print('SKIP claude_launcher_e2e: requires Linux /proc and namespace/process probes')
+    raise SystemExit(77)
+
 import argparse
 import json
 import os
@@ -85,6 +90,9 @@ class ClaudeLaunch(E2E):
 
 
 def main():
+    if sys.platform != 'linux':
+        print('SKIP claude_launcher_e2e: requires Linux /proc and namespace/process probes')
+        return 77
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', action='store_true', required=True)
     target = Path(os.environ.get('CARGO_TARGET_DIR') or REPO / 'target') / 'debug'

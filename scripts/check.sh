@@ -173,7 +173,7 @@ platform_skip_reason() {
       echo 'pinned /usr/bin/tmux harness requires Linux' ;;
     opt-in:herdr_provider|opt-in:fd_lifecycle|opt-in:accept_limits|e2e-providers|e2e-rex|e2e-tui-providers|e2e-tui-paste-dropdown|e2e-tui-sidebar-tree|e2e-tui-pick-search|e2e-tui-keys|e2e-tui-pane-basics|e2e-same-setup|e2e-tui-workspaces|e2e-scale-herdr|e2e-text-client|e2e-opentui|e2e-tui-smoke|e2e-item-streams)
       echo 'harness requires Linux /proc and/or pinned /usr/bin/tmux' ;;
-    e2e-pi-provider|e2e-pi-rust-default|e2e-agents-ui|e2e-codex-launcher|e2e-agent-stop)
+    e2e-pi-provider|e2e-pi-rust-default|e2e-agents-ui|e2e-codex-launcher|e2e-claude-launcher|e2e-agent-stop)
       echo 'private Linux namespaces and /proc are required' ;;
     e2e-testing-unit|e2e-testing-integration|e2e-testing-perf|e2e-testing-finish-gate)
       echo 'testing harness requires Linux /proc and Unix process groups' ;;
