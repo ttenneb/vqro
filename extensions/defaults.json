@@ -1,5 +1,5 @@
 {
-  "version": 12,
+  "version": 13,
   "extensions": [
     {
       "name": "tabs",
@@ -134,6 +134,12 @@
       ],
       "since": 4,
       "description": "Forgets finished terminals 60 s after no layout shows them (undo within that brings them back; keeps the newest 64 never-shown). Off keeps every finished terminal."
+    },
+    {
+      "name": "test-perf",
+      "since": 13,
+      "argv": ["python3", "testing_perf.py"],
+      "description": "On-demand repeated performance measurements in disposable copies; configurable limits warn, broken measurements fail."
     },
     {
       "name": "test-integration",

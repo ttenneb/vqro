@@ -67,7 +67,7 @@ stdlib unittest suites using the same convention. Bundled tests resolve code thr
 when set, otherwise the repository-relative extensions directory. Shared pure helpers are copied beside each suite.
 The workspace/pane suites exercise several cooperating bundled extensions against an in-memory fake core.
 A healthy status does not prove behaviour, rendering or performance; use the separate disposable integration
-checks for behaviour. Performance checks are not built yet. `--no-tests` skips even installed tests and records that coverage gap.
+checks for behaviour. Use the separate performance report for repeated timing and size measurements. `--no-tests` skips even installed tests and records that coverage gap.
 
 ### Disposable integration checks
 
@@ -100,6 +100,37 @@ are not copied yet. Use `--self-test` for crashing-extension and zero-coverage n
 `--keep`; CLI receipts are written only with `--out` (choose a path outside the disposable root). The report
 records source seq/generations before and after; concurrent source changes are unverified, not attributed to the
 harness. Exit codes remain 0 pass, 1 fail, 77 unverified, 2 harness/canary error.
+
+### Repeated performance measurements
+
+`vqro run test.perf` starts an asynchronous subprocess; `test.perf.show` opens its completed report.
+The CLI mirrors integration flags and adds `--repeats N` (1–50, default 5) and `--window S` (1–120 seconds,
+default 10). Each repeat uses a fresh private copy, serially, with a two-second settle before its idle window.
+
+```sh
+python3 ~/.local/share/vqro/extensions/testing_perf.py --json --repeats 5 --window 10 --out perf.json
+python3 ~/.local/share/vqro/extensions/testing_perf.py --candidate-ext /path/to/overlay --out comparison.json
+```
+
+The report separates core/extension time-to-ready, idle event/content rates, attributed process CPU/RSS,
+scenario invocation reply/content latency, and peak published item/total sizes. Extension time-to-ready starts
+when the harness leaves safe mode and ends after observing running status plus registered commands. Local
+monotonic receive times include event delivery latency; they are not process exec times. CPU/RSS use only
+harness-owned processes, and unavailable attribution/platform facts are unverified, never fabricated zeros.
+
+Every scope retains raw samples, count, median, minimum and maximum. Missing/non-finite samples fail.
+Limits are **configurable defaults and breaches only warn**, including the default quiet-window ceiling of
+0.5 events/s. Relative slowdowns beyond a noise floor warn only outside the baseline spread; overlapping
+spreads are unverified. Warnings never change a pass verdict. The first report line counts performance warnings;
+exit codes are 0 pass (including warnings), 1 broken measurement, 77 unverified, 2 harness/canary/usage error.
+
+`doc/settings/test-perf` overrides known defaults, including nested `absolute` ceilings; null disables a ceiling.
+Receipts record effective values, override names, ignored unknown keys, and whether settings or defaults were
+used. Malformed settings warn and fall back to defaults. Relative timing defaults are 25% with a 5 ms floor;
+RSS uses 25% and 10 MiB, size growth uses 2×. Absolute defaults are 170 ms interaction latency, 40% idle CPU,
+90 MiB RSS, 1 MiB/item and 8 MiB total content; startup has no default ceiling. Busy-machine load is recorded
+and warns, without pretending that one noisy sample proves a regression. Functional correctness, rendering
+and real agent profiles remain outside this report; use integration checks for functional failures.
 
 ## A manifest is data, never an executable probe
 

@@ -258,8 +258,9 @@ class SettingsTests(unittest.TestCase):
         import json
         root=EXT
         names={s["name"] for s in json.loads((root/"defaults.json").read_text())["extensions"]}
-        self.assertEqual(len(names),23)
+        self.assertEqual(len(names),24)
         self.assertIn('accounts', names)
+        self.assertIn("test-perf",names)
         self.assertIn("codex",names)
         self.assertIn("test-unit",names)
         for name in names:

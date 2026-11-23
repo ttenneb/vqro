@@ -3,6 +3,12 @@
 D16: build vqro itself, smallest complete and usable first. The north star: an agent can substantially modify its own
 workspace through reliable public primitives, without changing the host or endangering underlying processes.
 
+## Disposable setup performance checks (2026-11-22)
+
+`test-perf` measures repeated startup, idle events/content/CPU/RSS, scenario interactions and publication sizes
+in fresh private copies. Configurable defaults only warn, missing/non-finite samples fail, and overlapping noisy
+comparisons remain unverified. The async command and CLI share the slice-2 sandbox; no core or SDK changes.
+
 ## Disposable installed-setup integration checks (2026-11-22)
 
 `test-integration` adds audited private setup copies, startup/registration/recovery/lifetime smoke, event-driven
