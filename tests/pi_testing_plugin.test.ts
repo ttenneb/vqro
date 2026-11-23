@@ -6,8 +6,9 @@ import { join } from "node:path";
 
 function status(id = "a", generation = 0, patch: any = {}): any {
   return { setup_id: id.repeat(64), generation, require_unit: true, finish_ok: true,
-    unit: { state: "pass", receipt: "/private/unit.json", verdict: "pass", exception: null },
-    integration: { state: "pass", receipt: "/private/integration.json", skip_reason: null },
+    instance: { socket: "/private/core.sock", state_dir: "/private/state", extensions_dir: "/private/ext", epoch: "epoch-1" }, coverage_gaps: [],
+    unit: { state: "pass", receipt: "/private/unit.json", verdict: "pass", current: true, exception: null },
+    integration: { state: "pass", receipt: "/private/integration.json", skip_reason: null, current: true },
     performance: { recommended: false, why: "", state: "missing" }, not_verified_reasons: [], ...patch };
 }
 
@@ -46,12 +47,13 @@ function fixture(initial: any = status()) {
 describe("model-free Pi testing policy", () => {
   test("real CLI transport uses explicit selectors and --record, with no chosen filename", async () => {
     const root = mkdtempSync(join(tmpdir(), "pi-testing-cli-"));
-    const names = ["VQRO_EXTENSIONS_DIR", "VQRO_TESTING_SOCKET", "VQRO_TESTING_STATE_DIR", "HERDR_SOCKET", "VQRO_EXTENSION_TOKEN"];
+    const names = ["VQRO_EXTENSIONS_DIR", "VQRO_TESTING_EXTENSIONS_DIR", "VQRO_TESTING_SOCKET", "VQRO_TESTING_STATE_DIR", "HERDR_SOCKET", "VQRO_EXTENSION_TOKEN"];
     const saved = Object.fromEntries(names.map(name => [name, process.env[name]]));
     try {
       const ext = join(root, "ext"); mkdirSync(ext);
       const state = join(root, "state"); mkdirSync(state);
-      process.env.VQRO_EXTENSIONS_DIR = ext;
+      process.env.VQRO_EXTENSIONS_DIR = join(root, "wrong-ambient-extensions");
+      process.env.VQRO_TESTING_EXTENSIONS_DIR = ext;
       process.env.VQRO_TESTING_SOCKET = "opaque:selected-test-endpoint";
       process.env.VQRO_TESTING_STATE_DIR = state;
       process.env.HERDR_SOCKET = "must-not-leak";
@@ -71,9 +73,10 @@ if '--record' in args:
 else:
  passed=not generation or (root/'recorded').exists()
  print(json.dumps({'setup_id':('a' if generation==0 else 'b')*64,'generation':generation,'require_unit':True,'finish_ok':passed,
- 'unit':{'state':'pass' if passed else 'stale','receipt':'checker-owned.json' if passed else None,'verdict':'pass' if passed else 'unverified','exception':None},
+ 'unit':{'state':'pass' if passed else 'stale','receipt':'checker-owned.json' if passed else None,'verdict':'pass' if passed else 'unverified','exception':None,'current':passed},
  'integration':{'state':'skipped','receipt':None,'skip_reason':'fixture only'},
- 'performance':{'recommended':False,'why':'','state':'missing'},'not_verified_reasons':[]}))
+ 'performance':{'recommended':False,'why':'','state':'missing'},'not_verified_reasons':[], 'coverage_gaps':[],
+ 'instance':{'socket':'opaque:selected-test-endpoint','state_dir':str(root.parent/'state'),'extensions_dir':str(root),'epoch':'fixture'}}))
 `);
       const handlers = new Map<string, Function>(), tools = new Map<string, any>();
       plugin({ on: (name: string, fn: Function) => handlers.set(name, fn), registerTool: (tool: any) => tools.set(tool.name, tool) });
@@ -119,6 +122,40 @@ else:
     expect(await f.emit("agent_before_settle", { entries: [], continue: false })).toBeUndefined();
     expect(f.units).toBe(0);
     expect(f.providerRequests).toBe(0);
+  });
+
+  test("instance epoch changes are observed even if identity and generation were reused", async () => {
+    const f = fixture();
+    await f.emit("session_start");
+    const next = status(); next.instance.epoch = "epoch-2";
+    f.set(next);
+    f.unit(async () => {});
+    await f.emit("tool_result", { toolName: "write" });
+    expect(f.units).toBe(1);
+  });
+
+  test("coverage gaps are shown but never independently block finishing", async () => {
+    const f = fixture(status("a", 0, { coverage_gaps: ["no tests installed for sample"] }));
+    await f.emit("session_start");
+    const result = await f.finish();
+    expect(result.details.finish_ok).toBe(true);
+    expect(result.details.summary).toContain("Coverage gaps: no tests installed for sample");
+  });
+
+  test("stale Performance is disclosed as NOT VERIFIED but never blocks finish", async () => {
+    const f = fixture(status("a", 0, { performance: { recommended: false, why: "", state: "stale" } }));
+    await f.emit("session_start");
+    const result = await f.finish();
+    expect(result.details.finish_ok).toBe(true);
+    expect(result.details.summary).toContain("Performance STALE (NOT VERIFIED: result is from an older setup)");
+    expect(result.details.summary).toContain("never blocking");
+  });
+
+  test("unknown setup identity cannot grant a clean finish", async () => {
+    const f = fixture(status("a", 0, { setup_id: null }));
+    await f.emit("session_start");
+    await expect(f.finish()).rejects.toThrow("setup identity is unknown");
+    expect(f.units).toBe(0);
   });
 
   test("unknown/custom tool changes are caught by final-boundary rescan", async () => {
@@ -181,6 +218,15 @@ else:
       await f.emit("session_start");
       await expect(f.finish()).rejects.toThrow('"finish_ok":false');
     }
+  });
+
+  test("a stale Integration path is not mistaken for current evidence", async () => {
+    const f = fixture(status("a", 0, { finish_ok: false, integration: { state: "stale", receipt: "/old.json", skip_reason: null } }));
+    await f.emit("session_start");
+    await expect(f.finish()).rejects.toThrow('"finish_ok":false');
+    expect(f.statuses.at(-1)).toContain("NOT VERIFIED: result is from an older setup");
+    f.set(status("a", 0, { integration: { state: "stale", receipt: "/old.json", skip_reason: null } }));
+    await expect(f.finish()).rejects.toThrow("inconsistent finish approval");
   });
 
   test("Integration absence refuses finish; explicit skip and current human exception are reported", async () => {

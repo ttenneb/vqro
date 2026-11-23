@@ -126,7 +126,7 @@ class Tier1:
             argv = [*argv, "-e", str(PI_PLUGIN), *testing_args(HERE)]
         params = {"argv": ["python3", str(RUN), "--", *argv], "name": runtime + "-" + nonce,
                   "env": account_environment(account, {"VQRO_PRINCIPAL": principal, "VQRO_TIER1_LAUNCH": nonce,
-                                                       **(testing_environment(self.ext) if runtime == "pi" else {})})}
+                                                       **(testing_environment(self.ext, HERE) if runtime == "pi" else {})})}
         cwd = args.get("cwd") or self.ext.layout_folder(args)
         if cwd:
             params["cwd"] = cwd

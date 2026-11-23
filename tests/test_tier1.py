@@ -78,6 +78,7 @@ class Tier1Tests(unittest.TestCase):
         env = self.spawns()[0]["env"]
         self.assertEqual(env["VQRO_TESTING_SOCKET"], "/private/core.sock")
         self.assertEqual(env["VQRO_TESTING_STATE_DIR"], "/private/core-state")
+        self.assertEqual(env["VQRO_TESTING_EXTENSIONS_DIR"], str(tier1.HERE.resolve()))
         self.assertNotIn("VQRO_EXTENSION_TOKEN", env)
         self.assertFalse((self.home / ".pi").exists())
 

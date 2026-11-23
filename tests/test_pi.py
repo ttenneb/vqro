@@ -53,6 +53,7 @@ class PiTests(unittest.TestCase):
         env = self.native()[0][1]["env"]
         self.assertEqual(env["VQRO_TESTING_SOCKET"], "/private/core.sock")
         self.assertEqual(env["VQRO_TESTING_STATE_DIR"], "/private/state")
+        self.assertEqual(env["VQRO_TESTING_EXTENSIONS_DIR"], str(Path(EXTENSIONS).resolve()))
         self.assertNotIn("VQRO_SOCKET", env)
         self.assertNotIn("VQRO_EXTENSION_TOKEN", env)
 

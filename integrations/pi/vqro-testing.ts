@@ -8,14 +8,16 @@ import { fileURLToPath } from "node:url";
 const KEY = "vqro-testing";
 const RULE = "For a vqro setup change, use vqro_setup_finish before reporting completion. Attach the current Unit receipt (or ask the human to accept failure); attach Integration evidence or explicitly record why skipped. Missing/error/stale evidence is NOT VERIFIED. Performance is only recommended for hot paths and never blocks. This guard cannot prevent prose claims of done.";
 const UNIT_STATES = new Set(["pass", "fail", "error", "unverified", "missing", "stale", "pending"]);
-const INTEGRATION_STATES = new Set(["pass", "fail", "skipped", "unverified", "missing", "pending"]);
+const INTEGRATION_STATES = new Set(["pass", "fail", "skipped", "unverified", "missing", "pending", "stale"]);
 
 type Status = {
   setup_id: string; generation: number; require_unit: boolean; finish_ok: boolean;
-  unit: { state: string; receipt: string | null; verdict: unknown; exception: null | {
+  instance: { socket: string | null; state_dir: string | null; extensions_dir: string; epoch: string | null };
+  coverage_gaps: string[];
+  unit: { state: string; receipt: string | null; verdict: unknown; current?: boolean; exception: null | {
     reason: string; setup_id: string; generation: number; accepted_by: string;
   } };
-  integration: { state: string; receipt: string | null; skip_reason: string | null };
+  integration: { state: string; receipt: string | null; skip_reason: string | null; current?: boolean };
   performance: { recommended: boolean; why: string; state: string };
   not_verified_reasons: string[];
 };
@@ -27,12 +29,19 @@ type Dependencies = {
 };
 
 function parseStatus(value: any): Status {
+  if (value?.setup_id === null) throw new Error("setup identity is unknown: NOT VERIFIED");
   if (!value || typeof value.setup_id !== "string" || !/^[a-f0-9]{64}$/.test(value.setup_id) || !Number.isSafeInteger(value.generation) || value.generation < 0 ||
       typeof value.require_unit !== "boolean" || typeof value.finish_ok !== "boolean" ||
       !UNIT_STATES.has(value.unit?.state) || !INTEGRATION_STATES.has(value.integration?.state) ||
       !Array.isArray(value.not_verified_reasons) || !value.not_verified_reasons.every((v: unknown) => typeof v === "string") ||
       typeof value.performance?.recommended !== "boolean" || typeof value.performance?.why !== "string") {
     throw new Error("invalid test.setup.status response");
+  }
+  const instance = value.instance;
+  if (!instance || typeof instance !== "object" || !instance.extensions_dir || typeof instance.extensions_dir !== "string" ||
+      ![instance.socket, instance.state_dir, instance.epoch].every(item => item === null || typeof item === "string") ||
+      !Array.isArray(value.coverage_gaps) || !value.coverage_gaps.every((item: unknown) => typeof item === "string")) {
+    throw new Error("invalid setup instance or coverage gaps");
   }
   for (const receipt of [value.unit.receipt, value.integration.receipt]) {
     if (receipt !== null && (typeof receipt !== "string" || !receipt)) throw new Error("invalid receipt reference");
@@ -43,24 +52,35 @@ function parseStatus(value: any): Status {
       exception.generation !== value.generation || typeof exception.accepted_by !== "string" || !exception.accepted_by)) {
     throw new Error("invalid or stale user exception");
   }
-  const unitOK = (value.unit.state === "pass" && !!value.unit.receipt) || exception !== null;
-  const integrationOK = !!value.integration.receipt || !!value.integration.skip_reason?.trim();
+  const unitOK = (value.unit.state === "pass" && value.unit.current === true && !!value.unit.receipt) || exception !== null;
+  const integrationOK = (["pass", "fail", "unverified"].includes(value.integration.state) &&
+    value.integration.current === true && !!value.integration.receipt) ||
+    (value.integration.state === "skipped" && !!value.integration.skip_reason?.trim());
   if (value.finish_ok && value.require_unit && !(unitOK && integrationOK)) throw new Error("inconsistent finish approval");
   return value;
 }
 
-function token(status: Status): string { return `${status.setup_id}:${status.generation}`; }
+function token(status: Status): string {
+  const { socket, state_dir, extensions_dir, epoch } = status.instance;
+  return JSON.stringify([socket, state_dir, extensions_dir, epoch, status.setup_id, status.generation]);
+}
 
 function summary(status?: Status, error?: string): string {
   if (!status) return `Setup change: Unit NOT VERIFIED (${error || "checker unavailable"})`;
-  const verdict = status.unit.state === "pass" ? "PASS" : status.unit.state === "fail" ? "FAIL" : "NOT VERIFIED";
-  const receipt = status.unit.receipt ? `receipt ${status.unit.receipt}` : "no current receipt";
+  const verdict = status.unit.state === "pass" && status.unit.current === true ? "PASS" : status.unit.state === "fail" ? "FAIL" : "NOT VERIFIED";
+  const older = "NOT VERIFIED: result is from an older setup";
+  const receipt = (status.unit.receipt ? `receipt ${status.unit.receipt}` : "no current receipt") +
+    (status.unit.state === "stale" ? `; ${older}` : "");
   const integration = status.integration.state.toUpperCase() +
+    (status.integration.state === "stale" ? ` (${older})` : "") +
     (status.integration.receipt ? ` (receipt ${status.integration.receipt})` : "") +
     (status.integration.skip_reason ? `: ${status.integration.skip_reason}` : "");
-  return `Setup change: Unit ${verdict} (${receipt}); Integration ${integration}; ${status.finish_ok ? "finish evidence accepted" : "NOT VERIFIED: finish refused"}` +
+  const gaps = status.coverage_gaps.length ? ` [Coverage gaps: ${status.coverage_gaps.join("; ")}]` : "";
+  return `Setup change: Unit ${verdict}${gaps} (${receipt}); Integration ${integration}; ${status.finish_ok ? "finish evidence accepted" : "NOT VERIFIED: finish refused"}` +
     (status.unit.exception ? `; human exception: ${status.unit.exception.reason}` : "") +
     (status.require_unit ? "" : "; Unit requirement OFF") +
+    (["fail", "error", "unverified", "stale", "pending"].includes(status.performance.state) ?
+      `; Performance ${status.performance.state.toUpperCase()}${status.performance.state === "stale" ? ` (${older})` : ""} (never blocking)` : "") +
     (status.performance.recommended ? `; Performance recommended: ${status.performance.why} (never blocking)` : "");
 }
 
@@ -185,7 +205,7 @@ function execute(script: string, args: string[], timeout: number): Promise<Resul
 
 export default function (pi: any) {
   const here = dirname(fileURLToPath(import.meta.url));
-  const extensions = resolve(process.env.VQRO_EXTENSIONS_DIR ||
+  const extensions = resolve(process.env.VQRO_TESTING_EXTENSIONS_DIR || process.env.VQRO_EXTENSIONS_DIR ||
     (existsSync(join(here, "..", "testing_unit.py")) ? join(here, "..") : join(here, "..", "..", "extensions")));
   const state = process.env.VQRO_TESTING_STATE_DIR || process.env.VQRO_STATE_DIR;
   const socket = process.env.VQRO_TESTING_SOCKET || process.env.VQRO_SOCKET;

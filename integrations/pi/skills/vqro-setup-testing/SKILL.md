@@ -19,6 +19,7 @@ The Pi testing plugin runs Unit deterministically after observed setup changes; 
 `test.setup.status` reports the current setup identity/generation, evidence, and whether finishing is allowed.
 The Unit requirement ships OFF until the human enables `doc/settings/testing.require_unit` after a clean setup check.
 OFF is not a test pass. The tool may permit finishing while OFF; still disclose actual missing/failed coverage.
+Coverage gaps are shown prominently but do not independently block finishing; never describe them as tested.
 A lost response or checker error is NOT VERIFIED: inspect evidence; do not blindly replay a test command.
 Integration commands return a future receipt path before completion; a filename alone is not a result.
 
