@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("install_extension_tests", ROOT / "scripts/install_extension_tests.py")
@@ -42,6 +43,104 @@ class InstallExtensionTests(unittest.TestCase):
             for name, files in installer.test_files(ROOT).items():
                 self.assertEqual({file.name for file in (destination / "tests" / name).iterdir()},
                                  {Path(file).name for file in files})
+
+    def test_preflight_writes_nothing_and_runs_before_first_install_copy(self):
+        with tempfile.TemporaryDirectory(prefix="vqro-test-check-") as temporary:
+            home = Path(temporary)
+            destination = home / "missing/extensions"
+            checked = subprocess.run([sys.executable, "-B", str(ROOT / "scripts/install_extension_tests.py"),
+                                      "--check", str(destination)], cwd=home,
+                                     env={"HOME": str(home), "PATH": os.environ.get("PATH", os.defpath)},
+                                     capture_output=True, text=True, timeout=10)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            self.assertEqual(list(home.iterdir()), [])
+        script = (ROOT / "scripts/dev-install.sh").read_text()
+        self.assertLess(script.index("install_extension_tests.py --check"), script.index("cp extensions/"))
+
+    def test_bad_mapping_preflight_preserves_existing_suite(self):
+        with tempfile.TemporaryDirectory(prefix="vqro-test-invalid-") as temporary:
+            destination = Path(temporary) / "extensions"
+            installer.install_tests(ROOT, destination)
+            original = (destination / "tests/agents/test_agents.py").read_bytes()
+            source = Path(temporary) / "source"
+            (source / "extensions").mkdir(parents=True)
+            (source / "extensions/defaults.json").write_text(json.dumps({"extensions": [{"name": "agents"}]}))
+            (source / "extensions/tests.json").write_text(json.dumps({"suites": {"agents": ["tests/test_missing.py"]}}))
+            with self.assertRaisesRegex(ValueError, "not a test source"):
+                installer.install_tests(source, destination, check=True)
+            self.assertEqual((destination / "tests/agents/test_agents.py").read_bytes(), original)
+
+    def test_symlinked_parent_and_leaf_refused_without_changes(self):
+        for leaf in (False, True):
+            with self.subTest(leaf=leaf), tempfile.TemporaryDirectory(prefix="vqro-test-symlink-") as temporary:
+                home = Path(temporary)
+                destination = home / "extensions"
+                outside = home / "outside"
+                outside.mkdir()
+                canary = outside / "test_canary.py"
+                canary.write_text("must survive unchanged\n")
+                destination.mkdir()
+                if leaf:
+                    (destination / "tests").mkdir()
+                    (destination / "tests/agents").mkdir()
+                    (destination / "tests/agents/keep.py").write_text("previous suite\n")
+                    link = destination / "tests/tier1"
+                else:
+                    link = destination / "tests"
+                link.symlink_to(outside, target_is_directory=True)
+                for check in (True, False):
+                    completed = subprocess.run([sys.executable, "-B", str(ROOT / "scripts/install_extension_tests.py"),
+                                                *(["--check"] if check else []), str(destination)],
+                                               cwd=home, env={"HOME": str(home), "PATH": os.environ.get("PATH", os.defpath)},
+                                               capture_output=True, text=True, timeout=10)
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertIn("unsafe test destination", completed.stderr)
+                    self.assertTrue(link.is_symlink())
+                    self.assertEqual(canary.read_text(), "must survive unchanged\n")
+                    self.assertEqual(list(outside.iterdir()), [canary])
+                    self.assertFalse((destination / "tests.json").exists())
+                    if leaf:
+                        self.assertEqual((destination / "tests/agents/keep.py").read_text(), "previous suite\n")
+
+    def test_copy_failure_keeps_previous_complete_suite(self):
+        with tempfile.TemporaryDirectory(prefix="vqro-test-copy-failure-") as temporary:
+            destination = Path(temporary) / "extensions"
+            installer.install_tests(ROOT, destination)
+            suite = destination / "tests/agents"
+            before = {path.name: path.read_bytes() for path in suite.iterdir()}
+            copyfile = installer.shutil.copyfile
+            count = 0
+
+            def fail_second_copy(source, target):
+                nonlocal count
+                count += 1
+                if count == 2:
+                    raise OSError("injected copy failure")
+                return copyfile(source, target)
+
+            with mock.patch.object(installer.shutil, "copyfile", side_effect=fail_second_copy):
+                with self.assertRaisesRegex(OSError, "injected copy failure"):
+                    installer.install_tests(ROOT, destination)
+            self.assertEqual({path.name: path.read_bytes() for path in suite.iterdir()}, before)
+            self.assertFalse(any(path.name.startswith(".") for path in suite.parent.iterdir()))
+
+    def test_publication_failure_restores_previous_suite(self):
+        with tempfile.TemporaryDirectory(prefix="vqro-test-rename-failure-") as temporary:
+            destination = Path(temporary) / "extensions"
+            installer.install_tests(ROOT, destination)
+            suite = destination / "tests/agents"
+            before = {path.name: path.read_bytes() for path in suite.iterdir()}
+            rename = Path.rename
+
+            def fail_publication(source, target):
+                if source.name == "suite":
+                    raise OSError("injected rename failure")
+                return rename(source, target)
+
+            with mock.patch.object(Path, "rename", fail_publication):
+                with self.assertRaisesRegex(OSError, "injected rename failure"):
+                    installer.install_tests(ROOT, destination)
+            self.assertEqual({path.name: path.read_bytes() for path in suite.iterdir()}, before)
 
     def test_private_installed_offline_cli_and_broken_test_control(self):
         with tempfile.TemporaryDirectory(prefix="vqro-test-install-") as temporary:
