@@ -57,6 +57,8 @@ if [[ "$NICE" =~ ^-?[0-9]+$ ]] && (( NICE < 10 )); then
   renice -n 10 -p "$$" >/dev/null 2>&1 || echo "check: could not lower CPU priority" >&2
 fi
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+VQRO_PYTHON=$(/bin/sh "$REPO/scripts/test-python.sh") || exit 2
+export VQRO_PYTHON
 # A transient service owns this run's cgroup, including reparented/session-detached daemons.
 # Unlike a scope, its native main-process lifetime tears down all members on interruption.
 # The supervisor also watches the original launcher/parent with pidfds, including startup races.
@@ -68,10 +70,15 @@ if [ "$CHECK_SYSTEM" = Linux ] && [ -z "${VQRO_CHECK_SUPERVISED:-}" ]; then
     export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
   fi
   if command -v systemd-run >/dev/null 2>&1 && systemctl --user show --property=Version >/dev/null 2>&1; then
-    exec python3 -I "$REPO/scripts/check_lifetime.py" --owner "$CHECK_OWNER_PID" "$CHECK_OWNER_BIRTH" -- "$REPO/scripts/check.sh" "$@"
+    exec "$VQRO_PYTHON" -I "$REPO/scripts/check_lifetime.py" --owner "$CHECK_OWNER_PID" "$CHECK_OWNER_BIRTH" -- "$REPO/scripts/check.sh" "$@"
   fi
   echo "check: no systemd user manager (set XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS); the leftover check is UNSCOPED: report only, no kill, no failure" >&2
 fi
+# A private alias also covers overrides whose basename is not python3.
+PYTHON_BIN=$(mktemp -d /tmp/vqro-python-XXXXXX) || exit 2
+trap 'rm -rf "$PYTHON_BIN"' EXIT
+ln -s "$VQRO_PYTHON" "$PYTHON_BIN/python3" || exit 2
+export PATH="$PYTHON_BIN:$PATH"
 CGROUP=
 if [ "$CHECK_SYSTEM" = Linux ] && [ -n "${VQRO_CHECK_SUPERVISED:-}" ]; then
   CGROUP=$(sed -n 's/^0:://p' /proc/self/cgroup)
@@ -84,7 +91,7 @@ RECEIPT=${CHECK_RECEIPT:-$TARGET/check-receipt.json}
 mkdir -p "$LOGS"
 # Short private root for anything that needs socket paths (the scale harness run dir).
 RUN=$(mktemp -d /tmp/pchkXXXXXX)
-CARGO=(env -i HOME="$HOME" PATH="$PATH" CARGO_TARGET_DIR="$TARGET")
+CARGO=(env -i HOME="$HOME" PATH="$PATH" VQRO_PYTHON="$VQRO_PYTHON" CARGO_TARGET_DIR="$TARGET")
 CLEAN_PATH=/usr/bin:/bin
 # Portable suites may resolve tmux from PATH (e.g. Homebrew); pinned Linux harnesses do not.
 if [ "$CHECK_SYSTEM" != Linux ]; then
@@ -93,7 +100,8 @@ if [ "$CHECK_SYSTEM" != Linux ]; then
   CHECK_TMUX=$(command -v tmux || :)
   if [ -n "$CHECK_TMUX" ]; then CLEAN_PATH="$(dirname "$CHECK_TMUX"):$CLEAN_PATH"; fi
 fi
-CLEAN=(env -i HOME="$HOME" PATH="$CLEAN_PATH")
+CLEAN_PATH="$PYTHON_BIN:$(dirname "$VQRO_PYTHON"):$CLEAN_PATH"
+CLEAN=(env -i HOME="$HOME" PATH="$CLEAN_PATH" VQRO_PYTHON="$VQRO_PYTHON")
 # An explicit compiler selection must survive every clean build environment.
 if [ -n "${ZIG:-}" ]; then CARGO+=("ZIG=$ZIG"); CLEAN+=("ZIG=$ZIG"); fi
 STEPS=$LOGS/steps.tsv
@@ -146,7 +154,7 @@ step() {  # Capture argv as an array: paths/arguments never pass through eval or
 }
 timing_python() {
   # Also safe for direct/unscoped gates: never depend on supervisor sanitization.
-  /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin \
+  /usr/bin/env -i HOME="$HOME" PATH="$PYTHON_BIN:$(dirname "$VQRO_PYTHON"):/usr/bin:/bin" \
     VQRO_GATE_SLOT_DIR="${VQRO_GATE_SLOT_DIR:-}" VQRO_GATE_SLOT_HELD="${VQRO_GATE_SLOT_HELD:-}" \
     VQRO_GATE_EXCLUSIVE="${VQRO_GATE_EXCLUSIVE:-0}" python3 -I "$@"
 }

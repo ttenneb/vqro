@@ -53,7 +53,9 @@ class CheckTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="check-evidence-")
         self.root = Path(self.temporary.name)
-        self.env = {"HOME": str(self.root), "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1",
+        self.env = {"HOME": str(self.root), "PATH": str(Path(sys.executable).parent) + ":/usr/bin:/bin",
+                    "PYTHONDONTWRITEBYTECODE": "1", "VQRO_PYTHON": sys.executable,
+                    "PYTHON_BIN": str(Path(sys.executable).parent),
                     "CHECK_SYSTEM": "Linux"}  # Explicit fixture classification; never inferred by helpers.
         self.env["VQRO_GATE_SLOT_DIR"] = str(self.root / "slots")
         self.env["VQRO_GATE_SLOT_HELD"] = "slot-1.lock"
@@ -323,7 +325,7 @@ else:
         for env in observed:
             self.assertFalse(set(env) & set(forbidden), env)
             self.assertEqual(env['HOME'], str(self.root))
-            self.assertEqual(env['PATH'], '/usr/bin:/bin')
+            self.assertEqual(env['PATH'], f'{Path(sys.executable).parent}:{Path(sys.executable).parent}:/usr/bin:/bin')
             for key in ('VQRO_GATE_SLOT_DIR', 'VQRO_GATE_SLOT_HELD', 'VQRO_GATE_EXCLUSIVE'):
                 self.assertEqual(env[key], self.env[key])
 
