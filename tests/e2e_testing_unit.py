@@ -75,11 +75,26 @@ class Oracle:
         self.check(label + ": consistent counts", receipt.get("counts") ==
                    {s: counts[s] for s in STATUSES}, receipt.get("counts"))
         fp = receipt.get("fingerprint", {})
-        self.check(label + ": fingerprint schema", set(("vqro", "extensions_dir", "declarations", "extensions")) <= fp.keys(), fp)
-        for key in ("extensions_dir", "declarations"):
-            self.check(label + ": sha256 " + key, bool(re.fullmatch(r"[a-f0-9]{64}", str(fp.get(key, "")))), fp.get(key))
-        self.check(label + ": per-extension sha256", isinstance(fp.get("extensions"), dict)
-                   and bool(fp["extensions"]) and all(re.fullmatch(r"[a-f0-9]{64}", str(v)) for v in fp["extensions"].values()), fp)
+        self.check(label + ": fingerprint v2 schema", fp.get("version") == 2 and
+                   set(("setup_id", "vqro", "extensions_dir", "declarations", "settings", "extensions",
+                        "executables", "instance", "unknown", "scope")) <= fp.keys(), fp)
+        unknown = fp.get("unknown")
+        self.check(label + ": explicit unknown inputs", isinstance(unknown, list) and
+                   all(isinstance(value, str) and value for value in unknown), unknown)
+        sha256 = lambda value: bool(re.fullmatch(r"[a-f0-9]{64}", str(value)))
+        for key in ("declarations", "settings"):
+            self.check(label + ": sha256 " + key, sha256(fp.get(key)), fp.get(key))
+        self.check(label + ": assets digest or explicit unknown", sha256(fp.get("extensions_dir")) or
+                   (fp.get("extensions_dir") is None and bool(unknown)), fp)
+        self.check(label + ": per-extension digest or explicit unknown", isinstance(fp.get("extensions"), dict)
+                   and bool(fp["extensions"]) and all(sha256(value) or (value is None and bool(unknown))
+                   for value in fp["extensions"].values()), fp)
+        self.check(label + ": setup identity never guessed", fp.get("setup_id") is None if unknown else
+                   sha256(fp.get("setup_id")), fp)
+        self.check(label + ": receipt identity bound to fingerprint", receipt.get("setup_id") == fp.get("setup_id"), receipt)
+        if unknown:
+            self.check(label + ": unknown input cannot close verification", receipt.get("closure", {}).get("matched") is False
+                       and any(row.get("id") == "setup/closure" and row.get("status") == "unverified" for row in rows), rows)
         try:
             stamp = datetime.fromisoformat(receipt["started_at"].replace("Z", "+00:00"))
             valid_stamp = stamp.utcoffset().total_seconds() == 0
@@ -250,7 +265,8 @@ def readonly(oracle, label, before, after, core):
     oracle.check(label + ": only own view contribution may change", allowed, sorted(changed))
     events = core.events_between(old, new)
     oracle.check(label + ": sequence changes are own report publications only", all(
-        event.get("type") == "view.content" and event.get("data", {}).get("view") == "test-unit.report"
+        event.get("type") == "view.content" and event.get("data", {}).get("view") in
+        ("test-unit.report", "testing.status", "settings.page.testing")
         and event.get("data", {}).get("author") == "ext:test-unit"
         for event in events), events)
     oracle.check(label + ": all sequence changes accounted for", len(events) == new["seq"] - old["seq"],
@@ -351,6 +367,37 @@ def self_control(core, oracle, disabled):
     readonly(oracle, core.root.name + " read-only", before, core.snapshot(), core)
 
 
+def unknown_inputs(core, oracle):
+    core.start()
+    core.seed("ctl-ok", test=PASS_TEST)
+    core.settled({"ctl-ok": "running"})
+    assets = core.ext / "assets"
+    assets.mkdir(exist_ok=True)
+    for kind in ("dangling", "unreadable", "oversized"):
+        path = assets / ("unknown-" + kind)
+        if kind == "dangling":
+            path.symlink_to(assets / "does-not-exist")
+        else:
+            with path.open("wb") as stream:
+                stream.write(b"private oracle input")
+                if kind == "oversized":
+                    stream.truncate(33 * 1024 * 1024)
+            if kind == "unreadable":
+                path.chmod(0)
+        try:
+            process = core.cli()
+            receipt = decode(oracle, "unknown " + kind, process)
+            oracle.receipt("unknown " + kind, receipt, "unverified", "live")
+            oracle.check("unknown " + kind + ": exit 77", process.returncode == 77, process.returncode)
+            fp = receipt.get("fingerprint", {})
+            oracle.check("unknown " + kind + ": asset identity unavailable", fp.get("setup_id") is None and
+                         fp.get("extensions_dir") is None and kind in json.dumps(fp.get("unknown", [])), fp)
+        finally:
+            if kind == "unreadable":
+                path.chmod(0o600)
+            path.unlink()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vqro", type=Path, default=Path(os.environ.get("CARGO_TARGET_DIR") or REPO / "target") / "debug" / "vqro")
@@ -367,7 +414,8 @@ def main():
             raise RuntimeError("implementation not yet present: extensions/testing_unit.py")
         for scenario, run in (("neg", lambda c: negative(c, oracle)),
                               ("ok", lambda c: self_control(c, oracle, False)),
-                              ("off", lambda c: self_control(c, oracle, True))):
+                              ("off", lambda c: self_control(c, oracle, True)),
+                              ("unknown", lambda c: unknown_inputs(c, oracle))):
             core = PrivateCore(root, args.vqro.resolve(), scenario)
             cores.append(core)
             try:
