@@ -312,6 +312,27 @@ struct Observed {
     probe: Option<(String, Instant, oneshot::Sender<Duration>)>,
 }
 
+fn required_rss_valid(start: f64, setup: f64, end: f64, samples: &[(f64, f64)], missing: usize) -> bool {
+    let valid = |value: f64| value.is_finite() && value >= 0.0;
+    missing == 0 && !samples.is_empty() && [start, setup, end].into_iter().all(valid)
+        && samples.iter().all(|(at, rss)| valid(*at) && valid(*rss))
+}
+
+#[test]
+fn missing_or_invalid_required_rss_is_correctness_failure() {
+    let measured = BTreeMap::from([("echo_p99_ms", (11.0, 10.0, false))]);
+    let good = vec![(0.0, 20.0), (1.0, 25.0)];
+    assert_eq!(scale_failure_class(&measured, required_rss_valid(10.0, 20.0, 24.0, &good, 0)), "budget");
+    for (samples, end, missing) in [(vec![], 24.0, 0), (vec![(0.0, f64::NAN)], 24.0, 0),
+        (vec![(f64::NAN, 20.0)], 24.0, 0), (good.clone(), f64::NAN, 0), (good.clone(), 24.0, 1)] {
+        assert_eq!(scale_failure_class(&measured, required_rss_valid(10.0, 20.0, end, &samples, missing)),
+            "correctness", "samples={samples:?}, end={end}, missing={missing}");
+    }
+    assert!(!required_rss_valid(f64::NAN, 20.0, 24.0, &good, 0));
+    let not_applicable = BTreeMap::from([("slow_echo_p99_ms", (f64::NAN, BUDGET_SLOW_ECHO_P99_MS, true))]);
+    assert_eq!(scale_failure_class(&not_applicable, required_rss_valid(10.0, 20.0, 24.0, &good, 0)), "pass");
+}
+
 // Only these finite latency measurements may be graded externally under contention.
 // Capacity, loss, missing samples, invalid workloads and cleanup stay hard failures.
 fn scale_failure_class(measured: &BTreeMap<&str, (f64, f64, bool)>, correctness_ok: bool) -> &'static str {
@@ -518,17 +539,20 @@ async fn scale_load() {
         let stop = stop.clone();
         tokio::spawn(async move {
             let mut series = Vec::new();
+            let mut missing = 0usize;
             while !stop.load(Ordering::Relaxed) {
-                if let Some(r) = rss_mb(pid) {
+                if let Some(r) = rss_mb(pid).filter(|r| r.is_finite() && *r >= 0.0) {
                     series.push((t_load.elapsed().as_secs_f64(), r));
                     if r > rss_abort_mb {
                         // Safety stop for the machine running the test; the receipt shows it.
                         stop.store(true, Ordering::Relaxed);
                     }
+                } else {
+                    missing += 1;
                 }
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
-            series
+            (series, missing)
         })
     };
 
@@ -603,7 +627,7 @@ async fn scale_load() {
     stop.store(true, Ordering::Relaxed);
     let (txn_ms, txn_errors) = txn_task.await.unwrap();
     let (restarts_ok, restarts_failed, restart_ms) = restart_task.await.unwrap();
-    let rss_series = rss_task.await.unwrap();
+    let (rss_series, rss_missing) = rss_task.await.unwrap();
 
     let t = Instant::now();
     let snap = writer.call("workspace.snapshot", Value::Null).await;
@@ -646,7 +670,8 @@ async fn scale_load() {
     let failed: Vec<&str> = measured.iter().filter(|(_, (_, _, ok))| !ok).map(|(k, _)| *k).collect();
     let correctness_ok = txn_errors == 0 && echo_lost == 0 && !txn_ms.is_empty() && !echo_ms.is_empty()
         && !o.event_lag_ms.is_empty() && snap.is_ok() && resources_seen == prof.terminals
-        && cleanup.core_exit.ends_with("exit status: 0");
+        && cleanup.core_exit.ends_with("exit status: 0")
+        && required_rss_valid(rss_start, rss_after_setup, rss_end, &rss_series, rss_missing);
     let failure_class = scale_failure_class(&measured, correctness_ok);
     let commit = std::process::Command::new("git").args(["describe", "--always", "--dirty"]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
 
@@ -662,7 +687,7 @@ async fn scale_load() {
         "setup": {"seconds": setup_s, "spawn": stats(&spawn_ms), "resources_in_final_snapshot": resources_seen},
         "load_seconds": load_s,
         "stopped_early_rss_over_mb": if load_s + 0.5 < prof.duration_s { json!(rss_abort_mb) } else { Value::Null },
-        "core_rss_mb": {"start": rss_start, "after_setup": rss_after_setup, "peak": rss_peak, "end": rss_end, "samples_t_s_mb": rss_samples},
+        "core_rss_mb": {"start": rss_start, "after_setup": rss_after_setup, "peak": rss_peak, "end": rss_end, "samples_t_s_mb": rss_samples, "missing_samples": rss_missing},
         "transactions": {"latency": stats(&txn_ms), "errors": txn_errors, "achieved_per_sec": txn_ms.len() as f64 / load_s},
         "echo": {"latency": stats(&echo_ms), "lost_after_5s": echo_lost},
         "slow_echo_phases": {"anchor":"successful_connection", "startup_ms":SLOW_ECHO_STARTUP_MS, "classification":"probe_start", "empty_phase":"not_applicable; per-client missing sample guard still applies"},
