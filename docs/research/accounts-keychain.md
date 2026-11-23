@@ -23,7 +23,9 @@ host helper path, not the coordinator's default Python or an inferred remote pat
   stdout is JSON containing only the resulting handle. Before mutation, stderr emits
   and flushes `{status: pending_store, handle: HANDLE}`; an unknown/interrupted store
   returns `{status: indeterminate, handle: HANDLE}` for explicit verification/deletion.
-  The pending record remains available even if the helper is killed before replying.
+  After the helper is killed, the pending record is available only if the reader
+  retained the flushed record. It is not a durable reservation and gives no guarantee
+  across reader crash or loss.
   No mutation is retried automatically. It refuses non-terminal input
   and getpass's echo-on fallback. Do not type secrets into agent messages or commands.
 - `... delete --handle HANDLE`: an explicit irreversible effect. Failed/unconfirmed
