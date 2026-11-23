@@ -295,6 +295,21 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.provider._pending, {})
         self.assertEqual(len(self.core.notes("hang")), 1)
 
+    async def test_call_deadline_inside_the_write_is_a_timeout_not_a_dead_connection(self):
+        # Forced ordering, no sleeps: the writer lock is busy (another record mid-write) for longer than the call's
+        # deadline. The caller gets its own timeout; the connection stays up and the record is never written.
+        await self.provider._writer_lock.acquire()
+        try:
+            with self.assertRaises(ProviderError) as caught:
+                await self.provider.call("probe", {"text": "late"}, timeout=.01)
+        finally:
+            self.provider._writer_lock.release()
+        self.assertEqual(caught.exception.kind, "timeout")
+        self.assertFalse(self.provider._closed.is_set())
+        self.assertEqual(self.provider._pending, {})
+        self.assertEqual((await self.provider.call("probe", {"text": "after"}))["text"], "after")
+        self.assertEqual([r["params"]["text"] for r in self.core.notes("probe")], ["after"])
+
     async def test_load_profile_status_phase_and_flood(self):
         ref = await self.spawn(["agent", "--status-every-ms", "100", "--status-phase-ms", "1", "--output-bytes-per-sec", "10000"])
         await self.attach(ref)

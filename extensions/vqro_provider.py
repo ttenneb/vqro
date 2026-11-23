@@ -411,9 +411,13 @@ class Provider:
         future = asyncio.get_running_loop().create_future()
         self._pending[ident] = (method, future)
         try:
-            await self._write({"jsonrpc": "2.0", "id": ident, "method": method, "params": params}, deadline,
-                              on_written=on_written)
-            return await asyncio.wait_for(asyncio.shield(future), max(0, deadline - asyncio.get_running_loop().time()))
+            # The caller's deadline bounds only this caller's wait. The write keeps the writer's own deadline: a
+            # short answer deadline that runs out while the line waits for the writer lock or flushes is this
+            # caller's timeout, never a writer failure that would close the connection for everyone.
+            async with asyncio.timeout_at(deadline):
+                await self._write({"jsonrpc": "2.0", "id": ident, "method": method, "params": params},
+                                  on_written=on_written)
+                return await asyncio.shield(future)
         except TimeoutError:
             raise ProviderError("timeout", "answer deadline; delivery unknown, never resent") from None
         finally:
