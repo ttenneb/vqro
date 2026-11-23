@@ -1,4 +1,20 @@
 //! Shared portable test-only selection. No shell is required on native Windows.
+fn bootstrap_candidates(dirs: Vec<std::path::PathBuf>, windows: bool) -> Vec<std::path::PathBuf> {
+    let names: &[&str] = if windows { &["python3.exe", "python.exe"] } else { &["python3"] };
+    dirs.into_iter()
+        .filter(|dir| !windows || !dir.file_name().is_some_and(|name| name.eq_ignore_ascii_case("WindowsApps")))
+        .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
+        .collect()
+}
+
+#[test]
+fn store_bootstrap_directories_are_never_candidates() {
+    use std::path::PathBuf;
+    assert!(bootstrap_candidates(vec![PathBuf::from("C:/WindowsApps"), PathBuf::from("C:/wInDoWsApPs/")], true).is_empty());
+    assert_eq!(bootstrap_candidates(vec![PathBuf::from("C:/WindowsApps"), PathBuf::from("C:/ordinary")], true),
+        vec![PathBuf::from("C:/ordinary/python3.exe"), PathBuf::from("C:/ordinary/python.exe")]);
+}
+
 pub fn python() -> &'static str {
     static PYTHON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     PYTHON.get_or_init(|| {
@@ -6,10 +22,7 @@ pub fn python() -> &'static str {
         let candidates = if let Some(value) = std::env::var_os("VQRO_PYTHON") {
             vec![std::path::PathBuf::from(value)]
         } else {
-            let names: &[&str] = if cfg!(windows) { &["python3.exe", "python.exe"] } else { &["python3"] };
-            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-                .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
-                .collect()
+            bootstrap_candidates(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect(), cfg!(windows))
         };
         let root = tempfile::tempdir().expect("private Python bootstrap output");
         let out = root.path().join("out");

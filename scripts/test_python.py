@@ -14,14 +14,22 @@ WINDOWS = os.name == "nt"
 def candidates():
     if "VQRO_PYTHON" in os.environ:
         value = os.environ["VQRO_PYTHON"]
-        yield shutil.which(value) or value
+        if os.path.dirname(value):
+            yield value  # A literal relative or absolute path is intentional.
+        else:
+            selected = shutil.which(value) if value else None
+            if selected is None:
+                raise RuntimeError("VQRO_PYTHON name was not found on PATH")
+            yield selected
         return
     names = ("python3.exe", "python.exe") if WINDOWS else ("python3",)
     for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if WINDOWS and Path(directory).name.lower() == "windowsapps":
+            continue  # Store aliases must not even be inspected.
         for name in names:
             yield str(Path(directory or os.curdir) / name)
     # Native Windows Python installations need not expose python3 on PATH.
-    if WINDOWS:
+    if WINDOWS and Path(sys.executable).parent.name.lower() != "windowsapps":
         yield sys.executable
 
 

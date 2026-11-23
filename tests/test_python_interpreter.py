@@ -95,6 +95,42 @@ class PureInterpreterTests(unittest.TestCase):
                     resolver.resolve()
                 self.assertEqual(run.call_count, 1)
 
+    def test_missing_bare_override_never_inspects_or_probes_a_cwd_namesake(self):
+        with patch.dict(os.environ, {'VQRO_PYTHON': 'cwd-namesake', 'PATH': 'empty-path'}, clear=True), \
+                patch.object(resolver.shutil, 'which', return_value=None) as lookup, \
+                patch.object(resolver.os.path, 'isfile', return_value=True) as metadata, \
+                patch.object(resolver.subprocess, 'run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'not found on PATH'):
+                resolver.resolve()
+            lookup.assert_called_once_with('cwd-namesake')
+            metadata.assert_not_called()
+            run.assert_not_called()
+
+    def test_literal_relative_override_does_not_search_path(self):
+        chosen = os.path.join('.', 'literal python')
+        with patch.dict(os.environ, {'VQRO_PYTHON': chosen}, clear=True), \
+                patch.object(resolver.shutil, 'which') as lookup, \
+                patch.object(resolver.os.path, 'isfile', return_value=True), \
+                patch.object(resolver.os, 'access', return_value=True), \
+                patch.object(resolver.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
+            self.assertEqual(resolver.resolve(), os.path.abspath(chosen))
+            lookup.assert_not_called()
+
+    def test_windowsapps_are_skipped_before_any_metadata_or_launch(self):
+        for spelling in ('WindowsApps', 'wInDoWsApPs'):
+            store = str(Path('private-fake-root') / spelling)
+            with self.subTest(spelling=spelling), patch.object(resolver, 'WINDOWS', True), \
+                    patch.dict(os.environ, {'PATH': store}, clear=True), \
+                    patch.object(resolver.sys, 'executable', str(Path(store) / 'python.exe')), \
+                    patch.object(resolver.os.path, 'isfile') as metadata, \
+                    patch.object(resolver.os, 'access') as access, \
+                    patch.object(resolver.subprocess, 'run') as run:
+                with self.assertRaisesRegex(RuntimeError, 'Python >= 3.11'):
+                    resolver.resolve()
+                metadata.assert_not_called()
+                access.assert_not_called()
+                run.assert_not_called()
+
     def test_resolution_has_an_overall_deadline(self):
         with patch.object(resolver, 'candidates', return_value=iter(['never probed'])), \
                 patch.object(resolver.time, 'monotonic', side_effect=[0, resolver.RESOLVE_SECONDS + 1]), \
