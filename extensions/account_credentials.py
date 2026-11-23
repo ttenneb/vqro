@@ -26,20 +26,91 @@ def validate(row):
     provider = row.get('provider')
     if 'provider' in row and (not isinstance(provider,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}',provider)):
         raise VqroError('provider must be a short provider identifier', 'invalid')
-    if 'native_provider' in row and (row['runtime'] != 'pi' or not isinstance(row['native_provider'],str)
-            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}',row['native_provider']) or not provider):
-        raise VqroError('Pi native_provider requires a native provider identifier and explicit base provider', 'invalid')
+    if 'native_provider' in row and (not isinstance(row['native_provider'],str)
+            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}',row['native_provider'])):
+        raise VqroError('native_provider must be a short native provider identifier', 'invalid')
     if 'login_ref' in row:
         ref = row['login_ref']
-        if row['runtime'] != 'codex' or not isinstance(ref,dict) or set(ref) != {'sessionId','accountId'} or any(
+        if not isinstance(ref,dict) or set(ref) != {'sessionId','accountId'} or any(
                 not isinstance(value,str) or not value or not value.isprintable() or len(value.encode())>256 for value in ref.values()):
             raise VqroError('Codex login_ref contains only opaque native sessionId and accountId', 'invalid')
-    if 'secret_ref' in row and (not isinstance(row['secret_ref'],str) or not re.fullmatch(r'[0-9a-f]{32}',row['secret_ref'])
-            or row['kind'] != 'api_key' and row['runtime'] != 'claude'):
+    if 'secret_ref' in row and (not isinstance(row['secret_ref'],str) or not re.fullmatch(r'[0-9a-f]{32}',row['secret_ref'])):
         raise VqroError('credential reference must be an opaque host-keychain handle, never a token or key', 'invalid')
     if 'host' in row and (not isinstance(row['host'],str) or not row['host'] or len(row['host']) > 128 or not row['host'].isprintable()):
         raise VqroError('credential host reference is invalid', 'invalid')
     return dict(row)
+
+
+def selection_problem(row):
+    """Safe metadata may remain visible while its credential route is incomplete."""
+    routes = {key for key in ('native_provider', 'login_ref', 'secret_ref') if key in row}
+    if len(routes) > 1:
+        return 'Conflicting credential routes; keep exactly one native reference form.'
+    if ('host' in row) != ('secret_ref' in row):
+        return 'Host-keychain references require both host and secret_ref.'
+    if row['kind'] == 'api_key':
+        if routes != {'secret_ref'}:
+            return 'API-key account needs a host-keychain reference.'
+        if row.get('provider') not in ('openai', 'anthropic'):
+            return 'API-key helper needs an explicit supported provider (openai or anthropic).'
+        return None
+    expected = {'pi': 'native_provider', 'codex': 'login_ref', 'claude': 'secret_ref'}[row['runtime']]
+    if routes != {expected}:
+        return 'Native subscription reference is missing or belongs to another runtime.'
+    if row['runtime'] == 'pi' and not row.get('provider'):
+        return 'Pi native provider aliases require an explicit base provider.'
+    if row['runtime'] == 'pi' and row.get('native_provider') == row.get('provider'):
+        return 'Pi account alias must not overwrite the base native provider.'
+    return None
+
+
+def credential_identity(row):
+    """Known reference equality only; never an authenticated-account assertion.
+
+    Keep runtime/provider/kind/host namespaces distinct. Do not inspect secrets
+    or infer equality of two different references from matching labels.
+    """
+    if selection_problem(row):
+        return None
+    if 'native_provider' in row:
+        route = ('native_provider', row['native_provider'])
+    elif 'login_ref' in row:
+        route = ('login_ref', row['login_ref']['sessionId'], row['login_ref']['accountId'])
+    else:
+        route = ('secret_ref', row['secret_ref'])
+    # Native saved Codex logins and Claude subscriptions have an implicit
+    # issuer; omission is not a different credential namespace.
+    provider = row.get('provider')
+    if provider is None and row['kind'] == 'subscription':
+        provider = {'codex': 'openai', 'claude': 'anthropic'}.get(row['runtime'])
+    return (row['runtime'], provider, row['kind'], row.get('host'), *route)
+
+
+def distinct_accounts(rows):
+    result, seen = [], set()
+    for row in rows:
+        identity = credential_identity(row)
+        if identity is not None and identity not in seen:
+            seen.add(identity)
+            result.append(row)
+    return result
+
+
+def eligible_alternatives(rows, source_id, blocked_ids, allow_api_key):
+    """Aliases are one choice; a blocked/source reference excludes ALL aliases."""
+    by_id = {row['id']: row for row in rows}
+    source = by_id.get(source_id)
+    source_identity = credential_identity(source) if source else None
+    blocked = {credential_identity(by_id[ident]) for ident in blocked_ids if ident in by_id}
+    candidates = []
+    for row in rows:
+        identity = credential_identity(row)
+        if identity is None or row['id'] == source_id or identity == source_identity or identity in blocked:
+            continue
+        if row['kind'] == 'api_key' and not allow_api_key:
+            continue
+        candidates.append(row)
+    return distinct_accounts(candidates)
 
 
 def native_registration(row):
@@ -190,30 +261,38 @@ def environment(account, env=None):
 def choose(ext, args, runtime, command):
     rows, revision = snapshot(ext)
     selected = args.get('account')
-    if '_account_revision' in args and args['_account_revision'] != revision:
+    if '_account_revision' in args and (type(args['_account_revision']) is not int or args['_account_revision'] != revision):
         raise VqroError('account choices changed; choose again before launching', 'stale')
-    candidates = [row for row in rows if row['runtime'] == runtime]
+    registered = [row for row in rows if row['runtime'] == runtime]
+    candidates = [row for row in registered if selection_problem(row) is None]
     if selected == 'normal': return None, None
-    if selected is None and not candidates:
+    if selected is None and not registered:
         from accounts_policy import settings
         if settings(ext)['new_agents'] == 'ask': return None, None
         # Explicit capacity/rotation policy with no candidate must ask, not guess normal-login capacity.
     if selected is not None:
         account = next((row for row in candidates if row['id'] == selected), None)
         if account is None:
-            raise VqroError('account is missing or belongs to another program; nothing launched', 'invalid')
+            invalid = next((row for row in registered if row['id'] == selected), None)
+            reason = selection_problem(invalid) if invalid else 'Account is missing or belongs to another program.'
+            raise VqroError('account is not selectable: ' + reason, 'invalid')
         return account, None
     if selected is None:
         from accounts_policy import pick_new
-        account = pick_new(ext, candidates, runtime)
+        account = pick_new(ext, distinct_accounts(candidates), runtime)
         if account is not None: return account, None
     view = 'accounts-choice-' + command.replace('.', '-')
     forwarded = {k:args[k] for k in ('runtime','cwd','context','fresh') if k in args}
+    primary = {credential_identity(row): row['id'] for row in reversed(distinct_accounts(candidates))}
     ext.publish(view, {'title':'New '+runtime+' agent: account', 'requires':['menu'], 'items':[
         {'text':'Shared runtime login', 'description':'One shared setup; native login identity is not inspected', 'command':command,
          'args':dict(forwarded, account='normal', _account_revision=revision)},
         *[{'text':label(row['label']), 'description':label(row.get('provider',runtime)+' · '+row['kind']), 'command':command,
-           'args':dict(forwarded, account=row['id'], _account_revision=revision)} for row in candidates]]})
+           'args':dict(forwarded, account=row['id'], _account_revision=revision)} for row in distinct_accounts(candidates)],
+        *[{'type':'text','style':'dim','text':label(row['label'])+' - alias of '+primary[credential_identity(row)]+' (same credential reference)'}
+          for row in candidates if primary[credential_identity(row)] != row['id']],
+        *[{'type':'text','style':'warn','text':label(row['label'])+' - invalid: '+selection_problem(row)}
+          for row in registered if selection_problem(row) is not None]]})
     return None, {'client':{'popup':{'view':view,'width':72}}}
 
 

@@ -3,7 +3,7 @@ from pathlib import Path
 import sys
 import unittest
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / 'extensions')]
-from account_credentials import native_registration, validate
+from account_credentials import native_registration, validate, selection_problem
 from vqro_ext import VqroError
 
 
@@ -34,12 +34,14 @@ class CredentialRegistry(unittest.TestCase):
         self.assertEqual(validate(row), row)
 
     def test_no_profile_auth_file_token_or_cross_runtime_native_reference(self):
-        for extra in ({'profile': '/fake/profile'}, {'auth_file': '/fake/auth.json'}, {'token': 'not-allowed'},
-                      {'login_ref': {'sessionId': 's', 'accountId': 'a'}}, {'native_provider': 'alias-no-base'}):
+        for extra in ({'profile': '/fake/profile'}, {'auth_file': '/fake/auth.json'}, {'token': 'not-allowed'}):
             with self.subTest(extra=extra), self.assertRaises(VqroError):
                 validate(self.row(**extra))
-        with self.assertRaises(VqroError):
-            validate(self.row('claude', provider='anthropic', native_provider='alias'))
+        for incomplete in (self.row(login_ref={'sessionId': 's', 'accountId': 'a'}),
+                           self.row(native_provider='alias-no-base'),
+                           self.row('claude', provider='anthropic', native_provider='alias')):
+            self.assertEqual(validate(incomplete), incomplete)
+            self.assertIsNotNone(selection_problem(incomplete))
 
     def test_codex_reference_invalid_unicode_is_a_validation_error(self):
         with self.assertRaises(VqroError):
