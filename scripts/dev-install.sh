@@ -11,6 +11,8 @@ TARGET="${CARGO_TARGET_DIR:-target}"
 for bin in vqro-herdr vqro-tmux vqro-rex vqro-bridge-pi vqro-bridge-codex vqro-claude-hook vqro; do
   [ -x "$TARGET/release/$bin" ] || { echo "dev-install: $TARGET/release/$bin missing; nothing installed" >&2; exit 1; }
 done
+# Read-only diagnostics only: never stop or move a legacy installation implicitly.
+python3 scripts/install_preflight.py "$TARGET/release/vqro" || echo 'dev-install: warning: stale-install preflight unavailable; inspect old cores manually' >&2
 # Fail before touching installed files if bundled tests or their destination are unsafe.
 python3 scripts/install_extension_tests.py --check "$HOME/.local/share/vqro/extensions"
 # Bundled extensions: the core installs the ones in defaults.json on first run.
