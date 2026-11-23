@@ -11,6 +11,12 @@ for a moment. Layout effects are read back from the core.
 Usage: tests/e2e_tui_pane_basics.py TARGET_DIR   (debug binaries in TARGET_DIR/debug)
 Private /tmp root; nothing live is touched. Stops only what it started.
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP e2e_tui_pane_basics: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 from python_interpreter import PYTHON
 import json, os, shutil, socket, subprocess, sys, tempfile, time
 

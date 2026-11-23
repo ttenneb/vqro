@@ -12,6 +12,12 @@ not listed as an expected backend capability difference (EXPECTED below) fail th
 Usage: tests/e2e_same_setup.py TARGET_DIR [--keep-captures DIR]   (debug binaries in TARGET_DIR/debug)
 Private /tmp roots; nothing live is touched. Stops only what it started.
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP e2e_same_setup: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 from python_interpreter import PYTHON
 import json, os, re, shutil, socket, subprocess, sys, tempfile, time
 

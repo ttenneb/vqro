@@ -7,6 +7,7 @@ import io
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -98,6 +99,8 @@ class ControllerTimeout(unittest.TestCase):
             self.assertFalse(document['qualification_complete'])
 
     def invoke(self, root, extra, process):
+        if sys.platform != 'linux':
+            self.skipTest('controller isolation probe reads Linux /proc/self/ns/net')
         spec = root / 'spec.md'
         spec.write_text('fixture inventory is mocked, not qualification')
         manifest = root / 'manifest.json'

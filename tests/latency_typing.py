@@ -14,6 +14,12 @@ Usage: tests/latency_typing.py TARGET_DIR [--samples N] [--receipt FILE] [--only
 (debug or release binaries: TARGET_DIR/debug unless --release). Prints one line per scenario and writes a JSON
 receipt with every sample and the load average before and after. Private /tmp root; nothing live is touched.
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP latency_typing: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 import argparse, json, os, random, shutil, socket, statistics, subprocess, sys, tempfile, time
 
 ap = argparse.ArgumentParser()

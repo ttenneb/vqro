@@ -67,6 +67,7 @@ def gone(pid, deadline):
 
 
 @unittest.skipIf(sys.platform == "win32", "private controller uses Unix socket, shebang and /proc process-lifetime fixtures")
+@unittest.skipUnless(sys.platform == 'linux', 'startup cleanup probe reads Linux /proc process state')
 class StartupFailureTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="vq-harness-")

@@ -10,6 +10,12 @@ D edit while held reaches the model, edit after take is too_late; C idle start w
 unknown, never resent; F lost report -> reconciled inserted from the session; G abort after take -> inserted, read
 only by the next answered request; I image block inserted as an image; U a block Pi cannot insert stays held.
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP pi_pull_e2e: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 import argparse, json, os, queue, socket, subprocess, sys, tempfile, threading, time, re
 
 ap = argparse.ArgumentParser()

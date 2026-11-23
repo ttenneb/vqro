@@ -6,6 +6,12 @@ Real terminals in herdr-core (agents report OSC 7501 every 2 s; floods are `yes`
 an echo probe on an idle terminal during the floods. Prints a JSON receipt. Stops only what it started.
 Not the in-process scale harness (tests/scale.rs): numbers here include herdr-core and real shells.
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP e2e_scale_herdr: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 import base64, json, os, queue, shutil, socket, subprocess, sys, tempfile, threading, time
 
 TARGET = sys.argv[1]

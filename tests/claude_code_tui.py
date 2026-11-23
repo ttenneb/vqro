@@ -8,6 +8,12 @@
   I2  the human's unsent draft in the editor is untouched by the wake and is later submitted byte-identical;
   I3  a waiter armed while idle is retired by a new prompt (nothing taken while busy).
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP claude_code_tui: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 import argparse, fcntl, glob, json, os, pty, re, select, socket, struct, subprocess, sys, termios, time
 from pathlib import Path
 

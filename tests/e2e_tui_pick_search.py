@@ -12,6 +12,12 @@ extensions. A test client registers `e2e.pick` and records what each choice send
 Usage: tests/e2e_tui_pick_search.py TARGET_DIR   (debug binaries in TARGET_DIR/debug)
 Private /tmp root; nothing live is touched. Stops only what it started.
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP e2e_tui_pick_search: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 import json, os, shutil, socket, subprocess, sys, tempfile, threading, time
 
 TARGET = sys.argv[1]

@@ -69,6 +69,9 @@ async def smoke(root):
 
 
 def main():
+    if sys.platform != "linux":
+        print("SKIP pi_bridge_smoke: requires Linux /proc and namespace/process probes")
+        raise SystemExit(77)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", action="store_true", help="explicitly opt in; no provider calls")
     parser.add_argument("--scratch-parent", type=Path, default=REPO / ".run")

@@ -11,6 +11,12 @@ for that launch only. It checks:
 Usage (opt-in; needs the runtimes, never real models, no network): run inside a private network namespace:
   unshare -rn sh -c 'ip link set lo up && exec python3 tests/tier1_e2e.py --target T --claude C --pi PI_CLI_JS --root R'
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP tier1_e2e: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 import argparse
 import hashlib
 import json

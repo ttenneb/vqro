@@ -6,6 +6,12 @@ a runtime SIGKILL + restart; then pause and compare every viewer's reconstructio
 Exits 1 unless every viewer is identical to the runtime for every agent with zero integrity errors.
 With --py-viewer a fourth viewer, the Python SDK's (tests/py_items_viewer.py), is held to the same checks.
 Usage: e2e_item_streams.py OUT [--agents 200] [--rate 2] [--timescale 1] [--cpus 8-15] [--py-viewer]"""
+
+import sys
+if sys.platform != "linux":
+    print("SKIP e2e_item_streams: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 import json, os, shutil, signal, socket, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 

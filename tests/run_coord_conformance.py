@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 from agent_conformance.part_b.catalog import select_cases, cases_from_spec
@@ -26,6 +27,9 @@ def positive_seconds(value):
 
 
 def main(argv=None):
+    if sys.platform != "linux":
+        print("SKIP run_coord_conformance: requires Linux /proc and namespace/process probes")
+        raise SystemExit(77)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--implementation", type=Path, required=True)

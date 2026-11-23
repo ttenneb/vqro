@@ -21,6 +21,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -354,6 +355,9 @@ def owned(root):
 
 
 def main():
+    if sys.platform != "linux":
+        print("SKIP e2e_tui_scale: requires Linux /proc and namespace/process probes")
+        raise SystemExit(77)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", type=Path)
     parser.add_argument("--duration", type=float, default=15)

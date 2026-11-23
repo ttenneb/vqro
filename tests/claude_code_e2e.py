@@ -10,6 +10,12 @@ The fake model's request log is the oracle for *when* a message reached the mode
   D  resume: a claim handed over but absent from the transcript becomes unknown, never resent;
   S  status reports from hooks.
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP claude_code_e2e: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 import argparse, glob, json, os, shutil, socket, subprocess, sys, tempfile, time
 
 ap = argparse.ArgumentParser()

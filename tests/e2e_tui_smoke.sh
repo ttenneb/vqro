@@ -6,6 +6,10 @@
 # Checks: new tab + input echo; input after a 30 MB output flood; core restart -> reconnect, reattach and
 # input; quit while the core cannot start; no leftover processes (tmux servers matched by socket path).
 set -u
+if [ "$(uname -s)" != Linux ]; then
+  echo 'SKIP TUI smoke: requires Linux /proc process and socket probes'
+  exit 77
+fi
 SOURCE_P=${1:?vqro binary}
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 HC=$HOME/.local/bin/herdr-core

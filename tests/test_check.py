@@ -292,7 +292,7 @@ step portable true
         args = (ran.parent/'cargo-invoked').read_text()
         self.assertIn('--no-run --message-format=json', args)
         selection = json.loads((logs/'scale-artifact.json').read_text())
-        self.assertEqual(selection['path'], str(current))
+        self.assertEqual(Path(selection['path']).resolve(), current.resolve())
         self.assertEqual(selection['selection']['method'], 'cargo compiler-artifact')
 
     def test_failed_full_prebuild_never_runs_a_stale_binary(self):
@@ -350,7 +350,7 @@ else:
         self.assertEqual(attestation['checkout_commit'], 'a'*40)
         self.assertEqual(len(attestation['scale_test_artifacts']), 1)
         for row, path in [(attestation['release_vqro'], binary), (attestation['scale_test_artifacts'][0], scale)]:
-            self.assertEqual(row['path'], str(path))
+            self.assertEqual(Path(row['path']).resolve(), path.resolve())
             self.assertEqual(row['sha256'], hashlib.sha256(path.read_bytes()).hexdigest())
             self.assertEqual(row['mtime_unix_ns'], path.stat().st_mtime_ns)
 

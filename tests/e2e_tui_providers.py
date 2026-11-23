@@ -6,6 +6,12 @@ Usage: tests/e2e_tui_providers.py TARGET_DIR   (debug binaries in TARGET_DIR/deb
 Private /tmp root; providers and herdr-core run with an empty PATH; default extensions get python3 only.
 Stops only what it started.
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP e2e_tui_providers: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 from python_interpreter import PYTHON
 import json, os, shutil, socket, subprocess, sys, tempfile, time
 

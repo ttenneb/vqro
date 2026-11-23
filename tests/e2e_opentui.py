@@ -6,6 +6,12 @@ Usage: tests/e2e_opentui.py TARGET_DIR   (debug binaries in TARGET_DIR/debug)
 Skips (exit 77) when Bun or the client's node_modules are absent: the trial client is optional.
 Private /tmp root; stops only what it started.
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP OpenTUI trial client: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 import json, os, re, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]

@@ -409,6 +409,9 @@ def self_test(driver, source, checks):
 
 
 def main():
+    if sys.platform != "linux":
+        print("SKIP e2e_testing_integration: cleanup evidence requires Linux /proc process-group probes")
+        raise SystemExit(77)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vqro", type=Path, default=Path(os.environ.get("CARGO_TARGET_DIR") or REPO / "target") / "debug" / "vqro")
     parser.add_argument("--cases", default="isolation,smoke,comparison,self-test")

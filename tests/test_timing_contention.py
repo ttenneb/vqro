@@ -3,6 +3,7 @@ import importlib.util
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -101,6 +102,7 @@ class TimingFacts(unittest.TestCase):
             self.assertEqual(sum(row[1] for row in rows.values()), 120)
 
 
+@unittest.skipUnless(sys.platform == 'linux', 'gate-slot inheritance probe reads Linux /proc/self/fd')
 @unittest.skipUnless(os.environ.get('VQRO_TEST_GATE_SLOT'), 'external gate-slot wrapper not supplied')
 class ExclusiveSlots(unittest.TestCase):
     def setUp(self):

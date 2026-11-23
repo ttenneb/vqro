@@ -6,6 +6,12 @@ Rex is proprietary and optional: without it this prints SKIP and exits 77 (check
 core, provider and Rex run with a private HOME, XDG_RUNTIME_DIR and state directory, and the owned Rex server's
 sockets live under that root. Stops only what it started. Prints PASS/FAIL lines and exits non-zero on failure.
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP e2e_rex: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 import base64, json, os, queue, shutil, socket, subprocess, sys, tempfile, threading, time
 
 TARGET = sys.argv[1]

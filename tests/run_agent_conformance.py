@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import shutil
 import tempfile
 
@@ -19,6 +20,9 @@ from agent_conformance.runner import run_selection, validate_manifest
 
 
 def main():
+    if sys.platform != "linux":
+        print("SKIP run_agent_conformance: requires Linux /proc and namespace/process probes")
+        raise SystemExit(77)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", action="store_true", help="explicitly allow private backend subprocesses")
     parser.add_argument("--implementation", type=Path, required=True, help="JSON name/argv/wire/version manifest")

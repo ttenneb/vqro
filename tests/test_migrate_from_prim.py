@@ -19,7 +19,8 @@ class MigrationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        # Migration deliberately rewrites literal canonical source prefixes.
+        self.root = Path(self.tmp.name).resolve()
         self.source, self.target = self.root / "old", self.root / "new"
         self.source.mkdir()
         self.old_ext, self.new_ext = self.root / "old-ext", self.root / "new-ext"

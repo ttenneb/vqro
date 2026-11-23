@@ -203,16 +203,16 @@ class HealthChecks(unittest.TestCase):
             (directory / "vqro-fixture").write_text("fixture")
             (directory / "vqro-fixture").chmod(0o700)
         kwargs = {"binary": str(sibling_dir / "vqro"), "path": str(path_dir)}
-        self.assertEqual(shared.resolve_program("vqro-fixture", self.extensions, **kwargs), sibling_dir / "vqro-fixture")
+        self.assertEqual(shared.resolve_program("vqro-fixture", self.extensions, **kwargs).resolve(), (sibling_dir / "vqro-fixture").resolve())
         (sibling_dir / "vqro-fixture").unlink()
-        self.assertEqual(shared.resolve_program("vqro-fixture", self.extensions, **kwargs), path_dir / "vqro-fixture")
+        self.assertEqual(shared.resolve_program("vqro-fixture", self.extensions, **kwargs).resolve(), (path_dir / "vqro-fixture").resolve())
 
     def test_absolute_program_requires_executable(self):
         program = self.root / "program"
         program.write_text("fixture")
         self.assertIsNone(shared.resolve_program(str(program), self.extensions))
         program.chmod(0o700)
-        self.assertEqual(shared.resolve_program(str(program), self.extensions), program)
+        self.assertEqual(shared.resolve_program(str(program), self.extensions).resolve(), program.resolve())
 
     def test_dev_tree_and_worktree_warning(self):
         for directory in (self.root / "checkout", self.root / ".worktrees" / "branch"):

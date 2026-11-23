@@ -5,6 +5,12 @@ private core with the bundled extensions and the in-process fake backend.
 Usage: tests/e2e_text_client.py TARGET_DIR   (debug binary TARGET_DIR/debug/vqro)
 Private /tmp root; herdr/tmux providers are not used. Stops only what it started. Prints PASS/FAIL lines.
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP e2e_text_client: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 from python_interpreter import PYTHON
 import json, os, shutil, subprocess, sys, tempfile, time
 

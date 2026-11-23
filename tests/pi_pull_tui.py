@@ -5,6 +5,12 @@ draft, submitted later, arrives byte-identical. Fake model, private core and fak
   env -i HOME=$HOME PATH=$PATH unshare -rn sh -c 'ip link set lo up && exec python3 tests/pi_pull_tui.py \
       --vqro target/debug/vqro --pi /path/to/pi/dist/bundle/cli.js --root ROOT'
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP pi_pull_tui: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 import argparse, fcntl, json, os, pty, re, select, socket, struct, subprocess, sys, termios, time
 
 ap = argparse.ArgumentParser()

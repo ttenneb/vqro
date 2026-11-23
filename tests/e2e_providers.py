@@ -5,6 +5,12 @@ Usage: tests/e2e_providers.py TARGET_DIR   (debug binaries: TARGET_DIR/debug/{vq
 Everything lives under a short /tmp root; PATH is empty for the core, providers, hc and tmux.
 Stops only what it started. Prints PASS/FAIL lines and exits non-zero on failure.
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP e2e_providers: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 import base64, fcntl, json, os, queue, shutil, socket, struct, subprocess, sys, tempfile, termios, threading, time
 
 TARGET = sys.argv[1]

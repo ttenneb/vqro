@@ -323,6 +323,7 @@ class PeerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(reducer.failure)
 
 
+@unittest.skipUnless(sys.platform == "linux", "backend cleanup evidence reads Linux /proc/self/ns/net")
 class BackendCleanupTests(unittest.IsolatedAsyncioTestCase):
     async def test_peer_failure_does_not_skip_owned_backend_cleanup(self):
         cleaned = []

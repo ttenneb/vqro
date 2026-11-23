@@ -13,6 +13,12 @@ prints the bytes of each key it receives. Checks, on a private herdr-core and th
 Usage: tests/e2e_tui_keys.py TARGET_DIR   (debug binaries in TARGET_DIR/debug)
 Private /tmp root; nothing live is touched. Stops only what it started.
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP e2e_tui_keys: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 from python_interpreter import PYTHON
 import glob, json, os, shutil, socket, subprocess, sys, tempfile, time
 

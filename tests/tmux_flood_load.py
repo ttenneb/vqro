@@ -15,6 +15,9 @@ import time
 
 
 def main():
+    if sys.platform != "linux":
+        print("SKIP tmux_flood_load: requires Linux /proc and namespace/process probes")
+        raise SystemExit(77)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path, help="compiled tests/tmux.rs executable")
     parser.add_argument("output", type=Path, help="new private evidence directory (must not exist)")

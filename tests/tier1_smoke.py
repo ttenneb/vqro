@@ -13,6 +13,12 @@ Run inside a private user/mount/PID namespace with network (the Pi bind needs th
   unshare -Urmpf --mount-proc --kill-child python3 tests/tier1_smoke.py --runtime claude|pi --target T --root R
       [--claude C --claude-auth DIR] [--pi PI_CLI_JS --pi-auth FILE]
 """
+
+import sys
+if sys.platform != "linux":
+    print("SKIP tier1_smoke: requires Linux /proc and namespace/process probes")
+    raise SystemExit(77)
+
 from python_interpreter import PYTHON
 import argparse
 import glob

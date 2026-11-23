@@ -18,7 +18,8 @@ SPEC.loader.exec_module(selector)
 class ScaleArtifactTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='scale-selection-')
-        self.root = Path(self.temp.name)
+        # Selectors return canonical paths (macOS /tmp is a symlink).
+        self.root = Path(self.temp.name).resolve()
         self.checkout, self.target = self.root/'checkout', self.root/'target with spaces'
         (self.checkout/'tests').mkdir(parents=True)
         (self.checkout/'Cargo.toml').write_text('[package]\nname="vqro"\nversion="0.1.0"\n')
