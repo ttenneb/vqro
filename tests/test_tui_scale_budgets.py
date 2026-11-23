@@ -1,4 +1,5 @@
-"""The TUI scale probe enforces its performance budgets (pure check; the probe itself runs in check.sh full)."""
+"""The scale probe enforces unchanged budgets and does not infer delivery from stream history."""
+import copy
 import sys
 import unittest
 from pathlib import Path
@@ -27,97 +28,101 @@ class Budgets(unittest.TestCase):
 
 class DeliveryEvidence(unittest.TestCase):
     def metrics(self, errors=(), closures=(), attaches=()):
-        return {"started_unix_s": 1000, "stream_events_dropped": 0,
+        return {"started_unix_s": 1000, "stream_events_dropped": 0, "stream_events_cap": probe.STREAM_EVENT_CAP,
                 "stream_attachments": [
-                    {"at_s": 0, "stream": 7, "connection": 0, "resource": "idle"},
-                    {"at_s": 0, "stream": 9, "connection": 0, "resource": "flood"}, *attaches],
+                    {"at_s": 0, "method": "resource.attach", "stream": 7, "connection": 0, "resource": "idle"},
+                    {"at_s": 0, "method": "resource.attach", "stream": 9, "connection": 0, "resource": "flood"}, *attaches],
                 "stream_errors": list(errors), "stream_closures": list(closures)}
+
+    def error(self, at_s=1.5, stream=7, connection=0):
+        return {"at_s": at_s, "method": "stream.error", "stream": stream, "connection": connection, "kind": "invalid"}
+
+    def close(self, at_s=.5, stream=7, connection=0):
+        return {"at_s": at_s, "method": "stream.closed", "stream": stream,
+                "connection": connection, "reason": {"reason": "slow_consumer"}}
 
     def ledger(self):
         ledger = probe.KeyLedger(1000)
         ledger.sent("K00000Z", 1)
+        ledger.finish("K00000Z")
         return ledger
 
     def summary(self, ledger, metrics=None):
         return ledger.summary(self.metrics() if metrics is None else metrics, "idle", "flood", 5)
 
-    def test_late_is_a_deadline_miss_not_lost_even_with_stream_error(self):
+    def assert_unknown(self, summary):
+        self.assertNotIn("lost", summary)
+        for row in summary["ledger"]:
+            self.assertEqual(row["classification"], "unknown")
+            self.assertNotIn("stream", row)  # Historical attach replies are not a forwarding witness.
+            self.assertNotIn("non_delivery", row)
+            for signal in row["associated_signals"]:
+                self.assertEqual(signal["classification"], "unknown")
+
+    def test_late_complete_precedes_associated_error_without_clearing_deadline_miss(self):
         ledger = self.ledger()
-        ledger.finish("K00000Z")
         ledger.observe("K00000Z", 3.5)
-        metrics = self.metrics(errors=[{"at_s": 1.5, "stream": 7, "connection": 0, "kind": "not_found"}])
-        summary = self.summary(ledger, metrics)
+        summary = self.summary(ledger, self.metrics(errors=[self.error()]))
         self.assertEqual(summary["missed_deadline"], ["K00000Z"])
-        self.assertEqual(summary["lost"], [])
-        self.assertEqual(summary["ledger"][0]["seen_s"], 3.5)
+        self.assertNotIn("lost", summary)
+        row = summary["ledger"][0]
+        self.assertEqual((row["classification"], row["seen_s"]), ("observed", 3.5))
+        self.assertEqual(row["associated_signals"][0]["classification"], "unknown")
         self.assertEqual(summary["p99_ms"], 2500)
         self.assertIn("key_p99_ms", probe.exceeded({**Budgets.within, "key_p99_ms": summary["p99_ms"]}))
 
-    def test_unseen_alone_is_not_proven_loss(self):
-        ledger = self.ledger()
-        ledger.finish("K00000Z")
-        summary = self.summary(ledger)
-        self.assertEqual(summary["missed_deadline"], ["K00000Z"])
-        self.assertEqual(summary["lost"], [])
-        self.assertIsNone(summary["ledger"][0]["seen_s"])
-        self.assertEqual(summary["ledger"][0]["stream"], 7)
-        self.assertEqual(summary["ledger"][0]["flood_stream"], 9)
+    def test_stream_error_may_be_resize_close_or_backend_output_error_not_key_rejection(self):
+        summary = self.summary(self.ledger(), self.metrics(errors=[self.error()]))
+        self.assert_unknown(summary)
+        self.assertEqual(summary["ledger"][0]["associated_signals"][0]["method"], "stream.error")
 
-    def test_same_stream_error_during_key_window_is_positive_signal(self):
-        ledger = self.ledger()
-        ledger.finish("K00000Z")
-        summary = self.summary(ledger, self.metrics(errors=[{"at_s": 1.5, "stream": 7, "connection": 0, "kind": "overloaded"}]))
-        self.assertEqual(summary["lost"], ["K00000Z"])
-        self.assertEqual(summary["ledger"][0]["non_delivery"][0]["kind"], "overloaded")
+    def test_prior_attach_and_closure_do_not_witness_current_key_stream(self):
+        attach = {"at_s": 1.2, "method": "resource.attach", "stream": 8, "connection": 1, "resource": "idle"}
+        metrics = self.metrics(closures=[self.close()], attaches=[attach])
+        summary = self.summary(self.ledger(), metrics)
+        self.assert_unknown(summary)
+        signals = summary["ledger"][0]["associated_signals"]
+        self.assertEqual([s["method"] for s in signals], ["resource.attach"])
+        self.assertEqual(signals[0]["stream"], 8)
 
-    def test_other_stream_or_earlier_error_is_not_key_loss(self):
-        ledger = self.ledger()
-        ledger.finish("K00000Z")
-        metrics = self.metrics(errors=[
-            {"at_s": 1.5, "stream": 9, "connection": 0, "kind": "not_found"},
-            {"at_s": .5, "stream": 7, "connection": 0, "kind": "not_found"}],
-            closures=[{"at_s": 1.5, "stream": 7, "connection": 0, "reason": {"reason": "slow_consumer"}}])
-        self.assertEqual(self.summary(ledger, metrics)["lost"], [])
+    def test_ignored_or_early_closed_attach_reply_is_only_historical_signal(self):
+        attach = {"at_s": 1.2, "method": "resource.attach", "stream": 8, "connection": 0, "resource": "idle"}
+        summary = self.summary(self.ledger(), self.metrics(attaches=[attach], closures=[self.close(1.3, stream=8)]))
+        self.assert_unknown(summary)
+        self.assertEqual(len(summary["ledger"][0]["associated_signals"]), 2)
 
-    def test_error_is_not_assigned_to_an_earlier_key_window(self):
+    def test_all_streams_in_window_are_associated_without_claiming_a_current_mapping(self):
+        summary = self.summary(self.ledger(), self.metrics(errors=[self.error(stream=9)], closures=[self.close(2)]))
+        self.assert_unknown(summary)
+        self.assertEqual([s["stream"] for s in summary["ledger"][0]["associated_signals"]], [9, 7])
+
+    def test_delayed_prior_error_in_later_key_window_remains_unknown(self):
         ledger = self.ledger()
-        ledger.finish("K00000Z")
         ledger.sent("K00001Z", 2)
         ledger.finish("K00001Z")
-        metrics = self.metrics(errors=[{"at_s": 2.5, "stream": 7, "connection": 0, "kind": "not_found"}])
-        self.assertEqual(self.summary(ledger, metrics)["lost"], ["K00001Z"])
-
-    def test_closed_before_send_requires_same_connection_and_current_stream(self):
-        close = {"at_s": .5, "stream": 7, "connection": 0, "reason": {"reason": "slow_consumer"}}
-        ledger = self.ledger()
-        ledger.finish("K00000Z")
-        self.assertEqual(self.summary(ledger, self.metrics(closures=[close]))["lost"], ["K00000Z"])
-        for connection, stream in [(0, 8), (1, 7)]:
-            with self.subTest(connection=connection, stream=stream):
-                attach = {"at_s": .8, "stream": stream, "connection": connection, "resource": "idle"}
-                self.assertEqual(self.summary(ledger, self.metrics(closures=[close], attaches=[attach]))["lost"], [])
+        summary = self.summary(ledger, self.metrics(errors=[self.error(2.5)]))
+        self.assert_unknown(summary)
+        self.assertEqual(summary["ledger"][0]["associated_signals"], [])
+        self.assertEqual(len(summary["ledger"][1]["associated_signals"]), 1)
 
     def test_existing_capture_retains_a_late_prior_token(self):
         ledger = self.ledger()
-        ledger.finish("K00000Z")
         ledger.sent("K00001Z", 3.2)
         ledger.observe("K00000Z\nK00001Z", 3.3)
         ledger.finish("K00001Z")
         summary = self.summary(ledger)
         self.assertEqual(summary["missed_deadline"], ["K00000Z"])
-        self.assertEqual(summary["lost"], [])
+        self.assertEqual([r["classification"] for r in summary["ledger"]], ["observed", "observed"])
         self.assertEqual(summary["samples"], 2)
 
-    def test_cross_process_origins_are_correlated(self):
-        ledger = self.ledger()
-        ledger.finish("K00000Z")
-        metrics = self.metrics(errors=[{"at_s": 2.5, "stream": 7, "connection": 0, "kind": "not_found"}])
+    def test_cross_process_origins_only_correlate_signal_time(self):
+        metrics = self.metrics(errors=[self.error(2.5)])
         metrics["started_unix_s"] = 999
-        metrics["stream_attachments"][0]["at_s"] = 1
-        metrics["stream_attachments"][1]["at_s"] = 1
-        summary = self.summary(ledger, metrics)
-        self.assertEqual(summary["lost"], ["K00000Z"])
-        self.assertEqual(summary["ledger"][0]["non_delivery"][0]["at_s"], 1.5)
+        for attach in metrics["stream_attachments"]:
+            attach["at_s"] = 1
+        summary = self.summary(self.ledger(), metrics)
+        self.assert_unknown(summary)
+        self.assertEqual(summary["ledger"][0]["associated_signals"][0]["at_s"], 1.5)
 
     def test_ledger_is_bounded_and_eviction_is_explicit(self):
         ledger = probe.KeyLedger(1000, capacity=2)
@@ -127,24 +132,74 @@ class DeliveryEvidence(unittest.TestCase):
             ledger.finish(token)
         summary = self.summary(ledger)
         self.assertEqual(summary["ledger_dropped"], 1)
+        self.assertFalse(summary["stream_evidence_complete"])
+        self.assertEqual(summary["evidence_status"], "evidence incomplete")
         self.assertEqual([r["token"] for r in summary["ledger"]], ["K00001Z", "K00002Z"])
         self.assertEqual(len(ledger.by_token), 2)
 
     def test_partial_ledger_on_exception_still_marks_elapsed_deadline(self):
-        ledger = self.ledger()  # No finish call: the probe can fail while waiting.
-        summary = self.summary(ledger)
-        self.assertEqual(summary["missed_deadline"], ["K00000Z"])
-        self.assertEqual(summary["lost"], [])
+        ledger = probe.KeyLedger(1000)
+        ledger.sent("K00000Z", 1)  # No finish call: the probe failed while waiting.
+        self.assertEqual(self.summary(ledger)["missed_deadline"], ["K00000Z"])
         ledger.observe("K00000Z", 3.5)
         self.assertEqual(self.summary(ledger)["missed_deadline"], ["K00000Z"])
 
-    def test_incomplete_stream_evidence_is_explicit(self):
+    def test_each_missing_required_array_suppresses_all_association(self):
+        for field in ("stream_attachments", "stream_errors", "stream_closures"):
+            with self.subTest(field=field):
+                metrics = self.metrics(errors=[self.error()], closures=[self.close()])
+                del metrics[field]
+                summary = self.summary(self.ledger(), metrics)
+                self.assert_unknown(summary)
+                self.assertFalse(summary["stream_evidence_complete"])
+                self.assertEqual(summary["evidence_status"], "evidence incomplete")
+                self.assertEqual(summary["ledger"][0]["associated_signals"], [])
+
+    def test_dropped_metadata_cannot_infer_old_stream_loss_or_associate_signals(self):
+        metrics = self.metrics(errors=[self.error()], closures=[self.close()])
+        metrics["stream_events_dropped"] = 1  # A newer attachment may be missing.
+        summary = self.summary(self.ledger(), metrics)
+        self.assert_unknown(summary)
+        self.assertEqual(summary["ledger"][0]["associated_signals"], [])
+        self.assertEqual(summary["ledger"][0]["evidence_status"], "evidence incomplete")
+
+    def test_capture_remains_positive_when_stream_metadata_is_incomplete(self):
         ledger = self.ledger()
-        ledger.finish("K00000Z")
-        self.assertFalse(self.summary(ledger, {})["stream_evidence_complete"])
-        metrics = self.metrics()
-        metrics["stream_events_dropped"] = 1
-        self.assertFalse(self.summary(ledger, metrics)["stream_evidence_complete"])
+        ledger.observe("K00000Z", 3.5)
+        summary = self.summary(ledger, {})
+        self.assertEqual(summary["ledger"][0]["classification"], "observed")
+        self.assertEqual(summary["ledger"][0]["associated_signals"], [])
+        self.assertEqual(summary["missed_deadline"], ["K00000Z"])
+        self.assertFalse(summary["stream_evidence_complete"])
+
+    def test_malformed_origins_arrays_ids_and_categories_are_incomplete(self):
+        changes = [("started_unix_s", None), ("started_unix_s", True), ("started_unix_s", float("nan")),
+                   ("started_unix_s", float("inf")), ("stream_events_dropped", True),
+                   ("stream_events_cap", 999), ("stream_errors", {}), ("stream_closures", None)]
+        for field, value in changes:
+            with self.subTest(field=field, value=value):
+                metrics = self.metrics(errors=[self.error()])
+                metrics[field] = value
+                self.assertFalse(probe.stream_evidence_complete(metrics))
+                self.assertEqual(self.summary(self.ledger(), metrics)["ledger"][0]["associated_signals"], [])
+        for field, value in [("stream", "7"), ("stream", True), ("stream", -1), ("stream", {}),
+                             ("stream", 2**64), ("method", {}), ("at_s", float("nan")),
+                             ("kind", "private text"), ("kind", "x" * 10000), ("private", "text")]:
+            with self.subTest(field=field, value=value):
+                metrics = self.metrics(errors=[self.error()])
+                metrics["stream_errors"][0][field] = value
+                self.assertFalse(probe.stream_evidence_complete(metrics))
+        self.assertFalse(probe.stream_evidence_complete(None))
+
+    def test_long_resources_and_uncategorical_reasons_are_incomplete(self):
+        metrics = self.metrics(closures=[self.close(1.5)])
+        for value in ["private text", "x" * 10000, {"reason": "closed", "message": "private"}]:
+            with self.subTest(value=value):
+                bad = copy.deepcopy(metrics)
+                bad["stream_closures"][0]["reason"] = value
+                self.assertFalse(probe.stream_evidence_complete(bad))
+        metrics["stream_attachments"][0]["resource"] = "r" * 129
+        self.assertFalse(probe.stream_evidence_complete(metrics))
 
 
 if __name__ == "__main__":

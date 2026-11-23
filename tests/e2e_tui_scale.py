@@ -5,9 +5,9 @@ CPU is percent of one core; latency is tmux send-keys completion to first captur
 Performance budgets are enforced, as are correctness and owned-process cleanup. BUDGETS are set from measured
 results (docs/test-plan.md, "Scale budgets"): twice the worst of the current check.sh full runs, rounded up to 10;
 frame-rate limits are the renderer's design caps (background redraw is capped near 60 fps).
-Receipts distinguish screen deadline misses from positive same-stream rejection/closure signals.
-Late complete tokens are never called lost. Key/stream evidence is capped with explicit dropped counts;
-missing or truncated evidence fails the probe rather than suggesting complete delivery diagnostics.
+Receipts record screen deadline misses and associated historical stream signals, never inferred loss.
+A complete token is positive screen evidence even when late. Key/stream evidence is capped with explicit
+dropped counts; missing or truncated metadata is labelled incomplete and is not associated with keys.
 """
 import argparse
 from collections import deque
@@ -31,6 +31,53 @@ BUDGETS = {"cpu_pct_one_core": (40, 18.0), "rss_peak_mib": (80, 38.6), "key_p99_
 KEY_DEADLINE_SECONDS = 2
 KEY_LEDGER_CAP = 512
 TOKEN = re.compile(r"K[0-9]{5}Z")
+STREAM_EVENT_CAP = 256
+ERROR_KINDS = {"invalid", "conflict", "not_found", "unavailable", "forbidden", "backend", "disconnected",
+               "io", "durability_unconfirmed", "timeout", "overloaded", "unsupported", "stale_generation", "too_large", "other"}
+CLOSE_REASONS = {"slow_consumer", "closed", "detached", "finished", "invalid", "provider_disconnected", "viewer_disconnected", "other"}
+
+
+def stream_evidence_complete(metrics):
+    """Validate the bounded categorical schema before associating historical signals."""
+    def number(value):
+        return type(value) in (int, float) and 0 <= value <= 1e15  # Also excludes NaN/infinity.
+    def ident(value):
+        return type(value) is int and 0 <= value < 2**64
+    def resource(value):
+        return (isinstance(value, str) and 0 < len(value) <= 128 and value.isascii() and
+                all(c.isalnum() or c in "-._:" for c in value))
+    if not isinstance(metrics, dict) or not number(metrics.get("started_unix_s")):
+        return False
+    if type(metrics.get("stream_events_dropped")) is not int or metrics["stream_events_dropped"] != 0:
+        return False
+    if type(metrics.get("stream_events_cap")) is not int or metrics["stream_events_cap"] != STREAM_EVENT_CAP:
+        return False
+    total = 0
+    for field, methods, payload in (
+            ("stream_attachments", {"resource.attach"}, "resource"),
+            ("stream_errors", {"stream.error"}, "kind"),
+            ("stream_closures", {"stream.closed", "stream.gap"}, "reason")):
+        events = metrics.get(field)
+        if not isinstance(events, list):
+            return False
+        total += len(events)
+        if total > STREAM_EVENT_CAP:
+            return False
+        for event in events:
+            if not isinstance(event, dict) or set(event) != {"at_s", "method", "connection", "stream", payload}:
+                return False
+            if (not isinstance(event["method"], str) or event["method"] not in methods or not number(event["at_s"]) or
+                    not ident(event["stream"]) or not ident(event["connection"])):
+                return False
+            value = event[payload]
+            if payload == "resource" and not resource(value):
+                return False
+            if payload == "kind" and (not isinstance(value, str) or value not in ERROR_KINDS):
+                return False
+            if payload == "reason" and (not isinstance(value, dict) or set(value) != {"reason"} or
+                    not isinstance(value["reason"], str) or value["reason"] not in CLOSE_REASONS):
+                return False
+    return True
 
 
 class KeyLedger:
@@ -65,41 +112,33 @@ class KeyLedger:
             record["seen_s"] - record["sent_s"] > KEY_DEADLINE_SECONDS)
 
     def summary(self, metrics, idle_resource, flood_resource, elapsed_s):
-        complete = metrics.get("stream_events_dropped") == 0 and "started_unix_s" in metrics
-        origin = metrics.get("started_unix_s", self.started_unix_s) - self.started_unix_s
-        attaches = metrics.get("stream_attachments", [])
-        errors = metrics.get("stream_errors", [])
-        closures = metrics.get("stream_closures", [])
-        records = [dict(row, stream=None, connection=None, flood_stream=None, non_delivery=[]) for row in self.records]
+        complete = self.dropped == 0 and stream_evidence_complete(metrics)
+        origin = metrics["started_unix_s"] - self.started_unix_s if complete else 0
+        events = sorted((event for field in ("stream_attachments", "stream_errors", "stream_closures")
+                         for event in metrics[field]), key=lambda event: event["at_s"]) if complete else []
+        records = [dict(row, classification="observed" if row["seen_s"] is not None else "unknown",
+                        associated_signals=[], evidence_status="complete" if complete else "evidence incomplete")
+                   for row in self.records]
         for index, row in enumerate(records):
             sent = row["sent_s"]
             row["missed_deadline"] |= (row["seen_s"] is None and elapsed_s - sent > KEY_DEADLINE_SECONDS)
             if row["seen_s"] is not None:
                 row["missed_deadline"] |= row["seen_s"] - sent > KEY_DEADLINE_SECONDS
             end = records[index + 1]["sent_s"] if index + 1 < len(records) else elapsed_s
-            def attachment(resource):
-                candidates = [a for a in attaches if a["resource"] == resource and a["at_s"] + origin <= sent]
-                return max(candidates, key=lambda a: a["at_s"], default={})
-            idle, flood = attachment(idle_resource), attachment(flood_resource)
-            row.update(stream=idle.get("stream"), connection=idle.get("connection"), flood_stream=flood.get("stream"))
-            if not idle or row["seen_s"] is not None:
-                continue  # A full observed token is positive delivery evidence, even when late.
-            same_stream = lambda event: (event.get("connection"), event.get("stream")) == (row["connection"], row["stream"])
-            for error in errors:
-                at = error["at_s"] + origin
-                if same_stream(error) and sent <= at < end:
-                    row["non_delivery"].append({"signal": "stream.error", "at_s": at, "kind": error["kind"]})
-            for close in closures:
-                at = close["at_s"] + origin
-                if same_stream(close) and at <= sent:
-                    row["non_delivery"].append({"signal": "closed_before_send", "at_s": at, "reason": close["reason"]})
+            if row["missed_deadline"]:
+                # Time-window association only: neither stream errors nor attach replies identify
+                # a key's forwarding stream, acceptance, rejection or eventual delivery.
+                row["associated_signals"] = [dict(event, at_s=event["at_s"] + origin, classification="unknown") for event in events
+                                             if sent <= event["at_s"] + origin < end]
         latencies = sorted((row["seen_s"] - row["sent_s"]) * 1000 for row in records if row["seen_s"] is not None)
         return {"samples": len(latencies), "missed_deadline": [r["token"] for r in records if r["missed_deadline"]],
-                "lost": [r["token"] for r in records if r["non_delivery"]],
+                "resources": {"idle": idle_resource, "flood": flood_resource},
+                "signal_scope": "historical time-window association, not a forwarding witness",
                 "p50_ms": latencies[len(latencies)//2] if latencies else None,
                 "p99_ms": latencies[min(len(latencies)-1, int(len(latencies)*.99))] if latencies else None,
                 "max_ms": max(latencies, default=None), "ledger": records, "ledger_dropped": self.dropped,
-                "started_unix_s": self.started_unix_s, "stream_evidence_complete": complete}
+                "started_unix_s": self.started_unix_s, "stream_evidence_complete": complete,
+                "evidence_status": "complete" if complete else "evidence incomplete"}
 
 
 def exceeded(measured):
@@ -321,7 +360,7 @@ def main():
             "metrics": metrics})
         over = exceeded({**receipt["tui"], "key_p99_ms": receipt["keys"]["p99_ms"]})
         receipt["budgets_exceeded"] = over
-        receipt["result"] = "pass" if workload_valid and not keys["missed_deadline"] and not keys["lost"] and not keys["ledger_dropped"] and keys["stream_evidence_complete"] and not events["missed"] and keys["samples"] and not over and end_snapshot["extensions"]["sidebar"]["status"] == "running" and end_snapshot["extensions"]["sidebar"]["crashes"] == 0 else "fail"
+        receipt["result"] = "pass" if workload_valid and not keys["missed_deadline"] and not keys["ledger_dropped"] and keys["stream_evidence_complete"] and not events["missed"] and keys["samples"] and not over and end_snapshot["extensions"]["sidebar"]["status"] == "running" and end_snapshot["extensions"]["sidebar"]["crashes"] == 0 else "fail"
     except Exception as error:
         receipt.update(result="fail", error=f"{type(error).__name__}: {error}")
         try:
