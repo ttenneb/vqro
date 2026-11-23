@@ -38,11 +38,34 @@ ENV = {"HOME": str(R / "home"), "PATH": "/usr/bin:/bin", "VQRO_STATE_DIR": str(R
 LOG = open(OUT / "timeline.log", "a", buffering=1)
 T0 = time.monotonic()
 def log(*a): LOG.write(f"{time.monotonic()-T0:7.1f}s {' '.join(map(str, a))}\n")
-procs = {}
+procs, outs = {}, {}
+PHASE = ["setup"]
 RESULT = [["did not finish"]]
 def start(name, argv, out):
     procs[name] = subprocess.Popen([*(["taskset", "-c", CPUS] if CPUS else []), *map(str, argv)], env=ENV, stdout=open(out, "ab"), stderr=subprocess.STDOUT)
+    outs[name] = out
     log("start", name, procs[name].pid)
+
+class ChildDied(Exception): pass
+def check_alive(names):
+    """Fail at once, naming the process, its exit status and its last output, when a watched child has exited."""
+    for n in names:
+        p = procs.get(n)
+        if p is None or p.poll() is None: continue
+        status = f"exit status {p.returncode}" if p.returncode >= 0 else f"signal {-p.returncode}"
+        try:
+            with open(outs[n], "rb") as f:
+                f.seek(max(0, f.seek(0, os.SEEK_END) - 1500)); tail = f.read().decode(errors="replace").strip()
+        except OSError: tail = ""
+        raise ChildDied(f"{n} (pid {p.pid}) exited ({status}) during {PHASE[0]}; last output: {tail or '(none)'}")
+
+def wait_until(what, ready, watch):
+    """Wait for `ready()`, stopping as soon as any watched child exits instead of waiting forever."""
+    PHASE[0] = what
+    while True:
+        check_alive(watch)
+        if ready(): return
+        time.sleep(0.05)
 
 def rpc(method, params):
     s = socket.socket(socket.AF_UNIX); s.connect(str(R / "v.sock")); f = s.makefile("rb")
@@ -63,7 +86,6 @@ def pinfo(pid):
     except OSError:
         return None
 
-PHASE = ["setup"]
 def sampler():
     prev = {}
     with open(OUT / "samples.jsonl", "a") as f:
@@ -82,19 +104,21 @@ STOP = threading.Event()
 
 def at(t):
     t *= SCALE
-    while time.monotonic() - T0 < t: time.sleep(0.2)
+    while time.monotonic() - T0 < t:
+        check_alive(("core", "provider"))
+        time.sleep(0.2)
 
 def provider_argv():
     return [BIN / "vqro-fake-items", "--agents", AGENTS, "--rate", RATE, "--text", TEXT, "--burst-agents", BURST_AGENTS, "--burst-every", BURST_EVERY]
 
 try:
     start("core", [BIN / "vqro", "serve", "--fake"], OUT / "core.log")
-    while not (R / "v.sock").exists(): time.sleep(0.05)
+    wait_until("core socket", (R / "v.sock").exists, ("core",))
     start("provider", provider_argv(), OUT / "provider.log")
-    while True:
+    def registered():
         r = rpc("resource.list", {})
-        if sum(1 for x in r["result"]["resources"] if x["kind"] == "agent") >= AGENTS: break
-        time.sleep(0.2)
+        return sum(1 for x in r["result"]["resources"] if x["kind"] == "agent") >= AGENTS
+    wait_until("agent registration", registered, ("core", "provider"))
     total = int(400 * SCALE)
     for v in ("v1", "v2", "v3"):
         start(v, [BIN / "vqro-items-viewer", "--name", v, "--seconds", total + 300, "--stop-file", STOP_FILE, "--out", OUT / f"{v}.json"], OUT / f"{v}.out")
@@ -160,6 +184,8 @@ try:
     summary["coverage"] = {v: {k: summary[v]["counters"].get(k, 0) for k in ("opens_continue", "opens_reset", "closed_slow", "gaps_retention", "in_stream_resets")} for v in ("v1", "v2", "v3")}
     (OUT / "summary.json").write_text(json.dumps(summary, indent=1))
     RESULT[0] = failures
+except ChildDied as e:
+    log("failed:", e); RESULT[0] = [str(e)]
 finally:
     STOP.set()
     try: rpc("core.shutdown", {})
