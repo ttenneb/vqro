@@ -149,13 +149,24 @@ class CutoverTests(unittest.TestCase):
 
     def test_required_incomplete_or_malformed_markers_never_invoke_actual_callback(self):
         facts = self.ext.source['data']['agent']
-        for markers in (['state'], ['_claude.input_ledger'], ['_claude.input_ledger.pending'],
+        for markers in (['lifecycle'], ['v'], ['state'], ['_claude.input_ledger'], ['_claude.input_ledger.pending'],
                         ['background'], ['background[0]'], ['session'], ['session.id'],
                         ['availability.native'], ['availability.native.episode'], ['epoch'],
                         ['account.id'], ['caps.claude.restart'], None, {}, [None], ['']):
             facts['incomplete'] = markers
             self.refused()
         facts.pop('incomplete')
+
+    def test_final_source_incomplete_lifecycle_never_dispatches(self):
+        reads = []
+        def changed(method, args):
+            if method == 'resource.list':
+                reads.append(method)
+                if len(reads) == 2:
+                    self.ext.source['data']['agent']['incomplete'] = ['lifecycle']
+        self.ext.mutate = changed
+        self.refused()
+        self.assertEqual(len(reads), 2)
 
     def test_unrelated_incomplete_markers_do_not_disable_valid_episode(self):
         self.ext.source['data']['agent']['incomplete'] = ['history', 'items', 'session.title', 'queue']

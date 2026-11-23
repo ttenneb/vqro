@@ -41,7 +41,7 @@ def eligible_episode(row, automatic=True):
     if type(automatic) is not bool or not isinstance(row, dict) or row.get('kind') != 'agent' or not policy.live(row):
         return None
     facts = policy.facts(row)
-    required = ('state', '_claude.input_ledger', 'session.id', 'epoch', 'account.id', 'caps.' + OP,
+    required = ('v', 'lifecycle', 'state', '_claude.input_ledger', 'session.id', 'epoch', 'account.id', 'caps.' + OP,
                 'availability.native.subscription_limit', 'availability.native.episode',
                 'availability.native.session_id', 'availability.native.terminal_reason')
     if automatic:
