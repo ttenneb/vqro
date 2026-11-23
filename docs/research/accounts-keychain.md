@@ -1,4 +1,4 @@
-# API-key keychains and host launch helper
+# Credential keychains and host launch helper
 
 Slice 4 implementation boundary: `extensions/accounts_keychain.py` and
 `extensions/accounts_keychain_helper.py`. Stdlib-only; secrets stay on the execution host.
@@ -13,7 +13,10 @@ also not exercised against a real keychain; fake tests prove plumbing, not OS be
 `retrieve(handle) -> Secret` (private Python only),
 `delete(handle) -> deleted | not_found`, failures `KeychainError.status` with fixed safe
 text. All adapters use random 32-hex handles and a versioned service namespace. No
-subscription tokens or provider refresh ownership. Secrets are nonempty UTF-8 text,
+provider refresh ownership. The approved Claude subscription mode stores only a token
+made by the human with native `claude setup-token`, never a copied refresh-token store.
+The existing versioned keychain namespace is retained so existing API-key references
+remain valid. Secrets are nonempty UTF-8 text,
 at most 2048 bytes, without NUL/CR/LF; no trimming. Secret repr/str is redacted.
 
 The helper is invoked via an explicitly configured execution-host Python and absolute
@@ -28,6 +31,15 @@ host helper path, not the coordinator's default Python or an inferred remote pat
   across reader crash or loss.
   No mutation is retried automatically. It refuses non-terminal input
   and getpass's echo-on fallback. Do not type secrets into agent messages or commands.
+- `... store --kind claude_subscription`: the human enters a previously minted
+  Claude setup token at the hidden terminal prompt. Only the opaque handle is returned;
+  no browser/code exchange, native credential-file read or custom refresh is performed.
+- `... launch --handle HANDLE --provider anthropic --kind claude_subscription -- CLAUDE ...`:
+  the host helper resolves the handle privately and sets `CLAUDE_CODE_OAUTH_TOKEN` only
+  in the directly executed Claude process's environment. Ordinary API-key launches
+  retain their existing default mode. This helper is the credential boundary used when
+  vqro switches the agent automatically by restarting it on the other account; native
+  same-session resume and continuation are separate adapter/common-policy mechanisms.
 - `... delete --handle HANDLE`: an explicit irreversible effect. Failed/unconfirmed
   deletion retains the registry reference unless a human explicitly chooses to forget.
 - `... launch --handle HANDLE --provider openai -- RUNTIME ARG ...`: retrieve on host,
@@ -58,8 +70,11 @@ substitution, or fake in-memory fallback. Keychain operations are not transactio
 store before committing its handle, and report an orphan handle if that commit fails.
 A timeout/interruption during mutation is indeterminate, not a rollback or permission
 to replay it. Store exceptions retain the preallocated cleanup handle; the helper
-records that non-secret handle before entering the OS boundary, not only after success. Environment access by same-user tooling/admins, runtime children or crash
-dumps is outside this protection. Python cannot guarantee complete zeroization.
+records that non-secret handle before entering the OS boundary, not only after success. The token is kept in the system keychain and passed to the Claude process only in
+its environment when vqro starts it; it is never written to files, logs, workspace data
+or command lines, but programs running as your user (or an administrator) can read a
+running process's environment. Runtime children or crash dumps are also outside this
+protection. Python cannot guarantee complete zeroization.
 
 ## Linux / Windows evidence and limitations
 

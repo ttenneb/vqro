@@ -17,12 +17,20 @@ from accounts_keychain import KeychainError, Secret, backend, valid_handle
 
 PROVIDER_ENV = {'openai': 'OPENAI_API_KEY', 'anthropic': 'ANTHROPIC_API_KEY'}
 CONFLICTING_ENV = frozenset((*PROVIDER_ENV.values(), 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'))
+CREDENTIAL_KINDS = ('api_key', 'claude_subscription')
 
 
-def launch(handle, provider, argv, *, store, environment=None, execute=os.execvpe):
+def credential_env(provider, credential_kind):
+    if credential_kind == 'claude_subscription' and provider == 'anthropic':
+        return 'CLAUDE_CODE_OAUTH_TOKEN'
+    if credential_kind == 'api_key' and provider in PROVIDER_ENV:
+        return PROVIDER_ENV[provider]
+    raise KeychainError('unsupported')
+
+
+def launch(handle, provider, argv, *, store, environment=None, execute=os.execvpe, credential_kind='api_key'):
     valid_handle(handle)
-    if provider not in PROVIDER_ENV:
-        raise KeychainError('unsupported')
+    target_env = credential_env(provider, credential_kind)
     if not isinstance(argv, list) or not 1 <= len(argv) <= 128 or any(
             not isinstance(arg, str) or not arg or '\0' in arg for arg in argv):
         raise KeychainError('invalid_launch')
@@ -30,13 +38,13 @@ def launch(handle, provider, argv, *, store, environment=None, execute=os.execvp
     for key in CONFLICTING_ENV:
         env.pop(key, None)
     secret = store.retrieve(handle)
-    env[PROVIDER_ENV[provider]] = secret.reveal()
+    env[target_env] = secret.reveal()
     try:
         execute(argv[0], argv, env)  # exactly once; no shell exports or core env RPC
     except OSError:
         raise KeychainError('unavailable') from None
     finally:
-        env.pop(PROVIDER_ENV[provider], None)
+        env.pop(target_env, None)
 
 
 def pending_store(handle):
@@ -44,7 +52,9 @@ def pending_store(handle):
     print(json.dumps({'status': 'pending_store', 'handle': handle}), file=sys.stderr, flush=True)
 
 
-def enter(*, store, read=getpass.getpass, terminal=None, announce=pending_store):
+def enter(*, store, read=getpass.getpass, terminal=None, announce=pending_store, credential_kind='api_key'):
+    if credential_kind not in CREDENTIAL_KINDS:
+        raise KeychainError('unsupported')
     if terminal is None:
         terminal = sys.stdin.isatty() and sys.stderr.isatty()
     if not terminal:
@@ -54,7 +64,8 @@ def enter(*, store, read=getpass.getpass, terminal=None, announce=pending_store)
             # getpass falls back to echoed stdin when it cannot disable echo.
             # Reject that fallback BEFORE it reads any input.
             warnings.simplefilter('error', getpass.GetPassWarning)
-            secret = Secret(read('API key (hidden): '))
+            prompt = 'Claude setup token (hidden): ' if credential_kind == 'claude_subscription' else 'API key (hidden): '
+            secret = Secret(read(prompt))
         handle = uuid.uuid4().hex
         announce(handle)
         try:
@@ -72,21 +83,35 @@ def enter(*, store, read=getpass.getpass, terminal=None, announce=pending_store)
 def main(argv=None, *, store_factory=backend):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='action', required=True)
-    commands.add_parser('store', help='Read an API key with hidden terminal input; print only its handle')
+    add = commands.add_parser('store', help='Read a credential with hidden terminal input; print only its handle')
+    add.add_argument('--kind', choices=CREDENTIAL_KINDS, default='api_key')
     delete = commands.add_parser('delete', help='Delete an explicitly selected handle')
     delete.add_argument('--handle', required=True)
+    check = commands.add_parser('check', help='Check host-local credential availability; never print the value')
+    check.add_argument('--handle', required=True)
+    check.add_argument('--provider', required=True, choices=tuple(PROVIDER_ENV))
+    check.add_argument('--kind', choices=CREDENTIAL_KINDS, default='api_key')
     start = commands.add_parser('launch', help='Resolve a host-local handle and directly launch the runtime')
     start.add_argument('--handle', required=True)
     start.add_argument('--provider', required=True, choices=tuple(PROVIDER_ENV))
+    start.add_argument('--kind', choices=CREDENTIAL_KINDS, default='api_key')
     start.add_argument('runtime', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     try:
         if args.action == 'launch':
             runtime = args.runtime[1:] if args.runtime[:1] == ['--'] else args.runtime
-            launch(args.handle, args.provider, runtime, store=store_factory())
+            launch(args.handle, args.provider, runtime, store=store_factory(), credential_kind=args.kind)
             return 0  # only reached with an injected exec in tests
-        if args.action == 'store':
-            print(json.dumps({'handle': enter(store=store_factory())}))
+        if args.action == 'check':
+            valid_handle(args.handle)
+            credential_env(args.provider, args.kind)
+            secret = store_factory().retrieve(args.handle)
+            if not isinstance(secret, Secret):
+                raise KeychainError('backend_error')
+            del secret
+            print(json.dumps({'status': 'ready'}))
+        elif args.action == 'store':
+            print(json.dumps({'handle': enter(store=store_factory(), credential_kind=args.kind)}))
         else:
             print(json.dumps({'status': store_factory().delete(args.handle)}))
         return 0

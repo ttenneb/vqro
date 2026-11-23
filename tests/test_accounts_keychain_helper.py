@@ -34,6 +34,76 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(env['VQRO_ACCOUNT'], original['VQRO_ACCOUNT'])
         store.retrieve.assert_called_once_with('a' * 32)
 
+    def test_claude_subscription_token_is_only_in_selected_child_environment(self):
+        store = Mock()
+        store.retrieve.return_value = keys.Secret('fake-claude-setup-token')
+        seen = []
+        original = {'PATH': '/fake', 'ANTHROPIC_API_KEY': 'ambient-key',
+                    'ANTHROPIC_AUTH_TOKEN': 'ambient-bearer', 'CLAUDE_CODE_OAUTH_TOKEN': 'old-token'}
+        output, error = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+            helper.launch('b' * 32, 'anthropic', ['claude', '--resume', 'native-session'],
+                          credential_kind='claude_subscription', store=store, environment=original,
+                          execute=lambda program, argv, env: seen.append((program, argv, dict(env))))
+        program, argv, env = seen[0]
+        self.assertEqual(env['CLAUDE_CODE_OAUTH_TOKEN'], 'fake-claude-setup-token')
+        self.assertNotIn('ANTHROPIC_API_KEY', env)
+        self.assertNotIn('ANTHROPIC_AUTH_TOKEN', env)
+        self.assertEqual(original['CLAUDE_CODE_OAUTH_TOKEN'], 'old-token')
+        self.assertNotIn('fake-claude-setup-token', repr((program, argv, output.getvalue(), error.getvalue())))
+        store.retrieve.assert_called_once_with('b' * 32)
+
+    def test_subscription_mode_rejects_wrong_provider_before_secret_access(self):
+        store = Mock()
+        for kind, provider in [('claude_subscription', 'openai'), ('unknown', 'anthropic')]:
+            with self.assertRaises(keys.KeychainError):
+                helper.launch('b' * 32, provider, ['claude'], credential_kind=kind,
+                              store=store, execute=Mock())
+        store.retrieve.assert_not_called()
+
+    def test_subscription_entry_uses_hidden_token_prompt_and_returns_only_handle(self):
+        store = Mock()
+        store.store.return_value = 'b' * 32
+        read = Mock(return_value='fake-claude-setup-token')
+        result = helper.enter(store=store, read=read, terminal=True, credential_kind='claude_subscription')
+        self.assertEqual(result, 'b' * 32)
+        self.assertIn('Claude setup token', read.call_args.args[0])
+        self.assertNotIn('fake-claude-setup-token', str(store.store.call_args))
+
+    def test_subscription_exec_failure_does_not_leak_or_retry(self):
+        store = Mock()
+        store.retrieve.return_value = keys.Secret('fake-claude-setup-token')
+        execute = Mock(side_effect=OSError('fake-claude-setup-token'))
+        with self.assertRaises(keys.KeychainError) as caught:
+            helper.launch('b' * 32, 'anthropic', ['claude'], credential_kind='claude_subscription',
+                          store=store, execute=execute)
+        self.assertNotIn('fake-claude-setup-token', str(caught.exception))
+        execute.assert_called_once()
+
+    def test_claude_preflight_reports_only_ready_and_does_not_execute(self):
+        store = Mock()
+        store.retrieve.return_value = keys.Secret('fake-claude-setup-token')
+        output, error = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+            result = helper.main(['check', '--handle', 'b' * 32, '--provider', 'anthropic',
+                                  '--kind', 'claude_subscription'], store_factory=lambda: store)
+        self.assertEqual(result, 0)
+        self.assertEqual(json.loads(output.getvalue()), {'status': 'ready'})
+        self.assertNotIn('fake-claude-setup-token', output.getvalue() + error.getvalue())
+        store.retrieve.assert_called_once_with('b' * 32)
+
+    def test_claude_preflight_refusal_is_safe_and_not_retried(self):
+        store = Mock()
+        store.retrieve.side_effect = RuntimeError('fake-claude-setup-token')
+        output, error = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+            result = helper.main(['check', '--handle', 'b' * 32, '--provider', 'anthropic',
+                                  '--kind', 'claude_subscription'], store_factory=lambda: store)
+        self.assertEqual(result, 1)
+        self.assertEqual(output.getvalue(), '')
+        self.assertEqual(json.loads(error.getvalue()), {'status': 'backend_error'})
+        store.retrieve.assert_called_once()
+
     def test_unknown_provider_and_invalid_argv_fail_before_retrieval(self):
         store = Mock()
         for provider, argv in [('other', ['runtime']), ('openai', []), ('openai', ['a\0'])]:
