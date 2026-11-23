@@ -48,6 +48,13 @@ def load():
 
 
 class SidebarTests(unittest.TestCase):
+    def test_unknown_command_is_honest_and_dim_but_default_is_known(self):
+        module = load(); ext = module["ext"]
+        for argv, expected, style in ((None, "unknown command", "dim"), ([], "default shell", None)):
+            ext.resources = {"r1": {"id": "r1", "kind": "terminal", "argv": argv, "state": "live"}}
+            row = next(x for x in module["build"]() if x.get("args", {}).get("resource") == "r1")
+            self.assertEqual((row["text"], row["style"]), (expected, style))
+
     def test_tier1_status_shows_only_where_the_terminal_reports_none(self):
         module = load(); ext = module["ext"]
         ext.resources = {

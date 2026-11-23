@@ -73,7 +73,7 @@ struct WireFacts {
     kind: String,
     state: String,
     name: Option<String>, title: Option<String>, cwd: Option<String>,
-    #[serde(default)] argv: Vec<String>,
+    #[serde(default)] argv: Option<Vec<String>>,
     #[serde(default)] status: Value,
     #[serde(default)] exit: Value,
     #[serde(default = "empty_object")] data: Value,

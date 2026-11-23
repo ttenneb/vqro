@@ -94,7 +94,7 @@ pub fn start_with_instance(name: String, instance: String, events: mpsc::Unbound
                         state: "live".into(),
                         status: Value::Null,
                         exit: Value::Null,
-                        argv: req.argv,
+                        argv: Some(req.argv),
                         data: json!({}),
                         cwd: req.cwd.clone(),
                     };

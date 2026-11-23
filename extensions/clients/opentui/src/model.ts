@@ -989,6 +989,11 @@ export function tabLabel(style: TabStyle, index: number, title: string): string 
   return ` ${number}${joiner}${title} `;
 }
 
+export function commandLabel(resource: Json): string {
+  const argv = resource?.argv;
+  return Array.isArray(argv) ? (argv[0] ?? "default shell") : "unknown command";
+}
+
 export const PROGRAM_TITLE_MAX = 24;
 
 /** The name a tab shows (ui_model::tabbar::tab_title): with `program_titles` (default on) a tab still named after its
@@ -998,8 +1003,7 @@ export function tabTitle(setting: Json, title: string, resource: Json): string {
   if (!on || !isObj(resource)) return title;
   const program = typeof resource.title === "string" ? resource.title.trim() : "";
   const named = typeof resource.name === "string" && resource.name !== "";
-  const argv0 = Array.isArray(resource.argv) && typeof resource.argv[0] === "string" ? resource.argv[0] : null;
-  const command = argv0 === null ? null : argv0.split("/").pop()!;
+  const command = commandLabel(resource).split("/").pop()!;
   if (!program || named || command === null || title !== command) return title;
   const chars = [...program];
   return chars.length > PROGRAM_TITLE_MAX ? chars.slice(0, PROGRAM_TITLE_MAX - 1).join("") + "…" : program;

@@ -173,7 +173,7 @@ try:
                                   "name": "e2e-rex", "cols": 80, "rows": 24})
     rid = r["resource"]["id"]
     check("spawn through the core keeps known creation argv", r.get("outcome") == "observed" and r["resource"]["provider"] == "rex"
-          and r["resource"].get("data", {}).get("argv_known") is True and r["resource"].get("argv", [])[:1] == ["/bin/sh"], json.dumps(r)[:300])
+          and "argv_known" not in r["resource"].get("data", {}) and r["resource"].get("argv", [])[:1] == ["/bin/sh"], json.dumps(r)[:300])
     time.sleep(0.5)
     a = c.call("resource.attach", {"resource": rid, "cols": 80, "rows": 24})
     sid = a["stream"]
@@ -219,7 +219,7 @@ try:
     check("provider killed -> its resources unavailable", bool(wait(lambda: by_id(c, keep).get("available") is False, 10)))
     check("provider restarted -> same resource id available again",
           bool(wait(lambda: by_id(c, keep).get("available") is True and providers(c)["rex"]["state"] == "connected"
-                    and by_id(c, keep).get("data", {}).get("argv_known") is False, 30)))
+                    and by_id(c, keep).get("argv") is None and "argv_known" not in by_id(c, keep).get("data", {}), 30)))
     check("same instance after provider restart", providers(c)["rex"]["instance"] == instance)
 
     # Rex server restart: same blocks run new programs, so the old ids retire.

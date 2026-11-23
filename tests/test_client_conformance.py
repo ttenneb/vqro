@@ -23,6 +23,13 @@ def workspace(snapshot):
 
 
 class Conformance(unittest.TestCase):
+    def test_command_label_distinguishes_unknown_and_default(self):
+        for resource in ({}, {"argv": None}):
+            self.assertEqual(model.command_label(resource), "unknown command")
+            self.assertEqual(model.tab_title(None, "unknown command", dict(resource, title="editor")), "editor")
+        self.assertEqual(model.command_label({"argv": []}), "default shell")
+        self.assertEqual(model.command_label({"argv": ["/bin/sh", "-l"]}), "/bin/sh")
+
     def test_panels(self):
         doc = fixture("panels.json")
         self.assertEqual(doc["base_features"], model.BASE_FEATURES)

@@ -119,12 +119,10 @@ community clients and observing our own private server's traffic; the Rex binary
   registration end releases creation metadata. Registration end also refuses late admissions from unfinished effects.
   A successfully observed argv lives in the Block's normal facts. Native creation followed by unavailable observation
   still reports the created ref with an outcome-unknown/no-retry error, never a fabricated lifecycle.
-- **R1 argv provenance / core follow-up.** `facts.data.argv_known` is true when the creation input is known, false
-  when it is not (lost metadata, externally created blocks, provider-restart rediscovery). In the latter case the
-  provider publishes `argv: []` as the current contract's placeholder, not evidence of a known empty input.
-  `provider-v0.md` section9.3 defaults omitted argv to []; `src/provider_wire.rs:76,87` and `adapter::ResourceFacts`
-  store a Vec, and null is not a supported unknown representation. Core files are unchanged. A future, separate
-  core change should represent unknown argv explicitly instead of requiring this provider-data provenance flag.
+- **R1 argv provenance.** The generic provider facts contract now represents unknown creation input as
+  `argv: null` (lost metadata, externally created blocks, provider-restart rediscovery). Known creation input,
+  including `[]` for default input, stays a list. `data.argv_known` is removed: all providers and clients use
+  the same representation (`provider-v0.md` §9.3), not a Rex-specific provenance flag.
 - The control reader emits pending lag after queue drain even without another native event. It does not cancel
   a partially parsed WebSocket read to do so.
 - Status replacement requires object records, nullable/string id and textual fields, and nullable/numeric

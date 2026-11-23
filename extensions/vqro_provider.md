@@ -47,7 +47,9 @@ helper does not launch runtimes or turn vqro into a workspace-process host.
 - `sync(resources, final=True)`: acknowledged chunk; `full_sync(iterable)` chunks a whole listing to the negotiated
   record bound. First sync must be acknowledged before SDK upserts; further upserts during chunked sync work.
 - `upsert(facts)` / `gone(ref, incarnation="", why={"reason":...})`: notifications, await socket write, **not core
-  application**. Required facts/types and the opaque data size are validated. No hidden resource persistence.
+  application**. Required facts/types and the opaque data size are validated. Facts `argv` is optional:
+  absent or `None` means unknown creation input, `[]` means known no arguments/default, and a list of strings
+  is known argv. Omitted argv no longer defaults to `[]`; old providers remain accepted. No hidden resource persistence.
 - `effect(op)` registers a native handler. Declared capabilities and handlers must both include the operation.
   Callback receives an Effect plus args. Valid results are dispatched/accepted/observed/rejected; rejected needs
   `{error:{kind,message}}`. Raise ProviderError for JSON-RPC errors. Unexpected handler failures are backend errors,

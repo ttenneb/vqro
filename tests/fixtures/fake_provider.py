@@ -1,7 +1,8 @@
 """External deterministic fake backend using only vqro_provider (no actual programs).
 
 Resource argv flags mirror src/adapter/fake.rs: --status-every-ms,
---status-phase-ms, --output-bytes-per-sec. This is a fixture, not a backend product.
+--status-phase-ms, --output-bytes-per-sec. --argv-unknown publishes unknown creation
+input while keeping fixture controls private. This is a fixture, not a backend product.
 """
 import argparse
 import asyncio
@@ -65,8 +66,8 @@ class Fake:
         ref = f"f{self.counter}"
         facts = {"ref": ref, "incarnation": "", "kind": "terminal", "state": "live",
                  "name": args.get("name"), "title": None, "cwd": args.get("cwd"),
-                 "argv": argv, "status": None, "exit": None}
-        term = {"facts": facts, "streams": set(), "status_task": None}
+                 "argv": None if "--argv-unknown" in argv else argv, "status": None, "exit": None}
+        term = {"facts": facts, "argv": argv, "streams": set(), "status_task": None}
         self.terms[ref] = term
         period = load_arg(argv, "--status-every-ms")
         if period:
@@ -83,7 +84,7 @@ class Fake:
         for stream in list(term["streams"]):
             await stream.close({"reason": "killed"})
         term["streams"].clear()
-        if "--gone-on-kill" in term["facts"]["argv"]:
+        if "--gone-on-kill" in term["argv"]:
             # Like a provider whose pane watcher reports the end before the kill reply (vqro-tmux with an open stream).
             await self.provider.gone(effect.ref, "", {"reason": "killed"})
         return {"outcome": "observed", "data": {"facts": deepcopy(term["facts"])}}
@@ -97,7 +98,7 @@ class Fake:
         stream.on_resize = lambda cols, rows: None
         stream.on_end = lambda: term["streams"].discard(stream)
         stream.offer(f"fake {stream.ref}\r\n".encode())
-        bps = load_arg(term["facts"]["argv"], "--output-bytes-per-sec")
+        bps = load_arg(term["argv"], "--output-bytes-per-sec")
         if bps:
             self.task(self.flood(term, stream, bps))
         return "none"

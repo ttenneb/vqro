@@ -32,6 +32,46 @@ async fn event_matching(rx:&mut IncomingReceiver,ty:&str,key:&str,value:&Value)-
     }).await.unwrap()
 }
 
+#[test]
+fn argv_wire_preserves_unknown_default_and_known_lists() {
+    for (argv, expected) in [(None, None), (Some(Value::Null), None),
+        (Some(json!([])), Some(vec![])), (Some(json!(["sh", "-l"])), Some(vec!["sh".into(), "-l".into()]))] {
+        let mut value = facts("argv");
+        value.as_object_mut().unwrap().remove("argv");
+        if let Some(argv) = argv { value["argv"] = argv; }
+        assert_eq!(vqro::provider_wire::parse_facts(value).unwrap().argv, expected);
+    }
+    for argv in [json!("sh"), json!([1]), json!({})] {
+        let mut value = facts("bad"); value["argv"] = argv;
+        assert!(vqro::provider_wire::parse_facts(value).is_err());
+    }
+}
+
+#[tokio::test]
+async fn argv_unknown_is_published_in_events_lists_and_snapshots() {
+    let e = env().await; let (provider, _) = peer(&e).await; let (viewer, mut events) = peer(&e).await;
+    let generation = provider.call("provider.register", registration("argv")).await.unwrap()["generation"].clone();
+    viewer.call("events.subscribe", json!({"types":["resource"]})).await.unwrap();
+    let mut unknown = facts("unknown"); unknown.as_object_mut().unwrap().remove("argv");
+    provider.call("provider.sync", json!({"generation":generation,"resources":[unknown],"final":true})).await.unwrap();
+    let id = e.core.lock().unwrap().resources.values().find(|r| r.adapter == "argv").unwrap().id.clone();
+    let event = event_matching(&mut events, "resource", "id", &json!(id)).await;
+    assert_eq!(event.get("argv"), Some(&Value::Null));
+    for method in ["resource.list", "workspace.snapshot"] {
+        let result = viewer.call(method, json!({})).await.unwrap();
+        let resource = result["resources"].as_array().unwrap().iter().find(|r| r["id"] == id).unwrap();
+        assert_eq!(resource.get("argv"), Some(&Value::Null));
+    }
+    let mut known = facts("unknown"); known["argv"] = json!(["sh"]);
+    provider.call("provider.sync", json!({"generation":generation,"resources":[known],"final":true})).await.unwrap();
+    let event = event_matching(&mut events, "resource", "id", &json!(id)).await;
+    assert_eq!(event["argv"], json!(["sh"]));
+    let mut unknown = facts("unknown"); unknown["argv"] = Value::Null;
+    provider.call("provider.sync", json!({"generation":generation,"resources":[unknown],"final":true})).await.unwrap();
+    let event = event_matching(&mut events, "resource", "id", &json!(id)).await;
+    assert_eq!(event.get("argv"), Some(&Value::Null));
+}
+
 #[tokio::test]
 async fn native_removal_reasons_and_effect_addresses_survive_the_public_event_path() {
     let e=env().await;let(provider,mut incoming)=peer(&e).await;let(control,mut events)=peer(&e).await;

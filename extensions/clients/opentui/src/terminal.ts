@@ -4,6 +4,7 @@
 // Resources). A viewer never answers terminal queries: the emulator's `response` bytes are dropped.
 import { EmbeddedTerminalRenderable, type KeyEvent, type MouseEvent } from "@opentui/core";
 import type { App, Rect } from "./app";
+import { commandLabel } from "./model";
 
 const CHUNK = 64 * 1024;
 const MAX_PASTE = 4 * 1024 * 1024;
@@ -198,7 +199,7 @@ export class Terminals {
     const t = this.terms.get(view);
     const v = a.ws.entries.get(`view/${a.shownView(view) ?? view}`) ?? {};
     const r = a.ws.resources.get(v.resource);
-    const name = v.title ?? r?.name ?? r?.argv?.[0] ?? fallback;
+    const name = v.title ?? r?.name ?? (r ? commandLabel(r) : fallback);
     const state = !r ? " (gone)" : r.available === false ? " (unavailable)" : r.state === "finished" ? " (finished)" : t?.closed ? ` (${t.closed}; reattaching)` : "";
     return `${name}${state}`;
   }

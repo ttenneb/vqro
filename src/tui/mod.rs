@@ -2011,7 +2011,7 @@ impl App {
     fn pick_lines(&self) -> Vec<String> {
         self.ws.resources
             .values()
-            .map(|r| format!("{}  {}  {}", r["id"].as_str().unwrap_or(""), r["name"].as_str().or_else(|| r["argv"][0].as_str()).unwrap_or(""), r["state"].as_str().unwrap_or("")))
+            .map(|r| format!("{}  {}  {}", r["id"].as_str().unwrap_or(""), r["name"].as_str().unwrap_or_else(|| crate::ui_model::tabbar::command_label(r)), r["state"].as_str().unwrap_or("")))
             .collect()
     }
 
@@ -3283,7 +3283,8 @@ impl App {
                     }
                     None => format!(" {rid} (gone) "),
                 };
-                let block = Block::bordered().title(title).border_style(border);
+                let title_style = if title.contains("unknown command") { Style::new().fg(pal.dim) } else { Style::new() };
+                let block = Block::bordered().title(Span::styled(title, title_style)).border_style(border);
                 let inner = block.inner(rect);
                 f.render_widget(block, rect);
                 if inner.width == 0 || inner.height == 0 {
@@ -3722,7 +3723,11 @@ impl App {
         self.hit.overlay_lines.clear();
         let mut state = ListState::default();
         state.select(Some(sel));
-        let list = List::new(items.into_iter().map(ListItem::new).collect::<Vec<_>>()).style(pal.style(None)).highlight_style(pal.selected());
+        let picking = matches!(self.overlay, Some(Overlay::Pick { .. }));
+        let list = List::new(items.into_iter().map(|text| {
+            let style = pal.style(if picking && text.contains("  unknown command  ") { Some("dim") } else { None });
+            ListItem::new(text).style(style)
+        }).collect::<Vec<_>>()).style(pal.style(None)).highlight_style(pal.selected());
         f.render_stateful_widget(list, list_area, &mut state);
         self.hit.overlay = Some((rect, list_area, state.offset()));
     }
@@ -3861,7 +3866,7 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
             hit.tabs.push((path.clone(), i, Rect { x, y: bar.y, width: w.min(bar.right().saturating_sub(x)), height: 1 }));
             x = x.saturating_add(w);
             // A tab whose programs ended (`state` hint from the tabs extension) is drawn dim, its title unchanged.
-            let ended = crate::ui_model::tabbar::tab_state(t).is_some();
+            let ended = crate::ui_model::tabbar::tab_state(t).is_some() || t["title"] == "unknown command";
             let style = match (i == active, tabstyle.chips) {
                 (true, _) if ended => Style::new().bg(pal.tab_active).fg(pal.tab_active_text).add_modifier(Modifier::DIM),
                 (true, _) => Style::new().bg(pal.tab_active).fg(pal.tab_active_text).add_modifier(Modifier::BOLD),
@@ -3951,7 +3956,7 @@ fn menu_lines(items: &[Item], icons: &Icons) -> Vec<String> {
 /// A terminal's name: one the user gave, else the title its program set (OSC 0/2, as the backend reports it), else
 /// its command.
 fn resource_name(r: &Value) -> Option<String> {
-    r["name"].as_str().or_else(|| r["title"].as_str().filter(|t| !t.trim().is_empty())).or_else(|| r["argv"][0].as_str()).map(String::from)
+    Some(r["name"].as_str().or_else(|| r["title"].as_str().filter(|t| !t.trim().is_empty())).unwrap_or_else(|| crate::ui_model::tabbar::command_label(r)).to_string())
 }
 
 #[cfg(test)]

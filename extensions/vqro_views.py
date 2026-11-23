@@ -14,7 +14,9 @@ def title(resource, resources):
     agent = next((r for r in resources.values() if r.get("kind") == "agent" and r.get("host") == rid), None)
     if agent:
         return label(agent.get("name") or "Agent") + " " + agent["id"] + " bridge"
-    return label(resource.get("name") or (resource.get("argv") or ["Resource"])[0].split("/")[-1])
+    argv = resource.get("argv")
+    command = (argv[0] if argv else "default shell") if isinstance(argv, list) else "unknown command"
+    return label(resource.get("name") or command.split("/")[-1])
 
 
 def terminal_target(ext, rid):

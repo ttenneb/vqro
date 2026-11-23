@@ -137,7 +137,6 @@ impl State {
                     let block = self.blocks.get_mut(&bid).unwrap();
                     block.revision = revision;
                     block.facts["argv"] = json!(argv);
-                    block.facts["data"]["argv_known"] = json!(true);
                     publications.push(Publication::Upsert(block.facts.clone()));
                 } else {
                     self.pending_admit(&bid)?;

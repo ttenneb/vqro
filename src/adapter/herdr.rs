@@ -547,7 +547,7 @@ fn facts(t: &Value) -> ResourceFacts {
         state: s("state").unwrap_or_else(|| "live".into()),
         status: t.get("status").cloned().unwrap_or(Value::Null),
         exit: json!({"reason": t.get("reason"), "exit_code": t.get("exit_code"), "signal": t.get("signal")}),
-        argv: t.get("argv").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(),
+        argv: t.get("argv").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()),
         data: t.get("_vqro_machine").map(|machine| json!({"machine": machine, "hc_address": t["address"]})).unwrap_or_else(|| json!({})),
         // The foreground process's folder (read about twice a second), else where it started.
         cwd: t.get("foreground").and_then(|f| f.get("cwd")).and_then(|c| c.as_str()).or_else(|| t.get("cwd").and_then(|c| c.as_str())).map(String::from),
@@ -586,6 +586,18 @@ mod qa_tests {
         let mut input=EventInput::default();assert!(input.push(&vec![b'x';MAX_NATIVE_RECORD_BYTES]).unwrap().is_empty());
         assert!(input.push(b"x").unwrap_err().to_string().contains("exceeds 16 MiB"));
     }
+    #[test]
+    fn native_argv_omission_is_unknown_not_default_input() {
+        let mut terminal = json!({"id":"t1"});
+        assert_eq!(facts(&terminal).argv, None);
+        terminal["argv"] = Value::Null;
+        assert_eq!(facts(&terminal).argv, None);
+        terminal["argv"] = json!([]);
+        assert_eq!(facts(&terminal).argv, Some(vec![]));
+        terminal["argv"] = json!(["sh"]);
+        assert_eq!(facts(&terminal).argv, Some(vec!["sh".into()]));
+    }
+
     #[test]
     fn snapshot_sequence_fences_queued_old_events_and_old_missed_snapshots() {
         let mut seq=100;

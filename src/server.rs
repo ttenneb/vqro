@@ -1362,7 +1362,7 @@ async fn layout_reset(core: &Shared, author: &Caller, on_behalf_of:Option<Arc<st
         for r in c.resources.values().filter(|r| r.facts.kind == "terminal" && r.facts.state == "live") {
             let view = format!("term-{}", r.id);
             ops.push(Op::Set { key: format!("view/{view}"), value: json!({"kind": "terminal", "resource": r.id}), expect: None });
-            let title = r.facts.name.clone().or_else(|| r.facts.argv.first().cloned()).unwrap_or_else(|| r.id.clone());
+            let title = r.facts.name.clone().or_else(|| r.facts.argv.as_ref().and_then(|a| a.first()).cloned()).unwrap_or_else(|| if r.facts.argv.is_some() { "default shell".into() } else { "unknown command".into() });
             tabs.push(json!({"title": title, "node": {"view": view}}));
         }
         if tabs.is_empty() {

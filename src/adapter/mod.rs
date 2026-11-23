@@ -78,8 +78,9 @@ pub struct ResourceFacts {
     /// Exit details when finished, as reported.
     #[serde(default)]
     pub exit: Value,
+    /// Known creation input: None is unknown, Some([]) is known no arguments/default.
     #[serde(default)]
-    pub argv: Vec<String>,
+    pub argv: Option<Vec<String>>,
     /// Opaque kind-specific facts, preserved without backend/runtime policy in core.
     #[serde(default = "empty_data")]
     pub data: Value,

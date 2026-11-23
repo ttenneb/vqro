@@ -285,7 +285,7 @@ impl App {
                 continue;
             }
             let recorded: Option<Vec<String>> = serde_json::from_str(f[11]).ok();
-            let argv = recorded.or_else(|| self.state.lock().unwrap().argv.get(f[0]).cloned()).unwrap_or_default();
+            let argv = recorded.or_else(|| self.state.lock().unwrap().argv.get(f[0]).cloned());
             let facts = json!({
                 "ref": f[0], "incarnation": "", "kind": "terminal", "state": "live",
                 "name": if f[9].is_empty() { Value::Null } else { json!(f[9]) },

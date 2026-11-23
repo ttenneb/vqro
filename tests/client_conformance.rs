@@ -222,6 +222,16 @@ fn tab_states_like_the_model() {
 }
 
 #[test]
+fn command_labels_distinguish_unknown_and_default() {
+    for r in [json!({}), json!({"argv":null})] {
+        assert_eq!(tabbar::command_label(&r), "unknown command");
+    }
+    assert_eq!(tabbar::command_label(&json!({"argv":[]})), "default shell");
+    assert_eq!(tabbar::command_label(&json!({"argv":["/bin/sh","-l"]})), "/bin/sh");
+    assert_eq!(tabbar::tab_title(None, "unknown command", Some(&json!({"argv":null,"title":"editor"}))), "editor");
+}
+
+#[test]
 fn tab_titles_like_the_model() {
     check("tabtitle.json", |case| {
         let resource = Some(&case["resource"]).filter(|r| !r.is_null());

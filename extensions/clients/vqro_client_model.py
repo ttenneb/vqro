@@ -842,6 +842,12 @@ def tab_label(style, index, title):
     return f" {number}{joiner}{title} "
 
 
+def command_label(resource):
+    """Reported command: absent/null is unknown; [] is known default input."""
+    argv = resource.get("argv")
+    return (argv[0] if argv else "default shell") if isinstance(argv, list) else "unknown command"
+
+
 PROGRAM_TITLE_MAX = 24
 
 
@@ -853,8 +859,7 @@ def tab_title(setting, title, resource):
         return title
     program = resource.get("title").strip() if isinstance(resource.get("title"), str) else ""
     named = isinstance(resource.get("name"), str) and resource["name"] != ""
-    argv = resource.get("argv") if isinstance(resource.get("argv"), list) else []
-    command = argv[0].rsplit("/", 1)[-1] if argv and isinstance(argv[0], str) else None
+    command = command_label(resource).rsplit("/", 1)[-1]
     if not program or named or command is None or title != command:
         return title
     if len(program) > PROGRAM_TITLE_MAX:

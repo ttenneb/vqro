@@ -27,6 +27,15 @@ PANEL = {"title": "Provides", "facets": [{"key": "kind", "label": "Show"}], "sor
 
 
 class TextPanels(unittest.TestCase):
+    def test_terminal_command_fallback_is_unknown_not_empty(self):
+        c = client({})
+        c.ws.entries["view/t"] = {"kind": "terminal", "resource": "r1"}
+        for r in ({"argv": None}, {}, {"argv": []}):
+            c.ws.resources["r1"] = dict(r, id="r1", state="live")
+            expected = "default shell" if r.get("argv") == [] else "unknown command"
+            self.assertEqual(c.view_title("t"), expected)
+            self.assertIn(expected, c.view_lines("t")[0])
+
     def test_optional_child_table_keeps_readable_conversation_fallback(self):
         c = client({"title": "Pi", "items": [
             {"type": "text", "text": "Pi · 14:00"},

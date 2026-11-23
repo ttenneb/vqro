@@ -156,7 +156,7 @@ class TextClient:
         if isinstance(v.get("title"), str):
             return v["title"]
         r = self.ws.resources.get(v.get("resource")) or {}
-        return text_of(r.get("name")) or text_of((r.get("argv") or [""])[0]) or view
+        return text_of(r.get("name")) or (model.command_label(r) if r else view)
 
     def view_resource(self, view):
         v = self.ws.entries.get(f"view/{view}")

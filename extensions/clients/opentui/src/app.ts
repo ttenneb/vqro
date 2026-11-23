@@ -215,7 +215,7 @@ export class App {
     const v = this.ws.entries.get(`view/${view}`) ?? {};
     if (typeof v.title === "string") return v.title;
     const r = this.ws.resources.get(v.resource);
-    return r?.name ?? r?.argv?.[0] ?? view;
+    return r?.name ?? (r ? m.commandLabel(r) : view);
   }
 
   tabTitle(path: number[], index: number): string | null {
@@ -832,7 +832,7 @@ export class Screen extends Renderable {
         const mark = a.tabMark(t, on);
         const glyph = mark ? iconText(a, { name: mark, text: ({ blocked: "⚠", error: "✗", done: "✓" } as Json)[mark] ?? "•" }) : "";
         if (glyph) label = label.replace(/ $/, "");
-        const ended = m.tabState(t) !== null;  // programs ended (tabs extension hint): dim, title unchanged
+        const ended = m.tabState(t) !== null || t.title === "unknown command";  // programs ended (tabs extension hint): dim, title unchanged
         text(buf, x, r.y, fit(label, r.x + r.w - x), on ? a.pal.color("tab_active_text") : a.pal.color(ended ? "dim" : "muted"), bg,
           on ? (ended ? TextAttributes.DIM : TextAttributes.BOLD) : TextAttributes.NONE);
         if (glyph) {  // inside the chip after the name, in the mark's semantic colour
@@ -875,7 +875,7 @@ export class Screen extends Renderable {
     let title = a.viewTitle(leaf.view);
     if (kind === "panel") title = a.panelValue(leaf.view).title ?? title;
     if (kind === "terminal") title = a.terminals.title(leaf.view, title);
-    text(buf, leaf.rect.x + 1, leaf.rect.y, fit(` ${clean(title)} `, leaf.rect.w - 2), border);
+    text(buf, leaf.rect.x + 1, leaf.rect.y, fit(` ${clean(title)} `, leaf.rect.w - 2), title.startsWith("unknown command") ? a.pal.color("dim") : border);
     a.hits.push({ rect: leaf.rect, act: (e) => {
       a.focus = i;
       if (kind === "panel") this.click(leaf.view, leaf.view, e, a.ctxLeaf(i));
@@ -1026,7 +1026,7 @@ export class Screen extends Renderable {
       } else if (o.kind === "pick") {
         const res = [...a.ws.resources.values()];
         title = " pick a resource ";
-        items = res.map((r) => ` ${r.id}  ${r.name ?? r.argv?.[0] ?? ""}  ${r.state ?? ""}`);
+        items = res.map((r) => ` ${r.id}  ${r.name ?? m.commandLabel(r)}  ${r.state ?? ""}`);
         acts = res.map((r) => () => { a.closeOverlay(); void a.run(o.item.command, { ...(o.item.args ?? {}), picked: r.id }, o.ctx); });
         sel = o.sel;
       } else continue;
@@ -1039,7 +1039,7 @@ export class Screen extends Renderable {
       items.slice(top, top + h - 2).forEach((s, j) => {
         const i = top + j, y = r.y + 1 + j;
         const on = i === sel;
-        const [fg, bg] = on ? [a.pal.maybe("selection_text") ?? a.pal.bg, a.pal.maybe("selection") ?? a.pal.color("accent")] : [a.pal.color("text"), a.pal.bg];
+        const [fg, bg] = on ? [a.pal.maybe("selection_text") ?? a.pal.bg, a.pal.maybe("selection") ?? a.pal.color("accent")] : [a.pal.color(o.kind === "pick" && s.includes("  unknown command  ") ? "dim" : "text"), a.pal.bg];
         buf.fillRect(r.x + 1, y, w - 2, 1, bg);
         text(buf, r.x + 1, y, fit(s, w - 2), fg, bg);
         a.hits.push({ rect: { x: r.x + 1, y, w: w - 2, h: 1 }, act: acts[i] });

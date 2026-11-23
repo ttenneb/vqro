@@ -183,7 +183,7 @@ def term_row(rid, r, where=False):
     if agent and st.get("state") in STATUS:
         icon = dict(icon, name=[st["state"], "agent"])
     return {
-        "id": f"term:{rid}", "text": label, "style": ("agent" if agent else None) if live else "dim",
+        "id": f"term:{rid}", "text": label, "style": ("dim" if label == "unknown command" else ("agent" if agent else None)) if live else "dim",
         "icon": icon, "icon_style": icon_style,
         "badges": badges,
         "command": "sidebar.show", "args": {"resource": rid},

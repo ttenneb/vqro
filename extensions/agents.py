@@ -1269,7 +1269,7 @@ class Agents:
                                 "covers": covers}}]
         if host is not None:
             hid = host["id"]
-            program = label(" ".join(str(a) for a in (host.get("argv") or [])[:3]) or host.get("name") or hid, 200)
+            program = label(" ".join(str(a) for a in (host.get("argv") or [])[:3]) or host.get("name") or ("default shell" if isinstance(host.get("argv"), list) else "unknown command"), 200)
             served = self.served(hid)
             others = [a for a in served if a != rid]
             if owns_lifecycle(r):

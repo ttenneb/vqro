@@ -231,9 +231,8 @@ impl App {
     async fn refresh_facts(&self, session: &str, b: &Value, old: Option<Value>, argv: Option<Vec<String>>) -> Option<Value> {
         let id = b["block_id"].as_str().unwrap_or_default();
         let mut lifecycle_observed = old.is_some();
-        let argv_known = argv.is_some();
         let mut facts = old.unwrap_or_else(|| json!({"ref":id,"incarnation":self.run,"kind":"terminal",
-            "state":"live","argv":argv.unwrap_or_default(),"data":{"argv_known":argv_known}}));
+            "state":"live","argv":argv,"data":{}}));
         facts["name"] = json!(b["label"].as_str().filter(|s| !s.is_empty()));
         for key in ["window_id", "placement", "host_id", "flavor"] {
             let field = match key { "window_id" => "window", "host_id" => "host", other => other };

@@ -76,6 +76,14 @@ pub fn describe(setting: Option<&Value>, titles: &[&str], active: usize) -> Valu
            "active": active, "gap": style.gap(), "chips": style.chips})
 }
 
+/// A resource's reported command, preserving unknown versus known default input.
+pub fn command_label(resource: &Value) -> &str {
+    match resource["argv"].as_array() {
+        Some(argv) => argv.first().and_then(Value::as_str).unwrap_or("default shell"),
+        None => "unknown command",
+    }
+}
+
 /// Longest program title a tab shows, in characters; longer ones end in `…`.
 pub const PROGRAM_TITLE_MAX: usize = 24;
 
@@ -89,7 +97,7 @@ pub fn tab_title(setting: Option<&Value>, title: &str, resource: Option<&Value>)
     let Some(r) = resource.filter(|_| on) else { return title.to_string() };
     let program = r["title"].as_str().map(str::trim).filter(|t| !t.is_empty());
     let named = r["name"].as_str().is_some_and(|n| !n.is_empty());
-    let command = r["argv"][0].as_str().map(|a| a.rsplit('/').next().unwrap_or(a));
+    let command = Some(command_label(r).rsplit('/').next().unwrap_or("unknown command"));
     match (program, named, command) {
         (Some(program), false, Some(command)) if title == command => {
             if program.chars().count() > PROGRAM_TITLE_MAX {

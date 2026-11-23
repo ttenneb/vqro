@@ -563,6 +563,13 @@ and old layouts may show gone resources until explicitly repaired/reset. No iden
 
 ## Resources (backend-owned, D14)
 
+Resource facts `argv` is optional: absent or `null` means unknown creation input; `[]` means known no
+arguments/default, and a string list is known argv. Snapshots, lists and full resource events publish unknown
+as `null`; partial events retain normal patch semantics (absent = unchanged, explicit `null` = unknown).
+This changes the old provider omission default from `[]` to unknown without rejecting old providers.
+Clients show a dim `unknown command` wherever argv is the label fallback (plain text uses the same words),
+never an empty command or an inferred default. Known `[]` can show `default shell`. Names/titles still win.
+
 | Method | Params | Result |
 |---|---|---|
 | `resource.list` | `provider?`, `backend_ref?`, `id?`, `host?` (exact strings) | `resources` |

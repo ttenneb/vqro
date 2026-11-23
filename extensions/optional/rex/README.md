@@ -49,8 +49,8 @@ Other arguments: `--rex BIN` (the `rex` program), `--history LINES` (most histor
   codes are reported only from a valid integer witness.
 - Argv storage is limited to 64 KiB (string bytes plus per-argument metadata); oversized requests are refused before
   creation. Pending creation input remains owned by its spawn until completion; unrelated observation failures cannot
-  delete it. `data.argv_known` distinguishes known creation input from the current contract's `argv: []` placeholder
-  after lost metadata, external creation or provider restart. An explicit unknown-argv core field is future work.
+  delete it. Known creation input is published as an argv list; lost metadata, external creation and provider-restart
+  rediscovery publish `argv: null` (unknown), using the generic provider contract rather than `data.argv_known`.
 - Rex has **no per-terminal environment**: a spawn that asks for `env` is refused (nothing starts).
 - Rex takes **text input only** (UTF-8). Other bytes are refused for that stream, never changed.
 - Viewing a terminal makes vqro its size owner in Rex (like any Rex client that resizes it).

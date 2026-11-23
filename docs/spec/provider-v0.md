@@ -424,11 +424,23 @@ Unknown fields are not general secret discovery.
  "kind": "terminal",         // required, open set: "terminal", "agent", ...
  "state": "live",            // required: "live" | "finished"
  "name": null, "title": null, "cwd": null,   // optional strings
- "argv": [],                 // optional, default []
+ "argv": null,               // optional: absent/null = unknown; [] = known no arguments/default
  "status": null,             // optional: OSC 7501-shaped status object as reported, or null
  "exit": null,               // optional: {reason?, exit_code?, signal?} when finished
  "data": {}}                 // optional, opaque object preserved verbatim (≤ 64 KiB); kind-specific facts
 ```
+
+`argv` is the known creation input, not a guessed foreground process. Absent or `null` means unknown;
+`[]` means known no arguments/default, and a string list is the known argument vector. Published resources
+preserve unknown as `null`. Compatibility: old providers that omit `argv` still parse, but now mean unknown
+rather than the former `[]` default. Providers that know they used the default must send `[]` (or the actual
+argv); rediscovery without creation metadata must not invent one. Clients show a dim `unknown command`
+where they would show argv (plain text clients show the same words); `[]` may be labelled `default shell`.
+Unknown top-level fields remain ignored, so this does not add a provider-specific flag or version switch.
+Bundled providers: fake reports its known spawn vector (including `[]`); herdr preserves the native argv
+list and reports unknown if the native record omits/nulls it; tmux reports its recorded vector (including
+the resolved default shell) and unknown for externally created panes without that record. Rex likewise
+reports only retained creation input, not its native argv0/process-name observation.
 
 The core maps `ref` to today's internal `backend_ref` and publishes resources with vqro fields added (`id`,
 `provider`, `available`, and for bridges `host`). Unknown top-level fields are ignored; put extras in `data`. Agent

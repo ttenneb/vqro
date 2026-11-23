@@ -149,6 +149,14 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(invalid["error"]["data"]["kind"], "invalid")
         self.assertEqual(captured, [fields])
 
+    async def test_fake_reports_unknown_argv_without_breaking_its_controls(self):
+        ref = await self.spawn(["--argv-unknown"])
+        await self.core.wait(lambda: bool(self.core.notes("resource.upsert")))
+        self.assertIsNone(self.core.notes("resource.upsert")[-1]["params"]["facts"]["argv"])
+        self.assertIsNone(self.fake.terms[ref]["facts"]["argv"])
+        self.assertIn("result", await self.attach(ref))
+        self.assertEqual((await self.effect("terminal.kill", ref=ref))["result"]["outcome"], "observed")
+
     async def test_registration_sync_and_generation(self):
         register = self.core.notes("provider.register")[0]["params"]
         self.assertEqual(register["instance"], "instance")
@@ -430,6 +438,16 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             pass
         await asyncio.wait_for(self.provider.wait_closed(), 1)
         self.assertTrue(self.provider._closed.is_set())
+
+    def test_facts_argv_unknown_default_and_known(self):
+        base = {"ref": "x", "kind": "terminal", "state": "live"}
+        self.assertNotIn("argv", facts(dict(base)))
+        for argv in (None, [], ["sh", "-l"]):
+            value = dict(base, argv=argv)
+            self.assertEqual(facts(value), value)
+        for argv in ("sh", [1], {}):
+            with self.assertRaises(ProviderError):
+                facts(dict(base, argv=argv))
 
     def test_facts_and_capability_validation(self):
         with self.assertRaises(ProviderError):

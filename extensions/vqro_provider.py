@@ -213,9 +213,9 @@ def facts(value):
     for key in ("name", "title", "cwd"):
         if value.get(key) is not None and not isinstance(value[key], str):
             raise ProviderError("invalid", f"bad {key}")
-    argv = value.get("argv", [])
-    if not isinstance(argv, list) or any(not isinstance(v, str) for v in argv):
-        raise ProviderError("invalid", "argv must be strings")
+    argv = value.get("argv")
+    if argv is not None and (not isinstance(argv, list) or any(not isinstance(v, str) for v in argv)):
+        raise ProviderError("invalid", "argv must be null or a list of strings")
     for key in ("status", "exit"):
         if value.get(key) is not None and not isinstance(value[key], dict):
             raise ProviderError("invalid", f"bad {key}")

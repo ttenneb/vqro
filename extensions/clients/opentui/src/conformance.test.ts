@@ -169,6 +169,13 @@ test("tab states", async () => {
   for (const c of (await fixture("tabstate.json")).cases) expect(m.tabState(c.tab), c.name).toEqual(c.expect);
 });
 
+test("command labels preserve unknown and default", () => {
+  for (const r of [{}, { argv: null }]) expect(m.commandLabel(r)).toBe("unknown command");
+  expect(m.commandLabel({ argv: [] })).toBe("default shell");
+  expect(m.commandLabel({ argv: ["/bin/sh", "-l"] })).toBe("/bin/sh");
+  expect(m.tabTitle(null, "unknown command", { argv: null, title: "editor" })).toBe("editor");
+});
+
 test("tab titles", async () => {
   for (const c of (await fixture("tabtitle.json")).cases) expect(m.tabTitle(c.setting, c.title, c.resource), c.name).toEqual(c.expect);
 });

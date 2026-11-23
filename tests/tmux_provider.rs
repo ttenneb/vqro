@@ -190,6 +190,7 @@ async fn registers_syncs_spawns_streams_status_and_kills_on_real_tmux() {
     assert_eq!(panes.len(), 1);
     assert_eq!((panes[0]["kind"].as_str(), panes[0]["state"].as_str()), (Some("terminal"), Some("live")));
     assert_eq!(panes[0]["data"]["session"], "work");
+    assert_eq!(panes[0].get("argv"), Some(&Value::Null), "external panes have no recorded creation input");
     core.reply(&sync, json!({})).await;
 
     // Bad dimensions are rejected before creating a window.
