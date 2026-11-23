@@ -43,6 +43,7 @@ fn protected(kind: &str, value: &Value) -> bool {
         || (kind == "run" && value["status"] == "inProgress")
         || (kind == "message" && value["final"] == false)
         || (kind == "tool" && matches!(value["status"].as_str(), Some("pending" | "running")))
+        || (kind == "child" && matches!(value["status"].as_str(), Some("pending" | "running" | "waiting")))
         || (kind == "receipt" && value["stage"] == "dispatched")
 }
 fn timeline(kind: &str) -> bool {

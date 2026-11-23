@@ -3,6 +3,7 @@
 //! Protocol evidence/declarations: docs/research/codex-adapter.md. The native JSONL transport is
 //! the existing bounded `rpc::Peer`; this module only validates and reduces native observations.
 mod availability;
+mod children;
 pub mod configuration;
 mod customization;
 pub mod observation;
@@ -256,6 +257,7 @@ pub struct Endpoint {
     pending: BTreeMap<String, Pending>,
     receipts: BTreeMap<String, Value>,
     recent: VecDeque<String>,
+    children: children::Children,
 }
 
 impl Endpoint {
@@ -297,6 +299,7 @@ impl Endpoint {
             pending: BTreeMap::new(),
             receipts: BTreeMap::new(),
             recent: VecDeque::new(),
+            children: children::Children::default(),
         }
     }
 
@@ -919,6 +922,7 @@ impl Endpoint {
         self.usage = None;
         self.run_metadata = None;
         self.pending.clear();
+        self.children = children::Children::default();
         self.run = None;
         self.completion = None;
         self.apply_status(&thread["status"]);
@@ -995,8 +999,14 @@ impl Endpoint {
                 Vec::new()
             };
         }
-        if p["threadId"].as_str() != self.session.as_deref() {
-            return Vec::new();
+        if method == "thread/started" {
+            return self.child_thread_started(&p["thread"]);
+        }
+        let Some(thread) = p["threadId"].as_str() else { return vec![] };
+        if Some(thread) != self.session.as_deref()
+            && !(method == "serverRequest/resolved" && self.observes_thread(thread))
+        {
+            return self.child_notification(method, p);
         }
         match method {
             "thread/status/changed" => {
@@ -1071,7 +1081,11 @@ impl Endpoint {
                 };
                 vec![self.state_entity()]
             }
-            "item/started" | "item/completed" => self.item(&p["item"], method == "item/completed"),
+            "item/started" | "item/completed" => {
+                let mut changes = self.collaboration(&p["item"], thread);
+                changes.extend(self.item(&p["item"], method == "item/completed"));
+                changes
+            }
             "item/agentMessage/delta" => {
                 let (Ok(item), Some(text)) = (id(p, "itemId"), p["delta"].as_str()) else {
                     return vec![];
@@ -1112,9 +1126,8 @@ impl Endpoint {
                     vec![]
                 }
             }
-            "turn/plan/updated" => {
-                vec![Change::new("plan", "current", json!({"entries":p["plan"]}))]
-            }
+            "turn/plan/updated" => self.whole_plan(p, None),
+            "thread/goal/updated" | "thread/goal/cleared" => self.goal(method, p, None),
             _ => vec![],
         }
     }
@@ -1147,12 +1160,13 @@ impl Endpoint {
                     json!({"role":"thought","content":[{"type":"text","text":text}],"final":final_item}),
                 )
             }
-            Some("commandExecution" | "fileChange" | "webSearch" | "dynamicToolCall") => {
+            Some("commandExecution" | "fileChange" | "webSearch" | "dynamicToolCall" | "collabAgentToolCall") => {
                 let status = match item["status"].as_str() {
                     Some("completed") => "completed",
                     Some("failed" | "declined") => "failed",
-                    Some("cancelled") => "cancelled",
-                    _ if final_item => "unknown",
+                    Some("cancelled" | "interrupted") => "cancelled",
+                    Some("inProgress") => "running",
+                    _ if final_item || item["type"] == "collabAgentToolCall" => "unknown",
                     _ => "running",
                 };
                 let content = vec![
@@ -1204,12 +1218,14 @@ impl Endpoint {
         method: &str,
         params: &Value,
     ) -> Result<Change, RpcError> {
-        if params["threadId"].as_str() != self.session.as_deref() {
+        let thread = params["threadId"].as_str().filter(|thread| self.observes_thread(thread));
+        let Some(thread) = thread else {
             return Err(rejected(
                 "unsupported",
                 "request does not belong to this endpoint session",
             ));
-        }
+        };
+        let child = self.children_child_id(thread);
         if self.pending.values().any(|p| p.native_id == native_id) {
             return Err(rejected("stale", "native request id is already pending"));
         }
@@ -1287,6 +1303,9 @@ impl Endpoint {
         entity["request"] = json!(key);
         entity["revision"] = json!(1);
         entity["status"] = json!("pending");
+        if let Some(child) = child {
+            entity["child"] = child;
+        }
         entity["params"] = params.clone();
         entity["incomplete"] = json!(false);
         entity["scope"] =

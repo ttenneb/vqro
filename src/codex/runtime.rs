@@ -463,11 +463,15 @@ impl Runtime {
                     }
                     return;
                 }
-                if let Some(index) = params["threadId"]
-                    .as_str()
-                    .and_then(|id| self.thread_index(id))
-                {
-                    let mut endpoint = self.slots[index].endpoint.lock().unwrap();
+                // Child observations stay in each proven parent's stream. Never allocate a
+                // synthetic endpoint or make a native control call merely to observe a child.
+                for (index, slot) in self.slots.iter().enumerate() {
+                    let mut endpoint = slot.endpoint.lock().unwrap();
+                    if method != "thread/started"
+                        && !params["threadId"].as_str().is_some_and(|thread| endpoint.observes_thread(thread))
+                    {
+                        continue;
+                    }
                     let changes = endpoint.notification(&method, &params);
                     if !changes.is_empty() {
                         self.emit(index, &endpoint, changes, false);
@@ -481,7 +485,8 @@ impl Runtime {
                 }
                 if let Some(index) = params["threadId"]
                     .as_str()
-                    .and_then(|id| self.thread_index(id))
+                    .and_then(|thread| self.thread_index(thread).or_else(|| self.slots.iter()
+                        .position(|slot| slot.endpoint.lock().unwrap().observes_thread(thread))))
                 {
                     let mut endpoint = self.slots[index].endpoint.lock().unwrap();
                     match endpoint.request(id.clone(), &method, &params) {
@@ -928,7 +933,8 @@ impl Runtime {
                 .native
                 .call_with_timeout(
                     "thread/list",
-                    json!({"limit":64,"cursor":page}),
+                    json!({"limit":64,"cursor":page,"sourceKinds":["cli","vscode","exec","appServer",
+                        "subAgent","subAgentReview","subAgentCompact","subAgentThreadSpawn","subAgentOther","unknown"]}),
                     remaining(deadline),
                 )
                 .await
