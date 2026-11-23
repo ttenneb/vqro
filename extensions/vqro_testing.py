@@ -272,7 +272,11 @@ class SandboxClient:
                 raise ValueError("sandbox record exceeds size bound")
         line, _, rest = self.buffer.partition(b"\n")
         self.buffer = bytearray(rest)
-        return json.loads(line)
+        message = json.loads(line)
+        observer = getattr(self, "event_observer", None)
+        if observer is not None and message.get("method"):
+            observer(message, time.monotonic())
+        return message
 
     def call(self, method, params=None, timeout=None):
         self.next_id += 1
@@ -383,13 +387,14 @@ def process_group_members(group, env):
 class Sandbox:
     """Disposable copy, audited before launch. Cooperative isolation, not a security boundary."""
     def __init__(self, source_dir, snapshot, *, binary=None, root=None, backend="fake",
-                 allow_external=False, keep=False, candidate_ext=None, candidate_ops=None):
+                 allow_external=False, keep=False, candidate_ext=None, candidate_ops=None, observer=None):
         self.source_dir = Path(source_dir).resolve()
         self.snapshot = snapshot
         self.binary = os.path.abspath(binary or shutil.which("vqro") or Path.home() / ".local/bin/vqro")
         self.root = Path(root).resolve() if root else Path(tempfile.mkdtemp(prefix="vqro-it-"))
         self.backend, self.allow_external, self.keep = backend, allow_external, keep
         self.candidate_ext, self.candidate_ops = candidate_ext, candidate_ops or []
+        self.observer = observer
         self.ext, self.state, self.socket = self.root / "ext", self.root / "state", self.root / "p.sock"
         self.env = {"HOME": str(self.root / "home"), "PATH": os.environ.get("PATH", os.defpath), "LANG": "C.UTF-8",
                     "VQRO_STATE_DIR": str(self.state), "VQRO_SOCKET": str(self.socket), "VQRO_EXTENSIONS_DIR": str(self.ext),
@@ -549,6 +554,7 @@ class Sandbox:
                 raise RuntimeError("sandbox core exited: " + str(self.process.returncode))
             try:
                 self.client = SandboxClient(self.socket, self.root)
+                self.client.event_observer = self.observer
                 hello = self.client.call("hello", {"client": "test-integration", "identity": {"kind": "owner"}})
                 self.info["vqro"] = {"server": hello.get("server"), "version": hello.get("version")}
                 self.client.subscribe()
@@ -580,6 +586,9 @@ class Sandbox:
                         self.client.apply([op], "test-integration: seed optional document")
                     except RuntimeError as failure:
                         self.info["not_copied"].append({"key": op["key"], "error": text(str(failure))})
+        self.activation_at = time.monotonic()
+        if self.observer is not None:
+            self.observer({"method": "sandbox.activating"}, self.activation_at)
         self.client.invoke("vqro.safe_mode", {"on": False})
         return self
 
@@ -836,7 +845,7 @@ def discover_scenarios(extensions_dir):
     return result
 
 
-def run_scenarios(client, scenarios):
+def run_scenarios(client, scenarios, observer=None):
     rows = []
     for name, scenario in sorted(scenarios.items()):
         step_number = 0
@@ -848,6 +857,8 @@ def run_scenarios(client, scenarios):
                 if not 0 < seconds <= 120:
                     raise ValueError("step deadline must be between 1 and 120000 ms")
                 client.step_deadline = time.monotonic() + seconds
+                if observer is not None:
+                    observer("before", name, step_number, step, scenario)
                 if "apply" in step:
                     client.apply(step["apply"], "test-integration: scenario " + name)
                 elif "invoke" in step:
@@ -855,6 +866,8 @@ def run_scenarios(client, scenarios):
                     if command.startswith(("pi.", "codex.", "tier1.", "agents.")):
                         raise ValueError("runtime commands require the offline agent-profile follow-up; not invoked")
                     result = client.invoke(command, step.get("args"), timeout=seconds)
+                    if observer is not None:
+                        observer("reply", name, step_number, step, scenario)
                     if "result" in step and not subset_matches(result, step["result"]):
                         raise AssertionError("command result mismatch; last observed: " + text(result))
                 elif "wait" in step:
@@ -870,8 +883,12 @@ def run_scenarios(client, scenarios):
                     raise ValueError("unknown scenario step")
                 if time.monotonic() > client.step_deadline:
                     raise TimeoutError("step deadline exceeded")
+                if observer is not None:
+                    observer("after", name, step_number, step, scenario)
             rows.append(row("scenario", name, "pass", f"{len(scenario['steps'])} steps observed"))
         except Exception as error:
+            if observer is not None:
+                observer("error", name, step_number, None, scenario)
             rows.append(row("scenario", name, "fail", f"step {step_number}: {error}"))
         finally:
             client.step_deadline = float("inf")
