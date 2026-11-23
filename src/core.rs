@@ -141,6 +141,10 @@ pub struct Core {
     pub exts: BTreeMap<String, ExtRuntime>,
     pub shutdown: crate::shutdown::Shutdown,
     pub(crate) extension_tasks: Vec<tokio::task::JoinHandle<()>>,
+    #[cfg(unix)]
+    pub(crate) python_resolution: Option<Result<(PathBuf, Vec<String>), String>>,
+    #[cfg(unix)]
+    pub(crate) python_resolution_pending: bool,
     pub safe_mode: bool,
     pub safe_mode_allow: BTreeSet<String>,
     pub provider_extensions: BTreeSet<String>,
@@ -198,6 +202,10 @@ impl Core {
             exts: BTreeMap::new(),
             shutdown: crate::shutdown::Shutdown::default(),
             extension_tasks: Vec::new(),
+            #[cfg(unix)]
+            python_resolution: None,
+            #[cfg(unix)]
+            python_resolution_pending: false,
             safe_mode,
             safe_mode_allow: BTreeSet::new(),
             provider_extensions: BTreeSet::new(),

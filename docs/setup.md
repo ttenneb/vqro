@@ -56,7 +56,10 @@ For a core started by launchd or a GUI, Unix interpreter discovery checks each `
 `/opt/homebrew/bin` and `/usr/local/bin` when missing from PATH, skipping versions older than 3.11.
 `VQRO_PYTHON=/absolute/path/to/python3` overrides discovery and must also be Python 3.11+; set it in the
 core launch environment, not only in a later terminal. Each candidate's isolated version probe has a
-two-second timeout and is cached until the core restarts. No shell startup files are sourced, and no
+two-second timeout within a shared five-second search/probe budget, and is cached until the core restarts.
+Core discovery runs off its global lock; Python extensions show `starting` while other operations remain available.
+Relative paths are anchored before probing, so an extension/UI's different cwd cannot select another interpreter.
+Filesystem, spawn/reap and scheduler delays are not strict wall-clock bounds. No shell startup files are sourced, and no
 interpreter is installed automatically. A missing/old interpreter becomes an actionable extension failure.
 Actual launchd/GUI startup still needs verification on macOS.
 

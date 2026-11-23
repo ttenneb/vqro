@@ -51,7 +51,7 @@ pub fn python() -> Result<(PathBuf,Vec<String>),String> {
     #[cfg(unix)]
     {
         unix_python(explicit, std::env::split_paths(&path).collect(),
-            &[PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")], python_version)
+            &[PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")], python_version_until)
             .map(|program| (program, Vec::new()))
     }
     #[cfg(not(unix))]
@@ -64,19 +64,31 @@ pub fn python() -> Result<(PathBuf,Vec<String>),String> {
 
 #[cfg(unix)]
 fn unix_python(explicit: Option<PathBuf>, mut dirs: Vec<PathBuf>, fallback: &[PathBuf],
-               probe: impl Fn(&Path) -> Result<(u32, u32), String>) -> Result<PathBuf, String> {
+               probe: impl Fn(&Path, std::time::Instant) -> Result<(u32, u32), String>) -> Result<PathBuf, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let overridden = explicit.is_some();
     let candidates = if let Some(program) = explicit {
-        // An explicit override never silently falls back to another interpreter.
+        // A bare override uses PATH only, never a fallback directory. Relative paths and PATH
+        // entries are anchored to the selecting process, not the eventual extension/UI cwd.
+        let program = if program.components().count() == 1 && !program.is_absolute() {
+            dirs.iter().map(|dir| dir.join(&program)).find(|p| executable(p)).unwrap_or(program)
+        } else { program };
         vec![program]
     } else {
         for dir in fallback {
             if !dirs.contains(dir) { dirs.push(dir.clone()); }
         }
-        dirs.into_iter().map(|dir| dir.join("python3")).filter(|p| executable(p)).collect()
+        dirs.into_iter().map(|dir| dir.join("python3")).collect()
     };
     let mut found = Vec::new();
     for program in candidates {
-        match probe(&program) {
+        if std::time::Instant::now() >= deadline {
+            found.push("discovery exceeded its five-second total probe budget".into());
+            break;
+        }
+        let program = std::path::absolute(&program).map_err(|error| format!("cannot anchor Python path: {error}"))?;
+        if !overridden && !executable(&program) { continue; }
+        match probe(&program, deadline) {
             Ok((major, minor)) if major == 3 && minor >= 11 => return Ok(program),
             Ok((major, minor)) => found.push(format!("{} is {major}.{minor}", program.display())),
             Err(error) => found.push(format!("{}: {error}", program.display())),
@@ -87,24 +99,40 @@ fn unix_python(explicit: Option<PathBuf>, mut dirs: Vec<PathBuf>, fallback: &[Pa
 }
 
 #[cfg(unix)]
-fn python_version(program: &Path) -> Result<(u32, u32), String> {
+fn python_version_until(program: &Path, deadline: std::time::Instant) -> Result<(u32, u32), String> {
     use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    type Versions = HashMap<PathBuf, Result<(u32, u32), String>>;
+    use std::sync::{Arc, Mutex, OnceLock, TryLockError};
+    type Version = Result<(u32, u32), String>;
+    type Versions = HashMap<PathBuf, Arc<Mutex<Option<Version>>>>;
     static VERSIONS: OnceLock<Mutex<Versions>> = OnceLock::new();
-    let mut versions = VERSIONS.get_or_init(Default::default).lock().unwrap();
-    versions.entry(program.to_path_buf()).or_insert_with(|| probe_python_version(program)).clone()
+    // Only identical candidates share a probe. Never hold the cache map across external work.
+    let version = VERSIONS.get_or_init(Default::default).lock()
+        .map_err(|_| "Python version cache unavailable".to_string())?
+        .entry(program.to_path_buf()).or_default().clone();
+    let mut version = loop {
+        match version.try_lock() {
+            Ok(version) => break version,
+            Err(TryLockError::Poisoned(_)) => return Err("Python version cache unavailable".into()),
+            Err(TryLockError::WouldBlock) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+            _ => return Err("Python discovery total probe budget exhausted waiting for cache".into()),
+        }
+    };
+    if let Some(version) = version.as_ref() { return version.clone(); }
+    if std::time::Instant::now() >= deadline { return Err("Python discovery total probe budget exhausted".into()); }
+    let result = probe_python_version(program, deadline);
+    *version = Some(result.clone());
+    result
 }
 
 #[cfg(unix)]
-fn probe_python_version(program: &Path) -> Result<(u32, u32), String> {
+fn probe_python_version(program: &Path, total_deadline: std::time::Instant) -> Result<(u32, u32), String> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
     let mut child = Command::new(program).args(["-I", "-S", "-c", "import sys; print(sys.version_info[:2])"])
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
         .spawn().map_err(|error| format!("version probe could not start: {error}"))?;
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = total_deadline.min(Instant::now() + Duration::from_secs(2));
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -130,7 +158,7 @@ fn probe_python_version(program: &Path) -> Result<(u32, u32), String> {
             result => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(match result { Err(error) => format!("version probe failed: {error}"), _ => "version probe timed out after 2 seconds".into() });
+                return Err(match result { Err(error) => format!("version probe failed: {error}"), _ => "version probe timed out (two-second candidate / five-second total probe budget)".into() });
             }
         }
     }
@@ -197,18 +225,22 @@ pub fn resolve_provider(name:&str) -> Result<PathBuf,String> {
         let old = fake_python(&root.path().join("apple"), "echo '(3, 9)'");
         let new = fake_python(&root.path().join("brew"), "echo '(3, 12)'");
         let dirs = vec![old.parent().unwrap().into(), new.parent().unwrap().into()];
-        assert_eq!(unix_python(None, dirs.clone(), &[], python_version).unwrap(), new);
-        assert_eq!(unix_python(None, vec![dirs[0].clone()], &[dirs[1].clone()], python_version).unwrap(), new);
+        assert_eq!(unix_python(None, dirs.clone(), &[], python_version_until).unwrap(), new);
+        assert_eq!(unix_python(None, vec![dirs[0].clone()], &[dirs[1].clone()], python_version_until).unwrap(), new);
         // An explicit override wins over PATH; a bad override fails rather than falling back.
-        assert_eq!(unix_python(Some(new.clone()), vec![dirs[0].clone()], &[], python_version).unwrap(), new);
-        let error = unix_python(Some(old.clone()), dirs.clone(), &[], python_version).unwrap_err();
+        assert_eq!(unix_python(Some(new.clone()), vec![dirs[0].clone()], &[], python_version_until).unwrap(), new);
+        let error = unix_python(Some(old.clone()), dirs.clone(), &[], python_version_until).unwrap_err();
         assert!(error.contains("is 3.9") && error.contains("VQRO_PYTHON"), "{error}");
-        let error = unix_python(None, vec![dirs[0].clone()], &[], python_version).unwrap_err();
+        let error = unix_python(None, vec![dirs[0].clone()], &[], python_version_until).unwrap_err();
         assert!(error.contains("is 3.9"), "{error}");
-        assert!(unix_python(None, vec![], &[], python_version).unwrap_err().contains("install Python 3.11+"));
+        assert!(unix_python(None, vec![], &[], python_version_until).unwrap_err().contains("install Python 3.11+"));
         let calls = std::cell::Cell::new(0);
-        unix_python(None, dirs.clone(), &dirs, |_| { calls.set(calls.get()+1); Err("no".into()) }).unwrap_err();
+        unix_python(None, dirs.clone(), &dirs, |_, _| { calls.set(calls.get()+1); Err("no".into()) }).unwrap_err();
         assert_eq!(calls.get(), 2, "fallback directories already on PATH are not repeated");
+    }
+    #[cfg(unix)]
+    fn python_version(program: &Path) -> Result<(u32, u32), String> {
+        python_version_until(program, std::time::Instant::now() + std::time::Duration::from_secs(5))
     }
     #[cfg(unix)]
     #[test]
@@ -225,6 +257,29 @@ pub fn resolve_provider(name:&str) -> Result<PathBuf,String> {
         let start = std::time::Instant::now();
         assert!(python_version(&slow).unwrap_err().contains("timed out"));
         assert!(start.elapsed() < std::time::Duration::from_secs(4));
+        let dirs = (0..4).map(|i| {
+            let path = fake_python(&root.path().join(format!("slow-{i}")), "exec /bin/sleep 10");
+            path.parent().unwrap().to_path_buf()
+        }).collect();
+        let start = std::time::Instant::now();
+        let error = unix_python(None, dirs, &[], python_version_until).unwrap_err();
+        assert!(error.contains("total probe budget"), "{error}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(6), "candidate deadlines must share one total budget");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn relative_python_path_is_anchored_before_probe_and_launch() {
+        let root = tempfile::tempdir_in(".").unwrap();
+        let path = fake_python(&root.path().join("bin"), "echo '(3, 12)'");
+        let dir = path.parent().unwrap().to_path_buf();
+        let selected = unix_python(None, vec![dir.clone()], &[], python_version_until).unwrap();
+        assert!(selected.is_absolute());
+        assert_eq!(selected, std::path::absolute(&path).unwrap());
+        let other = root.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(std::process::Command::new(&selected).current_dir(&other).status().unwrap().success());
+        assert_eq!(unix_python(Some(path.clone()), vec![], &[], python_version_until).unwrap(), selected);
+        assert_eq!(unix_python(Some("python3".into()), vec![dir], &[], python_version_until).unwrap(), selected);
     }
     #[test] fn windows_program_suffix_is_added_once() {
         assert_eq!(candidate(Path::new("bin"),"vqro-herdr",".exe"),Path::new("bin").join("vqro-herdr.exe"));

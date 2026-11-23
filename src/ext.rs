@@ -159,6 +159,37 @@ pub fn reconcile(core: &Shared) {
             continue;
         }
         let argv: Vec<String> = spec["argv"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+        #[cfg(unix)]
+        if argv[0] == "python3" && c.python_resolution.is_none() {
+            let rt = c.exts.get_mut(&name).unwrap();
+            if rt.status != "starting" {
+                rt.status = "starting".into();
+                let state = rt.to_json();
+                c.emit("extension", json!({"name": name, "state": state}));
+            }
+            if !c.python_resolution_pending {
+                c.python_resolution_pending = true;
+                let core = core.clone();
+                c.extension_tasks.push(tokio::spawn(async move {
+                    let resolved = tokio::task::spawn_blocking(crate::program::python).await
+                        .unwrap_or_else(|error| Err(format!("Python discovery worker failed: {error}")));
+                    {
+                        let mut c = core.lock().unwrap();
+                        c.python_resolution = Some(resolved);
+                        c.python_resolution_pending = false;
+                    }
+                    // No declaration, argv or generation is carried across the probe. Re-read and
+                    // validate current specs/generations under the lock before any actual spawn.
+                    reconcile(&core);
+                }));
+            }
+            continue;
+        }
+        #[cfg(unix)]
+        let resolved = if argv[0] == "python3" { c.python_resolution.clone().unwrap() }
+            else { crate::program::resolve_argv0(&argv[0]) };
+        #[cfg(not(unix))]
+        let resolved = crate::program::resolve_argv0(&argv[0]);
         let cwd = spec.get("cwd").and_then(|c| c.as_str()).map(String::from);
         let socket = c.socket.clone();
         let log = c.state_dir.as_ref().map(|d| d.join(format!("ext-{name}.log")));
@@ -172,7 +203,7 @@ pub fn reconcile(core: &Shared) {
             let state=rt.to_json();c.emit("extension",json!({"name":name,"state":state}));continue;
         }
         rt.token=secret.iter().map(|b|format!("{b:02x}")).collect();
-        let (program,leading)=match crate::program::resolve_argv0(&argv[0]) {
+        let (program,leading)=match resolved {
             Ok(resolved)=>resolved,
             Err(error)=>{ rt.last_exit=Some(error.clone());rt.fail("startup",error);let state=rt.to_json();c.emit("extension",json!({"name":name,"state":state}));continue; }
         };

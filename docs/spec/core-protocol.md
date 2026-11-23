@@ -1618,8 +1618,14 @@ platform-native `PATH` search (including `.exe` on Windows). Likewise a literal 
 client `argv`) means "a Python 3 interpreter", resolved on each start: `VQRO_PYTHON` (one program path) on every
 platform; on Unix the override must pass the version check below, otherwise the first executable `python3`
 reporting Python 3.11+ walking `PATH`, then `/opt/homebrew/bin` and `/usr/local/bin` (only directories not
-already on PATH). Each candidate runs an isolated `-I -S -c` version probe with a two-second timeout;
-results (including failures) are cached per candidate path for the core process lifetime. A bad explicit
+already on PATH). Each candidate runs an isolated `-I -S -c` version probe with a two-second timeout, within a shared
+five-second search/probe budget (filesystem, spawn/reap and scheduler delays are not hard wall-clock bounds).
+Results (including failures) are cached per absolute candidate path for the core process lifetime. Relative PATH
+entries/override paths are anchored to the selecting process's cwd; a bare override searches PATH only. The same
+absolute path is probed and launched, without resolving away virtualenv symlinks. Core discovery runs on a blocking
+worker, never under the core mutex; Python extensions remain `starting` meanwhile. Before spawning, reconciliation
+re-reads the current declarations and generations instead of carrying launch arguments across discovery. The core
+caches the final discovery result until restart. A bad explicit
 override fails without silently falling back. No candidate reports what was found and how to install Python
 3.11+ or set `VQRO_PYTHON`. On Windows, which has no python.org `python3`, the first found walking `PATH` of
 `py -3`, `python`, `python3`, skipping `WindowsApps` directories entirely (their executables may be Store stubs).

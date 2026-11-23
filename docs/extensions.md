@@ -10,7 +10,10 @@ mode. A missing/bad manifest affects information, not whether the program is per
 Supervised extensions with literal `python3` argv[0] use core interpreter discovery. On Unix, the core
 checks `VQRO_PYTHON` first, else walks PATH then missing Homebrew directories `/opt/homebrew/bin` and
 `/usr/local/bin`, selecting Python 3.11+. Version checks are isolated, bounded to two seconds per candidate,
-and cached until core restart. An invalid override fails instead of falling back. Configure the core's launch
+with a shared five-second search/probe budget and cached until core restart. The core runs discovery off its
+mutex; Python extensions remain `starting` while recovery and other calls continue. It revalidates current
+declarations/generations before spawn, using the same absolute interpreter path that passed the probe even if
+the child cwd differs. An invalid override fails instead of falling back. Configure the core's launch
 environment for GUI/launchd startup; see [setup](setup.md#macos-runtime-python). Windows discovery is unchanged.
 
 ## Browsing and testing
