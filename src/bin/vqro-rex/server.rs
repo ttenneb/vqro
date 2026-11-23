@@ -287,6 +287,8 @@ pub async fn command(args: &[String]) -> Result<(), String> {
 mod regression_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    // Child-written fakes (ETXTBSY-safe with parallel tests); the only spawn stays in the status fixtures.
+    use super::status_tests::write_script;
 
     #[tokio::test]
     async fn stop_refuses_empty_instance_on_either_read() {
@@ -299,8 +301,7 @@ mod regression_tests {
             let bin = root.join("rex-cli");
             let first = if empty_first { "" } else { "instance" };
             // Fake CLI only; the socket never speaks to Rex. Second read always returns an empty id.
-            std::fs::write(&bin, format!("#!/bin/sh\ncd '{}' || exit 1\ncase \"$*\" in\n*server\\ stop*) touch stopped;;\n*) if test -e read; then id=''; else id='{first}'; touch read; fi; printf '{{\"instance_id\":\"%s\",\"session_count\":0}}' \"$id\";;\nesac\n", root.display())).unwrap();
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+            write_script(&bin, &format!("#!/bin/sh\ncd '{}' || exit 1\ncase \"$*\" in\n*server\\ stop*) touch stopped;;\n*) if test -e read; then id=''; else id='{first}'; touch read; fi; printf '{{\"instance_id\":\"%s\",\"session_count\":0}}' \"$id\";;\nesac\n", root.display()));
             let result = command(&["stop".into(), "--state-dir".into(), root.to_str().unwrap().into(),
                 "--rex".into(), bin.to_str().unwrap().into(), "--expect-instance".into(), first.into()]).await;
             let stopped = root.join("stopped").exists();
@@ -318,15 +319,19 @@ mod regression_tests {
         std::fs::write(root.join("rex/vqro-owned"), OWNED_MARKER).unwrap();
         let listener = std::os::unix::net::UnixListener::bind(socket(&root.join("rex"))).unwrap();
         let bin = root.join("rex-cli");
-        std::fs::write(&bin, format!("#!/bin/sh\ncd '{}' || exit 1\nif test -e first; then touch second; id=''; else touch first; id=instance; fi\nprintf '{{\"instance_id\":\"%s\",\"session_count\":0}}' \"$id\"\n", root.display())).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_script(&bin, &format!("#!/bin/sh\ncd '{}' || exit 1\nif test -e first; then touch second; id=''; else touch first; id=instance; fi\nprintf '{{\"instance_id\":\"%s\",\"session_count\":0}}' \"$id\"\n", root.display()));
         let guard = lock(&root.join("rex")).await.unwrap();
         let args = vec!["stop".into(), "--state-dir".into(), root.to_str().unwrap().into(),
             "--rex".into(), bin.to_str().unwrap().into(), "--expect-instance".into(), "instance".into()];
         let stopping = tokio::spawn(async move { command(&args).await });
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !root.join("first").exists() { tokio::time::sleep(Duration::from_millis(1)).await; }
-        }).await.unwrap();
+        // Event-based, no deadline: wait for the first status read, or fail at once with the stop's own result if it
+        // ended before reading (a slow, loaded machine only makes this wait longer).
+        while !root.join("first").exists() {
+            if stopping.is_finished() {
+                panic!("stop ended before its first status read: {:?}", stopping.await);
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(!root.join("second").exists(), "instance recheck passed a contended lock");
         drop(guard);
@@ -343,8 +348,7 @@ mod regression_tests {
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let listener = std::os::unix::net::UnixListener::bind(socket(&root.join("rex"))).unwrap();
         let bin = root.join("fake-rex");
-        std::fs::write(&bin, format!("#!/bin/sh\ntouch '{}/invoked'\n", root.display())).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_script(&bin, &format!("#!/bin/sh\ntouch '{}/invoked'\n", root.display()));
         let result = command(&["stop".into(), "--state-dir".into(), root.to_str().unwrap().into(),
             "--rex".into(), bin.to_str().unwrap().into(), "--expect-instance".into(), "instance".into()]).await;
         assert!(result.unwrap_err().contains("not a marked"));

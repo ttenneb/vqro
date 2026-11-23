@@ -5,6 +5,7 @@
 #![cfg(unix)]
 
 #[path = "support/python.rs"] mod test_python;
+#[path = "support/script.rs"] mod test_script;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -21,10 +22,8 @@ async fn client(dir: &Path, conf: &str, timeout_ms: u64) -> Client {
     std::fs::write(dir.join("s.conf"), conf).unwrap();
     let mut config = Config::new(socket, "test");
     // Run the fixture with the same resolved interpreter, even with an old python3 first on PATH.
-    use std::os::unix::fs::PermissionsExt;
     let wrapper = dir.join("fake-tmux");
-    std::fs::write(&wrapper, format!("#!/bin/sh\nexec '{}' '{}' \"$@\"\n", test_python::python().replace('\'', "'\\''"), fake().unwrap().to_string_lossy().replace('\'', "'\\''"))).unwrap();
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    test_script::write_executable(&wrapper, format!("#!/bin/sh\nexec '{}' '{}' \"$@\"\n", test_python::python().replace('\'', "'\\''"), fake().unwrap().to_string_lossy().replace('\'', "'\\''")).as_bytes());
     config.binary = wrapper;
     config.command_timeout = Duration::from_millis(timeout_ms);
     Client::connect(config).await.unwrap()
