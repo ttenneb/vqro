@@ -121,12 +121,12 @@ pub fn ensure(bin: &Path, dir: &Path) -> Result<PathBuf, String> {
     for _ in 0..50 {
         #[cfg(unix)]
         if vqro::rex::transport::connect_sync(&socket(dir)).is_ok() {
-            if should_mark { std::fs::write(dir.join("vqro-owned"), OWNED_MARKER).map_err(|e| e.to_string())?; }
+            if should_mark { vqro::store::write_atomic(&dir.join("vqro-owned"), OWNED_MARKER.as_bytes()).map_err(|e| e.to_string())?; }
             return Ok(socket(dir));
         }
         #[cfg(windows)]
         if let Some(endpoint) = reported_endpoint(bin, dir)? {
-            if should_mark { std::fs::write(dir.join("vqro-owned"), OWNED_MARKER).map_err(|e| e.to_string())?; }
+            if should_mark { vqro::store::write_atomic(&dir.join("vqro-owned"), OWNED_MARKER.as_bytes()).map_err(|e| e.to_string())?; }
             return Ok(endpoint);
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -338,6 +338,7 @@ mod tests {
 
     #[test]
     fn status_endpoint_is_reported_not_derived() {
+        #[cfg(unix)]
         assert_eq!(endpoint_from_status(&json!({"endpoint": "unix:///private/rex/server.sock"})).unwrap(),
             Path::new("/private/rex/server.sock"));
         let pipe = r"\\.\pipe\rex-S-1-5-21-example-private";

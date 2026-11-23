@@ -228,11 +228,12 @@ impl App {
 
     /// Refresh stored event-derived facts too: a reconcile repairs dropped events. Failed or malformed
     /// queries retain prior facts, never invent an exit or erase a previously observed status.
-    async fn refresh_facts(&self, session: &str, b: &Value, old: Option<Value>, argv: Vec<String>) -> Option<Value> {
+    async fn refresh_facts(&self, session: &str, b: &Value, old: Option<Value>, argv: Option<Vec<String>>) -> Option<Value> {
         let id = b["block_id"].as_str().unwrap_or_default();
         let mut lifecycle_observed = old.is_some();
+        let argv_known = argv.is_some();
         let mut facts = old.unwrap_or_else(|| json!({"ref":id,"incarnation":self.run,"kind":"terminal",
-            "state":"live","argv":argv,"data":{}}));
+            "state":"live","argv":argv.unwrap_or_default(),"data":{"argv_known":argv_known}}));
         facts["name"] = json!(b["label"].as_str().filter(|s| !s.is_empty()));
         for key in ["window_id", "placement", "host_id", "flavor"] {
             let field = match key { "window_id" => "window", "host_id" => "host", other => other };
@@ -331,7 +332,7 @@ impl App {
             let base = observation["revision"].as_u64();
             let token = observation["token"].as_u64();
             let old = observation["facts"].as_object().map(|_| observation["facts"].clone());
-            let argv = observation["argv"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
+            let argv = observation["argv"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect());
             let mut pending = facts::PendingGuard::new(self.clone(), bid.clone(), token);
             let Some(facts) = self.refresh_facts(session, b, old.clone(), argv).await else {
                 eprintln!("vqro-rex: defer {bid}: no valid lifecycle observation");
@@ -484,12 +485,13 @@ impl App {
         drop(owned_lock);
         let reservation = self.write_facts(Change::Created { bid:bid.clone(), argv }).await
             .map_err(|e| ProviderError::new("backend", format!("terminal created: ref {bid}; pending metadata unavailable: {e}; do not retry spawn")))?;
-        let mut pending = facts::PendingGuard::new(self.clone(), bid.clone(), reservation.as_ref().and_then(|v| v["token"].as_u64()));
+        let mut pending = facts::PendingGuard::creator(self.clone(), bid.clone(), reservation.as_ref().and_then(|v| v["creator_token"].as_u64()));
         if let Err(e) = self.reconcile(false).await {
             eprintln!("vqro-rex: reconcile after spawn: {e}");
         }
-        pending.clear().await;
-        let facts = self.write_facts(Change::Snapshot { bid:bid.clone() }).await.map_err(|e| ProviderError::new("backend", e))?
+        let snapshot = self.write_facts(Change::Snapshot { bid:bid.clone() }).await;
+        pending.clear().await; // only this spawn completes its creator ownership, after its observation attempt
+        let facts = snapshot.map_err(|e| ProviderError::new("backend", e))?
             .ok_or_else(|| ProviderError::new("backend", format!("terminal created: ref {bid}; follow-up lifecycle observation unavailable; outcome unknown, do not retry spawn")))?;
         Ok(Outcome::Observed(Some(json!({"facts": facts}))))
     }
@@ -715,7 +717,7 @@ impl App {
                         if let Err(e) = self.size(&session, &bid, cols, rows).await {
                             match e {
                                 control::Error::Rejected { .. } => { let _ = stream.error(&ProviderError::new("backend", e.to_string())).await; }
-                                control::Error::Lost(_) | control::Error::Timeout => {
+                                control::Error::Lost(_) | control::Error::Timeout | control::Error::VerificationRefused(_) => {
                                     eprintln!("vqro-rex: resize outcome unknown: {e}");
                                     // stream.error always means rejected, regardless of kind. A backend gap
                                     // reports lost certainty without asserting that ownership/resize had no effect.
@@ -842,7 +844,12 @@ async fn run() -> Result<(), String> {
         // don't restart an owned server someone stopped on purpose.
         loop {
             let lock = match &owned_dir { Some(dir) => Some(owned_server::lock(dir).await?), None => None };
-            let reachable = rex::transport::connect(&socket).await.is_ok();
+            let reachable = match rex::transport::connect(&socket).await {
+                Ok(_) => true,
+                Err(error) if vqro::transport::is_server_verification_error(&error) =>
+                    return Err(format!("Rex endpoint verification refused at {}: {error}; reconnect stopped", socket.display())),
+                Err(_) => false,
+            };
             drop(lock);
             if reachable { break; }
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -850,20 +857,34 @@ async fn run() -> Result<(), String> {
     }
 }
 
-/// One registration for one run of the Rex server. Ok when that run ended (a new registration follows).
-async fn registration(a: &Args, endpoint: &str, socket: &Path, owned_dir: Option<&Path>) -> Result<(), String> {
-    let (control, mut events) = loop {
-        let lock = match owned_dir { Some(dir) => Some(owned_server::lock(dir).await?), None => None };
-        let result = Control::connect(socket, "vqro-rex", CALL_TIMEOUT).await;
-        drop(lock);
-        match result {
-            Ok(c) => break c,
-            Err(e) => {
-                eprintln!("vqro-rex: connect {}: {e}", socket.display());
+/// Verification refusal is permanent for this attempt: never normalize/bypass it or loop before registration.
+async fn connect_control<T, F, Fut>(endpoint: &Path, mut attempt: F) -> Result<T, String>
+where F: FnMut() -> Fut, Fut: std::future::Future<Output = Result<Result<T, control::Error>, String>> {
+    loop {
+        // Local setup/lock errors stay fatal; only native transient connection failures are retried.
+        match attempt().await? {
+            Ok(value) => return Ok(value),
+            Err(control::Error::VerificationRefused(reason)) => return Err(format!(
+                "Rex endpoint verification refused at {}: {reason}; startup stopped; the shared client requires the exact user SID as pipe owner", endpoint.display())),
+            Err(error) => {
+                eprintln!("vqro-rex: connect {}: {error}", endpoint.display());
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
-    };
+    }
+}
+
+/// One registration for one run of the Rex server. Ok when that run ended (a new registration follows).
+async fn registration(a: &Args, endpoint: &str, socket: &Path, owned_dir: Option<&Path>) -> Result<(), String> {
+    let (control, mut events) = connect_control(socket, || async {
+        let lock = match owned_dir {
+            Some(dir) => Some(owned_server::lock(dir).await?),
+            None => None,
+        };
+        let result = Control::connect(socket, "vqro-rex", CALL_TIMEOUT).await;
+        drop(lock);
+        Ok(result)
+    }).await?;
     let boot = control.call("session.bootstrap", json!({"event_scope": "all", "attach_session_ids": []})).await.map_err(|e| e.to_string())?;
     let status = &boot["server_status"];
     let run = status["instance_id"].as_str().ok_or("rex reported no instance_id")?.to_string();

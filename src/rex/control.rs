@@ -26,6 +26,8 @@ const EVENT_QUEUE: usize = 4096;
 pub enum Error {
     /// The connection failed or closed; an in-flight request's outcome is unknown.
     Lost(String),
+    /// The shared connector refused endpoint/server verification before any Rex connection was exposed.
+    VerificationRefused(String),
     /// Rex answered with an error: the request had no effect (Rex reports failures before acting).
     Rejected { code: String, message: String },
     /// No answer within the deadline: outcome unknown.
@@ -36,6 +38,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Lost(m) => write!(f, "rex connection lost: {m}"),
+            Error::VerificationRefused(m) => write!(f, "rex endpoint verification refused: {m}"),
             Error::Rejected { code, message } => write!(f, "rex refused ({code}): {message}"),
             Error::Timeout => write!(f, "rex did not answer in time"),
         }
@@ -48,6 +51,14 @@ pub enum Event {
     Event(Value),
     /// Events were dropped because the consumer fell behind; re-read state.
     Lagged,
+}
+
+fn transport_error(error: std::io::Error) -> Error {
+    if crate::transport::is_server_verification_error(&error) {
+        Error::VerificationRefused(error.to_string())
+    } else {
+        Error::Lost(error.to_string())
+    }
 }
 
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, Error>>>>>;
@@ -65,7 +76,7 @@ pub struct Control {
 impl Control {
     /// Connect and say hello. `events` receives every event the server sends this connection.
     pub async fn connect(socket: &Path, name: &str, timeout: Duration) -> Result<(Control, mpsc::Receiver<Event>), Error> {
-        let lost = |e: std::io::Error| Error::Lost(e.to_string());
+        let lost = transport_error;
         let mut stream = tokio::time::timeout(timeout, super::transport::connect(socket)).await.map_err(|_| Error::Timeout)?.map_err(lost)?;
         let leftover = tokio::time::timeout(timeout, ws::handshake(&mut stream, "/api/control", PROTOCOL)).await.map_err(|_| Error::Timeout)?.map_err(lost)?;
         let (read, write) = tokio::io::split(stream);
@@ -226,6 +237,12 @@ impl Control {
 mod regression_tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn shared_verification_refusal_keeps_its_permanent_kind() {
+        let error = crate::transport::validate_windows_endpoint(Path::new(r"unix://\\.\pipe\rex-example")).unwrap_err();
+        assert!(matches!(transport_error(error), Error::VerificationRefused(_)));
+    }
 
     #[tokio::test]
     async fn lag_marker_arrives_after_drain_without_another_server_event() {

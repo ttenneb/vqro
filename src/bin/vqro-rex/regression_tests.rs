@@ -1,5 +1,7 @@
 //! Powerless fake Rex/control + fake core. Never starts Rex or a real backend.
 use super::*;
+#[path = "argv_ownership_tests.rs"]
+mod argv_ownership_tests;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncBufReadExt, BufReader};
 
@@ -488,7 +490,7 @@ async fn pending_tokens_protect_newer_argv_and_registration_end_clears_them() {
     app.write_facts(Change::Cancel { bid:"new".into(), token:old["token"].as_u64().unwrap() }).await.unwrap();
     let observation = app.write_facts(Change::Begin { bid:"new".into() }).await.unwrap().unwrap();
     assert_eq!(observation["argv"], json!(["command"]));
-    app.write_facts(Change::Cancel { bid:"new".into(), token:created["token"].as_u64().unwrap() }).await.unwrap();
+    app.write_facts(Change::FinishCreator { bid:"new".into(), token:created["creator_token"].as_u64().unwrap() }).await.unwrap();
     assert_eq!(app.state.lock().unwrap().pending.len(), 1);
     app.write_facts(Change::Remove { bid:"new".into(), incarnation:"run".into(), reason:json!({"reason":"exited"}) }).await.unwrap();
     assert!(app.state.lock().unwrap().pending.is_empty());
@@ -513,4 +515,16 @@ async fn pending_identity_and_argv_storage_budgets_are_enforced() {
     assert!(app.provider.is_closed());
     app.write_facts(Change::End).await.unwrap();
     assert!(app.state.lock().unwrap().pending.is_empty());
+}
+
+#[tokio::test]
+async fn startup_does_not_retry_a_permanent_connector_verification_refusal() {
+    let attempts = AtomicU64::new(0);
+    let result = tokio::time::timeout(Duration::from_secs(1), connect_control::<(), _, _>(Path::new("fake-endpoint"), || {
+        attempts.fetch_add(1, Ordering::Relaxed);
+        async { Ok(Err(control::Error::VerificationRefused("fake connector: pipe owner is a group SID, not TokenUser".into()))) }
+    })).await.expect("verification refusal must not enter the reconnect loop");
+    let message = result.unwrap_err();
+    assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    assert!(message.contains("startup stopped") && message.contains("group SID") && message.contains("exact user SID"));
 }

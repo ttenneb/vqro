@@ -12,25 +12,34 @@ pub(super) fn argv_size(argv: &[String]) -> usize {
     argv.iter().fold(0usize, |n, s| n.saturating_add(s.len()).saturating_add(std::mem::size_of::<String>()))
 }
 
-pub(super) struct Pending {
+struct Creator {
     token: u64,
-    revision: u64,
     argv: Vec<String>,
 }
 
-/// Clears an admitted stamp/argv on ordinary failure or cancellation. The token protects a newer
-/// replacement reservation from an older future's cleanup. Registration End also clears the whole set.
+pub(super) struct Pending {
+    token: u64, // observation owner, or zero when only the creator is active
+    revision: u64,
+    creator: Option<Creator>,
+}
+
+/// Each guard finishes only its own role: observation cleanup cannot consume creator-owned input.
+/// Independent tokens protect newer owners from stale cleanup. Registration End clears both roles.
 pub(super) struct PendingGuard {
     app: Arc<App>,
     bid: String,
     token: Option<u64>,
+    creator: bool,
 }
 
 impl PendingGuard {
-    pub(super) fn new(app: Arc<App>, bid: String, token: Option<u64>) -> Self { Self { app, bid, token } }
+    pub(super) fn new(app: Arc<App>, bid: String, token: Option<u64>) -> Self { Self { app, bid, token, creator:false } }
+    pub(super) fn creator(app: Arc<App>, bid: String, token: Option<u64>) -> Self { Self { app, bid, token, creator:true } }
     pub(super) async fn clear(&mut self) {
         if let Some(token) = self.token {
-            let _ = self.app.write_facts(Change::Cancel { bid:self.bid.clone(), token }).await;
+            let change = if self.creator { Change::FinishCreator { bid:self.bid.clone(), token } }
+                else { Change::Cancel { bid:self.bid.clone(), token } };
+            let _ = self.app.write_facts(change).await;
             self.token = None;
         }
     }
@@ -40,7 +49,8 @@ impl Drop for PendingGuard {
     fn drop(&mut self) {
         if let (Some(token), Ok(runtime)) = (self.token.take(), tokio::runtime::Handle::try_current()) {
             let (app, bid) = (self.app.clone(), self.bid.clone());
-            runtime.spawn(async move { let _ = app.write_facts(Change::Cancel { bid, token }).await; });
+            let change = if self.creator { Change::FinishCreator { bid, token } } else { Change::Cancel { bid, token } };
+            runtime.spawn(async move { let _ = app.write_facts(change).await; });
         }
     }
 }
@@ -49,6 +59,7 @@ pub(super) enum Change {
     Begin { bid: String },
     Created { bid: String, argv: Vec<String> },
     Cancel { bid: String, token: u64 },
+    FinishCreator { bid: String, token: u64 },
     End,
     Refresh { bid: String, session: String, base: Option<u64>, token: Option<u64>, facts: Value },
     Status { bid: String, base: u64, status: Value },
@@ -76,8 +87,9 @@ impl State {
         if bid.is_empty() || bid.len() > MAX_REF_BYTES {
             return Err("invalid/oversized Rex ref; closing registration".into());
         }
+        let pending_only = self.pending.keys().filter(|id| !self.blocks.contains_key(*id) && !self.removed.contains(*id)).count();
         if !self.blocks.contains_key(bid) && !self.removed.contains(bid) && !self.pending.contains_key(bid)
-            && self.blocks.len() + self.removed.len() + self.pending.len() >= MAX_REGISTRATION_REFS {
+            && self.blocks.len() + self.removed.len() + pending_only >= MAX_REGISTRATION_REFS {
             return Err("fact identity ledger exhausted; closing registration without evicting retired refs".into());
         }
         Ok(())
@@ -104,12 +116,12 @@ impl State {
                 } else {
                     self.pending_admit(&bid)?;
                     let revision = self.revision()?;
-                    let argv = self.pending.remove(&bid).map(|p| p.argv).unwrap_or_default();
-                    // Transfer any creation metadata into this observation's unique token. Cleanup from
-                    // an older observer or creation future cannot erase this newer in-flight witness.
-                    self.pending.insert(bid.clone(), Pending { token:revision, revision, argv });
-                    let pending = &self.pending[&bid];
-                    result = Some(json!({"revision":pending.revision,"token":pending.token,"facts":null,"argv":pending.argv}));
+                    let pending = self.pending.entry(bid).or_insert(Pending { token:0, revision, creator:None });
+                    pending.token = revision;
+                    pending.revision = revision;
+                    // Read creation input without transferring its ownership to this observation.
+                    let argv = pending.creator.as_ref().map(|c| &c.argv);
+                    result = Some(json!({"revision":pending.revision,"token":pending.token,"facts":null,"argv":argv}));
                 }
             }
             Change::Created { bid, argv } => {
@@ -117,30 +129,43 @@ impl State {
                     return Err("pending argv exceeds byte budget; closing registration".into());
                 }
                 if self.removed.contains(&bid) { return Ok((None, publications)); }
+                if self.pending.get(&bid).is_some_and(|p| p.creator.is_some()) {
+                    return Err("duplicate active creator for Rex ref; closing registration".into());
+                }
                 if self.blocks.contains_key(&bid) {
                     let revision = self.revision()?;
                     let block = self.blocks.get_mut(&bid).unwrap();
                     block.revision = revision;
                     block.facts["argv"] = json!(argv);
+                    block.facts["data"]["argv_known"] = json!(true);
                     publications.push(Publication::Upsert(block.facts.clone()));
                 } else {
                     self.pending_admit(&bid)?;
                     let revision = self.revision()?;
-                    // A delayed creation acknowledgement replaces an older discovery token. Cancellation
-                    // from the older observation cannot erase this reservation or its argv.
-                    self.pending.insert(bid, Pending { token:revision, revision, argv });
-                    result = Some(json!({"token":revision}));
+                    let pending = self.pending.entry(bid).or_insert(Pending { token:0, revision, creator:None });
+                    pending.revision = revision; // invalidate an observer that captured facts before argv was known
+                    pending.creator = Some(Creator { token:revision, argv });
+                    result = Some(json!({"creator_token":revision}));
                 }
             }
             Change::Cancel { bid, token } => {
-                if self.pending.get(&bid).is_some_and(|p| p.token == token) { self.pending.remove(&bid); }
+                if let Some(pending) = self.pending.get_mut(&bid).filter(|p| p.token == token) {
+                    pending.token = 0;
+                    if pending.creator.is_none() { self.pending.remove(&bid); }
+                }
+            }
+            Change::FinishCreator { bid, token } => {
+                if let Some(pending) = self.pending.get_mut(&bid).filter(|p| p.creator.as_ref().is_some_and(|c| c.token == token)) {
+                    pending.creator = None;
+                    if pending.token == 0 { self.pending.remove(&bid); }
+                }
             }
             Change::End => { self.pending.clear(); self.ending = true; }
             Change::Refresh { bid, session, base, token, facts } => {
                 let current = self.blocks.get(&bid).map(|b| b.revision);
                 let pending = self.pending.get(&bid);
                 let valid = if current.is_some() { token.is_none() && current == base }
-                    else { pending.is_some_and(|p| Some(p.token) == token && Some(p.revision) == base) };
+                    else { pending.is_some_and(|p| p.token != 0 && Some(p.token) == token && Some(p.revision) == base) };
                 if self.removed.contains(&bid) || !valid {
                     return Ok((None, publications));
                 }
@@ -149,7 +174,11 @@ impl State {
                 }
                 self.admit(&bid)?;
                 let revision = self.revision()?;
-                self.pending.remove(&bid);
+                if let Some(pending) = self.pending.get_mut(&bid) {
+                    // Committing an observation ends only its stamp, not an active spawn's metadata.
+                    pending.token = 0;
+                    if pending.creator.is_none() { self.pending.remove(&bid); }
+                }
                 self.blocks.insert(bid, Block { session, facts: facts.clone(), revision });
                 result = Some(facts.clone());
                 publications.push(Publication::Upsert(facts));

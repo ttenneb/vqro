@@ -107,12 +107,20 @@ community clients and observing our own private server's traffic; the Rex binary
   remain unpublished until the owner emits the first full sync. The event-triggered status query uses the same rules.
 - Created-but-unobserved argv is stored only in the owner's pending identity entry, never a separate unbounded map.
   Its estimated storage (string bytes plus per-argument metadata) is capped at 64 KiB; oversized argv is refused
-  before native creation. Creation metadata transfers into a fresh observation token so older cleanup cannot erase
-  a newer reservation. Token-aware guards clear pending entries on commit, failure or cancellation; removal clears
-  them too. Registration end clears all pending metadata and refuses late admissions from unfinished effect tasks.
+  before native creation. Creation metadata has a creator token owned by the spawn until its observation attempt
+  completes, independent of discovery tokens in the same bounded identity entry. Observations may read it but cannot
+  adopt or clear it: discovery cancel/commit ends only its stamp. Only creator completion/cancellation, removal or
+  registration end releases creation metadata. Registration end also refuses late admissions from unfinished effects.
   A successfully observed argv lives in the Block's normal facts. Native creation followed by unavailable observation
-  still reports the created ref with an outcome-unknown/no-retry error, never a fabricated lifecycle. The control reader emits pending lag after queue drain even
-  without another native event. It does not cancel a partially parsed WebSocket read to do so.
+  still reports the created ref with an outcome-unknown/no-retry error, never a fabricated lifecycle.
+- **R1 argv provenance / core follow-up.** `facts.data.argv_known` is true when the creation input is known, false
+  when it is not (lost metadata, externally created blocks, provider-restart rediscovery). In the latter case the
+  provider publishes `argv: []` as the current contract's placeholder, not evidence of a known empty input.
+  `provider-v0.md` section9.3 defaults omitted argv to []; `src/provider_wire.rs:76,87` and `adapter::ResourceFacts`
+  store a Vec, and null is not a supported unknown representation. Core files are unchanged. A future, separate
+  core change should represent unknown argv explicitly instead of requiring this provider-data provenance flag.
+- The control reader emits pending lag after queue drain even without another native event. It does not cancel
+  a partially parsed WebSocket read to do so.
 - Status replacement requires object records, nullable/string id and textual fields, and nullable/numeric
   progress; invalid entries or supported field types preserve the old table. Sparse process replies preserve
   missing names, while explicit nullable names may clear them. An exit requires an integer `last_exit.exit_code`.
@@ -142,11 +150,23 @@ community clients and observing our own private server's traffic; the Rex binary
 
 - Control and data channels use the shared `vqro::transport::connect` (`ClientStream`, Tokio split halves),
   not a second named-pipe implementation. Rex-specific `unix://` normalization is in `src/rex/transport.rs`;
-  raw Unix paths and Windows pipe names pass through. The provider's core connection uses that same shared
-  connector without normalization (D22: the core endpoint is opaque).
+  the prefix is stripped **only on Unix**. Windows values pass byte-for-byte to the shared connector: a
+  `unix://`-prefixed pipe spelling is refused, not rewritten into an accepted pipe. The provider's core connection
+  uses that same shared connector without normalization (D22: the core endpoint is opaque).
 - [Rex's Windows running guide](https://www.superlogical.com/rex/docs/windows/running.md) documents one personal
   server per account, no shared/login server; `rex server start` needs no administrator, keeps running when empty,
   and ends when explicitly stopped or the account signs out. vqro does not install a service or sign-in entry.
+- The shared Windows client authenticates the pipe before exposing a stream and requires its object owner to
+  be **exactly the current user's TokenUser SID**, not Administrators or another group. Rex's actual pipe owner
+  is **unverified**: account-only access in its documentation does not establish the object's owner SID. An explicitly
+  elevated `rex server run` may produce a group-owned pipe that is refused. The guide says `server start` normally
+  reduces elevated tokens; this is not a claim that every elevated launch is incompatible or that compatibility
+  is verified. Shared owner/namespace verification is unchanged, with no bypass or broader acceptance.
+- Permanent connector verification refusal is preserved as a distinct control error. Startup and reconnect stop
+  with a clear stderr diagnostic (visible in the extension log), rather than silently retrying before provider
+  registration. No registered provider-unavailable fact is fabricated when startup never registered.
+- Owned marker publication uses `store::write_atomic` on Unix and Windows, under the existing owned-server lock;
+  atomic/durability errors propagate as startup failure. This strengthens publication, not marker authentication.
 - The guide documents `\\\\.\\pipe\\rex-<SID>` and a suffix when `REX_RUNTIME_DIR` is set. vqro **does not derive**
   either: owned Windows servers use the private runtime directory and `rex server status --json`'s `endpoint`.
   The Unix socket path-length restriction applies only on Unix. The owned command retains a small platform-specific
@@ -157,7 +177,7 @@ community clients and observing our own private server's traffic; the Rex binary
   sign-out lifetime and real control/data handshakes remain **unverified at runtime**: no Windows host is available.
   Cross-compilation alone cannot establish those behaviours.
 - Checks after rebasing onto the corrected Rex provider plus integrated Windows transport:
-  Linux `cargo test --lib rex::` (7) and `cargo test --bin vqro-rex` (30) pass. The corrected provider's
+  Linux `cargo test --lib rex::` (9) and `cargo test --bin vqro-rex` (33) pass. The corrected provider's
   private-server `tests/e2e_rex.py TARGET` passes all 27 checks.
   `cargo check --target x86_64-pc-windows-gnu --all-targets` passes, including the complete provider
   and owned-server Windows code. An earlier module-only dependency check was blocked by then-unmigrated
