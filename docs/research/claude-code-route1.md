@@ -77,7 +77,10 @@ cutoff is never called EOF. Public lifecycle remains `ending` until the final it
 cannot retire clients before late records. Final frames drain before normal item close; the SDK reason field
 carries `native_reader_closed`, not a generic provider-drop fallback. A bounded unconfirmed tail is labelled
 `native_tail_unconfirmed`/incomplete, not claimed EOF or complete history. Retired publisher/initializer tasks
-are joined before the final cut. The existing acknowledged `provider.sync` (reply once applied) fences final
+are joined before the final cut. Each item stream retains its handle after output close/gap until the core's
+existing `stream.close` retirement acknowledgement (normal real-core relay drained, not merely provider enqueue).
+Missing/disconnected/timed-out retirement stays unconfirmed and never publishes a successful ended cut.
+The existing acknowledged `provider.sync` (reply once applied) then fences final
 item data/terminal markers and facts before intentional disconnect. An outer five-second deadline includes
 outgoing-budget/channel enqueue stalls as well as the ACK wait; timeout stays unconfirmed and is not replayed.
 The bridge stops only its owned child

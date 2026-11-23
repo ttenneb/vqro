@@ -99,6 +99,13 @@ async fn registered_with_capacity(
     shared: &Arc<Shared>,
     capacity: usize,
 ) -> (Provider, UnboundedReceiver<Request>, Core) {
+    registered_with_timeout(shared, capacity, Duration::from_secs(5)).await
+}
+async fn registered_with_timeout(
+    shared: &Arc<Shared>,
+    capacity: usize,
+    reply_timeout: Duration,
+) -> (Provider, UnboundedReceiver<Request>, Core) {
     let (a, b) = tokio::io::duplex(capacity);
     let (r, w) = tokio::io::split(b);
     let mut core = Core {
@@ -113,7 +120,7 @@ async fn registered_with_capacity(
         shared.state.lock().unwrap().provider_caps(),
     );
     config.role = "runtime".into();
-    config.call_timeout = Duration::from_secs(5);
+    config.call_timeout = reply_timeout;
     let connect = tokio::spawn(Provider::connect(a, config));
     let hello = core.recv().await;
     assert_eq!(hello["method"], "hello");
@@ -507,6 +514,11 @@ async fn synthetic_process_provider_vertical_slice() {
                     frame["params"]["reason"]["reason"], "native_reader_closed",
                     "not a generic provider-drop marker"
                 );
+                assert!(
+                    !finish.is_finished(),
+                    "disconnect must also wait for the core's stream retirement"
+                );
+                core.send(json!({"jsonrpc":"2.0","method":"stream.close","params":{"generation":7,"stream":44}})).await;
                 closed = true;
             }
             Some("provider.sync") => {
@@ -605,7 +617,11 @@ async fn normal_publisher_and_acknowledged_shutdown_preserve_blocked_writer_tail
         let frame = core.recv().await;
         match frame["method"].as_str() {
             Some("stream.data") => core.item_data(&frame).await,
-            Some("stream.closed") => closed = true,
+            Some("stream.closed") => {
+                assert!(!finish.is_finished());
+                core.send(json!({"jsonrpc":"2.0","method":"stream.close","params":{"generation":7,"stream":44}})).await;
+                closed = true;
+            }
             Some("provider.sync") => {
                 assert_eq!(
                     frame["params"]["resources"][0]["data"]["agent"]["lifecycle"],
@@ -639,7 +655,10 @@ async fn final_ack_deadline_includes_a_budget_stalled_enqueue() {
         "claude-fixture".into(),
         "fixture-instance".into(),
     );
-    let (provider, _requests, _core) = registered_with_capacity(&shared, 1).await;
+    // SDK reply timeout is deliberately much longer than the adapter's TOTAL final-stage
+    // deadline, so the SDK's later timer cannot accidentally make this control green.
+    let (provider, _requests, _core) =
+        registered_with_timeout(&shared, 1, Duration::from_secs(60)).await;
     {
         let mut state = shared.state.lock().unwrap();
         state.observe(&vqro::native_process::Event::Exited(

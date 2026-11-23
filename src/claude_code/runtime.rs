@@ -24,6 +24,7 @@ pub struct Shared {
     generation: AtomicU64,
     viewers: AtomicUsize,
     viewers_changed: Notify,
+    retirement_failed: std::sync::atomic::AtomicBool,
     stdout_done: std::sync::atomic::AtomicBool,
     background_probe: std::sync::atomic::AtomicBool,
     spawned: std::sync::atomic::AtomicBool,
@@ -70,6 +71,7 @@ impl Shared {
             generation: AtomicU64::new(1),
             viewers: AtomicUsize::new(0),
             viewers_changed: Notify::new(),
+            retirement_failed: std::sync::atomic::AtomicBool::new(false),
             stdout_done: std::sync::atomic::AtomicBool::new(false),
             background_probe: std::sync::atomic::AtomicBool::new(false),
             spawned: std::sync::atomic::AtomicBool::new(false),
@@ -416,7 +418,11 @@ impl Shared {
                     }
                 }
                 Next::Gap(reason) => {
-                    let _ = stream.gap(reason).await;
+                    let acknowledged =
+                        stream.gap(reason).await.is_ok() && Self::retired(&mut stream).await;
+                    if !acknowledged && self.stdout_done.load(Ordering::SeqCst) {
+                        self.retirement_failed.store(true, Ordering::SeqCst);
+                    }
                     break;
                 }
                 Next::Idle => {
@@ -432,7 +438,14 @@ impl Shared {
                         } else {
                             "native_reader_closed"
                         };
-                        let _ = stream.close(json!({"reason":kind})).await;
+                        let acknowledged = if stream.close(json!({"reason":kind})).await.is_ok() {
+                            Self::retired(&mut stream).await
+                        } else {
+                            false
+                        };
+                        if !acknowledged {
+                            self.retirement_failed.store(true, Ordering::SeqCst);
+                        }
                         break;
                     }
                     tokio::select! {_=changed=>{},command=stream.next()=>match command{
@@ -440,6 +453,15 @@ impl Shared {
                         _=>{let _=stream.error(&ProviderError::new("unsupported","agent item stream is read-only")).await;break;}
                     }}
                 }
+            }
+        }
+    }
+    async fn retired(stream: &mut ProviderStream) -> bool {
+        loop {
+            match stream.next().await {
+                Some(crate::provider_client::StreamCommand::Close) => return true,
+                None => return false,
+                _ => {}
             }
         }
     }
@@ -497,6 +519,16 @@ impl Shared {
                 .unwrap()
                 .incomplete
                 .insert("item_stream_tail".into());
+            return Err(ProviderError::new(
+                "timeout",
+                "core item-stream retirement unconfirmed; no retry",
+            ));
+        }
+        if self.retirement_failed.load(Ordering::SeqCst) {
+            return Err(ProviderError::new(
+                "unavailable",
+                "core item-stream retirement unconfirmed; no retry",
+            ));
         }
         {
             let mut state = self.state.lock().unwrap();
