@@ -334,7 +334,8 @@ pub fn resolve_provider(name:&str) -> Result<PathBuf,String> {
             ("Rex CLI", include_str!("bin/vqro-rex/server.rs"), 1),
             ("Codex app-server", include_str!("bin/vqro-bridge-codex.rs"), 1),
             ("Pi version", include_str!("bin/vqro-bridge-pi/main.rs"), 1),
-            ("Pi RPC", include_str!("bin/vqro-bridge-pi/native.rs"), 1),
+            ("native runtime (Pi RPC)", include_str!("native_process.rs"), 1),
+            ("Pi envelope wrapper", include_str!("bin/vqro-bridge-pi/native.rs"), 0),
             ("snapshot test child", include_str!("tui/ghostty/mod.rs"), 1),
         ] {
             assert_eq!(source.matches("program::background_command(").count(), calls, "{name}");
