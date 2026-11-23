@@ -1616,10 +1616,15 @@ default: the per-platform extensions directory, `~/.local/share/vqro/extensions`
 default stays bare in stored state and resolves on each start: executable sibling of the running `vqro`, then
 platform-native `PATH` search (including `.exe` on Windows). Likewise a literal `python3` program (in extension and
 client `argv`) means "a Python 3 interpreter", resolved on each start: `VQRO_PYTHON` (one program path) on every
-platform, else `python3` on Unix; on Windows, which has no python.org `python3`, the first found walking `PATH` of
+platform; on Unix the override must pass the version check below, otherwise the first executable `python3`
+reporting Python 3.11+ walking `PATH`, then `/opt/homebrew/bin` and `/usr/local/bin` (only directories not
+already on PATH). Each candidate runs an isolated `-I -S -c` version probe with a two-second timeout;
+results (including failures) are cached per candidate path for the core process lifetime. A bad explicit
+override fails without silently falling back. No candidate reports what was found and how to install Python
+3.11+ or set `VQRO_PYTHON`. On Windows, which has no python.org `python3`, the first found walking `PATH` of
 `py -3`, `python`, `python3`, skipping `WindowsApps` directories entirely (their executables may be Store stubs).
 No candidate means an actionable discovery failure for extensions and UI clients, not a retry through bare `python3`.
-This is native PATH selection, not interpreter identity/version validation; no executable probes run. An unavailable program reports
+Windows selection remains native PATH discovery without executable/version probes. An unavailable program reports
 `failed` and an actionable diagnostic; hello/snapshot `backend_notice` and the built-in status bar expose unavailable backends.
 `entries`, `provider` (and compatibility `adapter`), `extension`, and `safe_mode` event data also carry the current
 `backend_notice` (string or null). Null clears a previous notice; absent fields from older cores leave it unchanged.

@@ -5,6 +5,14 @@ shows a checkbox, title/name, short summary and runtime badge. Select a row to r
 when it is turned off. Static information remains available when the extension is off, failed or stopped by safe
 mode. A missing/bad manifest affects information, not whether the program is permitted to run.
 
+## Runtime Python
+
+Supervised extensions with literal `python3` argv[0] use core interpreter discovery. On Unix, the core
+checks `VQRO_PYTHON` first, else walks PATH then missing Homebrew directories `/opt/homebrew/bin` and
+`/usr/local/bin`, selecting Python 3.11+. Version checks are isolated, bounded to two seconds per candidate,
+and cached until core restart. An invalid override fails instead of falling back. Configure the core's launch
+environment for GUI/launchd startup; see [setup](setup.md#macos-runtime-python). Windows discovery is unchanged.
+
 ## Browsing and testing
 
 - `/` starts a list search (title/name, summary and tags); Enter finishes typing, Esc clears the search.

@@ -42,17 +42,101 @@ pub fn resolve_argv0(name:&str) -> Result<(PathBuf,Vec<String>),String> {
 }
 
 /// A literal `python3` argv[0] means "a Python 3 interpreter": `VQRO_PYTHON` (one program path) on every platform,
-/// else `python3` on Unix. Windows installs no `python3` from python.org, so there it is the first found walking PATH
+/// else the first Unix PATH/Homebrew interpreter >= 3.11. Windows installs no `python3` from python.org, so there it is the first found walking PATH
 /// of `py -3` (the python.org launcher), `python`, `python3` (that order within one directory). Directories named
 /// `WindowsApps` are skipped entirely: their `python*.exe` may be stubs that open the Store instead.
 pub fn python() -> Result<(PathBuf,Vec<String>),String> {
-    if let Some(program)=std::env::var_os("VQRO_PYTHON").filter(|p|!p.is_empty()) { return Ok((program.into(),Vec::new())); }
-    if !cfg!(windows) { return Ok(("python3".into(),Vec::new())); }
-    let path=std::env::var_os("PATH").unwrap_or_default();
-    windows_python(std::env::split_paths(&path).collect(), executable)
-        .ok_or_else(||"no Python 3 found on PATH (tried py -3, python, python3); install Python 3.11+ or set VQRO_PYTHON to python.exe".into())
+    let explicit = std::env::var_os("VQRO_PYTHON").filter(|p| !p.is_empty()).map(PathBuf::from);
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    #[cfg(unix)]
+    {
+        unix_python(explicit, std::env::split_paths(&path).collect(),
+            &[PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")], python_version)
+            .map(|program| (program, Vec::new()))
+    }
+    #[cfg(not(unix))]
+    {
+        if let Some(program) = explicit { return Ok((program, Vec::new())); }
+        windows_python(std::env::split_paths(&path).collect(), executable)
+            .ok_or_else(||"no Python 3 found on PATH (tried py -3, python, python3); install Python 3.11+ or set VQRO_PYTHON to python.exe".into())
+    }
 }
 
+#[cfg(unix)]
+fn unix_python(explicit: Option<PathBuf>, mut dirs: Vec<PathBuf>, fallback: &[PathBuf],
+               probe: impl Fn(&Path) -> Result<(u32, u32), String>) -> Result<PathBuf, String> {
+    let candidates = if let Some(program) = explicit {
+        // An explicit override never silently falls back to another interpreter.
+        vec![program]
+    } else {
+        for dir in fallback {
+            if !dirs.contains(dir) { dirs.push(dir.clone()); }
+        }
+        dirs.into_iter().map(|dir| dir.join("python3")).filter(|p| executable(p)).collect()
+    };
+    let mut found = Vec::new();
+    for program in candidates {
+        match probe(&program) {
+            Ok((major, minor)) if major == 3 && minor >= 11 => return Ok(program),
+            Ok((major, minor)) => found.push(format!("{} is {major}.{minor}", program.display())),
+            Err(error) => found.push(format!("{}: {error}", program.display())),
+        }
+    }
+    Err(format!("no Python 3.11+ found ({}); install Python 3.11+ or set VQRO_PYTHON to its executable",
+        if found.is_empty() { "no executable python3 on PATH or in /opt/homebrew/bin, /usr/local/bin".into() } else { found.join("; ") }))
+}
+
+#[cfg(unix)]
+fn python_version(program: &Path) -> Result<(u32, u32), String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    type Versions = HashMap<PathBuf, Result<(u32, u32), String>>;
+    static VERSIONS: OnceLock<Mutex<Versions>> = OnceLock::new();
+    let mut versions = VERSIONS.get_or_init(Default::default).lock().unwrap();
+    versions.entry(program.to_path_buf()).or_insert_with(|| probe_python_version(program)).clone()
+}
+
+#[cfg(unix)]
+fn probe_python_version(program: &Path) -> Result<(u32, u32), String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let mut child = Command::new(program).args(["-I", "-S", "-c", "import sys; print(sys.version_info[:2])"])
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .spawn().map_err(|error| format!("version probe could not start: {error}"))?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() { return Err(format!("version probe exited with {status}")); }
+                let mut output = String::new();
+                let stdout = child.stdout.take().unwrap();
+                // A descendant retaining stdout must not turn a bounded probe into a hang.
+                use std::os::fd::AsRawFd;
+                let fd = stdout.as_raw_fd();
+                // SAFETY: fd is an owned live pipe; fcntl only changes its read flags.
+                if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } == -1 {
+                    return Err("could not make version output nonblocking".into());
+                }
+                if let Err(error) = stdout.take(128).read_to_string(&mut output) {
+                    if error.kind() != std::io::ErrorKind::WouldBlock { return Err(format!("invalid version output: {error}")); }
+                }
+                let pair = output.trim().strip_prefix('(').and_then(|s| s.strip_suffix(')'))
+                    .and_then(|s| s.split_once(','));
+                return pair.and_then(|(major, minor)| Some((major.trim().parse().ok()?, minor.trim().parse().ok()?)))
+                    .ok_or_else(|| "invalid version probe output".into());
+            }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(match result { Err(error) => format!("version probe failed: {error}"), _ => "version probe timed out after 2 seconds".into() });
+            }
+        }
+    }
+}
+
+#[cfg(any(not(unix), test))]
 fn windows_python(dirs:Vec<PathBuf>, exists:impl Fn(&Path)->bool) -> Option<(PathBuf,Vec<String>)> {
     let store=|dir:&&PathBuf| dir.file_name().is_some_and(|n|n.eq_ignore_ascii_case("WindowsApps"));
     dirs.iter().filter(|d|!store(d))
@@ -96,6 +180,51 @@ pub fn resolve_provider(name:&str) -> Result<PathBuf,String> {
             .output().await.unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         assert_eq!(String::from_utf8_lossy(&output.stdout), "0");
+    }
+    #[cfg(unix)]
+    fn fake_python(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join("python3");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+    #[cfg(unix)]
+    #[test]
+    fn unix_python_skips_old_versions_and_uses_missing_homebrew_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let old = fake_python(&root.path().join("apple"), "echo '(3, 9)'");
+        let new = fake_python(&root.path().join("brew"), "echo '(3, 12)'");
+        let dirs = vec![old.parent().unwrap().into(), new.parent().unwrap().into()];
+        assert_eq!(unix_python(None, dirs.clone(), &[], python_version).unwrap(), new);
+        assert_eq!(unix_python(None, vec![dirs[0].clone()], &[dirs[1].clone()], python_version).unwrap(), new);
+        // An explicit override wins over PATH; a bad override fails rather than falling back.
+        assert_eq!(unix_python(Some(new.clone()), vec![dirs[0].clone()], &[], python_version).unwrap(), new);
+        let error = unix_python(Some(old.clone()), dirs.clone(), &[], python_version).unwrap_err();
+        assert!(error.contains("is 3.9") && error.contains("VQRO_PYTHON"), "{error}");
+        let error = unix_python(None, vec![dirs[0].clone()], &[], python_version).unwrap_err();
+        assert!(error.contains("is 3.9"), "{error}");
+        assert!(unix_python(None, vec![], &[], python_version).unwrap_err().contains("install Python 3.11+"));
+        let calls = std::cell::Cell::new(0);
+        unix_python(None, dirs.clone(), &dirs, |_| { calls.set(calls.get()+1); Err("no".into()) }).unwrap_err();
+        assert_eq!(calls.get(), 2, "fallback directories already on PATH are not repeated");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn unix_version_probes_are_bounded_and_cached() {
+        let root = tempfile::tempdir().unwrap();
+        let count = root.path().join("calls");
+        let path = fake_python(root.path(), &format!("echo called >> '{}'; echo '(3, 12)'", count.display()));
+        assert_eq!(python_version(&path).unwrap(), (3, 12));
+        assert_eq!(python_version(&path).unwrap(), (3, 12));
+        assert_eq!(std::fs::read_to_string(count).unwrap(), "called\n");
+        let bad = fake_python(&root.path().join("bad"), "echo nonsense");
+        assert!(python_version(&bad).unwrap_err().contains("invalid version"));
+        let slow = fake_python(&root.path().join("slow"), "exec /bin/sleep 10");
+        let start = std::time::Instant::now();
+        assert!(python_version(&slow).unwrap_err().contains("timed out"));
+        assert!(start.elapsed() < std::time::Duration::from_secs(4));
     }
     #[test] fn windows_program_suffix_is_added_once() {
         assert_eq!(candidate(Path::new("bin"),"vqro-herdr",".exe"),Path::new("bin").join("vqro-herdr.exe"));

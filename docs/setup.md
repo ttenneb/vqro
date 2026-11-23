@@ -49,6 +49,17 @@ The `licenses` step in `scripts/check.sh` uses `cargo metadata --offline --locke
 for platforms other than the current host. If crates are missing from the cache, run
 `cargo fetch --locked` once (network), then retry. The licence check itself never fetches packages.
 
+## macOS runtime Python
+
+Extensions require Python 3.11+. Install it with `brew install python` (or use your preferred installer).
+For a core started by launchd or a GUI, Unix interpreter discovery checks each `python3` on PATH, then
+`/opt/homebrew/bin` and `/usr/local/bin` when missing from PATH, skipping versions older than 3.11.
+`VQRO_PYTHON=/absolute/path/to/python3` overrides discovery and must also be Python 3.11+; set it in the
+core launch environment, not only in a later terminal. Each candidate's isolated version probe has a
+two-second timeout and is cached until the core restarts. No shell startup files are sourced, and no
+interpreter is installed automatically. A missing/old interpreter becomes an actionable extension failure.
+Actual launchd/GUI startup still needs verification on macOS.
+
 ## Reference clones (read-only, into `~/Projects`, depth 1)
 
 | Name | URL | Commit read (2026-11-16) | Why |
