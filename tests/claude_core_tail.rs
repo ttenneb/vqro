@@ -20,7 +20,7 @@ async fn actual_core_viewer_keeps_final_tail_after_acknowledged_provider_disconn
     let core = server::start(
         socket.clone(),
         dir.path().join("st"),
-        true,
+        false, // private EMPTY store + defaults:None: no extension or real backend starts
         Backend::Fake,
         None,
     )
