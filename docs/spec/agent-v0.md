@@ -534,6 +534,11 @@ reasoning the runtime exposes for display):
     owner?, blocked_by?: [item ids], native?}]`, `update: whole | items` (each report replaces the list, or the
     runtime reports per-item changes), `explanation?`, `source: native | tool` (a runtime event, or a model tool
     call/result that carried it, with `tool?` naming that entity).
+  - `goal` (a runtime's stated objective for a conversation or child; id per owner, e.g. `current` or the child id):
+    `owner?` (child id or `null`), `objective?`, `status: active|paused|blocked|completed|unknown` (the native value is
+    always kept in `native.status`; for example Codex `usageLimited`/`budgetLimited` are `blocked`, `complete` is
+    `completed`; an unknown value is `unknown`), `budget? {tokens?}`, `used? {tokens?, seconds?}`,
+    `updated_ms?`, `native`. A goal is not a plan: no plan items are derived from it.
   - Control is declared, never emulated: caps `agent.child {actions: [interrupt | send | close | stop …], items:
     [scoped | endpoint | none]}` with `agent.child {v, child, action, content?, delivery?}` (`send` follows
     `agent.send`'s content and literal rules), and caps `agent.task {actions: [stop …]}` with `agent.task {v, task,
