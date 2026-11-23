@@ -514,7 +514,33 @@ reasoning the runtime exposes for display):
   `cols?`, `rows?`.
 - `receipt` (id = its `delivery`): `delivery`, `stage`, `native?`, `run?`, `cause?`; one entity per delivery, whose
   later stages are revisions of it.
-- `plan` (whole), `compaction`, `request` (§5), `session` (id `current`), `association` (§6.5).
+- `compaction`, `request` (§5), `session` (id `current`), `association` (§6.5).
+- **Children, tasks and plans** (beyond the main conversation; native evidence only; every field optional unless
+  noted; absent is not reported):
+  - `child` (id: the adapter's stable id for one native child run or thread), kept in the parent's stream:
+    `parent` (a child id, or `null` for the main conversation), `depth?`, `name?`, `role?` (agent type), `status:
+    pending|running|waiting|completed|failed|cancelled|unknown` (an unknown native value is `unknown`, kept in
+    `native.status`), `model?`, `usage?` (as `data.agent.usage`), `started_ms?`, `ended_ms?`, `items: scoped |
+    endpoint | none`, `endpoint?` (a resource id when the child is its own attachable agent endpoint), `native`
+    (the runtime's own ids: thread, agent, task, tool-use, run ids and its status). `scoped`: the child's
+    `message`, `tool` and `request` entities are in the parent's stream with `child: <child id>`; `endpoint`: they
+    are in that endpoint's stream; `none`: only this entity.
+  - `task` (background work the runtime runs: shell, monitor, workflow, async agent …): `kind?` (the runtime's
+    word), `title?`, `owner?` (child id or `null`), `parent_task?`, `child?` (when the task is a child agent),
+    `status: running|completed|failed|stopped|unknown`, `progress? {summary?, at_ms?}`, `started_ms?`,
+    `ended_ms?`, `usage?`, `generation?` (the runtime's revision or sequence), `native` (task, run, tool-use ids).
+  - `plan` (a todo or plan list; id per list, e.g. `current` or a native list id): `owner?` (child id or `null`),
+    `items: [{id?, text, description?, status: pending|in_progress|completed|cancelled|unknown, active_form?,
+    owner?, blocked_by?: [item ids], native?}]`, `update: whole | items` (each report replaces the list, or the
+    runtime reports per-item changes), `explanation?`, `source: native | tool` (a runtime event, or a model tool
+    call/result that carried it, with `tool?` naming that entity).
+  - Control is declared, never emulated: caps `agent.child {actions: [interrupt | send | close | stop …], items:
+    [scoped | endpoint | none]}` with `agent.child {v, child, action, content?, delivery?}` (`send` follows
+    `agent.send`'s content and literal rules), and caps `agent.task {actions: [stop …]}` with `agent.task {v, task,
+    action}`. Observing needs no action.
+  - Coordination adds no inbox: a child's request is an ordinary `request` with `child`; inbox and coordination
+    messages address agent endpoints only (a child with `endpoint` is one); child, task and plan activity is
+    observation, never authority.
 - `notice`: `position?`, `text`, `severity?: info|warn|error`, `native?`: a human-facing runtime notice that viewers
   show (with `position`, on the timeline). `severity` only when the runtime reports one; absent is unspecified, never
   inferred. Unlike the live `notice` record it is retained, with the normal entity and epoch lifecycle: a new epoch's
