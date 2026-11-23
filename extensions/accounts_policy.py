@@ -124,7 +124,7 @@ def capacities(rows, candidates):
     return result
 
 
-def pick_new(ext, candidates, runtime):
+def pick_new(ext, candidates, runtime, *, credential_identities=None):
     configured=settings(ext);mode=configured['new_agents']
     if mode=='ask': return None
     try: observed=resources(ext)
@@ -132,6 +132,15 @@ def pick_new(ext, candidates, runtime):
     blocked_ids={configured_id(row) for row in observed if blocked(row)}
     eligible=[row for row in candidates if row['id'] not in blocked_ids
               and (row['kind']!='api_key' or configured['api_key_overflow'])]
+    if credential_identities is not None:
+        blocked_credentials={credential_identities[ident] for ident in blocked_ids
+                             if credential_identities.get(ident) is not None}
+        distinct=[];seen=set()
+        for row in eligible:
+            identity=credential_identities.get(row['id'])
+            if identity is None or identity in blocked_credentials or identity in seen: continue
+            seen.add(identity);distinct.append(row)
+        eligible=distinct
     if mode=='most_remaining_capacity':
         scores=capacities(observed,eligible)
         eligible=[row for row in eligible if scores.get(row['id']) is not None and scores[row['id']]>0]

@@ -279,7 +279,8 @@ def choose(ext, args, runtime, command):
         return account, None
     if selected is None:
         from accounts_policy import pick_new
-        account = pick_new(ext, distinct_accounts(candidates), runtime)
+        account = pick_new(ext, candidates, runtime,
+                           credential_identities={row['id']: credential_identity(row) for row in rows})
         if account is not None: return account, None
     view = 'accounts-choice-' + command.replace('.', '-')
     forwarded = {k:args[k] for k in ('runtime','cwd','context','fresh') if k in args}

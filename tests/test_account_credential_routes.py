@@ -89,13 +89,29 @@ class CredentialRoutes(unittest.TestCase):
         b, b_alias = row('b', secret_ref='b' * 32), row('b-alias', secret_ref='b' * 32)
         self.assertEqual(eligible_alternatives([a, alias, b, b_alias], 'a', {'b'}, False), [])
 
-    def test_new_agent_strategy_sees_one_candidate_per_known_credential(self):
+    def test_real_round_robin_has_only_one_slot_for_known_aliases(self):
         import accounts_policy as policy
         core = self.core([row(), row('alias')])
         core.entries[policy.POLICY] = {'version': 1, 'value': {'new_agents': 'round_robin'}}
-        with patch('accounts_policy.pick_new', side_effect=lambda ext, candidates, runtime: candidates[0]) as picked:
-            choose(core, {}, 'claude', 'fake.new')
-        self.assertEqual([item['id'] for item in picked.call_args.args[1]], ['a'])
+        first, _ = choose(core, {}, 'claude', 'fake.new')
+        second, _ = choose(core, {}, 'claude', 'fake.new')
+        self.assertEqual((first['id'], second['id']), ('a', 'a'))
+
+    def test_real_strategies_exclude_a_credential_when_any_alias_is_blocked(self):
+        import accounts_policy as policy
+        from test_account_capacity import resource, NOW
+        for mode in ('round_robin', 'most_remaining_capacity'):
+            with self.subTest(mode=mode):
+                a, alias = row(), row('alias')
+                core = self.core([a, alias])
+                core.entries[policy.POLICY] = {'version': 1, 'value': {'new_agents': mode}}
+                core.resources['healthy-a'] = resource('healthy-a', a, 10)
+                core.resources['blocked-alias'] = resource('blocked-alias', alias, 100, blocked=True)
+                with patch('accounts_policy.now_ms', return_value=NOW):
+                    selected, popup = choose(core, {}, 'claude', 'fake.new')
+                self.assertIsNone(selected)
+                self.assertIsNotNone(popup)
+                self.assertNotIn(policy.CURSORS + 'claude', core.entries)
 
     def test_fresh_id_selection_needs_no_revision_but_supplied_revision_is_strict(self):
         account = row()
