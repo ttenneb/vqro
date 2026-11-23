@@ -110,6 +110,70 @@ class CheckTests(unittest.TestCase):
         result = subprocess.run(['/bin/bash', '-c', body], env=env, capture_output=True, text=True, timeout=10)
         return result, logs, target, current, ran
 
+    def test_platform_skips_are_receipted_and_linux_commands_unchanged(self):
+        commands = '''
+step build-zero-warnings true
+step opt-in:tmux bash -c 'exit 42'
+step e2e-agent-stop bash -c 'exit 43'
+step scale-harness bash -c 'exit 44'
+step portable true
+'''
+        result, receipt, logs = self.gate('CHECK_SYSTEM=Darwin\n' + commands, mode='quick')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(receipt['skipped'], ['opt-in:tmux', 'e2e-agent-stop', 'scale-harness'])
+        self.assertIn('Linux', (logs/'opt-in:tmux.log').read_text())
+        result, receipt, _ = self.gate('CHECK_SYSTEM=Linux\n' + commands, mode='quick')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(receipt['skipped'], [])
+        self.assertIn('opt-in:tmux', receipt['failed'])
+
+    def test_non_linux_timing_rejected_before_admission_or_steps(self):
+        fake = self.root/'bin'
+        fake.mkdir()
+        uname = fake/'uname'
+        uname.write_text('#!/bin/sh\necho Darwin\n')
+        uname.chmod(0o700)
+        env = dict(self.env, PATH=str(fake) + ':' + self.env['PATH'], CARGO_TARGET_DIR=str(self.root/'target'))
+        result = subprocess.run(['/bin/bash', str(ROOT/'scripts/check.sh'), 'timing'],
+                                env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('timing mode requires Linux (/proc, pidfds)', result.stderr)
+        self.assertFalse((self.root/'target').exists())
+        self.assertNotIn('vqro check (', result.stdout)
+
+    def test_non_linux_snapshot_and_leftovers_do_not_probe_proc(self):
+        body = 'set -u\nCHECK_SYSTEM=Darwin\npython3() { exit 49; }\n' + shell_function('snapshot') + '\nsnapshot'
+        result = subprocess.run(['/bin/bash', '-c', body], env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        classification = SOURCE[SOURCE.index('LEFT=${LEFT% }'):SOURCE.index('\nrm -rf "$RUN"')]
+        result, receipt, _ = self.gate('CHECK_SYSTEM=Darwin\nstep build-zero-warnings true',
+            cleanup='LEFT=\nCGROUP=\n' + classification)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(receipt['steps'][-1]['name'], 'no-leftover-processes')
+        self.assertEqual(receipt['steps'][-1]['result'], 'skip')
+        self.assertIn('/proc leftover scan requires Linux', result.stdout)
+
+    def test_old_bash_bootstrap_reexecs_path_candidate_or_fails_clearly(self):
+        bootstrap = SOURCE[:SOURCE.index('# Release gate.')]
+        # Simulate the version values that Apple's Bash would expose. Candidate probes
+        # remain untouched and must establish their own version before exec.
+        bootstrap = bootstrap.replace('if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then', 'if true; then', 1)
+        script = self.root/'bootstrap'
+        script.write_text(bootstrap + '\nexit 99\n')
+        env = dict(self.env, PATH=str(self.root/'empty'))
+        result = subprocess.run(['/bin/bash', str(script)], env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('Bash 4.3+', result.stderr)
+        modern = self.root/'modern'
+        modern.mkdir()
+        candidate = modern/'bash'
+        candidate.write_text('#!/bin/sh\nif [ "$1" = -c ]; then exit 0; fi\nprintf "%s\\n" "$@"\nexit 17\n')
+        candidate.chmod(0o700)
+        env['PATH'] = str(modern)
+        result = subprocess.run(['/bin/bash', str(script), 'quick', 'two words'], env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 17)
+        self.assertEqual(result.stdout.splitlines(), [str(script), 'quick', 'two words'])
+
     def test_scale_explicit_path_runs_current_amid_stale_binaries(self):
         result, logs, target, current, ran = self.scale_fixture('extras', extra=4)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

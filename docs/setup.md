@@ -30,6 +30,18 @@
 Nothing outside this repo moves with you. Reference clones, installed tools and the assistant's local memory all stay
 on the old machine, so everything needed is listed here.
 
+## Checks on macOS
+
+`scripts/check.sh quick` and `full` require Bash 4.3+ (namerefs); Apple's Bash 3.2 is too old.
+Install a newer Bash, e.g. `brew install bash`, and put it on PATH: the gate re-execs under the
+first suitable PATH Bash, or fails clearly before running checks. Use Python 3.11+ for tests.
+Portable suites can find Homebrew tmux on PATH. Harnesses pinned to `/usr/bin/tmux`, Linux namespaces,
+`/proc` measurements/cleanup and systemd supervision are explicitly **SKIP** on non-Linux, not PASS;
+see the step logs and receipt. A passing macOS gate therefore does not certify the Linux-only suites.
+The Linux gate retains its existing commands and checks. `timing` mode requires Linux and exits 2
+up front elsewhere (an all-SKIP run is not timing validation). macOS still needs native smoke validation.
+For development commands that need `timeout`, `brew install coreutils` provides `gtimeout`.
+
 ## Offline licence inventory
 
 The `licenses` step in `scripts/check.sh` uses `cargo metadata --offline --locked`, including crates

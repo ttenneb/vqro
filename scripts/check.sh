@@ -1,4 +1,16 @@
 #!/bin/bash
+# Apple's /bin/bash is 3.2. Namerefs below require Bash 4.3 or newer.
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
+  IFS=: read -r -a check_bash_dirs <<< "$PATH"
+  for check_bash_dir in "${check_bash_dirs[@]}"; do
+    check_bash=${check_bash_dir:-.}/bash
+    if [ -x "$check_bash" ] && "$check_bash" -c '(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3) ))' 2>/dev/null; then
+      exec "$check_bash" "$0" "$@"
+    fi
+  done
+  echo 'check: Bash 4.3+ is required; install a modern bash (e.g. brew install bash) and put it on PATH.' >&2
+  exit 2
+fi
 # Release gate. Run `scripts/check.sh full` before installing.
 #
 #   scripts/check.sh quick   licence policy/notices + cargo build (zero warnings) + cargo test + Python unittests
@@ -12,8 +24,10 @@
 # a JSON receipt to $CHECK_RECEIPT (default <target>/check-receipt.json), plus an exclusive read-only
 # check-receipt-<commit>-<stamp>.json sibling. Exit 77 means an intentional optional-dependency SKIP,
 # never PASS; skips are non-failing and listed explicitly in the table, summary and receipt.
-# Needs: cargo, python3, /usr/bin/tmux 3.7b and ~/.local/bin/herdr-core for `full`.
+# Needs: cargo, python3, Bash 4.3+; Linux full harnesses pin /usr/bin/tmux 3.7b
+# and ~/.local/bin/herdr-core. Non-Linux skips are recorded, never PASS.
 set -u
+CHECK_SYSTEM=$(uname -s)
 # Capture the caller before any subprocess/exec can outlive it during bootstrap.
 CHECK_OWNER_PID=$PPID
 CHECK_OWNER_BIRTH=
@@ -24,6 +38,10 @@ fi
 SKIP_EXIT=77
 MODE=${1:-quick}
 case "$MODE" in quick|full|timing) ;; *) echo "usage: $0 quick|full|timing" >&2; exit 2 ;; esac
+if [ "$MODE" = timing ] && [ "$CHECK_SYSTEM" != Linux ]; then
+  echo 'check: timing mode requires Linux (/proc, pidfds)' >&2
+  exit 2
+fi
 # Full gates share a bounded pool, then run latency/RSS/scale probes without sibling steps.
 CHECK_JOBS=${CHECK_JOBS:-6}
 if ! [[ "$CHECK_JOBS" =~ ^[1-9][0-9]?$ ]] || (( CHECK_JOBS > 64 )); then
@@ -40,7 +58,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 # The supervisor also watches the original launcher/parent with pidfds, including startup races.
 # Under env -i recover only the user bus; never replay a failed service launch unscoped.
 # Without a manager the leftover check remains UNSCOPED/report-only: never kill other runs.
-if [ -z "${VQRO_CHECK_SUPERVISED:-}" ]; then
+if [ "$CHECK_SYSTEM" = Linux ] && [ -z "${VQRO_CHECK_SUPERVISED:-}" ]; then
   if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -O "/run/user/$(id -u)" ]; then export XDG_RUNTIME_DIR=/run/user/$(id -u); fi
   if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "${XDG_RUNTIME_DIR:-/nonexistent}/bus" ]; then
     export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
@@ -51,7 +69,7 @@ if [ -z "${VQRO_CHECK_SUPERVISED:-}" ]; then
   echo "check: no systemd user manager (set XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS); the leftover check is UNSCOPED: report only, no kill, no failure" >&2
 fi
 CGROUP=
-if [ -n "${VQRO_CHECK_SUPERVISED:-}" ]; then
+if [ "$CHECK_SYSTEM" = Linux ] && [ -n "${VQRO_CHECK_SUPERVISED:-}" ]; then
   CGROUP=$(sed -n 's/^0:://p' /proc/self/cgroup)
   case "$CGROUP" in */vqro-check-*.service) [ "${CGROUP##*/}" = "${VQRO_CHECK_UNIT:-}" ] || CGROUP= ;; *) CGROUP= ;; esac
 fi
@@ -63,7 +81,13 @@ mkdir -p "$LOGS"
 # Short private root for anything that needs socket paths (the scale harness run dir).
 RUN=$(mktemp -d /tmp/pchkXXXXXX)
 CARGO=(env -i HOME="$HOME" PATH="$PATH" CARGO_TARGET_DIR="$TARGET")
-CLEAN=(env -i HOME="$HOME" PATH=/usr/bin:/bin)
+CLEAN_PATH=/usr/bin:/bin
+# Portable suites may resolve tmux from PATH (e.g. Homebrew); pinned Linux harnesses do not.
+if [ "$CHECK_SYSTEM" != Linux ]; then
+  CHECK_TMUX=$(command -v tmux || :)
+  if [ -n "$CHECK_TMUX" ]; then CLEAN_PATH="$(dirname "$CHECK_TMUX"):$CLEAN_PATH"; fi
+fi
+CLEAN=(env -i HOME="$HOME" PATH="$CLEAN_PATH")
 # An explicit compiler selection must survive every clean build environment.
 if [ -n "${ZIG:-}" ]; then CARGO+=("ZIG=$ZIG"); CLEAN+=("ZIG=$ZIG"); fi
 STEPS=$LOGS/steps.tsv
@@ -73,6 +97,7 @@ cd "$REPO" || exit 2
 # Processes that belong to test roots: environment or a unix socket under a test root (tmux renames its
 # server to "tmux: server", so its command line no longer shows the socket path).
 snapshot() {
+  [ "${CHECK_SYSTEM:-Linux}" = Linux ] || return 0
   python3 - "$RUN" <<'PY'
 import os, sys
 roots = [b"/tmp/pt", b"/tmp/pe2", b"/tmp/ppd", b"/tmp/pps", b"/tmp/pst", b"/tmp/pke", b"/tmp/phc", b"/tmp/pft", b"/tmp/ppe", b"/tmp/pev", b"/tmp/pscale", b"/tmp/vqro-tmux",
@@ -122,11 +147,32 @@ timing_python() {
 timed() {
   case "$1" in e2e-tui-scale-budgets|scale-harness|pi-bridge-memory) return 0 ;; *) return 1 ;; esac
 }
+# Keep Linux admission/commands unchanged; these harnesses depend on Linux-only isolation,
+# /proc measurements/cleanup, or an intentionally pinned /usr/bin/tmux, not PATH tmux.
+platform_skip_reason() {
+  [ "${CHECK_SYSTEM:-Linux}" != Linux ] || return 1
+  case "$1" in
+    systemd-supervision) echo 'systemd supervision requires Linux' ;;
+    opt-in:tmux|opt-in:tmux_provider|opt-in:undo_attribution|opt-in:provider_wire)
+      echo 'pinned /usr/bin/tmux harness requires Linux' ;;
+    opt-in:herdr_provider|opt-in:fd_lifecycle|opt-in:accept_limits|e2e-providers|e2e-rex|e2e-tui-providers|e2e-tui-paste-dropdown|e2e-tui-sidebar-tree|e2e-tui-pick-search|e2e-tui-keys|e2e-tui-pane-basics|e2e-same-setup|e2e-tui-workspaces|e2e-scale-herdr|e2e-text-client|e2e-opentui|e2e-tui-smoke|e2e-item-streams)
+      echo 'harness requires Linux /proc and/or pinned /usr/bin/tmux' ;;
+    e2e-pi-provider|e2e-pi-rust-default|e2e-agents-ui|e2e-codex-launcher|e2e-agent-stop)
+      echo 'private Linux namespaces and /proc are required' ;;
+    pi-bridge-memory|e2e-tui-scale-budgets|scale-harness)
+      echo 'timing measurements and contention monitor require Linux /proc and pidfds' ;;
+    *) return 1 ;;
+  esac
+}
+platform_skip() { echo "SKIP: $*"; return "$SKIP_EXIT"; }
 run_step() {
   local index=$1 name=${STEP_NAMES[$1]} start=$SECONDS rc
   local -n command="CHECK_STEP_$index"
   local log="$LOGS/$name.log" result=PASS
-  if timed "$name"; then
+  local skip_reason
+  if skip_reason=$(platform_skip_reason "$name"); then
+    platform_skip "$skip_reason" > "$log" 2>&1; rc=$?
+  elif timed "$name"; then
     local pid facts="$LOGS/$name-contention.json" strict=()
     if [ "$MODE" = timing ] || [ "${VQRO_GATE_EXCLUSIVE:-0}" = 1 ]; then strict=(--strict); fi
     ( "${command[@]}" ) > "$log" 2>&1 & pid=$!
@@ -324,11 +370,12 @@ PY
 }
 
 BEFORE=$(snapshot | cut -f1 | sort)
-if [ -n "${VQRO_CHECK_INJECT_LEAK:-}" ]; then
+if [ "${CHECK_SYSTEM:-Linux}" = Linux ] && [ -n "${VQRO_CHECK_INJECT_LEAK:-}" ]; then
   # Self-test of the leftover check: one deliberately leaked, detached process of this run.
   ( setsid sleep 300 < /dev/null > /dev/null 2>&1 & )  # reparented once the subshell exits, like a real leak
 fi
 echo "vqro check ($MODE) at $(git describe --always --dirty 2>/dev/null); logs $LOGS"
+if [ "${CHECK_SYSTEM:-Linux}" != Linux ]; then step systemd-supervision platform_skip 'systemd supervision requires Linux'; fi
 if [ "$MODE" != timing ]; then
 step licenses "${CARGO[@]}" python3 scripts/license_check.py --check
 step vendor-libghostty "${CARGO[@]}" python3 scripts/check_vendor.py
@@ -398,7 +445,10 @@ if [ "$MODE" = full ] || [ "$MODE" = timing ]; then
 fi
 run_steps
 sleep 2
-if [ -n "$CGROUP" ]; then
+if [ "$CHECK_SYSTEM" != Linux ]; then
+  SCOPE="unavailable: /proc leftover scan requires Linux"
+  LEFT=
+elif [ -n "$CGROUP" ]; then
   SCOPE="cgroup $CGROUP"
   LEFT=$(scoped_leftovers | cut -f1 | tr '\n' ' ')
 else
@@ -406,7 +456,10 @@ else
   LEFT=$(comm -13 <(echo "$BEFORE") <(snapshot | cut -f1 | sort) | tr '\n' ' ')
 fi
 LEFT=${LEFT% }
-if [ -n "$LEFT" ]; then
+if [ "${CHECK_SYSTEM:-Linux}" != Linux ]; then
+  printf '%-28s SKIP  /proc leftover scan requires Linux\n' "no-leftover-processes"
+  printf 'no-leftover-processes\tSKIP\t0\t-\n' >> "$STEPS"
+elif [ -n "$LEFT" ]; then
   for pid in $LEFT; do printf '%s %s\n' "$pid" "$(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null | cut -c1-100)"; done > "$LOGS/leftovers.log"
   if [ -n "$CGROUP" ]; then
     printf '%-28s FAIL  pids %s (see %s)\n' "no-leftover-processes" "$LEFT" "$LOGS/leftovers.log"
