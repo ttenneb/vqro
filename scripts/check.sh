@@ -64,6 +64,8 @@ mkdir -p "$LOGS"
 RUN=$(mktemp -d /tmp/pchkXXXXXX)
 CARGO=(env -i HOME="$HOME" PATH="$PATH" CARGO_TARGET_DIR="$TARGET")
 CLEAN=(env -i HOME="$HOME" PATH=/usr/bin:/bin)
+# An explicit compiler selection must survive every clean build environment.
+if [ -n "${ZIG:-}" ]; then CARGO+=("ZIG=$ZIG"); CLEAN+=("ZIG=$ZIG"); fi
 STEPS=$LOGS/steps.tsv
 : > "$STEPS"
 cd "$REPO" || exit 2
@@ -286,7 +288,7 @@ tui_scale_probe() {
 libghostty_release_safe() {  # the terminal engines with libghostty-vt's safety checks on (Zig ReleaseSafe): the
   # known crash traces (P0-1 and P0-2) and 2000 fuzz rounds per engine. Its own target directory,
   # so the main build keeps its ReleaseFast library.
-  env -i HOME="$HOME" PATH="$PATH" CARGO_TARGET_DIR="$TARGET/release-safe" LIBGHOSTTY_VT_OPTIMIZE=ReleaseSafe VQRO_FUZZ_ITERS=2000 \
+  "${CARGO[@]}" CARGO_TARGET_DIR="$TARGET/release-safe" LIBGHOSTTY_VT_OPTIMIZE=ReleaseSafe VQRO_FUZZ_ITERS=2000 \
     cargo test --lib -- engines_survive tui::ghostty
 }
 

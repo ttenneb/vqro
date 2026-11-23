@@ -18,6 +18,11 @@ The final name is **vqro** (D27); see [TRADEMARKS.md](TRADEMARKS.md).
 
 ## Install and run
 
+Requires stable Rust, Python 3.11+, git and **Zig 0.17.1** for the vendored terminal engine.
+Use `brew install zig` (check `zig version`), or `mise install zig@0.17.1`; set `ZIG` to its binary
+or put it at `~/.local/zig-0.17.1/zig`. The first build fetches about 18 MB of Zig packages into
+`~/.cache/vqro/zig-pkg` (override with `LIBGHOSTTY_VT_ZIG_PKG_DIR`), so it needs network once.
+
 ```sh
 ./scripts/dev-install.sh        # release build to ~/.local/bin/vqro, extensions to ~/.local/share/vqro/extensions
 vqro tui                        # starts the core in the background if needed (herdr-core must be installed)

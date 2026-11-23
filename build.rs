@@ -52,7 +52,7 @@ fn wanted_zig(vendored: &std::path::Path) -> String {
 
 /// `ZIG` if set (and it must be the wanted version: a wrong one is refused, naming the right one found); else `zig`
 /// on PATH if it is the wanted version; else the user-local `~/.local/zig-<version>/zig` (installed next to other
-/// versions, never on PATH); else `zig`, whose build then says what is missing.
+/// versions, never on PATH); else refuse the missing or wrong-version compiler before building.
 fn find_zig(vendored: &std::path::Path) -> String {
     let wanted = wanted_zig(vendored);
     let version = |zig: &str| Command::new(zig).arg("version").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
@@ -74,8 +74,12 @@ fn find_zig(vendored: &std::path::Path) -> String {
             ),
         }
     }
-    if version("zig").as_deref() == Some(wanted.as_str()) { return "zig".into(); }
-    local.unwrap_or_else(|| "zig".into())
+    let found = version("zig");
+    if found.as_deref() == Some(wanted.as_str()) { return "zig".into(); }
+    local.unwrap_or_else(|| panic!(
+        "libghostty-vt needs Zig {wanted} (found {} at PATH zig). Set ZIG to a Zig {wanted}, or install it at ~/.local/zig-{wanted}/zig.",
+        found.map(|v| format!("Zig {v}")).unwrap_or_else(|| "no Zig that runs".into())
+    ))
 }
 
 /// The build host's home: `HOME`, else (Windows, where it is usually unset) `USERPROFILE`.

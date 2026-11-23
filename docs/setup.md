@@ -4,7 +4,12 @@
 
 ## Run vqro on a new machine
 
-1. **Prerequisites:** Rust (stable), Python 3 (extensions are stdlib-only), git.
+1. **Prerequisites:** Rust (stable), Python 3.11+ (extensions are stdlib-only), git, **Zig 0.17.1**.
+   The vendored terminal engine requires that exact Zig version. Use `brew install zig` and check
+   `zig version`, or `mise install zig@0.17.1`. Set `ZIG` to the binary, or link the installation to
+   `~/.local/zig-0.17.1` (binary: `~/.local/zig-0.17.1/zig`). `scripts/check.sh` preserves `ZIG`.
+   The first build needs network to fetch about 18 MB of Zig packages into `~/.cache/vqro/zig-pkg`
+   (override with `LIBGHOSTTY_VT_ZIG_PKG_DIR`); subsequent builds can use that cache offline.
 2. **herdr-core:** install with its official installer (it verifies sha256 and codesign), e.g.
    `curl -fsSL https://releases.herdr.dev/core/install.sh` and review it before running. The `herdr` provider
    extension (vqro-herdr) finds `hc` on PATH or at herdr-core's standard install (`~/.local/share/herdr-core/current/...`),
