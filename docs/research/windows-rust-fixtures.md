@@ -14,7 +14,7 @@ concurrent extension-log rotation (W04) are separate product investigations; the
 | `tui::tests::owner_unset_hello_reaches_the_real_snapshot_and_renderer` | Same shared native endpoint helper. Owner-unset assertions unchanged. | Named-pipe hello/snapshot plus renderer assertions. |
 | `tui::tests::reconnect_draw_reattaches_terminal_and_repaints_backend_output` | Platform tempfile root and shared native endpoint; explicitly shut down its private fake core after the assertions. | Named-pipe reconnect/attach/repaint, then cleanup. |
 | `ui_launch::tests::manifests_are_checked_listed_and_resolved_against_the_clients_directory` | Build the expected script path with separate `clients` and `text.py` components, matching production resolution rather than comparing mixed slash strings. | Run the existing manifest/command test; no optional client is launched. |
-| `commit::tests::operational_owner_retires_at_the_existing_writer_dispatch_linearization` | **Read-only diagnosis below; unchanged.** | Confirm the exact panic site and fixture launch failure before altering the test. |
+| `commit::tests::operational_owner_retires_at_the_existing_writer_dispatch_linearization` | Follow-up approved after the initial diagnosis: use `program::python()` and preserve its leading arguments for the token-export fixture. Missing-token timeout now includes supervisor state; writer/retirement assertions and bounds are unchanged. | Confirm fixture launch and both queued/dispatched cases with the real interpreter. |
 | `store::tests::windows_replace_with_open_delete_shared_reader` | **Not a fixture exemption.** W03 owner investigates the native replacement API/durability semantics. | Native regression remains required. |
 | `ext_log::tests::one_generation_and_overlapping_writers_stay_within_two_fixed_files` | **Not a fixture exemption.** W04 owner investigates concurrent rotation. | Native overlapping-writer regression remains required. |
 
@@ -30,7 +30,7 @@ namespace control. The original native W10 report supplies RED evidence for endp
 Linux cannot reproduce Windows path-component formatting merely by cross-compiling. The named tests remain
 native regression tests, not skipped or weakened on Windows.
 
-### Operational-owner timeout: best source diagnosis, not a production timing conclusion
+### Operational-owner timeout: source diagnosis and approved fixture follow-up
 
 `src/commit.rs`, `operational_owner_retires_at_the_existing_writer_dispatch_linearization`, stores an extension argv
 whose executable is a hard-coded Unix Python path. The actual fixture (`tests/fixtures/managed_identity.py`)
@@ -40,11 +40,14 @@ through Python discovery; an absolute Unix executable path is passed through lit
 fixture therefore normally cannot start, so the token poll is the first plausible timeout. This is stronger
 evidence of a missing fixture prerequisite than of a commit linearization defect.
 
-Proposal (not implemented in this read-only item): use literal `python3` for this fixture too; retain the
-five-second bound and both dispatched/queued assertions, and include supervisor failure details if the token is
-not produced. The report does not give the panic line, so do not claim this explains a later two-second writer
-barrier timeout. If the token is present and a writer barrier times out, investigate that separately. Do not fix
-this by increasing timeouts, skipping Windows, changing owner retirement, or relaxing write-through durability.
+The initial review proposed portable interpreter discovery and left the test unchanged. The lead then approved a
+separate fixture-only follow-up: use `program::python()` (including `py -3` leading arguments), retain the
+five-second bound and both dispatched/queued assertions, and include supervisor state if the token is not produced.
+A Linux control selects a private interpreter shim through `VQRO_PYTHON` and requires evidence that it was invoked;
+the old hard-coded executable bypasses that shim. The report does not give the panic line, so do not claim this
+explains a later two-second writer barrier timeout. If the token is present and a writer barrier times out,
+investigate that separately. No timeout increase, Windows skip, owner retirement change, or weaker write-through
+durability was introduced.
 
 ## W13: forward-slash cmd.exe launch
 

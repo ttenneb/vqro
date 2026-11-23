@@ -268,7 +268,11 @@ mod tests {
         for dispatched in [false,true] {
             let root=Arc::new(tempfile::tempdir().unwrap());let token_path=root.path().join("owner.token");
             let mut store=crate::store::Store::open_locked(root.path().join("workspace.json")).unwrap();
-            store.apply("fixture",None,vec![Op::Set {key:"extension/owner".into(),value:serde_json::json!({"enabled":true,"argv":["/usr/bin/python3",std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/managed_identity.py"),token_path]}),expect:None}]).unwrap();
+            let (python, leading)=crate::program::python().expect("owner fixture requires the configured Python 3 interpreter");
+            let mut argv=vec![serde_json::json!(python)];
+            argv.extend(leading.into_iter().map(|arg|serde_json::json!(arg)));
+            argv.extend([serde_json::json!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/managed_identity.py")),serde_json::json!(&token_path)]);
+            store.apply("fixture",None,vec![Op::Set {key:"extension/owner".into(),value:serde_json::json!({"enabled":true,"argv":argv}),expect:None}]).unwrap();
             let core=Arc::new(Mutex::new(Core::new(store,Some(root.path().into()),root.path().join("p"),false).unwrap()));
             let gate=Arc::new((Mutex::new(false),std::sync::Condvar::new()));
             struct Release(Arc<(Mutex<bool>,std::sync::Condvar)>);impl Drop for Release{fn drop(&mut self){*self.0.0.lock().unwrap()=true;self.0.1.notify_all();}}
@@ -282,7 +286,7 @@ mod tests {
             if dispatched {core.lock().unwrap().configure_operational_writer(writer).unwrap();}else{core.lock().unwrap().configure_workspace_writer(writer).unwrap();}
             core.lock().unwrap().manifest_catalog.root=root.path().join("empty");crate::ext::reconcile(&core);
             let until=std::time::Instant::now()+std::time::Duration::from_secs(5);
-            let owner=loop {if let Ok(token)=std::fs::read_to_string(&token_path) {if let Some(owner)=crate::ext::authenticate(&core.lock().unwrap(),"owner",&token){break owner;}}assert!(std::time::Instant::now()<until);tokio::time::sleep(std::time::Duration::from_millis(5)).await;};
+            let owner=loop {if let Ok(token)=std::fs::read_to_string(&token_path) {if let Some(owner)=crate::ext::authenticate(&core.lock().unwrap(),"owner",&token){break owner;}}assert!(std::time::Instant::now()<until,"owner fixture did not export a token; supervisor state: {}",core.lock().unwrap().exts["owner"].to_json());tokio::time::sleep(std::time::Duration::from_millis(5)).await;};
             let registration_owner=owner.clone();submit_operational(&core,256,true,move|c|Ok(Plan {owner:Some(crate::principal::CallerLifetime::Extension(registration_owner.clone())),action:Action::Operational {domain:Box::new(c.operational.prepare("state",&registration_owner.name,None)?),author:"ext:owner".into(),attribution:crate::principal::Attribution::default(),on_behalf_of:None,note:None,ops:None,control:true},after_adopt:None})).await.unwrap();
             let blocker=if !dispatched {let c=core.lock().unwrap();Some(c.committer.enqueue(&core,512,Box::new(|_|Ok(Plan {owner:None,action:Action::Apply {author:"fixture".into(),attribution:crate::principal::Attribution::default(),on_behalf_of:None,note:None,ops:vec![Op::Set {key:"doc/block".into(),value:serde_json::json!(1),expect:None}]},after_adopt:None}))).unwrap())}else{None};
             if !dispatched {tokio::time::timeout(std::time::Duration::from_secs(2),entered.notified()).await.unwrap();}
