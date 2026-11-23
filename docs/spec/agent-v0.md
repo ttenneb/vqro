@@ -533,16 +533,21 @@ reasoning the runtime exposes for display):
     `items: [{id?, text, description?, status: pending|in_progress|completed|cancelled|unknown, active_form?,
     owner?, blocked_by?: [item ids], native?}]`, `update: whole | items` (each report replaces the list, or the
     runtime reports per-item changes), `explanation?`, `source: native | tool` (a runtime event, or a model tool
-    call/result that carried it, with `tool?` naming that entity).
+    call/result that carried it, with `tool?` naming that entity). The entity value is always the whole current list
+    as the adapter knows it (each `put` replaces it, so snapshots are complete); `update` only names the runtime's
+    granularity. For `items`, the adapter applies each native change to the item with that native `id`; a change it
+    cannot attribute (no id, or an unknown one) makes the plan `incomplete`, never a guessed edit.
   - `goal` (a runtime's stated objective for a conversation or child; id per owner, e.g. `current` or the child id):
     `owner?` (child id or `null`), `objective?`, `status: active|paused|blocked|completed|unknown` (the native value is
     always kept in `native.status`; for example Codex `usageLimited`/`budgetLimited` are `blocked`, `complete` is
     `completed`; an unknown value is `unknown`), `budget? {tokens?}`, `used? {tokens?, seconds?}`,
     `updated_ms?`, `native`. A goal is not a plan: no plan items are derived from it.
-  - Control is declared, never emulated: caps `agent.child {actions: [interrupt | send | close | stop …], items:
-    [scoped | endpoint | none]}` with `agent.child {v, child, action, content?, delivery?}` (`send` follows
-    `agent.send`'s content and literal rules), and caps `agent.task {actions: [stop …]}` with `agent.task {v, task,
-    action}`. Observing needs no action.
+  - Control is declared, never emulated (§6.5): caps `agent.child {actions: [interrupt | send | close …], items:
+    [scoped | endpoint | none]}` with `agent.child {v, epoch, child, action, …}` for a child without its own
+    endpoint. `send` is an `agent.send` to that child: its full argument set and every §3.2 and §3.4 rule apply
+    (origin and attribution, render and framing, the literal rule, delivery, correlation, keys, guards and receipts),
+    with `child` added. Cancelling a declared
+    task or child uses `agent.object {action: cancel, kind: task | child, id}` (§6.5). Observing needs no action.
   - Coordination adds no inbox: a child's request is an ordinary `request` with `child`; inbox and coordination
     messages address agent endpoints only (a child with `endpoint` is one); child, task and plan activity is
     observation, never authority.
@@ -658,8 +663,10 @@ dialogs remain answerable; nothing is auto-approved.
 4. **History.** `agent.history {v, page?}`: retained native history as snapshot records from one frozen history cut,
    in bounded pages, with coverage and gaps; the last page gives the live `{epoch, seq}` at that cut. Separate from
    `resume`; supported only where the adapter can prove the cut.
-5. **Children and background.** Exposed children are endpoints with their own `rN` and `caps`; an `association
-   {child, relation, controls}` entity links them. A child's native controls stand alone: nothing (prompt, resume,
+5. **Children and background.** Every child is a `child` entity (§4) in its parent's stream. A child with `items:
+   endpoint` is also exposed as an endpoint with its own `rN` and `caps`; an `association {child, relation,
+   controls}` entity links them. A `scoped` or `none` child has no endpoint: its parent declares what it can do to it
+   through `agent.child`, and its items carry `child`. Background work is a `task` entity. A child's native controls stand alone: nothing (prompt, resume,
    close, config) is inferred from the root, and a child may allow cancelling its own tool or terminal without
    allowing session cancel. Parentage does not prove that cancelling the parent cancels the child. `agent.object {v,
    epoch, action: cancel, kind, id}` cancels one declared item; an accepted cancel is not an observed end.
