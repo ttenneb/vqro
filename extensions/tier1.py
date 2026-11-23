@@ -27,6 +27,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
+from pi_testing import testing_args, testing_environment
 from vqro_display import label
 from vqro_process import background_kwargs
 from account_profiles import choose as choose_account, environment as account_environment, provider_argv, fact as account_fact, require_fresh
@@ -122,9 +123,10 @@ class Tier1:
             if not PI_PLUGIN.is_file():
                 raise VqroError("the Pi plugin is not installed at " + str(PI_PLUGIN), "unavailable")
             declaration = pi_declaration()
-            argv = [*argv, "-e", str(PI_PLUGIN)]
+            argv = [*argv, "-e", str(PI_PLUGIN), *testing_args(HERE)]
         params = {"argv": ["python3", str(RUN), "--", *argv], "name": runtime + "-" + nonce,
-                  "env": account_environment(account, {"VQRO_PRINCIPAL": principal, "VQRO_TIER1_LAUNCH": nonce})}
+                  "env": account_environment(account, {"VQRO_PRINCIPAL": principal, "VQRO_TIER1_LAUNCH": nonce,
+                                                       **(testing_environment(self.ext) if runtime == "pi" else {})})}
         cwd = args.get("cwd") or self.ext.layout_folder(args)
         if cwd:
             params["cwd"] = cwd

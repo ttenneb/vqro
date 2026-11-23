@@ -72,6 +72,21 @@ class Tier1Tests(unittest.TestCase):
     def configure(self, **value):
         self.core.apply([{"op": "set", "key": tier1.SETTINGS, "value": value}], "settings")
 
+    def test_pi_testing_selection_is_per_launch_and_no_profile_is_modified(self):
+        self.core.info = {"socket": "/private/core.sock", "state_dir": "/private/core-state", "extension_token": "never-forward"}
+        self.launch("pi")
+        env = self.spawns()[0]["env"]
+        self.assertEqual(env["VQRO_TESTING_SOCKET"], "/private/core.sock")
+        self.assertEqual(env["VQRO_TESTING_STATE_DIR"], "/private/core-state")
+        self.assertNotIn("VQRO_EXTENSION_TOKEN", env)
+        self.assertFalse((self.home / ".pi").exists())
+
+    def test_pi_missing_testing_asset_refuses_before_spawn(self):
+        with patch("tier1.testing_args", side_effect=VqroError("plugin missing", "unavailable")):
+            with self.assertRaisesRegex(VqroError, "missing"):
+                self.launch("pi")
+        self.assertEqual(self.spawns(), [])
+
     def test_claude_launch_wires_hooks_for_that_launch_only(self):
         self.configure(claude=["/opt/claude"], hook=str(self.hook))
         result = self.launch("claude", cwd="/work")
@@ -114,7 +129,7 @@ class Tier1Tests(unittest.TestCase):
     def test_pi_launch_loads_the_plugin_with_its_own_declaration(self):
         self.launch("pi")
         argv = self.spawns()[0]["argv"]
-        self.assertEqual(argv[3:], ["pi", "-e", str(tier1.PI_PLUGIN)])
+        self.assertEqual(argv[3:], ["pi", "-e", str(tier1.PI_PLUGIN), *tier1.testing_args(tier1.HERE)])
         self.assertTrue(tier1.PI_PLUGIN.is_file())
         declared = self.core.value("doc/agents/terminals/r1")
         self.assertEqual(declared["pull"], tier1.pi_declaration())

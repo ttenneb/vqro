@@ -10,6 +10,7 @@ from unittest.mock import patch
 EXT = Path(os.environ.get("VQRO_TEST_EXTENSIONS_DIR", Path(__file__).resolve().parents[1] / "extensions"))
 sys.path.insert(0, str(EXT))
 from pi import Pi, DEFAULTS, EXTENSIONS, LEGACY, SETTINGS, default_bridge, runtimes
+from pi_testing import testing_args
 from vqro_ext import VqroError
 from agent_fixture import FakeCore
 
@@ -39,12 +40,27 @@ class PiTests(unittest.TestCase):
         spawn = self.native()[0][1]
         self.assertTrue(spawn["bridge"])
         self.assertEqual(spawn["argv"][:3], default_bridge())
-        self.assertEqual(spawn["argv"][3:], ["--", "/node", "literal $(not-a-shell)", "--mode", "rpc"])
+        self.assertEqual(spawn["argv"][3:], ["--", "/node", "literal $(not-a-shell)", "--mode", "rpc", *testing_args(EXTENSIONS)])
         self.assertRegex(spawn["env"]["VQRO_PRINCIPAL"], r"^p:[0-9a-f]{32}$")
         self.assertEqual(set(spawn["env"]), {"VQRO_PRINCIPAL"})
         self.assertEqual(spawn["cwd"], "/private/project")
         self.assertEqual(self.core.calls[-1], ("agents.show", {"resource": "r2"}))
         self.assertEqual(len(self.native()), 1)
+
+    def test_testing_plugin_gets_the_actual_core_selection_without_changing_bridge_endpoint_env(self):
+        self.core.info = {"socket": "/private/core.sock", "state_dir": "/private/state", "extension_token": "never-forward"}
+        self.command("new")
+        env = self.native()[0][1]["env"]
+        self.assertEqual(env["VQRO_TESTING_SOCKET"], "/private/core.sock")
+        self.assertEqual(env["VQRO_TESTING_STATE_DIR"], "/private/state")
+        self.assertNotIn("VQRO_SOCKET", env)
+        self.assertNotIn("VQRO_EXTENSION_TOKEN", env)
+
+    def test_missing_testing_asset_refuses_before_spawn(self):
+        with patch("pi.testing_args", side_effect=VqroError("plugin missing", "unavailable")):
+            with self.assertRaisesRegex(VqroError, "missing"):
+                self.command("new")
+        self.assertEqual(self.native(), [])
 
     def test_new_uses_only_scoped_reads_even_for_source_cwd(self):
         self.core.resources["r88"]={"id":"r88","cwd":"/private/source"}
@@ -120,7 +136,7 @@ class PiTests(unittest.TestCase):
             "bridge_argv": ["/Host Tools/python", "-m", "pi_bridge"], "bridge_env": {"PYTHONPATH": "/Host Modules"}}]}}], "host")
         self.command("new")
         spawn = self.native()[0][1]
-        self.assertEqual(spawn["argv"], ["/Host Tools/python", "-m", "pi_bridge", "--", "pi-host", "--mode", "rpc"])
+        self.assertEqual(spawn["argv"], ["/Host Tools/python", "-m", "pi_bridge", "--", "pi-host", "--mode", "rpc", *testing_args(EXTENSIONS)])
         self.assertEqual(spawn["env"]["PYTHONPATH"], "/Host Modules")
         self.assertRegex(spawn["env"]["VQRO_PRINCIPAL"], r"^p:[0-9a-f]{32}$")
 
@@ -152,7 +168,7 @@ class PiTests(unittest.TestCase):
         self.assertEqual(result["client"]["popup"]["view"], "pi-runtimes")
         self.assertEqual(self.native(), [])
         self.command("new", runtime="two")
-        self.assertEqual(self.native()[0][1]["argv"][-1], "/two")
+        self.assertEqual(self.native()[0][1]["argv"][-len(testing_args(EXTENSIONS))-1], "/two")
 
     def test_late_agent_retains_observed_terminal_and_never_repeats_spawn(self):
         self.core.make_agent = False

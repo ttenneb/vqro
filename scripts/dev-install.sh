@@ -27,7 +27,9 @@ mkdir -p "$HOME/.local/share/vqro/extensions/optional/rex"
 cp extensions/optional/rex/rex.json extensions/optional/rex/README.md "$HOME/.local/share/vqro/extensions/optional/rex/"
 # The tier-1 Pi plugin, loaded per launch by the tier1 extension (pi -e); never added to ~/.pi.
 mkdir -p "$HOME/.local/share/vqro/extensions/tier1"
-cp integrations/pi/vqro-pull.ts "$HOME/.local/share/vqro/extensions/tier1/"
+cp integrations/pi/vqro-pull.ts integrations/pi/vqro-testing.ts "$HOME/.local/share/vqro/extensions/tier1/"
+mkdir -p "$HOME/.local/share/vqro/extensions/tier1/skills/vqro-setup-testing"
+cp integrations/pi/skills/vqro-setup-testing/SKILL.md "$HOME/.local/share/vqro/extensions/tier1/skills/vqro-setup-testing/"
 # UI clients for `vqro ui <name>` (client manifests and programs; the built-in TUI needs none).
 mkdir -p "$HOME/.local/share/vqro/extensions/clients"
 # The OpenTUI trial client (clients/opentui, needs Bun and its packages) is not installed; run it from the repo.

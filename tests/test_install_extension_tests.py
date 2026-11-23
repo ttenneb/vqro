@@ -233,6 +233,8 @@ class InstallExtensionTests(unittest.TestCase):
             shutil.copytree(ROOT / "extensions", destination, ignore=shutil.ignore_patterns("__pycache__", "node_modules"))  # dev packages are never installed
             (destination / "tier1").mkdir(exist_ok=True)
             shutil.copyfile(ROOT / "integrations/pi/vqro-pull.ts", destination / "tier1/vqro-pull.ts")
+            shutil.copyfile(ROOT / "integrations/pi/vqro-testing.ts", destination / "tier1/vqro-testing.ts")
+            shutil.copytree(ROOT / "integrations/pi/skills", destination / "tier1/skills")
             env = {"HOME": str(home), "PATH": os.environ.get("PATH", os.defpath), "PYTHONIOENCODING": "utf-8"}
             copied = subprocess.run([sys.executable, "-B", str(ROOT / "scripts/install_extension_tests.py"), str(destination)],
                                     env=env, cwd=home, capture_output=True, text=True, encoding="utf-8", timeout=10)
