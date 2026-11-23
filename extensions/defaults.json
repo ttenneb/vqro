@@ -1,5 +1,5 @@
 {
-  "version": 10,
+  "version": 11,
   "extensions": [
     {
       "name": "tabs",
@@ -129,6 +129,12 @@
       ],
       "since": 4,
       "description": "Forgets finished terminals 60 s after no layout shows them (undo within that brings them back; keeps the newest 64 never-shown). Off keeps every finished terminal."
+    },
+    {
+      "name": "test-integration",
+      "since": 11,
+      "argv": ["python3", "testing_integration.py"],
+      "description": "On-demand disposable setup copies, recovery smoke and baseline/candidate scenarios; never changes the live workspace."
     },
     {
       "name": "test-unit",

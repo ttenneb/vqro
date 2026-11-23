@@ -3,6 +3,12 @@
 D16: build vqro itself, smallest complete and usable first. The north star: an agent can substantially modify its own
 workspace through reliable public primitives, without changing the host or endangering underlying processes.
 
+## Disposable installed-setup integration checks (2026-11-22)
+
+`test-integration` adds audited private setup copies, startup/registration/recovery/lifetime smoke, event-driven
+JSON scenarios and baseline/candidate comparisons. The in-app command starts an asynchronous CLI subprocess;
+no candidate is applied live. Agent-profile loading remains a separate follow-up; rendering/performance are not covered.
+
 ## Installed-setup unit health report (2026-11-22)
 
 The `test-unit` extension adds on-demand read-only health checks, an offline-capable CLI, scrubbed installed-test

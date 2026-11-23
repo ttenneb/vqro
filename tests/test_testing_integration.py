@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
 import vqro_testing as harness
+import testing_integration as integration
 
 
 class SandboxTests(unittest.TestCase):
@@ -50,14 +51,20 @@ class SandboxTests(unittest.TestCase):
         self.assertIn("doc/settings/x", sandbox.info["excluded"])
         self.assertIn("doc/owned", sandbox.info["excluded"])
 
-    def test_copy_excludes_external_symlinks_and_credential_files(self):
+    def test_whole_tree_preserves_scenario_names_and_links_without_dereferencing(self):
         external = self.root / "outside"
         external.write_text("private")
         (self.source / "link").symlink_to(external)
         (self.source / "token.json").write_text("private")
         sandbox = self.sandbox().prepare()
-        self.assertFalse((sandbox.ext / "link").exists())
-        self.assertFalse((sandbox.ext / "token.json").exists())
+        self.assertTrue((sandbox.ext / "link").is_symlink())
+        self.assertEqual((sandbox.ext / "token.json").read_text(), "private")
+        overlay = self.root / "overlay"
+        overlay.mkdir()
+        (overlay / "link").write_text("candidate")
+        sandbox.copy_tree(overlay, sandbox.ext)
+        self.assertFalse((sandbox.ext / "link").is_symlink())
+        self.assertEqual(external.read_text(), "private")
 
     def test_fake_disables_providers(self):
         self.snapshot["entries"]["extension/example"]["value"].update(kind="provider")
@@ -134,6 +141,35 @@ class SandboxTests(unittest.TestCase):
         self.assertTrue(sandbox.leftovers)
         self.assertEqual([call.args[0] for call in kill.call_args_list], [54321, 54321])
 
+    def test_refused_optional_document_is_reported_after_atomic_seed_fallback(self):
+        self.snapshot["entries"]["doc/protected"] = {"value": {"example": True}}
+        sandbox = self.sandbox().prepare()
+        client = Mock()
+        client.call.side_effect = lambda method, *args: {"hello": {"server": "vqro", "version": "fixture"}, "workspace.snapshot": {"entries": {}}}[method]
+        client.apply.side_effect = [RuntimeError("forbidden"), {"txn": 1}, RuntimeError("protected document refused")]
+        with patch.object(harness.subprocess, "Popen", return_value=Mock(pid=123456, poll=Mock(return_value=None))), patch.object(harness, "SandboxClient", return_value=client):
+            sandbox.start()
+        self.assertEqual(client.call.call_args_list[0].args[1]["identity"], {"kind": "owner"})
+        self.assertEqual(len(client.apply.call_args_list[0].args[0]), 2)
+        self.assertEqual([op["key"] for op in client.apply.call_args_list[1].args[0]], ["extension/example"])
+        self.assertEqual(sandbox.info["not_copied"][0]["key"], "doc/protected")
+        sandbox.client = sandbox.process = None
+        sandbox.groups.clear()
+
+    def test_leftovers_are_attributed_only_when_the_script_is_identified(self):
+        self.snapshot["entries"]["extension/other"] = {"value": {"argv": ["python3", "other.py"]}}
+        sandbox = self.sandbox().prepare()
+        sandbox.info["started"] = True
+        leftovers = [{"pid": 111, "start_ticks": 1, "command": f"python3 {sandbox.ext / 'example.py'}"},
+                     {"pid": 112, "start_ticks": 1, "command": "unknown child"}]
+        with patch.object(harness, "private_processes", return_value=leftovers), patch.object(harness, "process_identity", return_value=None):
+            sandbox.stop()
+        statuses = {r["id"]: r["status"] for r in sandbox.lifetime_rows}
+        self.assertEqual(statuses["lifetime/example"], "fail")
+        self.assertEqual(statuses["lifetime/other"], "pass")
+        self.assertEqual(statuses["lifetime/unattributed"], "fail")
+        sandbox.info["started"] = False
+
     def test_process_facts_exclude_other_groups_and_zombies(self):
         output = "12 12 S core\n13 12 S extension\n14 12 Z zombie\n21 21 S unrelated\n"
         with patch.object(harness.subprocess, "run", return_value=Mock(stdout=output)):
@@ -164,12 +200,175 @@ class SandboxTests(unittest.TestCase):
         fact["manifest"]["provides"].append("command/not.registered")
         indexed = {r["id"]: r for r in harness.smoke(sandbox, window=0)}
         self.assertEqual(indexed["commands/example"]["status"], "fail")
+        fact["manifest"]["provides"].append("view/agent-*")
+        indexed = {r["id"]: r for r in harness.smoke(sandbox, window=0)}
+        self.assertEqual(indexed["views/example"]["status"], "unverified")
+        self.assertIn("view family needs live resources", indexed["views/example"]["evidence"])
+        fact["manifest"]["provides"].append("view/missing.concrete")
+        indexed = {r["id"]: r for r in harness.smoke(sandbox, window=0)}
+        self.assertEqual(indexed["views/example"]["status"], "fail")
         sandbox.stop = Mock()
 
     def test_smoke_zero_enabled_is_failure(self):
         sandbox = self.sandbox().prepare()
         sandbox.declarations["extension/example"]["enabled"] = False
         self.assertEqual(harness.smoke(sandbox)[0]["status"], "fail")
+
+
+class IntegrationModesTests(unittest.TestCase):
+    setUp = SandboxTests.setUp
+
+    def write_source(self):
+        state = self.root / "source-state"
+        state.mkdir()
+        (state / "workspace.json").write_text(json.dumps(self.snapshot))
+        return state
+
+    def test_cli_offline_candidate_new_scenario_uses_top_level_comparisons(self):
+        state = self.write_source()
+        scenario_dir = self.source / "tests/example/scenarios"
+        scenario_dir.mkdir(parents=True)
+        (scenario_dir / "new.json").write_text(json.dumps({"new": True, "steps": [{"expect": {"entry": "doc/x", "exists": True}}]}))
+        candidate = self.root / "candidate"
+        candidate.mkdir()
+        args = integration.parser().parse_args(["--offline", "--state-dir", str(state), "--extensions-dir", str(self.source),
+                                                "--root", str(self.root / "run"), "--candidate-ext", str(candidate)])
+        baseline = {"rows": [harness.row("start", "example", "pass", "running"),
+                             harness.row("scenario", "example/new", "fail", "expected baseline failure")], "error": False}
+        changed = {"rows": [harness.row("start", "example", "pass", "running"),
+                            harness.row("scenario", "example/new", "pass", "candidate success")], "error": False}
+        with patch.object(integration, "run_copy", side_effect=[baseline, changed]):
+            result = integration.run(args)
+        self.assertEqual(result["verdict"], "pass")
+        self.assertEqual(result["baseline"]["rows"][1]["status"], "fail")
+        self.assertEqual(result["rows"][1]["id"], "compare/scenario/example/new")
+        self.assertFalse((self.root / "run").exists())
+
+    def test_cli_canary_error_has_no_spawn_and_existing_root_is_untouched(self):
+        state = self.write_source()
+        root = self.root / ("deep" * 30)
+        args = integration.parser().parse_args(["--offline", "--json", "--state-dir", str(state), "--extensions-dir", str(self.source), "--root", str(root)])
+        with patch.object(harness.subprocess, "Popen") as spawn:
+            result = integration.run(args)
+            spawn.assert_not_called()
+        self.assertEqual(result["verdict"], "error")
+        self.assertFalse(result["sandbox"]["started"])
+        self.assertEqual(result["sandbox"]["canary"]["status"], "fail")
+        self.assertFalse(root.exists())
+        root.mkdir()
+        marker = root / "user-file"
+        marker.write_text("untouched")
+        result = integration.run(args)
+        self.assertEqual(result["verdict"], "error")
+        self.assertEqual(marker.read_text(), "untouched")
+
+    def test_async_extension_returns_before_waiting_then_publishes_completion(self):
+        handlers = {}
+        ext = Mock()
+        state = self.root / "extension-state"
+        state.mkdir()
+        ext.info = {"state_dir": str(state), "socket": str(self.root / "source.sock")}
+        ext.command.side_effect = lambda name, title: lambda fn: handlers.setdefault(name, fn)
+        child = Mock()
+        child.poll.return_value = None
+        with patch("vqro_ext.Extension", return_value=ext), patch.object(integration.subprocess, "Popen", return_value=child) as launch, patch.object(integration.threading, "Thread") as thread, patch.dict(os.environ, {"VQRO_EXTENSIONS_DIR": str(self.source), "HERDR_PANE_ID": "canary"}):
+            integration.extension_main()
+            first = handlers["test.integration"]({"backend": "fake"})
+            self.assertTrue(first["started"])
+            child.wait.assert_not_called()
+            ext.publish.assert_not_called()
+            self.assertEqual(set(launch.call_args.kwargs["env"]), {"HOME", "PATH"})
+            self.assertNotIn("VQRO_EXTENSION_LIFETIME", launch.call_args.kwargs["env"])
+            self.assertFalse(handlers["test.integration"]({})["started"])
+            result = {"verdict": "pass", "counts": {}, "rows": []}
+            Path(first["receipt"]).write_text(json.dumps(result))
+            thread.call_args.kwargs["target"]()
+            child.wait.assert_called_once()
+            self.assertEqual(ext.publish.call_args.args[0], "test-integration.report")
+            popup = handlers["test.integration.show"]({})
+            self.assertEqual(popup["client"]["popup"]["view"], "test-integration.report")
+
+
+class ScenarioTests(unittest.TestCase):
+    def test_apply_invoke_subset_expect_and_wait(self):
+        client = Mock()
+        client.invoke.return_value = {"result": {"ok": True, "extra": 1}}
+        client.call.return_value = {"entries": {"doc/x": {"value": {"show": "all"}}},
+                                    "live": {"fixture.panel": {"items": [{"text": "probe"}]}}}
+        client.wait.side_effect = lambda observe, predicate, timeout: observe() if predicate(observe()) else None
+        scenario = {"fixture/new": {"steps": [
+            {"apply": [{"op": "set", "key": "doc/x", "value": {"show": "all"}}]},
+            {"invoke": "fixture.show", "result": {"result": {"ok": True}}},
+            {"expect": {"entry": "doc/x", "path": "show", "equals": "all"}},
+            {"wait": {"content": "fixture.panel", "contains": "probe"}, "within_ms": 100}]}}
+        rows = harness.run_scenarios(client, scenario)
+        self.assertEqual(rows[0]["id"], "scenario/fixture/new")
+        self.assertEqual(rows[0]["status"], "pass")
+        self.assertEqual(client.wait.call_args.args[2], 0.1)
+        client.apply.assert_called_once()
+        self.assertEqual(client.step_deadline, float("inf"))
+
+    def test_failed_expect_includes_last_observation(self):
+        client = Mock()
+        client.call.return_value = {"entries": {"doc/x": {"value": "actual"}}}
+        rows = harness.run_scenarios(client, {"fixture/existing": {"steps": [
+            {"expect": {"entry": "doc/x", "equals": "expected"}}]}})
+        self.assertEqual(rows[0]["status"], "fail")
+        self.assertIn("actual", rows[0]["evidence"])
+
+    def test_wait_timeout_reports_last_value_without_sleeping(self):
+        client = object.__new__(harness.SandboxClient)
+        client.call = Mock(return_value={"entries": {"doc/x": {"value": "not yet"}}})
+        client.next_event = Mock(side_effect=TimeoutError("deadline"))
+        with patch.object(harness.time, "sleep", side_effect=AssertionError("scenario waits must use events")):
+            rows = harness.run_scenarios(client, {"fixture/wait": {"steps": [
+                {"wait": {"entry": "doc/x", "equals": "never"}, "within_ms": 10}]}})
+        self.assertEqual(rows[0]["status"], "fail")
+        self.assertIn("last observed", rows[0]["evidence"])
+        self.assertIn("not yet", rows[0]["evidence"])
+
+    def test_empty_unknown_and_runtime_steps_fail_closed(self):
+        for steps in ([], [{"unknown": True}], [{"invoke": "pi.new"}], [{"invoke": "fixture.show", "within_ms": 0}]):
+            client = Mock()
+            rows = harness.run_scenarios(client, {"fixture/invalid": {"steps": steps}})
+            self.assertEqual(rows[0]["status"], "fail")
+            client.invoke.assert_not_called()
+
+    def test_predicate_missing_and_list_path(self):
+        client = Mock()
+        client.call.return_value = {"entries": {"doc/x": {"value": {"items": ["first"]}}}}
+        observed = harness.scenario_observation(client, {"entry": "doc/x", "path": "items.0"})
+        self.assertTrue(harness.scenario_matches(observed, {"equals": "first"}))
+        missing = harness.scenario_observation(client, {"entry": "doc/missing"})
+        self.assertTrue(harness.scenario_matches(missing, {"exists": False}))
+        self.assertFalse(harness.scenario_matches(missing, {"equals": None}))
+
+    def test_comparison_fixed_shapes(self):
+        for new, before, after, expected in [(True, "fail", "pass", "pass"), (True, "pass", "pass", "weak"),
+                                             (True, "pass", "fail", "fail"), (False, "pass", "pass", "pass"),
+                                             (False, "pass", "fail", "fail"), (False, "fail", "fail", "warn")]:
+            with self.subTest(new=new, before=before, after=after):
+                rows = harness.compare_runs({"rows": [harness.row("scenario", "fixture/x", before, "baseline")]},
+                                            {"rows": [harness.row("scenario", "fixture/x", after, "candidate")]},
+                                            {"fixture/x": {"new": new}})
+                self.assertEqual((rows[0]["id"], rows[0]["status"]), ("compare/scenario/fixture/x", expected))
+        before = {"rows": [harness.row("start", "fixture", "pass", "baseline")]}
+        after = {"rows": [harness.row("start", "fixture", "fail", "candidate")]}
+        self.assertEqual(harness.compare_runs(before, after, {})[0]["status"], "fail")
+        before["rows"][0]["status"] = "fail"
+        self.assertEqual(harness.compare_runs(before, after, {})[0]["status"], "warn")
+
+    def test_candidate_verdict_counts_comparisons_not_expected_baseline_failures(self):
+        counting = [harness.row("start", "fixture", "pass", "running")]
+        self.assertEqual(integration.summarize([harness.row("compare/scenario", "fixture/x", "pass", "red to green")], counting), "pass")
+        self.assertEqual(integration.summarize([harness.row("compare/scenario", "fixture/x", "weak", "both pass")], counting), "unverified")
+        self.assertEqual(integration.summarize([harness.row("compare/smoke", "start/fixture", "fail", "regression")], counting), "fail")
+        self.assertEqual(integration.summarize([], []), "unverified")
+        self.assertEqual(integration.summarize([], counting, error=True), "error")
+
+    def test_panel_bound(self):
+        result = {"verdict": "pass", "counts": {}, "rows": [harness.row("start", str(i), "pass", "running") for i in range(1000)]}
+        self.assertLessEqual(len(integration.panel(result)["items"]), 400)
 
 
 if __name__ == "__main__":

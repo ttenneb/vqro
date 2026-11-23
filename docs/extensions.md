@@ -56,8 +56,40 @@ per extension; the in-app command shares a 20-second tests budget and reports re
 Run the CLI for full tests if that budget is exhausted. This is cooperative isolation, **not a security sandbox**: only run installed tests you trust.
 
 No installed tests means **no coverage**, not a test pass. Bundled tests are not currently installed.
-A healthy status does not prove behaviour, rendering or performance; integration and performance suites are not
-built yet. `--no-tests` skips even installed tests and records that coverage gap.
+A healthy status does not prove behaviour, rendering or performance; use the separate disposable integration
+checks for behaviour. Performance checks are not built yet. `--no-tests` skips even installed tests and records that coverage gap.
+
+### Disposable integration checks
+
+`vqro run test.integration` starts a subprocess and immediately returns its future receipt path;
+`test.integration.show` opens the completed report. It copies declarations, credential-free documents and
+extension files into a private core, audits launch paths, then checks startup, dependencies, registered commands,
+views, safe-mode recovery, revert, restart and process cleanup. It never invokes extension commands during the
+smoke or applies anything to the source workspace. Providers are disabled with the default fake backend.
+
+```sh
+python3 ~/.local/share/vqro/extensions/testing_integration.py --json --vqro /path/to/vqro --out receipt.json
+python3 ~/.local/share/vqro/extensions/testing_integration.py --candidate-ext /path/to/overlay --candidate-ops changes.json
+```
+
+Source selection also accepts `--socket`, `--state-dir`, `--extensions-dir` and `--offline`. Scenarios live at
+`tests/<extension>/scenarios/*.json` beside the extension. Steps support `apply`, `invoke`, event-driven `wait`,
+and immediate `expect`, each with a bounded `within_ms` deadline. Agent-runtime commands are not invoked in
+this slice. New scenarios (`"new": true`) must fail on the baseline and pass on the candidate; passing both is
+`weak` and yields exit 77, never a pass. Existing failures are distinguished from regressions in comparisons.
+
+`--backend private` allows sandbox-local herdr-core/tmux providers; the harness stops only its private endpoints.
+External launch paths stay off and unverified unless explicitly allowed with `--allow-external`. Credential-like
+workspace entries and contributed documents are excluded and listed; the extension tree is copied whole,
+with symlinks preserved rather than dereferenced. Protected documents refused by the private core are reported
+as not copied. This is
+cooperative isolation, not a security sandbox: only run extension code and scenarios you trust. Agent profiles
+are not copied yet. Use `--self-test` for crashing-extension and zero-coverage negative controls.
+
+`--root DIR` must be absent or empty and short enough for sockets under 100 bytes. Copies are removed unless
+`--keep`; CLI receipts are written only with `--out` (choose a path outside the disposable root). The report
+records source seq/generations before and after; concurrent source changes are unverified, not attributed to the
+harness. Exit codes remain 0 pass, 1 fail, 77 unverified, 2 harness/canary error.
 
 ## A manifest is data, never an executable probe
 
