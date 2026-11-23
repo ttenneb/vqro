@@ -15,6 +15,7 @@ pub mod principal;
 pub mod causality;
 pub mod provider_client;
 pub mod codex;
+pub mod claude_code;
 pub mod native_process;
 pub mod queue;
 pub mod limits;

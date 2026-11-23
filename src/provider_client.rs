@@ -12,6 +12,7 @@
 //! Mirrors the Python SDK (`extensions/vqro_provider.py`) where the spec leaves room.
 
 pub mod items;
+pub mod agent;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
