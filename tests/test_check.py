@@ -144,7 +144,14 @@ class CheckTests(unittest.TestCase):
         body = '\n'.join(['set -u', 'CHECK_SYSTEM=Darwin', 'TARGET=$HOME/target',
                           'command -v tmux && exit 49', arrays,
                           '"${CLEAN[@]}" bash -c \'printf "%s\\n" "$BASH"\''])
-        env = dict(self.env, PATH=str(tools))  # No tmux or system directories at discovery.
+        # The Python directories precede the selected Bash on CLEAN PATH, so they must not hold a bash of their own:
+        # with the inherited sys.executable in /usr/bin, /usr/bin/bash won and the result depended on how the suite
+        # was started. A private directory holding only python3 keeps this about Bash selection.
+        python_dir = self.root/'selected-python'
+        python_dir.mkdir()
+        (python_dir/'python3').symlink_to(sys.executable)
+        env = dict(self.env, PATH=str(tools),  # No tmux or system directories at discovery.
+                   VQRO_PYTHON=str(python_dir/'python3'), PYTHON_BIN=str(python_dir))
         result = subprocess.run([str(tools/'bash'), '-c', body], env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), str(tools/'bash'))
