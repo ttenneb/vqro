@@ -106,7 +106,7 @@ def receive_control(frame):
     elif request["subtype"] == "interrupt":
         control(request_id, {"still_queued": []})
         if ACTIVE:
-            result(ACTIVE, "interrupted")
+            result(ACTIVE, "aborted_streaming")
     else:
         emit({"type": "control_response", "response": {"subtype": "error", "request_id": request_id, "error": "synthetic unsupported control"}})
 

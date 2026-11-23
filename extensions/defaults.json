@@ -1,5 +1,5 @@
 {
-  "version": 13,
+  "version": 14,
   "extensions": [
     {
       "name": "tabs",
@@ -69,6 +69,11 @@
       "name": "codex",
       "since": 9,
       "argv": ["python3", "codex.py"]
+    },
+    {
+      "name": "claude-code",
+      "since": 14,
+      "argv": ["python3", "claude_code.py"]
     },
     {
       "name": "accounts",

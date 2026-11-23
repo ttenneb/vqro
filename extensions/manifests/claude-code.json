@@ -1,0 +1,16 @@
+{
+  "name":"claude-code", "title":"Claude Code headless launcher", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"runtime",
+  "summary":"Launch Claude Code stream/control agents in the vqro agent UI; native TUI remains separate.",
+  "description":"Route 1 uses the backend-owned vqro-bridge-claude and native user login/settings without bare mode or a startup prompt. Literal send is currently qualified by source for CLI2.1.329; other versions remain observable without guessed input guarantees. Native TUI parity, profile management and authentication are not provided. Disabling this extension leaves existing processes intact.",
+  "requires":{"protocol":1,"client_features":["items","input","menu"]},
+  "provides":["command/claude-code.new","command/claude-code.settings","command/claude-code.configure","view/claude-code-runtimes","view/claude-code-settings","view/accounts-choice-claude-code-new","doc/settings/claude-code","ability/vqro.agents","view/agent-*"],
+  "needs":[{"cap":"ability/vqro.terminals","suggest":"herdr","why":"The headless bridge and native CLI execute in one backend-owned terminal"}],
+  "works_with":[{"cap":"doc/settings/accounts-policy","suggest":"accounts","without":"Named-account choices default to ask"},
+                {"cap":"doc/settings/accounts","suggest":"accounts","without":"Native default login/settings remain unchanged"},
+                {"cap":"command/coord.request_route","suggest":"coord","without":"Human Control remains available; route initialization is unconfirmed and never replays the launch"},
+                {"cap":"command/coord.inbox.window","suggest":"coord","without":"Request routing remains unconfirmed, never a native launch retry"},
+                {"cap":"command/agents.show","suggest":"agents","without":"The created agent opens as its bridge terminal"},
+                {"cap":"command/tabs.show","suggest":"tabs","without":"The observed host remains reachable through the resource picker"}],
+  "settings_command":"claude-code.settings",
+  "contributes":{"commands":["claude-code.new","claude-code.settings","claude-code.configure"],"panels":["Claude Code headless runtimes"],"settings":["doc/settings/claude-code"]}
+}

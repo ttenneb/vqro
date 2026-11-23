@@ -1,12 +1,14 @@
 //! Claude Code's native stream-json control envelopes, not JSON-RPC.
 //! Reference: @anthropic-ai/claude-agent-sdk 0.3.329 sdk.d.ts, SDKControlRequest/Response.
-use serde_json::{Value, json};
 use crate::native_process::{Codec, Reply};
+use serde_json::{Value, json};
 
 pub struct ClaudeCodec;
 
 impl Codec for ClaudeCodec {
-    fn name(&self) -> &'static str { "Claude Code" }
+    fn name(&self) -> &'static str {
+        "Claude Code"
+    }
 
     fn request(&self, command: &str, id: &str, args: Value) -> Result<Value, String> {
         let Some(mut request) = args.as_object().cloned() else {
@@ -18,7 +20,9 @@ impl Codec for ClaudeCodec {
     }
 
     fn reply_id(&self, record: &Value) -> Result<Option<String>, String> {
-        if record["type"] != "control_response" { return Ok(None); }
+        if record["type"] != "control_response" {
+            return Ok(None);
+        }
         let Some(response) = record["response"].as_object() else {
             return Err("native control response has no response object".into());
         };
@@ -26,8 +30,13 @@ impl Codec for ClaudeCodec {
             return Err("native control response has no subtype".into());
         };
         // Unknown future subtypes are observations, not completion of a pending request.
-        if !matches!(subtype, "success" | "error") { return Ok(None); }
-        response.get("request_id").and_then(Value::as_str).map(|id| Some(id.into()))
+        if !matches!(subtype, "success" | "error") {
+            return Ok(None);
+        }
+        response
+            .get("request_id")
+            .and_then(Value::as_str)
+            .map(|id| Some(id.into()))
             .ok_or_else(|| "native control response has no request_id".into())
     }
 
@@ -40,7 +49,9 @@ impl Codec for ClaudeCodec {
                 error: Value::Null,
             }),
             Some("error") if response["error"].is_string() => Ok(Reply {
-                success: false, data: Value::Null, error: response["error"].clone(),
+                success: false,
+                data: Value::Null,
+                error: response["error"].clone(),
             }),
             _ => Err("native control response payload/type mismatch".into()),
         }
@@ -55,8 +66,16 @@ mod tests {
 
     #[test]
     fn nested_control_request_preserves_arguments_without_accepting_forged_subtype() {
-        assert_eq!(ClaudeCodec.request("initialize", "n7", json!({"subtype":"interrupt","hooks":{}})).unwrap(),
-            json!({"type":"control_request","request_id":"n7","request":{"subtype":"initialize","hooks":{}}}));
+        assert_eq!(
+            ClaudeCodec
+                .request(
+                    "initialize",
+                    "n7",
+                    json!({"subtype":"interrupt","hooks":{}})
+                )
+                .unwrap(),
+            json!({"type":"control_request","request_id":"n7","request":{"subtype":"initialize","hooks":{}}})
+        );
         assert!(ClaudeCodec.request("initialize", "n1", json!([])).is_err());
     }
 
@@ -67,8 +86,15 @@ mod tests {
         let reply = ClaudeCodec.reply(&frame, "initialize").unwrap();
         assert!(reply.success);
         assert_eq!(reply.data, json!({"commands":[]}));
-        let empty = json!({"type":"control_response","response":{"subtype":"success","request_id":"n10"}});
-        assert!(ClaudeCodec.reply(&empty, "interrupt").unwrap().data.is_null());
+        let empty =
+            json!({"type":"control_response","response":{"subtype":"success","request_id":"n10"}});
+        assert!(
+            ClaudeCodec
+                .reply(&empty, "interrupt")
+                .unwrap()
+                .data
+                .is_null()
+        );
     }
 
     #[test]
@@ -87,7 +113,9 @@ mod tests {
             json!({"type":"control_request","request_id":"p1","request":{"subtype":"can_use_tool"}}),
             json!({"type":"assistant","message":{"content":[]}}),
             json!({"type":"system","subtype":"control_request_progress","request_id":"n1"}),
-        ] { assert!(ClaudeCodec.reply_id(&frame).unwrap().is_none()); }
+        ] {
+            assert!(ClaudeCodec.reply_id(&frame).unwrap().is_none());
+        }
     }
 
     #[test]
@@ -103,7 +131,9 @@ mod tests {
             json!({"type":"control_response","response":[]}),
             json!({"type":"control_response","response":{"request_id":"n1"}}),
             json!({"type":"control_response","response":{"subtype":"success","request_id":7}}),
-        ] { assert!(ClaudeCodec.reply_id(&frame).is_err()); }
+        ] {
+            assert!(ClaudeCodec.reply_id(&frame).is_err());
+        }
         let invalid = json!({"type":"control_response","response":{"subtype":"error","request_id":"n1","error":false}});
         assert!(ClaudeCodec.reply(&invalid, "initialize").is_err());
     }
