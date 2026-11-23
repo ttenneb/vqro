@@ -175,6 +175,8 @@ platform_skip_reason() {
       echo 'harness requires Linux /proc and/or pinned /usr/bin/tmux' ;;
     e2e-pi-provider|e2e-pi-rust-default|e2e-agents-ui|e2e-codex-launcher|e2e-agent-stop)
       echo 'private Linux namespaces and /proc are required' ;;
+    e2e-testing-unit|e2e-testing-integration|e2e-testing-perf|e2e-testing-finish-gate)
+      echo 'testing harness requires Linux /proc and Unix process groups' ;;
     pi-bridge-memory|e2e-tui-scale-budgets|scale-harness)
       echo 'timing measurements and contention monitor require Linux /proc and pidfds' ;;
     *) return 1 ;;
@@ -215,7 +217,7 @@ show_ready() {
 sensitive() {
   case "$1" in
     # The default Rust suite includes the inventory core-lock hold-time assertion too.
-    cargo-test|history-budget|scale-harness|e2e-tui-scale-budgets|e2e-sidebar-scale|e2e-item-streams|pi-bridge-memory|opt-in:core_storm|opt-in:accept_limits|opt-in:fd_lifecycle|e2e-scale-herdr) return 0 ;;
+    cargo-test|history-budget|scale-harness|e2e-testing-perf|e2e-tui-scale-budgets|e2e-sidebar-scale|e2e-item-streams|pi-bridge-memory|opt-in:core_storm|opt-in:accept_limits|opt-in:fd_lifecycle|e2e-scale-herdr) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -425,6 +427,10 @@ if [ "$MODE" = full ]; then
   done
   step history-budget history_budget
   step libghostty-release-safe libghostty_release_safe
+  step e2e-testing-unit "${CLEAN[@]}" CARGO_TARGET_DIR="$TARGET" python3 tests/e2e_testing_unit.py
+  step e2e-testing-integration "${CLEAN[@]}" CARGO_TARGET_DIR="$TARGET" python3 tests/e2e_testing_integration.py
+  step e2e-testing-perf "${CLEAN[@]}" CARGO_TARGET_DIR="$TARGET" python3 tests/e2e_testing_perf.py
+  step e2e-testing-finish-gate "${CLEAN[@]}" CARGO_TARGET_DIR="$TARGET" python3 tests/e2e_testing_finish_gate.py
   step e2e-providers "${CLEAN[@]}" python3 tests/e2e_providers.py "$TARGET"
   step e2e-rex "${CLEAN[@]}" python3 tests/e2e_rex.py "$TARGET"  # optional: SKIP without /usr/bin/rex
   step e2e-coordination-review "${CLEAN[@]}" python3 tests/e2e_coordination_review.py --binary "$TARGET/debug/vqro"

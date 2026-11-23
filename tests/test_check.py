@@ -386,6 +386,42 @@ else:
             self.assertEqual(row['sha256'], hashlib.sha256(path.read_bytes()).hexdigest())
             self.assertEqual(row['mtime_unix_ns'], path.stat().st_mtime_ns)
 
+    def test_full_registers_all_testing_contracts_with_selected_target(self):
+        registration = SOURCE[SOURCE.index('BEFORE=$(snapshot'):SOURCE.index('\nrun_steps\nsleep 2')]
+        expected = ['e2e-testing-unit', 'e2e-testing-integration', 'e2e-testing-perf', 'e2e-testing-finish-gate']
+        for mode in ('quick', 'full', 'timing'):
+            body = '\n'.join(['set -u', f'MODE={mode}', 'RUN=fixture', 'TARGET="target with spaces"', 'LOGS=fixture',
+                              'CARGO=()', 'CLEAN=()', 'snapshot() { :; }',
+                              'step() { printf "%s\\t" "$@"; printf "\\n"; }', registration])
+            result = subprocess.run([BASH, '-c', body], env=self.env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = [line.rstrip('\t').split('\t') for line in result.stdout.splitlines() if line.startswith('e2e-testing-')]
+            self.assertEqual([row[0] for row in rows], expected if mode == 'full' else [])
+            for row in rows:
+                self.assertEqual(row[1:3], ['CARGO_TARGET_DIR=target with spaces', 'python3'])
+                self.assertEqual(row[3], 'tests/' + row[0].replace('-', '_') + '.py')
+
+    def test_testing_perf_is_serial_and_exit_77_is_skip_not_pass(self):
+        body = shell_function('sensitive') + '\n' + '\n'.join(
+            f'if sensitive {name}; then echo serial:{name}; else echo independent:{name}; fi'
+            for name in ('e2e-testing-unit', 'e2e-testing-integration', 'e2e-testing-perf', 'e2e-testing-finish-gate'))
+        result = subprocess.run([BASH, '-c', body], env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['independent:e2e-testing-unit', 'independent:e2e-testing-integration',
+                                                    'serial:e2e-testing-perf', 'independent:e2e-testing-finish-gate'])
+        result, receipt, _ = self.gate("step build-zero-warnings true\nstep e2e-testing-perf bash -c 'exit 77'")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(receipt['steps'][-1]['result'], 'skip')
+        self.assertEqual(receipt['skipped'], ['e2e-testing-perf'])
+
+    def test_testing_contract_platform_skips_are_explicit_and_unverified(self):
+        names = ('e2e-testing-unit', 'e2e-testing-integration', 'e2e-testing-perf', 'e2e-testing-finish-gate')
+        commands = 'CHECK_SYSTEM=Darwin\nstep build-zero-warnings true\n' + '\n'.join(f'step {name} false' for name in names)
+        result, receipt, _ = self.gate(commands)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(receipt['skipped'], list(names))
+        self.assertTrue(all(step['result'] == 'skip' for step in receipt['steps'][1:]))
+
     def test_timing_mode_registers_only_the_three_budget_probes(self):
         registration = SOURCE[SOURCE.index('BEFORE=$(snapshot'):SOURCE.index('\nrun_steps\nsleep 2')]
         body = '\n'.join(['set -u', 'MODE=timing', 'RUN=fixture', 'TARGET=fixture', 'LOGS=fixture',
