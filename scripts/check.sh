@@ -111,6 +111,12 @@ step() {  # Capture argv as an array: paths/arguments never pass through eval or
   local -n command="CHECK_STEP_$index"
   command=("$@")
 }
+timing_python() {
+  # Also safe for direct/unscoped gates: never depend on supervisor sanitization.
+  /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin \
+    VQRO_GATE_SLOT_DIR="${VQRO_GATE_SLOT_DIR:-}" VQRO_GATE_SLOT_HELD="${VQRO_GATE_SLOT_HELD:-}" \
+    VQRO_GATE_EXCLUSIVE="${VQRO_GATE_EXCLUSIVE:-0}" python3 -I "$@"
+}
 timed() {
   case "$1" in e2e-tui-scale-budgets|scale-harness|pi-bridge-memory) return 0 ;; *) return 1 ;; esac
 }
@@ -122,9 +128,9 @@ run_step() {
     local pid facts="$LOGS/$name-contention.json" strict=()
     if [ "$MODE" = timing ] || [ "${VQRO_GATE_EXCLUSIVE:-0}" = 1 ]; then strict=(--strict); fi
     ( "${command[@]}" ) > "$log" 2>&1 & pid=$!
-    python3 "$REPO/scripts/timing_contention.py" --pid "$pid" --output "$facts" >> "$log" 2>&1
+    timing_python "$REPO/scripts/timing_contention.py" --pid "$pid" --output "$facts" >> "$log" 2>&1
     wait "$pid"; rc=$?
-    python3 "$REPO/scripts/timing_contention.py" --output "$facts" --grade "$rc" "${strict[@]}" >> "$log" 2>&1; rc=$?
+    timing_python "$REPO/scripts/timing_contention.py" --output "$facts" --grade "$rc" "${strict[@]}" >> "$log" 2>&1; rc=$?
   else
     "${command[@]}" > "$log" 2>&1; rc=$?
   fi
@@ -248,7 +254,7 @@ scale_harness() {
   "${CARGO[@]}" VQRO_SCALE_RUN_DIR="$RUN" VQRO_SCALE_RECEIPT="$LOGS/scale-receipt.json" VQRO_SCALE_DEFER_TIMING_GRADE=1 \
     "${command[@]}" || return 1
   # Cargo/test success is required too: a stale receipt can never excuse a panic.
-  python3 - "$LOGS/scale-receipt.json" <<'PY'
+  timing_python - "$LOGS/scale-receipt.json" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1]))
 sys.exit({"pass": 0, "budget": 78}.get(r.get("failure_class"), 1))
@@ -410,7 +416,7 @@ else
 fi
 rm -rf "$RUN"
 
-python3 - "$STEPS" "$RECEIPT" "$MODE" "$(git describe --always --dirty 2>/dev/null)" "$LOGS" "$LEFT" "$SCOPE" "$STAMP" "$REPO" "$TARGET" "$(git rev-parse HEAD 2>/dev/null)" <<'PY'
+timing_python - "$STEPS" "$RECEIPT" "$MODE" "$(git describe --always --dirty 2>/dev/null)" "$LOGS" "$LEFT" "$SCOPE" "$STAMP" "$REPO" "$TARGET" "$(git rev-parse HEAD 2>/dev/null)" <<'PY'
 import hashlib, json, os, sys, time
 from pathlib import Path
 steps_file, receipt, mode, commit, logs, left, scope, stamp = sys.argv[1:9]

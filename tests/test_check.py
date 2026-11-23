@@ -62,6 +62,34 @@ class CheckTests(unittest.TestCase):
         receipt = json.loads(latest.read_text()) if latest.exists() else None
         return result, receipt, logs
 
+    def test_sampler_and_grader_receive_only_explicit_sanitized_environment(self):
+        repo = self.root/'fake-repo'
+        (repo/'scripts').mkdir(parents=True)
+        (repo/'scripts/timing_contention.py').write_text('''import json,os,pathlib,sys
+path=pathlib.Path(sys.argv[sys.argv.index('--output')+1])
+with pathlib.Path(str(path)+'.env').open('a') as output:
+    output.write(json.dumps(dict(os.environ))+'\\n')
+if '--grade' not in sys.argv:
+    path.write_text(json.dumps(dict(status='available',contended=False)))
+else:
+    sys.exit(0 if sys.argv[sys.argv.index('--grade')+1]=='0' else 1)
+''')
+        forbidden = dict(HERDR_TEST_SENTINEL='not-a-real-session', PYTHONPATH='/not-an-import-root',
+                         PYTHONSTARTUP='/not-a-startup-file', TEST_CREDENTIAL='not-a-real-secret')
+        self.env.update(forbidden)
+        self.env['VQRO_GATE_EXCLUSIVE'] = '0'
+        result, receipt, logs = self.gate(f'REPO={shlex.quote(str(repo))}\n'
+            'step build-zero-warnings true\nstep scale-harness /bin/true')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        observed = [json.loads(line) for line in (logs/'scale-harness-contention.json.env').read_text().splitlines()]
+        self.assertEqual(len(observed), 2)
+        for env in observed:
+            self.assertFalse(set(env) & set(forbidden), env)
+            self.assertEqual(env['HOME'], str(self.root))
+            self.assertEqual(env['PATH'], '/usr/bin:/bin')
+            for key in ('VQRO_GATE_SLOT_DIR', 'VQRO_GATE_SLOT_HELD', 'VQRO_GATE_EXCLUSIVE'):
+                self.assertEqual(env[key], self.env[key])
+
     def test_receipt_names_caller_attested_checkout_and_hashes_exact_artifacts(self):
         target = self.root/'build'
         release = target/'release'
