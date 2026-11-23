@@ -37,7 +37,13 @@ fn oversized_main_and_child_deltas_retain_prefix_and_mark_entity_and_stream_inco
                 &json!({"threadId":thread,"itemId":"item","delta":"x".repeat(ENTITY_BYTES+1)}),
             ));
             let value = &projection.journal.entity(kind, &id).unwrap().1;
-            assert_eq!(value["content"][0]["text"], "retained prefix");
+            assert!(
+                value["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("retained prefix")
+            );
+            assert!(crate::limits::encoded_bytes(value) < ENTITY_BYTES);
             assert_eq!(value["incomplete"], true);
             assert_eq!(
                 projection.journal.entity("state", "current").unwrap().1["items_incomplete"],
@@ -84,7 +90,13 @@ fn omission_only_delta_refusal_keeps_final_main_and_child_messages_final_in_snap
         );
         projection.apply(refusal);
         let value = &projection.journal.entity("message", &id).unwrap().1;
-        assert_eq!(value["content"][0]["text"], "finished text");
+        assert!(
+            value["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("finished text")
+        );
+        assert!(crate::limits::encoded_bytes(value) < ENTITY_BYTES);
         assert_eq!(value["final"], true);
         assert_eq!(value["incomplete"], true);
         let mut view = ItemView::new();
@@ -103,6 +115,47 @@ fn omission_only_delta_refusal_keeps_final_main_and_child_messages_final_in_snap
         assert_eq!(value["content"][0]["text"], "native new activity");
         drain(&mut cursor, &mut projection, &mut view);
         assert_eq!(view.entity("message", &id).unwrap().1["final"], false);
+    }
+}
+
+#[test]
+fn first_oversized_delta_creates_typed_incomplete_main_and_child_placeholders() {
+    for thread in ["main", "child"] {
+        for (method, kind) in [
+            ("item/agentMessage/delta", "message"),
+            ("item/commandExecution/outputDelta", "tool"),
+        ] {
+            let mut endpoint = endpoint();
+            let mut projection = Projection::new("epoch2".into());
+            projection.apply(vec![endpoint.state_entity()]);
+            let changes = endpoint.notification(
+                method,
+                &json!({"threadId":thread,"itemId":"absent","delta":"x".repeat(ENTITY_BYTES+1)}),
+            );
+            let id = changes[0].id.clone();
+            projection.apply(changes);
+            let value = &projection.journal.entity(kind, &id).unwrap().1;
+            if kind == "message" {
+                assert_eq!(value["final"], false);
+            } else {
+                assert_eq!(value["status"], "running");
+            }
+            assert_eq!(value["incomplete"], true);
+            assert!(crate::limits::encoded_bytes(value) < ENTITY_BYTES);
+            if thread == "child" {
+                assert!(value["child"].is_string());
+            }
+            let mut view = ItemView::new();
+            let mut cursor = projection.journal.open(None);
+            drain(&mut cursor, &mut projection, &mut view);
+            let snapshot = &view.entity(kind, &id).unwrap().1;
+            if kind == "message" {
+                assert_eq!(snapshot["final"], false);
+            } else {
+                assert_eq!(snapshot["status"], "running");
+            }
+            assert_eq!(snapshot["incomplete"], true);
+        }
     }
 }
 

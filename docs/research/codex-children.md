@@ -55,12 +55,14 @@ Associations live inside the parent's native-session epoch: at most 256 children
 4096 compact mappings for unusually long native-ID pairs, reset on session replacement.
 Ordinary reversible IDs do not consume that map. IDs/threads are at most
 128 bytes; native child payload fields are bounded. Whole plans accept at most 256
-steps, bounded text and total entity bytes. Over-bound deltas and whole plans emit a
-bounded refusal witness through the existing projection: a known entity retains its
-old contents but is marked incomplete, as is the item stream. Omission-only refusal
-witnesses carry no synthetic lifecycle: they do not reopen a final message. Real
-native lifecycle reports still apply; final items are not frozen. Refusals never
-silently leave an old prefix or list looking complete, and no bound is raised. Other
+steps, bounded text and total entity bytes. Deltas use the existing bounded projection
+append path: it creates a typed message/tool base only if the entity is absent,
+retains the bounded accepted prefix on overflow, and marks entity and stream
+incomplete. For an existing entity, refusal preserves its lifecycle rather than
+reopening a final message; the absent case keeps required final/status fields.
+Whole-plan refusal uses the same projection's incomplete witness and retains the
+prior list. Real native lifecycle reports still apply; final items are not frozen.
+Refusals never silently leave a prefix/list looking complete, and no bound is raised. Other
 unrepresentable/unattributable observations are omitted, not claims that native
 children are absent. The ordinary tail-coverage item
 journal can evict old entities; active child facts are protected like active tools.

@@ -437,16 +437,9 @@ impl Endpoint {
         let Some(id) = self.children.identity(thread, kind, &native) else {
             return vec![];
         };
-        if text.len() > ENTITY_BYTES {
-            base["incomplete"] = json!(true);
-            // This witnesses omitted content, not a native lifecycle update. In particular
-            // the synthetic delta base must not reopen an already final message.
-            if let Some(fields) = base.as_object_mut() {
-                fields.remove("final");
-                fields.remove("status");
-            }
-            return vec![Change::new(kind, id, base)];
-        }
+        // The existing bounded append path creates this typed base only when absent.
+        // On overflow it retains the accepted prefix and existing lifecycle, then marks
+        // the entity/stream incomplete. Do not synthesize a whole-item lifecycle update.
         vec![Change::append(kind, id, base, field, text.into())]
     }
 
