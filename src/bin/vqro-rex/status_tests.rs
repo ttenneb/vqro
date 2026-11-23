@@ -86,7 +86,12 @@ async fn unix_only_not_found_and_refused_are_absent_all_other_errors_refuse_star
     }
     // Actual missing and stale Unix socket paths use those same two positive absence classifications.
     assert!(native_endpoint(&fake.bin, &fake.dir).unwrap().is_none());
-    let listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
-    drop(listener);
+    // The stale socket is made by a child process that binds and exits, never by a listener in this test process:
+    // with tests running in parallel, another test's fork (before its exec) can briefly hold a copy of an in-process
+    // listener, so it would still accept and the path would not be refused.
+    let made = std::process::Command::new("python3")
+        .args(["-c", "import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])"])
+        .arg(&endpoint).status().unwrap();
+    assert!(made.success() && endpoint.exists());
     assert!(native_endpoint(&fake.bin, &fake.dir).unwrap().is_none());
 }
