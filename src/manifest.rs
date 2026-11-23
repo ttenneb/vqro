@@ -63,13 +63,22 @@ impl Catalog {
                     if cap.starts_with("ui/") {
                         ui_status(&mut row,&(cap,major),clients);rows.push(row);continue;
                     }
-                    let state=if core_provides(&cap,major) {
+                    let family_prefix=cap.strip_suffix('*');
+                    let state=if core_provides(&cap,major) || family_prefix.is_some_and(|p|core_family(p,major)) {
                         row["providers"]=json!([{"name":"vqro","display_status":"core"}]);"satisfied"
                     } else {
                         // A family (`data/settings.page.*`) is met by any provider of a member (`data/settings.page.sidebar`).
+                        // One provider of several members counts once, with the needed major if any member has it.
                         let family:Vec<(String,u64)>;
-                        let offered:&[(String,u64)]=match cap.strip_suffix('*') {
-                            Some(prefix)=>{family=providers.iter().filter(|(k,_)|k.starts_with(prefix)).flat_map(|(_,v)|v.iter().cloned()).collect();&family}
+                        let offered:&[(String,u64)]=match family_prefix {
+                            Some(prefix)=>{
+                                let mut by:BTreeMap<String,u64>=BTreeMap::new();
+                                for (p,m) in providers.iter().filter(|(k,_)|k.starts_with(prefix)).flat_map(|(_,v)|v.iter()) {
+                                    let e=by.entry(p.clone()).or_insert(*m);
+                                    if *m==major {*e=major;}
+                                }
+                                family=by.into_iter().collect();&family
+                            }
                             None=>providers.get(&cap).map(Vec::as_slice).unwrap_or(&[]),
                         };
                         let same:Vec<&(String,u64)>=offered.iter().filter(|(p,m)|*m==major && p!=name).collect();
@@ -77,7 +86,8 @@ impl Catalog {
                             used_by.entry(p.clone()).or_default().push(json!({"name":name,"cap":cap_text,"hard":hard,"display_status":status.get(name)}));
                         }
                         row["providers"]=Value::Array(same.iter().map(|(p,_)|json!({"name":p,"display_status":status.get(p)})).collect());
-                        if offered.iter().any(|(p,_)|p==name) {"satisfied"}
+                        // Its own member satisfies an exact need whatever the major (as before); a family need only in that major.
+                        if offered.iter().any(|(p,m)|p==name && (family_prefix.is_none() || *m==major)) {"satisfied"}
                         else if same.iter().any(|(p,_)|running(p)) {"satisfied"}
                         else if !same.is_empty() {"off"}
                         else if !offered.is_empty() {"version"}
@@ -107,6 +117,12 @@ pub fn parse_cap(text:&str)->Option<(String,u64)> {
     let (kind,name)=body.split_once('/')?;
     let ok=|s:&str|!s.is_empty() && s.len()<=256 && s.chars().all(|c|c.is_ascii_alphanumeric() || "._-/*".contains(c));
     (ok(kind) && !kind.contains('/') && ok(name)).then(||(body.to_string(),major))
+}
+/// A family need (`prefix*`) met by the core: it owns every `command/vqro.*` command, and the listed built-ins.
+fn core_family(prefix:&str,major:u64)->bool {
+    const MEMBERS:[&str;5]=["doc/settings/tui","doc/settings/theme","doc/settings/icons","ability/vqro.operational-domains","ability/vqro.principals"];
+    prefix.starts_with("command/vqro.") || "command/vqro.".starts_with(prefix)
+        || MEMBERS.iter().any(|c|c.starts_with(prefix) && core_provides(c,major))
 }
 /// Built-in capabilities: core commands and the spec-defined shared settings, whose readers always have a fallback.
 fn core_provides(cap:&str,major:u64)->bool {
@@ -160,6 +176,30 @@ fn ui_status(row:&mut Value,want:&(String,u64),clients:&[Value]) {
         assert_eq!(w[0]["status"],"satisfied");assert_eq!(w[0]["providers"][0]["name"],"sidebar");
         assert_eq!(w[1]["status"],"missing","a family nobody provides");
         assert_eq!(deps["sidebar"]["used_by"][0]["name"],"settings");
+    }
+    #[test]fn family_needs_count_a_provider_once_respect_majors_and_see_core_members(){
+        // vqro-lead-secondary (wildcard1ca): duplicates, a wrong-major own member, and core members.
+        let root=tempfile::tempdir().unwrap();
+        let write=|n:&str,v:Value|std::fs::write(root.path().join(format!("{n}.json")),v.to_string()).unwrap();
+        write("pages",json!({"name":"pages","provides":["data/page.a","data/page.b@2","data/page.c"]}));
+        write("reader",json!({"name":"reader","needs":["data/page.*"],"works_with":["data/page.*@2"]}));
+        write("mine",json!({"name":"mine","provides":["data/own.mine@1"],"needs":["data/own.*@2"]}));
+        write("core",json!({"name":"core","needs":["doc/settings/*","ability/vqro.*","command/*"],"works_with":["ability/vqro.*@2"]}));
+        let names=["pages","reader","mine","core"];
+        let specs:Vec<(String,u64,Value)>=names.iter().map(|n|(n.to_string(),0,json!({"manifest":format!("{n}.json")}))).collect();
+        let mut catalog=Catalog::new(root.path().into());catalog.refresh(&specs);
+        let status:BTreeMap<String,String>=names.iter().map(|n|(n.to_string(),"running".to_string())).collect();
+        let deps=catalog.dependencies(&status,&[]);
+        let r=&deps["reader"];
+        assert_eq!(r["needs"][0]["providers"].as_array().unwrap().len(),1,"one provider of three members counts once: {r}");
+        assert_eq!(r["needs"][0]["status"],"satisfied");
+        assert_eq!(r["works_with"][0]["status"],"satisfied","page.b is the @2 member");
+        assert_eq!(deps["pages"]["used_by"].as_array().unwrap().len(),2,"one entry per declared row, not per member");
+        assert_eq!(deps["mine"]["needs"][0]["status"],"version","an own member of another major does not satisfy");
+        assert_eq!(deps["mine"]["status"],"missing");
+        let c=&deps["core"];
+        for i in 0..3 {assert_eq!(c["needs"][i]["status"],"satisfied","{}",c["needs"][i]);assert_eq!(c["needs"][i]["providers"][0]["name"],"vqro");}
+        assert_eq!(c["works_with"][0]["status"],"missing","no @2 core ability");
     }
     #[test]fn dependencies_report_satisfied_off_missing_version_and_reverse_users(){
         let root=tempfile::tempdir().unwrap();
