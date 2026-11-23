@@ -14,7 +14,9 @@ published through the same write-through move before the original can be replace
 A failed move returns
 `AtomicWriteError { renamed: false }`; a successful move has no subsequent fallible barrier.
 Existing callers, including `IdentityMap::save` in `src/provider.rs`, retain their adoption logic.
-No retry/replay is added.
+No transaction or agent-input replay is added. Native follow-up W03 adds only bounded retries of
+the same refused write-through rename for ACCESS_DENIED/SHARING_VIOLATION; a successful rename is
+never retried. See `windows-persistence-native-followup.md` for the ruling and scheduled-wait bound.
 
 Microsoft documents WRITE_THROUGH as not returning until the file is moved on disk, and explicitly
 guarantees flushing for a copy/delete move. We do not request COPY_ALLOWED; this is a same-directory
@@ -87,8 +89,9 @@ before the fake spawn, and rejects spawn on reader panic. `store::tests::quarant
 uses a failing fake publication call to require error propagation, original byte preservation and guard cleanup,
 then a successful fake publication to check the backup survives original replacement. Negative controls
 omitting stop/join fail both reader tests; omitting the publication callback fails the quarantine test.
-The Windows production
-callback is the same `move_file_write_through` used by ordinary store writes; no retry/replay is added.
+The Windows production callback is the same `move_file_write_through` used by ordinary store writes.
+Its W03 bounded same-rename retries are distinct from transaction/input replay: neither transactions,
+agent input nor a successful rename are replayed.
 
 Thread CPU timing uses GetThreadTimes on Windows (kernel + user, 100 ns units), not a wall-clock
 fallback. Consumers: `tests/history_budget.rs`, `tests/identity_hygiene.rs`, `src/core.rs`'s inventory
