@@ -117,8 +117,16 @@ def archive_files(package):
 
 
 def cargo_output(arguments):
-    return subprocess.run(["cargo", *arguments], cwd=ROOT,
-        env={**os.environ, "CARGO_NET_OFFLINE": "true"}, capture_output=True, text=True, encoding="utf-8", check=True, timeout=60).stdout
+    try:
+        return subprocess.run(["cargo", *arguments], cwd=ROOT,
+            env={**os.environ, "CARGO_NET_OFFLINE": "true"}, capture_output=True, text=True, encoding="utf-8", check=True, timeout=60).stdout
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or "").strip()
+        if arguments and arguments[0] == "metadata" and any(marker in detail for marker in (
+                "attempting to make an HTTP request", "no matching package named", "failed to download")):
+            raise ValueError("offline Cargo metadata is missing cached crates (including other platforms); "
+                             "run `cargo fetch --locked` once (network), then retry.\n" + detail) from error
+        raise ValueError("Cargo failed: " + (detail or str(error))) from error
 
 
 def vendored(root, texts):

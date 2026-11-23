@@ -21,6 +21,22 @@ def module():
 
 
 class Licenses(unittest.TestCase):
+    def test_offline_metadata_missing_crate_has_fetch_instruction(self):
+        m = module()
+        for detail in ["failed to download `anstyle-wincon`\n attempting to make an HTTP request, but --offline was specified",
+                       "no matching package named `fixture` found"]:
+            error = m.subprocess.CalledProcessError(101, ["cargo"], stderr=detail)
+            with mock.patch.object(m.subprocess, "run", side_effect=error):
+                with self.assertRaisesRegex(ValueError, r"run `cargo fetch --locked` once \(network\)"):
+                    m.cargo_output(["metadata", "--offline", "--locked"])
+
+    def test_other_cargo_errors_keep_detail_without_fetch_advice(self):
+        m = module()
+        error = m.subprocess.CalledProcessError(101, ["cargo"], stderr="invalid manifest")
+        with mock.patch.object(m.subprocess, "run", side_effect=error):
+            with self.assertRaisesRegex(ValueError, "Cargo failed: invalid manifest"):
+                m.cargo_output(["metadata", "--offline", "--locked"])
+
     def test_spdx_precedence_choices_and_explicit_exceptions(self):
         m = module()
         for expression in ["Apache-2.0", "MIT/Apache-2.0", "GPL-3.0-only OR MIT", "BSD-3-Clause AND ISC",

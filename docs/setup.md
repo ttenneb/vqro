@@ -30,6 +30,12 @@
 Nothing outside this repo moves with you. Reference clones, installed tools and the assistant's local memory all stay
 on the old machine, so everything needed is listed here.
 
+## Offline licence inventory
+
+The `licenses` step in `scripts/check.sh` uses `cargo metadata --offline --locked`, including crates
+for platforms other than the current host. If crates are missing from the cache, run
+`cargo fetch --locked` once (network), then retry. The licence check itself never fetches packages.
+
 ## Reference clones (read-only, into `~/Projects`, depth 1)
 
 | Name | URL | Commit read (2026-11-16) | Why |
