@@ -894,6 +894,275 @@
           }
         }
       ]
+    },
+    {
+      "expect": [
+        {
+          "settled": {
+            "Took": "main"
+          },
+          "shown": "main"
+        },
+        {
+          "ok": false,
+          "shown": "main"
+        }
+      ],
+      "name": "missing default falls back to main",
+      "snapshot": {
+        "entries": {
+          "layout/main": {
+            "value": {
+              "view": "v"
+            },
+            "version": 2
+          },
+          "view/v": {
+            "value": {
+              "items": [],
+              "kind": "panel"
+            },
+            "version": 1
+          }
+        },
+        "epoch": "e",
+        "resources": [],
+        "seq": 0
+      },
+      "steps": [
+        {
+          "do": "start"
+        },
+        {
+          "args": {},
+          "do": "client.layout"
+        }
+      ]
+    },
+    {
+      "expect": [
+        {
+          "settled": {
+            "Took": "main"
+          },
+          "shown": "main"
+        },
+        {
+          "ok": false,
+          "shown": "main"
+        }
+      ],
+      "name": "dangling default falls back to main",
+      "snapshot": {
+        "entries": {
+          "layout/main": {
+            "value": {
+              "view": "v"
+            },
+            "version": 2
+          },
+          "view/v": {
+            "value": {
+              "items": [],
+              "kind": "panel"
+            },
+            "version": 1
+          },
+          "workspace/active": {
+            "value": {
+              "layout": "gone"
+            },
+            "version": 3
+          }
+        },
+        "epoch": "e",
+        "resources": [],
+        "seq": 0
+      },
+      "steps": [
+        {
+          "do": "start"
+        },
+        {
+          "args": {},
+          "do": "client.layout"
+        }
+      ]
+    },
+    {
+      "expect": [
+        {
+          "settled": {
+            "Took": "other"
+          },
+          "shown": "other"
+        },
+        {
+          "ok": false,
+          "shown": "other"
+        }
+      ],
+      "name": "valid default precedes main",
+      "snapshot": {
+        "entries": {
+          "layout/main": {
+            "value": {
+              "view": "v"
+            },
+            "version": 2
+          },
+          "layout/other": {
+            "value": {
+              "view": "v"
+            },
+            "version": 2
+          },
+          "view/v": {
+            "value": {
+              "items": [],
+              "kind": "panel"
+            },
+            "version": 1
+          },
+          "workspace/active": {
+            "value": {
+              "layout": "other"
+            },
+            "version": 3
+          }
+        },
+        "epoch": "e",
+        "resources": [],
+        "seq": 0
+      },
+      "steps": [
+        {
+          "do": "start"
+        },
+        {
+          "args": {},
+          "do": "client.layout"
+        }
+      ]
+    },
+    {
+      "expect": [
+        {
+          "settled": "Same",
+          "shown": null
+        },
+        {
+          "error": "client.layout: no layout to show",
+          "shown": null
+        }
+      ],
+      "name": "dangling default without main shows nothing",
+      "snapshot": {
+        "entries": {
+          "view/v": {
+            "value": {
+              "items": [],
+              "kind": "panel"
+            },
+            "version": 1
+          },
+          "workspace/active": {
+            "value": {
+              "layout": "gone"
+            },
+            "version": 3
+          }
+        },
+        "epoch": "e",
+        "resources": [],
+        "seq": 0
+      },
+      "steps": [
+        {
+          "do": "start"
+        },
+        {
+          "args": {},
+          "do": "client.layout"
+        }
+      ]
+    },
+    {
+      "expect": [
+        {
+          "settled": {
+            "Took": "other"
+          },
+          "shown": "other"
+        },
+        {
+          "settled": {
+            "Closed": {
+              "now": "main",
+              "was": "other"
+            }
+          },
+          "shown": "main"
+        }
+      ],
+      "name": "deleted pinned layout falls back to main without a shared default",
+      "snapshot": {
+        "entries": {
+          "layout/main": {
+            "value": {
+              "view": "v"
+            },
+            "version": 2
+          },
+          "layout/other": {
+            "value": {
+              "view": "v"
+            },
+            "version": 2
+          },
+          "view/v": {
+            "value": {
+              "items": [],
+              "kind": "panel"
+            },
+            "version": 1
+          },
+          "workspace/active": {
+            "value": {
+              "layout": "other"
+            },
+            "version": 3
+          }
+        },
+        "epoch": "e",
+        "resources": [],
+        "seq": 0
+      },
+      "steps": [
+        {
+          "do": "start"
+        },
+        {
+          "do": "event",
+          "event": {
+            "data": {
+              "changes": [
+                {
+                  "key": "layout/other",
+                  "value": null
+                },
+                {
+                  "key": "workspace/active",
+                  "value": null
+                }
+              ]
+            },
+            "epoch": "e",
+            "seq": 1,
+            "type": "entries"
+          }
+        }
+      ]
     }
   ]
 }

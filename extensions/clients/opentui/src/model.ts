@@ -729,7 +729,8 @@ export function safeChooser(ws: Workspace, selected: Set<string>): Json {
 
 export function defaultLayout(ws: Workspace): string | null {
   const a = ws.entries.get("workspace/active");
-  return isObj(a) && isStr(a.layout) ? a.layout : null;
+  if (isObj(a) && isStr(a.layout) && ws.entries.has(`layout/${a.layout}`)) return a.layout;
+  return ws.entries.has("layout/main") ? "main" : null;
 }
 
 export type Settled = "Same" | { Took: string } | { Closed: { was: string; now: string | null } };

@@ -218,9 +218,13 @@ existing views; `workspace/active` must name an existing layout.
 
 **Several layouts; layout settings.** A workspace may hold any number of `layout/<name>` trees. Each
 client window shows one of them: its own choice, client state like zoom, not workspace state. A window
-starts on `workspace/active`, the shared default (the layout anyone last switched to), and then moves only
-when it switches itself: a command reply's `{"client": {"layout"}}`, `client.layout`, its own
-`vqro.layout.reset`, or its layout being deleted (it falls back to the default). Switching extensions also
+starts on an existing `workspace/active`, the shared default (the layout anyone last switched to), or
+existing `main` when that default is missing/dangling; without either it shows recovery with no layout.
+It then moves only when it switches itself: a command reply's `{"client": {"layout"}}`, `client.layout`,
+its own `vqro.layout.reset`, or its layout being deleted (it falls back to the existing default, then
+existing `main`). An existing pinned layout always wins over another window's changed default.
+`client.layout` without a name deliberately returns to that default/main fallback, not the pinned layout.
+This resolution never creates a layout or terminal. Switching extensions also
 write `workspace/active`, so new windows open there and older clients (which show the default) follow;
 another window's switch, or a script writing the default, never moves an open window. Every invocation a
 client sends carries `args.context.layout` (and `layout_version`) for the window it came from, also from the

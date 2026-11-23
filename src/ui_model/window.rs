@@ -2,7 +2,7 @@
 //! "Several layouts; layout settings"). A window starts on the shared default `workspace/active` (the layout
 //! anyone last switched to) and then moves only on its own switches: a command reply's `{"client": {"layout"}}`,
 //! `client.layout {name?}`, its own `vqro.layout.reset` (which shows `main` there), or its layout being deleted
-//! (it falls back to the default). Every invocation it sends names that layout in `args.context.layout`, and rows
+//! (it falls back to the existing default, then existing `main`). Every invocation it sends names that layout in `args.context.layout`, and rows
 //! with `current_when: {"layout"}` are marked current only in the window showing it.
 //! Conformance cases for other clients: `tests/fixtures/client/window.json`.
 
@@ -29,9 +29,11 @@ pub enum Settled {
 
 fn exists(ws: &Workspace, name: &str) -> bool { ws.entries.contains_key(&format!("layout/{name}")) }
 
-/// The shared default: the layout anyone last switched to.
+/// An existing shared default, else the existing neutral recovery layout. Never creates state.
 pub fn default_layout(ws: &Workspace) -> Option<String> {
-    ws.entries.get("workspace/active").and_then(|a| a["layout"].as_str()).map(String::from)
+    ws.entries.get("workspace/active").and_then(|a| a["layout"].as_str())
+        .filter(|name| exists(ws, name)).map(String::from)
+        .or_else(|| exists(ws, "main").then(|| "main".to_string()))
 }
 
 impl Window {
@@ -65,7 +67,7 @@ impl Window {
         Ok(changed)
     }
 
-    /// `client.layout {name?}`: show `name`, or without one the shared default.
+    /// `client.layout {name?}`: show `name`, or without one the existing shared default, else main.
     pub fn client_layout(&mut self, ws: &Workspace, args: &Value) -> Result<bool, String> {
         match args["name"].as_str().or_else(|| args["layout"].as_str()) {
             Some(name) => self.show(ws, name),

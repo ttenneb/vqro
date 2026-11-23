@@ -709,16 +709,18 @@ def safe_chooser(ws, selected):
 # ---- the window's layout ---------------------------------------------------------------------------------------
 
 def default_layout(ws):
-    """The shared default `workspace/active`: the layout anyone last switched to."""
+    """The existing shared default, else existing main. Never creates state."""
     active = ws.entries.get("workspace/active")
     name = active.get("layout") if isinstance(active, dict) else None
-    return name if isinstance(name, str) else None
+    if isinstance(name, str) and f"layout/{name}" in ws.entries:
+        return name
+    return "main" if "layout/main" in ws.entries else None
 
 
 class Window:
     """Which layout this window shows: window state, never workspace state. It starts on the shared default and
     then moves only on its own switches (a reply's `{"client": {"layout"}}`, `client.layout`, its own reset) or
-    when its layout is deleted (then it falls back to the default)."""
+    when its layout is deleted (then it falls back to the existing default, else existing main)."""
 
     def __init__(self, pinned=None):
         self.pinned = pinned
