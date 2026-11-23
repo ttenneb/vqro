@@ -10,7 +10,7 @@ ROOT=pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'extensions'))
 from vqro_ext import VqroError
 from codex_cutover import Cutover, SETTINGS, HOST_COMMANDS
-from accounts_policy import episode
+from accounts_policy import episode, DEFAULTS, POLICY
 
 
 def row(ident, host, native_host, state='idle'):
@@ -34,6 +34,7 @@ class Ext:
             'login_ref':{'sessionId':'saved-b','accountId':'workspace-b'}}]}
         self.consent={'setups':{'shared':{'automatic_login_switch':True}}};self.claim=None;self.fail=None;self.counter=0
         self.owner={'value':'human-owner','version':5}
+        self.policy=dict(DEFAULTS,blocked='auto_restart')
         self.registry_revision=3;self.hook=None;self.skip_publication=False;self.reject=None
         self.all_active=False;self.missing_on=None
     def command(self,*_):return lambda fn:fn
@@ -42,6 +43,7 @@ class Ext:
         if method=='resource.list':return {'resources':copy.deepcopy(self.rows)}
         if method=='workspace.get':
             if args['key']=='doc/principals/owner':return copy.deepcopy(self.owner)
+            if args['key']==POLICY:return {'version':4,'value':copy.deepcopy(self.policy)}
             return {'version':3 if args['key']==SETTINGS else self.registry_revision,'value':copy.deepcopy(self.consent if args['key']==SETTINGS else self.registry)}
         if method=='command.invoke':
             assert args['name']=='accounts.claim.read'
@@ -179,6 +181,18 @@ class Tests(unittest.TestCase):
         missing['data']['agent'].update(account={'id':'b-alias'},usage_limits=None)
         ext.rows.append(missing)
         with self.assertRaises(VqroError):Cutover(ext).prepare(self.args())
+    def test_notify_policy_revocation_prevents_any_native_restart(self):
+        ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p);ext.policy['blocked']='notify'
+        with self.assertRaises(VqroError):c.cutover(args)
+        self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
+    def test_policy_revocation_during_readonly_native_discovery_aborts_before_switch(self):
+        ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p)
+        def revoke(op,_):
+            if op=='_account.list':ext.policy['blocked']='notify'
+        ext.hook=revoke
+        with self.assertRaises(VqroError):c.cutover(args)
+        names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
+        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.abort']*2)
     def test_source_native_thread_witness_required(self):
         ext=Ext();ext.rows[0]['data']['agent']['availability']['native']['threadId']='foreign'
         with self.assertRaises(VqroError):Cutover(ext).prepare(self.args())

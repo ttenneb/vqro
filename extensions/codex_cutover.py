@@ -180,6 +180,15 @@ class Cutover:
             owner = self.ext.vqro.call('workspace.get',{'key':'doc/principals/owner'})
             if not isinstance(owner,dict) or owner.get('value')!=authority['principal'] or owner.get('version')!=authority['owner_revision']:
                 fail('OFFER human authority changed after the claim','stale')
+        from accounts_policy import settings
+        configured = settings(self.ext)
+        mode = configured['blocked']
+        if claim.get('automatic') is True:
+            maximum = configured.get('auto_cutover_max_per_hour',3)
+            if mode!='auto_restart' or type(maximum) is not int or maximum<1:
+                fail('AUTO policy was revoked or disabled; offer instead, no native switch','offer_required')
+        elif mode not in ('offer_restart','auto_restart'):
+            fail('NOTIFY policy never authorizes a native restart','forbidden')
 
     def _validate_claim(self, args, prepared, claim):
         from accounts_policy import episode, configured_id
