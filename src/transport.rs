@@ -277,26 +277,39 @@ mod windows {
     }
 }
 
+/// Private test cores use the native local transport, never a filesystem path on Windows.
+#[cfg(test)]
+pub(crate) fn test_endpoint(dir: &Path) -> std::path::PathBuf {
+    #[cfg(unix)]
+    { dir.join("core.sock") }
+    #[cfg(windows)]
+    { let _ = dir; windows_test_endpoint() }
+}
+
+#[cfg(test)]
+fn windows_test_endpoint() -> std::path::PathBuf {
+    format!(r"\\.\pipe\vqro-transport-test-{}-{}", std::process::id(), getrandom::u64().unwrap()).into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use super::test_endpoint as endpoint;
 
-    fn endpoint(dir: &Path) -> std::path::PathBuf {
-        #[cfg(unix)]
-        {
-            dir.join("core.sock")
-        }
+    #[test]
+    fn test_endpoints_are_private_native_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = windows_test_endpoint();
+        let second = windows_test_endpoint();
+        assert_ne!(first, second);
+        validate_windows_endpoint(&first).unwrap();
+        validate_windows_endpoint(&second).unwrap();
+        assert!(validate_windows_endpoint(&dir.path().join("s")).is_err(), "a filesystem fixture is not a Windows endpoint");
         #[cfg(windows)]
-        {
-            let _ = dir;
-            format!(
-                r"\\.\pipe\vqro-transport-test-{}-{}",
-                std::process::id(),
-                getrandom::u64().unwrap()
-            )
-            .into()
-        }
+        validate_windows_endpoint(&endpoint(dir.path())).unwrap();
+        #[cfg(unix)]
+        assert_eq!(endpoint(dir.path()), dir.path().join("core.sock"));
     }
 
     #[tokio::test]

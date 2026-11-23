@@ -109,7 +109,7 @@ mod tests {
             || Ok(("python3".into(), Vec::new()))).unwrap();
         assert_eq!(cmd.get_program(), "python3");
         let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert_eq!(args, vec![root.path().join("clients/text.py").to_string_lossy().into_owned(), "--once".into()]);
+        assert_eq!(args, vec![root.path().join("clients").join("text.py").to_string_lossy().into_owned(), "--once".into()]);
         assert!(cmd.get_envs().any(|(k, v)| k == "VQRO_SOCKET" && v == Some(std::ffi::OsStr::new("/run/p.sock"))));
     }
 }

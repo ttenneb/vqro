@@ -4733,7 +4733,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_unset_hello_reaches_the_real_snapshot_and_renderer() {
-        let root=tempfile::Builder::new().prefix("own-ui").tempdir().unwrap();let socket=root.path().join("s");
+        let root=tempfile::Builder::new().prefix("own-ui").tempdir().unwrap();let socket=crate::transport::test_endpoint(root.path());
         let core=crate::server::start(socket.clone(),root.path().join("st"),false,crate::server::Backend::Fake,None).unwrap();
         let(owner,_,_)=client::connect_as(&socket,"owner","owner").await.unwrap();
         owner.call("workspace.apply",json!({"ops":[{"op":"delete","key":crate::principal::OWNER_KEY}]})).await.unwrap();
@@ -5461,9 +5461,10 @@ mod tests {
     #[tokio::test]
     async fn reconnect_draw_reattaches_terminal_and_repaints_backend_output() {
         use crate::server::{start, Backend};
-        let dir = tempfile::Builder::new().prefix("pr").tempdir_in("/tmp").unwrap();
-        let socket = dir.path().join("s");
-        let _core = start(socket.clone(), dir.path().join("state"), false, Backend::Fake, None).unwrap();
+        let dir = tempfile::Builder::new().prefix("pr").tempdir().unwrap();
+        assert_eq!(dir.path().parent(), Some(std::env::temp_dir().as_path()), "fixture must respect the platform temp directory");
+        let socket = crate::transport::test_endpoint(dir.path());
+        let core = start(socket.clone(), dir.path().join("state"), false, Backend::Fake, None).unwrap();
         let (peer, mut incoming, _) = client::connect(&socket, "test").await.unwrap();
         peer.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap();
         peer.call("command.invoke", json!({"name": "vqro.layout.reset"})).await.unwrap();
@@ -5512,6 +5513,7 @@ mod tests {
                 if term.stream.is_some_and(|new| new != sid) && term.emu.contents().contains("fake f1") { break; }
             }
         }).await.unwrap();
+        crate::server::shutdown(&core).await;
     }
 
     #[tokio::test]

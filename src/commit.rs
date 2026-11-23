@@ -321,7 +321,8 @@ mod tests {
     }
     #[tokio::test]
     async fn shutdown_deadline_rejects_queued_work_but_never_claims_active_write_failed() {
-        let root=Arc::new(tempfile::Builder::new().prefix("pcq").tempdir_in("/tmp").unwrap());
+        let root=Arc::new(tempfile::Builder::new().prefix("pcq").tempdir().unwrap());
+        assert_eq!(root.path().parent(), Some(std::env::temp_dir().as_path()), "fixture must respect the platform temp directory");
         let store=crate::store::Store::open_locked(root.path().join("workspace.json")).unwrap();
         let core=Arc::new(Mutex::new(Core::new(store,None,root.path().join("s"),false).unwrap()));
         let gate=Arc::new((Mutex::new(false),std::sync::Condvar::new()));

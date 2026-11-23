@@ -415,11 +415,12 @@ mod qa2_tests {
 
     #[tokio::test]
     async fn cooperative_provider_gets_time_for_its_one_second_cleanup() {
-        let root=tempfile::Builder::new().prefix("pxq").tempdir_in("/tmp").unwrap();
+        let root=tempfile::Builder::new().prefix("pxq").tempdir().unwrap();
+        assert_eq!(root.path().parent(), Some(std::env::temp_dir().as_path()), "fixture must respect the platform temp directory");
         let ready=root.path().join("ready"); let done=root.path().join("done");
         let script="import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('ready'); sys.stdin.buffer.read(); time.sleep(0.8); pathlib.Path(sys.argv[2]).write_text('done')";
         let mut store=crate::store::Store::in_memory();
-        store.apply("test",None,vec![crate::store::Op::Set { key:"extension/cleanup".into(),value:json!({"argv":["/usr/bin/python3","-c",script,ready,done]}),expect:None }]).unwrap();
+        store.apply("test",None,vec![crate::store::Op::Set { key:"extension/cleanup".into(),value:json!({"argv":["python3","-c",script,ready,done]}),expect:None }]).unwrap();
         let core=std::sync::Arc::new(std::sync::Mutex::new(crate::core::Core::new(store,None,root.path().join("s"),false).unwrap()));
         reconcile(&core);
         let started=tokio::time::timeout(Duration::from_secs(2),async { while !ready.exists() { tokio::time::sleep(Duration::from_millis(5)).await; } }).await;

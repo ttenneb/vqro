@@ -1094,7 +1094,7 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach, attribution:Attribut
 #[tokio::test]
 async fn actual_system_authors_are_never_default_undo_targets() {
     let root=tempfile::Builder::new().prefix("sys-u").tempdir().unwrap();
-    let shared=start(root.path().join("s"),root.path().join("st"),false,Backend::Fake,None).unwrap();
+    let shared=start(crate::transport::test_endpoint(root.path()),root.path().join("st"),false,Backend::Fake,None).unwrap();
     {
         let mut core=shared.lock().unwrap();let context=Attribution::for_actor("system",&mut json!({})).unwrap();
         core.store.apply_context("system:fixture",None,context.clone(),None,vec![Op::Set{key:"doc/system".into(),value:json!(1),expect:None}]).unwrap();
