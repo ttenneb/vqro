@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location('timing_contention', ROOT/'scripts/timing_contention.py')
@@ -30,6 +31,18 @@ class TimingFacts(unittest.TestCase):
                 self.assertEqual(sampler.grade(78, facts, strict)[0], 1 if strict else 77)
                 self.assertEqual(sampler.grade(77, facts, strict)[0], 77)
         self.assertEqual(sampler.grade(78, dict(status='available', contended=False), False)[0], 1)
+
+    def test_normal_final_process_exit_is_not_sampler_unavailability(self):
+        with patch.object(sampler, 'identity', side_effect=[('birth', 'R'), ('birth', 'R'), FileNotFoundError]), \
+                patch.object(sampler, 'tree_schedstat', return_value={(42, 42, 'birth'): (100, 20)}), \
+                patch.object(sampler, 'slot_sample', return_value=[]), \
+                patch.object(sampler.Path, 'read_text', return_value='procs_running 1\n'), \
+                patch.object(sampler.os, 'cpu_count', return_value=8), patch.object(sampler.time, 'sleep'):
+            facts = sampler.sample(42)
+        self.assertEqual(facts['status'], 'available', facts)
+        self.assertFalse(facts['contended'], facts)
+        self.assertEqual(facts['runtime_ns'], 100)
+        self.assertEqual(facts['sample_count'], 2)
 
     def test_tree_accounts_for_worker_threads_and_their_children(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -120,6 +120,8 @@ def sample(pid, interval=1.0):
                     for key, value in tree_schedstat(pid).items():
                         previous = totals.get(key, (0, 0))
                         totals[key] = tuple(max(a, b) for a, b in zip(previous, value))
+            except (FileNotFoundError, ProcessLookupError):
+                pass  # Normal final PID disappearance is completion, not missing facts.
             except (OSError, ValueError, IndexError):
                 unavailable.add("process-tree schedstat unavailable")
         samples.append(row)
