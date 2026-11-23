@@ -6,8 +6,8 @@ for each of these steps, not a machine-wide load average from before/after the r
 
 | Step | Timing breach distinguishable from correctness |
 | --- | --- |
-| `e2e-tui-scale-budgets` | Only a finite `key_p99_ms` breach, with valid workload, samples, extension state and cleanup. CPU, RSS and frame caps stay hard failures. |
-| `scale-harness` | Finite spawn, transaction, echo, event-lag, snapshot and slow-reader latency breaches. Missing/incomplete samples, RPC errors, lost echo, missed events, inadequate delivered share, restart failures, capacity bounds and leftovers stay hard failures. |
+| `e2e-tui-scale-budgets` | Only a finite `key_p99_ms` breach, with valid workload, samples, extension state, successful shutdown request and observed zero core exit. A shutdown error, forced kill or nonzero exit is hard failure. CPU, RSS and frame caps stay hard failures. |
+| `scale-harness` | Finite spawn, transaction, echo, event-lag, snapshot and slow-reader latency breaches. Missing/incomplete samples (including required load-window and end RSS), RPC errors, lost echo, missed events, inadequate delivered share, restart failures, capacity bounds and leftovers stay hard failures. |
 | `pi-bridge-memory` | Sampled, but all its allocation, journal/identity cardinality and owned-child checks stay hard failures. They are capacity/correctness claims, not scheduler latency claims. |
 
 `latency_typing.py` is an opt-in telemetry harness, not registered in `check.sh`,
@@ -27,6 +27,12 @@ existing grading and registration. No budget, retry policy or production timer c
   mapping that class to 78. Direct cargo runs remain strict.
 - `77`: SKIP, never a passed step. Existing optional-dependency skips stay unchanged.
 - Every other nonzero: FAIL, never downgraded for contention.
+
+The TUI validates required finite metrics and explicit correctness/cleanup evidence
+before either 0 or 78, deriving breaches from measured values rather than trusting
+`result` or `budgets_exceeded` labels. A pass-only dict and NaN metrics are invalid.
+Scale requires nonempty, finite load-window RSS, no missing RSS attempts, and finite
+start/setup/end RSS; a genuinely not-applicable slow-reader phase remains allowed.
 
 In full mode, 78 plus observed contention is SKIP, reason `unverified (contended)`.
 With no contention it is FAIL. `check.sh timing`, or any gate admitted with
@@ -51,7 +57,11 @@ these facts; unsupported platforms report unavailable rather than guessing quiet
 The wrapper exports `VQRO_GATE_SLOT_DIR`, `VQRO_GATE_SLOT_HELD` (comma-separated
 filenames) and `VQRO_GATE_EXCLUSIVE`; the repository never guesses a slot directory.
 The common first `env -i` and the gate's service supervisor preserve only these
-admission facts, not arbitrary caller variables or credentials. Direct gate calls
+admission facts, not arbitrary caller variables or credentials. The candidate wrapper
+strips conflicting caller assignments for all three facts in the common env/plain
+or env-i prefix, then supplies its actual authoritative values. Sampler, grader,
+scale-receipt parser and final receipt writer also run under an explicit env-i,
+isolated Python boundary, including on direct/unscoped gates. Direct gate calls
 without wrapper metadata correctly report slot facts unavailable.
 
 The external slot wrapper's `--exclusive` acquires all configured full **and** quick

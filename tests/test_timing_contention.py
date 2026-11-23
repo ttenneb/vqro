@@ -109,6 +109,20 @@ assert not any('slot-' in os.readlink(fd) for fd in pathlib.Path('/proc/self/fd'
                                'python3', '-c', program)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_caller_environment_cannot_override_actual_admission_facts(self):
+        for options in (['-i'], ['--ignore-environment'], []):
+            with self.subTest(options=options):
+                program = '''import os
+assert os.environ['VQRO_GATE_SLOT_DIR'] == os.environ['EXPECTED_DIR'], os.environ
+assert os.environ['VQRO_GATE_SLOT_HELD'] == 'slot-1.lock,quick-slot-1.lock', os.environ
+assert os.environ['VQRO_GATE_EXCLUSIVE'] == '1', os.environ
+'''
+                result = self.run_slot('--exclusive', '--wait-seconds', '0', 'env', *options,
+                    'ODD-NAME=harmless', 'PATH=/usr/bin:/bin', f'EXPECTED_DIR={self.root}',
+                    'VQRO_GATE_SLOT_DIR=/stale-directory', 'VQRO_GATE_SLOT_HELD=stale.lock',
+                    'VQRO_GATE_EXCLUSIVE=0', 'python3', '-c', program)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_normal_quick_call_and_command_failure_keep_their_status(self):
         result = self.run_slot('env', '-i', 'PATH=/usr/bin:/bin', '/bin/bash', '-c',
                                'test "$VQRO_GATE_SLOT_HELD" = quick-slot-1.lock || exit 1; exit 9', 'quick')
