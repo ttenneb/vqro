@@ -193,6 +193,8 @@ If any extra console appears, stop the scratch core immediately and report failu
   the endpoint and directories explicitly with `--socket`, `--state-dir` and `--extensions-dir`.
 - Optional OpenTUI client: not checked on Windows.
 - `scripts/check.sh` and the e2e harnesses are Linux-only (namespaces, cgroups, procfs).
-- `tests/windows_background_smoke.py` refuses to run for now (exit 77): it is not isolated from your real profile
-  and credentials yet. Check for console windows by hand: after `vqro tui` and a minute idle, no console windows
-  other than your own terminal should be open, and none should appear later.
+- The revised `tests/windows_background_smoke.py` requires `python -I -B` (bare Python refuses with exit 77).
+  It starts a private controller/profile/environment/cwd and retains evidence on failure; its revised isolation and
+  cleanup still require native verification and owner disposition before use. It is not a full Windows gate.
+  Also check desktop windows by hand: after `vqro tui` and a minute idle, no console windows other than your own
+  terminal should be open, and none should appear later.

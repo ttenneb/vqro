@@ -383,7 +383,7 @@ From native Windows with Rust/MSVC, pinned Zig and CPython 3.11+ available:
 cargo build --bins
 cargo test --lib program::tests
 python -m unittest discover -s tests -p test_vqro_process.py
-python tests/windows_background_smoke.py --vqro target/debug/vqro.exe
+python -I -B tests/windows_background_smoke.py --vqro target/debug/vqro.exe
 ```
 
 The native smoke declares only two private fixture services and does not start a real backend,

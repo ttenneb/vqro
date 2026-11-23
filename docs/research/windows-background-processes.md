@@ -56,5 +56,17 @@ No workspace-terminal argv or backend spawn contract, restart budget, replay or 
   reintroducing fixture TerminateProcess fails them. Positive restart/stdio assertions stay intact. Run it natively
   after building the consolidated candidate, not as a Linux/Wine desktop certificate.
 
+The smoke now requires an initial `python -I -B` invocation, then starts its actual controller with explicit
+private HOME/USERPROFILE/AppData/temp/XDG/state/endpoint/cwd and a minimal tool/OS environment. It does not inherit
+caller auth, profile, Python startup, HC or Herdr variables. Every Python fixture uses -I/-B; fixture/native-helper
+code restores the saved private environment before ctypes/console use, including after the connector's deliberate
+VQRO variable clearing. Private supervisor-generated credentials are not caller credentials. No profiles are copied.
+This is isolation for these trusted fixtures, not a sandbox for arbitrary interpreter/tool code.
+
+Shutdown, both client-close handles, owned-core wait/kill/reap, report inventory and captured fixture handles each
+get independent cleanup attempts. Errors aggregate into FAIL; no earlier cleanup exception bypasses later resources.
+Evidence is never automatically deleted, and a passing result is emitted only after all cleanup stages succeed.
+Native controller/fixture output remains in its private evidence root. No late PID termination was reintroduced.
+
 The final candidate and extra runtime boundaries still need native Windows reruns and actual desktop/descendant
 inspection. Human predecessor results are valuable evidence, not a passing full Windows gate or an install approval.
