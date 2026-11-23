@@ -88,7 +88,11 @@ try {
     # decoding fails. Retain both raw streams and execute the command only once.
     $flood = Join-Path $root 'invalid-flood.py'
     $once = Join-Path $root 'flood-attempts'
-    [IO.File]::WriteAllText($flood, "import os,pathlib,sys`npathlib.Path(sys.argv[1]).open('a').write('attempt\\n')`nsys.stdout.buffer.write(b'\\xff' + b'x' * (2 * 1024 * 1024))`nsys.stdout.buffer.flush()`nsys.stderr.buffer.write(b'y' * (2 * 1024 * 1024))`nsys.stderr.buffer.flush()`n")
+    [IO.File]::WriteAllText($flood, "import os,pathlib,sys`npathlib.Path(sys.argv[1]).open('a').write('attempt\n')`nsys.stdout.buffer.write(bytes([255]) + b'x' * (2 * 1024 * 1024))`nsys.stdout.buffer.flush()`nsys.stderr.buffer.write(b'y' * (2 * 1024 * 1024))`nsys.stderr.buffer.flush()`n")
+    $floodSource = [IO.File]::ReadAllText($flood)
+    Assert ($floodSource.Contains('bytes([255])')) 'Generated control must emit one invalid byte, not an escaped ASCII spelling'
+    Assert ($floodSource.Contains(".write('attempt\n')")) 'Generated attempt counter must contain a Python newline escape'
+    Assert (-not $floodSource.Contains(".write('attempt\\n')")) 'Generated attempt counter must not double-escape the newline'
     $row = Invoke-GateStep 'invalid-flood' $python.Program ($python.Arguments + @('-I', '-X', 'utf8', $flood, $once)) $logs $child $root -TimeoutSeconds 30
     Assert ($row.result -eq 'FAIL' -and $row.exit_code -eq 0 -and $row.evidence_error) 'Invalid UTF-8 must fail after the child exits, never stall its raw drains'
     Assert ((Get-Item -LiteralPath $row.stdout_bytes).Length -eq (2 * 1024 * 1024 + 1)) 'Entire invalid stdout flood must be retained'
