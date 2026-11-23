@@ -19,8 +19,8 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-VQRO = sys.argv[sys.argv.index("--vqro") + 1] if "--vqro" in sys.argv else str(ROOT / "target/debug/vqro")
-SCRATCH = Path.home() / ".local/share/herdr/scratch"
+VQRO = sys.argv[sys.argv.index("--vqro") + 1] if "--vqro" in sys.argv else str(Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target") / "debug/vqro")
+SCRATCH = ROOT / ".run"
 SCRATCH.mkdir(parents=True, exist_ok=True)
 
 PROVIDER = r'''

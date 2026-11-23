@@ -271,9 +271,9 @@ def run(args, root):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('vqro', type=Path)
+    parser.add_argument('vqro', type=Path, nargs='?', default=Path(os.environ.get('CARGO_TARGET_DIR') or REPO / 'target') / 'debug/vqro')
     parser.add_argument('--seconds', type=int, default=5, help='seconds per phase at 20 resource updates/second')
-    parser.add_argument('--scratch-parent', type=Path, default=Path.home()/'.local/share/herdr/scratch/vqro-sidebar-scale')
+    parser.add_argument('--scratch-parent', type=Path, default=REPO / '.run')
     parser.add_argument('--baseline-sidebar', type=Path)
     parser.add_argument('--receipt', type=Path)
     args = parser.parse_args()

@@ -318,8 +318,8 @@ async fn scale_load() {
     let prof = Profile::from_env();
     eprintln!("scale profile: {prof:?}");
     // One run directory for socket and state, on a real disk so durable writes cost what they do:
-    // $VQRO_SCALE_RUN_DIR, default <private-notes> Removed after the run.
-    let base = std::env::var("VQRO_SCALE_RUN_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap()).join(".local/share/herdr/scratch/vqro-scale"));
+    // $VQRO_SCALE_RUN_DIR, default repository .run. Removed after the run.
+    let base = std::env::var("VQRO_SCALE_RUN_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".run"));
     std::fs::create_dir_all(&base).unwrap();
     let run_dir = tempfile::Builder::new().prefix("run").tempdir_in(&base).unwrap();
     let socket = run_dir.path().join("s.sock");

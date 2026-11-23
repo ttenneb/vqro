@@ -2,17 +2,18 @@
 """Public-RPC regressions for coordination review: managed extension, real core,
 fake provider, no native runtime/model or live endpoint. Derived from the
 independent review driver. Usage: --binary PATH [--extensions PATH] [case ...].
-An explicit core binary with C1/C2 support is required; roots are private.
+The core binary defaults to the repository debug build; roots are private.
 """
 import argparse, json, os, socket, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 
+REPO = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--binary', type=Path, required=True, help='explicit disposable-test core binary')
+parser.add_argument('--binary', type=Path, default=Path(os.environ.get('CARGO_TARGET_DIR') or REPO / 'target') / 'debug/vqro', help='disposable-test core binary')
 parser.add_argument('--extensions', type=Path, default=Path(__file__).resolve().parents[1] / 'extensions')
 parser.add_argument('cases', nargs='*')
 ARGS = parser.parse_args()
-W = Path.home() / '.local/share/herdr/scratch/vqro-coordination-review'
+W = REPO / '.run'
 W.mkdir(parents=True, exist_ok=True)
 BIN = ARGS.binary.resolve()
 EXT = ARGS.extensions.resolve()

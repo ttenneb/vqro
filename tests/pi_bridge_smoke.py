@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,7 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
 from pi_bridge import PiRpcClient
 
 NODE = "/usr/bin/node"
-PACKAGE = Path("/home/bennettgarcia/.local/share/pi1/node_modules/@earendil-works/pi-coding-agent")
+REPO = Path(__file__).resolve().parents[1]
+# Resolve the installed CLI, or opt into a different package explicitly; never pin a user's home.
+PACKAGE = Path(os.environ.get("PI_TEST_PACKAGE") or Path(shutil.which("pi") or "pi").resolve().parents[2])
 CLI = PACKAGE / "dist/bundle/cli.js"
 
 
@@ -68,7 +71,7 @@ async def smoke(root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", action="store_true", help="explicitly opt in; no provider calls")
-    parser.add_argument("--scratch-parent", type=Path, default=Path.home() / ".local/share/herdr/scratch")
+    parser.add_argument("--scratch-parent", type=Path, default=REPO / ".run")
     parser.add_argument("--isolated-root", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--parent-net", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -83,7 +86,8 @@ def main():
     root = Path(tempfile.mkdtemp(prefix="pi-bridge-", dir=args.scratch_parent))
     (root / ".private-pi-smoke").touch()
     (root / "home").mkdir()
-    clean = {"HOME": str(root / "home"), "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+    clean = {"HOME": str(root / "home"), "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+             "PI_TEST_PACKAGE": str(PACKAGE.resolve())}
     command = ["/usr/bin/unshare", "-Urn", sys.executable, str(Path(__file__).resolve()),
                "--isolated-root", str(root), "--parent-net", os.readlink("/proc/self/ns/net")]
     # Explicit allowlist is env -i equivalent; no credentials/Herdr identity pass.

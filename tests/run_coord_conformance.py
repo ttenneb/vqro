@@ -28,11 +28,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--implementation", type=Path, required=True)
-    parser.add_argument("--vqro", type=Path, required=True)
+    repo = Path(__file__).resolve().parents[1]
+    parser.add_argument("--vqro", type=Path, default=Path(os.environ.get("CARGO_TARGET_DIR") or repo / "target") / "debug/vqro")
     parser.add_argument("--cases")
     parser.add_argument("--selection-timeout", type=positive_seconds, default=900,
                         help="whole-selection controller seconds (default900); never changes per-case deadlines")
-    parser.add_argument("--scratch-parent", type=Path, default=Path.home()/".local/share/herdr/scratch/prim-pi1-check/pb")
+    parser.add_argument("--scratch-parent", type=Path, default=repo / ".run")
     parser.add_argument("--isolated-root", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--parent-net", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)

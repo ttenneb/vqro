@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import tempfile
 
 from agent_conformance.results import BY_ID
@@ -36,9 +37,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--implementation", type=Path, required=True)
-    parser.add_argument("--vqro", type=Path, required=True)
-    parser.add_argument("--hc", type=Path, required=True)
-    parser.add_argument("--scratch-parent", type=Path, default=Path.home() / ".local/share/herdr/scratch/prim-bridge-review/k1")
+    repo = Path(__file__).resolve().parents[1]
+    parser.add_argument("--vqro", type=Path, default=Path(os.environ.get("CARGO_TARGET_DIR") or repo / "target") / "debug/vqro")
+    parser.add_argument("--hc", type=Path, default=Path(shutil.which("herdr-core") or "herdr-core").resolve())
+    parser.add_argument("--scratch-parent", type=Path, default=repo / ".run")
     parser.add_argument("--isolated-root", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--parent-net", help=argparse.SUPPRESS)
     args = parser.parse_args()

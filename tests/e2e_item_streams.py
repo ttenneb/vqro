@@ -13,9 +13,10 @@ OUT = Path(sys.argv[1]); OUT.mkdir(parents=True, exist_ok=True)
 def arg(n, d): return sys.argv[sys.argv.index(n) + 1] if n in sys.argv else d
 AGENTS, RATE, TEXT = int(arg("--agents", "200")), arg("--rate", "2"), arg("--text", "160")
 SCALE = float(arg("--timescale", "1"))  # shrink the timeline for smoke runs
-BIN = Path(os.environ.get("CARGO_TARGET_DIR", str(Path(__file__).resolve().parents[2] / "target"))) / "release"
+REPO = Path(__file__).resolve().parents[1]
+BIN = Path(os.environ.get("CARGO_TARGET_DIR") or REPO / "target") / "debug"
 CPUS = arg("--cpus", "")  # pin with taskset only when asked (measurements: 8-15); the gate inherits its own set
-SCRATCH = Path.home() / ".local/share/herdr/scratch"
+SCRATCH = REPO / ".run"
 SCRATCH.mkdir(parents=True, exist_ok=True)
 R = Path(tempfile.mkdtemp(prefix="p3", dir=SCRATCH))  # socket path stays short (< 103 bytes)
 STOP_FILE = R / "stop"

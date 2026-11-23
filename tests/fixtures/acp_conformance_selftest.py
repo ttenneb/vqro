@@ -28,12 +28,15 @@ class VendorTests(unittest.TestCase):
 
 class NativeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        base = Path.home() / ".local/share/herdr/scratch"
+        base = HERE.parents[1] / ".run"
         base.mkdir(parents=True, exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(prefix="af-", dir=base)
         self.root = Path(self.temp.name)
         (self.root / "home").mkdir()
-        self.control_path = self.root / "c"
+        # Keep only the control socket short, independently of the checkout path.
+        self.socket_temp = tempfile.TemporaryDirectory(prefix="af-sock-", dir="/tmp")
+        self.addCleanup(self.socket_temp.cleanup)
+        self.control_path = Path(self.socket_temp.name) / "c"
         self.ledger = self.root / "l"
         self.proc = await asyncio.create_subprocess_exec(
             "/usr/bin/python3", str(HERE / "acp_conformance.py"), "--control", str(self.control_path), "--ledger", str(self.ledger),

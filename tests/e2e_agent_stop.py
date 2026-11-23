@@ -168,9 +168,9 @@ class StopE2E(base.E2E):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', action='store_true')
-    parser.add_argument('--vqro', type=Path, required=True)
-    parser.add_argument('--hc', type=Path, required=True)
-    parser.add_argument('--scratch-parent', type=Path, default=Path.home()/'.local/share/herdr/scratch')
+    parser.add_argument('--vqro', type=Path, default=Path(os.environ.get('CARGO_TARGET_DIR') or REPO / 'target') / 'debug/vqro')
+    parser.add_argument('--hc', type=Path, default=Path(shutil.which('herdr-core') or 'herdr-core').resolve())
+    parser.add_argument('--scratch-parent', type=Path, default=REPO / '.run')
     parser.add_argument('--isolated-root', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--parent-net', help=argparse.SUPPRESS)
     args = parser.parse_args()

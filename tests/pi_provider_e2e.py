@@ -20,7 +20,7 @@ import time
 import traceback
 
 REPO = Path(__file__).resolve().parents[1]
-PACKAGE = Path('/home/bennettgarcia/.local/share/pi1/node_modules/@earendil-works/pi-coding-agent')
+PACKAGE = Path(os.environ.get('PI_TEST_PACKAGE') or Path(shutil.which('pi') or 'pi').resolve().parents[2])
 
 
 def identity(pid):
@@ -847,8 +847,8 @@ class E2E:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', action='store_true')
-    parser.add_argument('--vqro', type=Path, required=True)
-    parser.add_argument('--hc', type=Path, required=True)
+    parser.add_argument('--vqro', type=Path, default=Path(os.environ.get('CARGO_TARGET_DIR') or REPO / 'target') / 'debug/vqro')
+    parser.add_argument('--hc', type=Path, default=Path(shutil.which('herdr-core') or 'herdr-core').resolve())
     parser.add_argument('--real-pi-metadata', action='store_true')
     parser.add_argument('--rust-bridge', action='store_true', help='test the actual default Rust launcher/v0 profile, not the explicit legacy Python profile')
     parser.add_argument('--agents-extension', action='store_true', help='drive agents extension commands with fake Pi')
@@ -856,7 +856,7 @@ def main():
     parser.add_argument('--probe-terminal-invoke', action='store_true', help='assert declared stream-only input rejects an unsupported effect')
     parser.add_argument('--large-workspace', action='store_true', help='exercise startup and resume with a workspace snapshot above the provider record cap')
     parser.add_argument('--bridge-program', type=Path, help='private staged bridge implementation for deterministic old/new regression checks (agents extension only)')
-    parser.add_argument('--scratch-parent', type=Path, default=Path.home()/'.local/share/herdr/scratch')
+    parser.add_argument('--scratch-parent', type=Path, default=REPO / '.run')
     parser.add_argument('--isolated-root', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--parent-net', help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -888,7 +888,8 @@ def main():
         if args.bridge_program:
             assert args.agents_extension and args.bridge_program.is_absolute()
             command.extend(['--bridge-program', str(args.bridge_program)])
-        result = subprocess.run(command, cwd=root, env={'HOME': str(root/'home'), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'})
+        result = subprocess.run(command, cwd=root, env={'HOME': str(root/'home'), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8',
+                                                           'PI_TEST_PACKAGE': str(PACKAGE.resolve())})
         print(json.dumps({'code': result.returncode, 'receipt': str(root/'receipt.json')}), flush=True)
         raise SystemExit(result.returncode)
     assert (args.isolated_root/'.private-e2e').is_file()

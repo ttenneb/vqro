@@ -111,7 +111,7 @@ cover opaque bodies, synchronous extra blocks, native automatic pause, and manua
 ## Reproduce
 
 ```sh
-W=/home/bennettgarcia/Projects/.worktrees/prim/tmux-client
+W=<worktree>
 T=<private-notes>
 env -i HOME=$HOME PATH=$PATH CARGO_TARGET_DIR=$T cargo test --manifest-path "$W/Cargo.toml"
 env -i HOME=$HOME PATH=$PATH CARGO_TARGET_DIR=$T cargo test --manifest-path "$W/Cargo.toml" --test tmux -- --ignored

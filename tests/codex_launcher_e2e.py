@@ -136,8 +136,11 @@ class CodexLaunch(E2E):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', action='store_true', required=True)
-    for key in ('vqro', 'bridge', 'hc'): parser.add_argument('--' + key, type=Path, required=True)
-    parser.add_argument('--scratch-parent', type=Path, default=Path.home() / '.local/share/herdr/scratch')
+    target = Path(os.environ.get('CARGO_TARGET_DIR') or REPO / 'target') / 'debug'
+    for key, default in (('vqro', target / 'vqro'), ('bridge', target / 'vqro-bridge-codex'),
+                         ('hc', Path(shutil.which('herdr-core') or 'herdr-core').resolve())):
+        parser.add_argument('--' + key, type=Path, default=default)
+    parser.add_argument('--scratch-parent', type=Path, default=REPO / '.run')
     parser.add_argument('--isolated-root', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--parent-net', help=argparse.SUPPRESS)
     args = parser.parse_args()
