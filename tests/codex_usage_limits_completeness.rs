@@ -7,31 +7,33 @@ use vqro::rpc::{Incoming, Peer};
 async fn shared_native_dto_marks_positive_subset_unknown_for_capacity() {
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/usage_limits_incomplete.json")).unwrap();
-    let (io, _other) = tokio::io::duplex(1024);
-    let (read, write) = tokio::io::split(io);
-    let (peer, _) = Peer::spawn(read, write);
-    let runtime = Runtime::with_host_metadata(
-        peer,
-        1,
-        "inc".into(),
-        "fixture".into(),
-        "instance".into(),
-        None,
-        None,
-        Some(fixture["expected"]["account"].clone()),
-    );
-    runtime.incoming(Incoming::Notification {
-        method: "account/rateLimits/updated".into(),
-        params: fixture["dto"].clone(),
-    });
-    let facts = runtime.fact("endpoint-1").unwrap();
-    let agent = &facts["data"]["agent"];
-    let mut actual = json!({"account":agent["account"],"usage_limits":agent["usage_limits"],"incomplete":agent["incomplete"]});
-    for row in actual["usage_limits"].as_array_mut().unwrap() {
-        row["observed_at_ms"] = json!(0);
+    for (dto, expected) in [("dto", "expected"), ("complete_dto", "complete_expected")] {
+        let (io, _other) = tokio::io::duplex(1024);
+        let (read, write) = tokio::io::split(io);
+        let (peer, _) = Peer::spawn(read, write);
+        let runtime = Runtime::with_host_metadata(
+            peer,
+            1,
+            "inc".into(),
+            "fixture".into(),
+            "instance".into(),
+            None,
+            None,
+            Some(fixture[expected]["account"].clone()),
+        );
+        runtime.incoming(Incoming::Notification {
+            method: "account/rateLimits/updated".into(),
+            params: fixture[dto].clone(),
+        });
+        let facts = runtime.fact("endpoint-1").unwrap();
+        let agent = &facts["data"]["agent"];
+        let mut actual = json!({"account":agent["account"],"usage_limits":agent["usage_limits"],"incomplete":agent["incomplete"]});
+        for row in actual["usage_limits"].as_array_mut().unwrap() {
+            row["observed_at_ms"] = json!(0);
+        }
+        assert_eq!(actual, fixture[expected]);
+        runtime.native.close();
     }
-    assert_eq!(actual, fixture["expected"]);
-    runtime.native.close();
 }
 
 #[test]

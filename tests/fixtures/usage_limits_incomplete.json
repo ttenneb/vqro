@@ -3,7 +3,7 @@
     "accountId": "native-workspace",
     "rateLimitsByLimitId": {
       "codex": {
-        "primary": {"usedPercent": 10, "windowDurationMins": 300},
+        "primary": {"usedPercent": 10, "windowDurationMins": 300, "resetsAt": 1800000000},
         "secondary": {"usedPercent": "invalid"}
       }
     }
@@ -14,9 +14,28 @@
       "scope": {"kind": "account", "account": "work", "native_account_id": "native-workspace", "bucket": "codex"},
       "window": {"id": "primary", "duration_ms": 18000000},
       "used_percent": 10,
+      "resets_at_ms": 1800000000000,
       "source": "codex.account/rateLimits",
       "observed_at_ms": 0
     }],
     "incomplete": ["usage_limits", "items"]
+  },
+  "complete_dto": {
+    "accountId": "native-workspace",
+    "rateLimitsByLimitId": {
+      "codex": {"primary": {"usedPercent": 10, "windowDurationMins": 300, "resetsAt": 1800000000}}
+    }
+  },
+  "complete_expected": {
+    "account": {"id": "work", "label": "Work", "kind": "subscription", "sources": {"id": "vqro:launcher", "label": "vqro:launcher", "kind": "vqro:launcher"}},
+    "usage_limits": [{
+      "scope": {"kind": "account", "account": "work", "native_account_id": "native-workspace", "bucket": "codex"},
+      "window": {"id": "primary", "duration_ms": 18000000},
+      "used_percent": 10,
+      "resets_at_ms": 1800000000000,
+      "source": "codex.account/rateLimits",
+      "observed_at_ms": 0
+    }],
+    "incomplete": ["items"]
   }
 }

@@ -84,6 +84,9 @@ impl UsageLimits {
         }
         if p.get("rateLimitsByLimitId")
             .is_some_and(|v| !v.is_null() && !v.is_object())
+            || (p["rateLimitsByLimitId"].as_object().is_none()
+                && p.get("rateLimits")
+                    .is_some_and(|v| !v.is_null() && !v.is_object()))
         {
             self.incomplete = true;
         }
