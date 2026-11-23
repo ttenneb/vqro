@@ -167,10 +167,16 @@ pub fn native_env(command:&mut Command,env:&HashMap<String,String>) {
 
 impl Process {
     pub async fn spawn(argv: &[String], cwd: &std::path::Path, env: &HashMap<String,String>, codec: Arc<dyn Codec>, observe: Observe) -> Result<Self, Error> {
+        Self::spawn_with_env(argv,cwd,env,codec,observe,native_env).await
+    }
+    /// Adapter-owned environment setup; the default spawn keeps the shared strict filter. The process,
+    /// background flags, bounded pipes and lifetime mechanism stay shared rather than copied by an adapter.
+    pub async fn spawn_with_env(argv: &[String], cwd: &std::path::Path, env: &HashMap<String,String>, codec: Arc<dyn Codec>, observe: Observe,
+                            setup_env: fn(&mut Command,&HashMap<String,String>)) -> Result<Self, Error> {
         let Some(program) = argv.first() else { return Err(Error::new("invalid", format!("explicit {} argv is required", codec.name()))); };
         let mut command = crate::program::background_command(program);
         command.args(&argv[1..]).current_dir(cwd);
-        native_env(&mut command,env);
+        setup_env(&mut command,env);
         command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
         let mut child = command.spawn().map_err(|e| Error::new("backend",format!("start native {}: {e}", codec.name())))?;
         let stdin = child.stdin.take().unwrap();

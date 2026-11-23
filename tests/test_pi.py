@@ -46,14 +46,15 @@ class PiTests(unittest.TestCase):
         self.assertEqual(self.core.calls[-1], ("agents.show", {"resource": "r2"}))
         self.assertEqual(len(self.native()), 1)
 
-    def test_rpc_testing_is_explicitly_unsupported_without_extension_or_environment_injection(self):
+    def test_rpc_missing_assets_keep_notice_without_native_injection(self):
         self.core.info = {"socket": "/private/core.sock", "state_dir": "/private/state", "extension_token": "never-forward"}
-        self.command("new")
+        with tempfile.TemporaryDirectory(prefix="missing-rpc-testing-") as directory, patch("pi.EXTENSIONS", directory):
+            self.command("new")
         env = self.native()[0][1]["env"]
         self.assertFalse(any(key.startswith("VQRO_TESTING_") for key in env))
         self.assertNotIn("-e", self.native()[0][1]["argv"])
         self.assertNotIn("--skill", self.native()[0][1]["argv"])
-        self.assertTrue(any("testing plugin unsupported for RPC Pi" in text for text, _ in self.core.notices))
+        self.assertTrue(any("installed RPC testing assets are missing" in text and "NOT VERIFIED" in text for text, _ in self.core.notices))
         self.assertNotIn("VQRO_SOCKET", env)
         self.assertNotIn("VQRO_EXTENSION_TOKEN", env)
 
@@ -63,9 +64,45 @@ class PiTests(unittest.TestCase):
             self.command("new")
         self.assertEqual(len(self.native()), 2)
         self.assertTrue(all("-e" not in params["argv"] and "--skill" not in params["argv"] for _, params in self.native()))
-        notices = [text for text, style in self.core.notices if "testing plugin unsupported for RPC Pi" in text]
+        notices = [text for text, style in self.core.notices if "installed RPC testing assets are missing" in text]
         self.assertEqual(len(notices), 1)
         self.assertIn("NOT VERIFIED", notices[0])
+
+    def test_installed_testing_uses_one_bridge_field_and_only_two_selectors(self):
+        self.core.apply([{"op": "set", "key": SETTINGS, "value": {"runtimes": [{"name": "pi", "argv": ["pi1"],
+                         "bridge_env": {"VQRO_TESTING_SOCKET": "wrong-ambient", "VQRO_TESTING_STATE_DIR": "wrong-ambient"}}]}}], "configured spoof")
+        self.core.info = {"socket": "/private/core.sock", "state_dir": "/private/state", "extension_token": "never-forward"}
+        with tempfile.TemporaryDirectory(prefix="installed-rpc-testing-") as directory, patch("pi.EXTENSIONS", directory):
+            root = Path(directory)
+            plugin = root / "tier1/vqro-testing.ts"
+            skill = root / "tier1/skills/vqro-setup-testing/SKILL.md"
+            skill.parent.mkdir(parents=True)
+            plugin.write_text("plugin")
+            skill.write_text("skill")
+            result = self.command("new")
+            params = self.native()[0][1]
+            self.assertEqual(params["argv"][3:6], ["--testing-plugin", str(plugin), "--"])
+            self.assertNotIn("-e", params["argv"])
+            self.assertNotIn("--skill", params["argv"])
+            self.assertEqual({key for key in params["env"] if key.startswith("VQRO_TESTING_")},
+                             {"VQRO_TESTING_SOCKET", "VQRO_TESTING_STATE_DIR"})
+            self.assertNotIn("VQRO_EXTENSION_TOKEN", params["env"])
+            self.assertEqual(params["env"]["VQRO_TESTING_SOCKET"], "/private/core.sock")
+            self.assertEqual(params["env"]["VQRO_TESTING_STATE_DIR"], "/private/state")
+            self.assertEqual(result["testing_plugin"]["state"], "unverified")  # argv alone is never loading evidence.
+            self.assertEqual(len(self.native()), 1)
+            self.core.info = {}
+            self.command("new")
+            unbound = self.native()[1][1]
+            self.assertNotIn("--testing-plugin", unbound["argv"])
+            self.assertFalse(any(key.startswith("VQRO_TESTING_") for key in unbound["env"]))
+            self.assertEqual(len(self.native()), 2, "each request launches once, never retries a downgrade")
+            self.core.info = {"socket": "/private/core.sock", "state_dir": "/private/state"}
+            host_launcher = ["py", "-3", "-I", str(root / "pi_bridge/launch.py")]
+            self.core.apply([{"op": "set", "key": SETTINGS, "value": {"runtimes": [{"name": "host", "argv": ["pi"], "bridge_argv": host_launcher}]}}], "host interpreter")
+            self.command("new")
+            self.assertEqual(self.native()[2][1]["argv"][:6], [*host_launcher, "--testing-plugin", str(plugin)])
+            self.assertEqual(len(self.native()), 3)
 
     def test_new_uses_only_scoped_reads_even_for_source_cwd(self):
         self.core.resources["r88"]={"id":"r88","cwd":"/private/source"}

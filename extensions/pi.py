@@ -8,7 +8,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
-from pi_testing import testing_notice
+from pi_testing import testing_notice, testing_environment, rpc_testing_args
 from vqro_display import label
 from account_profiles import choose as choose_account, environment as account_environment, provider_argv, runtime_environment, require_fresh
 from agent_launch import initialize_request_route, launch, launch_cwd, runtimes as validate_runtimes, valid_argv
@@ -77,21 +77,43 @@ class Pi:
         if args.get('fresh') is True: require_fresh('pi', runtime['argv'])
         account, popup = choose_account(self.ext, dict(args, runtime=runtime['name'], **({'cwd':cwd} if cwd else {})), 'pi', 'pi.new')
         if popup: return popup
-        # RPC bridges intentionally reject extension injection and filter runtime env.
-        # Do not weaken those guards to claim setup-testing coverage.
-        testing_notice(self.ext, "testing plugin unsupported for RPC Pi; launching without testing hooks (NOT VERIFIED)")
         native_argv = provider_argv(runtime['argv'], account)
         launcher = runtime.get("bridge_argv", default_bridge())
         # The local isolated launcher locates its installed package itself. Neither it nor
         # a configured host launcher injects a module path into the agent environment.
         env = account_environment(account, runtime_environment('pi', runtime))
+        testing = []
+        if len(launcher) >= 3 and launcher[-1] == default_bridge()[-1] and "-I" in launcher[1:-1]:
+            testing = rpc_testing_args(EXTENSIONS, self.ext)
+        else:
+            testing_notice(self.ext, "testing plugin unsupported for configured RPC launcher; launching without testing hooks (NOT VERIFIED)")
+        selectors = {key: value for key, value in testing_environment(self.ext, EXTENSIONS).items()
+                     if key in ("VQRO_TESTING_SOCKET", "VQRO_TESTING_STATE_DIR")}
+        for key in ("VQRO_TESTING_SOCKET", "VQRO_TESTING_STATE_DIR"):
+            env.pop(key, None)  # A configured/ambient selector is not managed binding evidence.
+        if testing and len(selectors) == 2:
+            env.update(selectors)
+        elif testing:
+            testing = []
+            testing_notice(self.ext, "testing plugin unavailable: managed socket/state selectors missing; launching without testing hooks (NOT VERIFIED)")
         # A new agent owns its own logical work, not its launching TUI's undo scope.
         env.setdefault("VQRO_PRINCIPAL", "p:"+uuid.uuid4().hex)
-        params = {"bridge": True, "name": "pi-bridge-"+uuid.uuid4().hex[:12], "argv": [*launcher, "--", *native_argv], "env": env}
+        params = {"bridge": True, "name": "pi-bridge-"+uuid.uuid4().hex[:12], "argv": [*launcher, *testing, "--", *native_argv], "env": env}
         if cwd:
             params["cwd"] = cwd
-        return launch(self.ext, params, brand="Pi", initialize_route=self.initialize_request_route,
-                      show_terminal=self.terminal)
+        answer = launch(self.ext, params, brand="Pi", initialize_route=self.initialize_request_route,
+                        show_terminal=self.terminal)
+        if testing:
+            try:
+                rows = self.ext.vqro.call("resource.list", {"id": answer.get("agent")})["resources"] if answer.get("agent") else []
+                fact = next((row.get("data", {}).get("agent", {}).get("testing_plugin") for row in rows
+                             if row.get("id") == answer.get("agent")), None)
+            except Exception:
+                fact = None
+            answer["testing_plugin"] = fact or {"state": "unverified"}
+            if not fact or fact.get("state") != "loaded":
+                testing_notice(self.ext, "testing plugin loading unconfirmed for this RPC launch (NOT VERIFIED); no launch retry")
+        return answer
 
     def initialize_request_route(self, agent):
         # Preserve Pi's return shape while sharing the actual-caller default mechanism.

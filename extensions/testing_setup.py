@@ -14,8 +14,36 @@ from vqro_testing import (canonical, digest, fingerprint, process_identity, rele
 POLICY_KEY = "doc/settings/testing.require_unit"
 
 
-def rpc_rule_notice(snapshot):
-    """Declared RPC launchers only; no attempt to infer arbitrary executable behavior."""
+def rpc_launches(snapshot):
+    """Per-process bridge reports; absent, old and unavailable bridges never establish loading."""
+    launches = []
+    for resource in snapshot.get("rpc_resources", []):
+        if not isinstance(resource, dict):
+            continue
+        data = resource.get("data")
+        agent = data.get("agent") if isinstance(data, dict) else None
+        fact = agent.get("testing_plugin") if isinstance(agent, dict) else None
+        if resource.get("kind") != "agent" or resource.get("state") == "finished":
+            continue
+        if resource.get("name") != "Pi" and not isinstance(fact, dict):
+            continue
+        fact = fact if isinstance(fact, dict) else {}
+        loaded = (resource.get("available") is True and resource.get("state") == "live"
+                  and fact.get("state") == "loaded" and fact.get("source") == "rpc:get_commands"
+                  and all(isinstance(fact.get(key), str) and fact[key] for key in ("principal", "path", "skill")))
+        launches.append({"agent": resource.get("id"), "principal": fact.get("principal"),
+                         "state": "loaded" if loaded else "unverified", "path": fact.get("path")})
+    return launches
+
+
+def rpc_rule_notice(snapshot, principal=None):
+    """A confirmed launch clears only its own caveat, never the global workspace notice."""
+    launches = rpc_launches(snapshot)
+    if principal is not None:
+        selected = [row for row in launches if row["principal"] == principal]
+        return None if selected and all(row["state"] == "loaded" for row in selected) else RPC_RULE_NOTICE
+    if launches:
+        return RPC_RULE_NOTICE
     for key, entry in snapshot.get("entries", {}).items():
         if not key.startswith("extension/"):
             continue
@@ -247,12 +275,12 @@ class SetupStore:
                     return stale
         return stale or {"state": "missing", "receipt": None, "verdict": None, "why": "no current recorded receipt"}
 
-    def status(self, value, snapshot):
+    def status(self, value, snapshot, *, rpc_principal=None):
         required = snapshot.get("entries", {}).get(POLICY_KEY, {}).get("value", False) is True
         state = self.observe(value, snapshot) if required else self.preview(value, snapshot)
         unit, integration, performance = (self.receipt(suite, state) for suite in ("unit", "integration", "perf"))
         reasons = list(value.get("unknown", []))
-        scope_notice = rpc_rule_notice(snapshot)
+        scope_notice = rpc_rule_notice(snapshot, rpc_principal)
         if scope_notice:
             reasons.insert(0, scope_notice)
         policy = snapshot.get("entries", {}).get(POLICY_KEY, {}).get("value", False)
@@ -301,6 +329,8 @@ class SetupStore:
         return {"setup_id": value.get("setup_id"), "generation": state["generation"], "require_unit": required,
                 "policy_state": "unknown" if invalid_policy else "on" if required else "off", "instance": value.get("instance"),
                 "unit": unit, "integration": integration, "performance": performance,
+                "rpc_testing": {"principal": rpc_principal, "launches": rpc_launches(snapshot), "lookup_error": snapshot.get("rpc_lookup_error"),
+                                "verified": rpc_principal is not None and scope_notice is None},
                 "finish_ok": bool(finish), "not_verified_reasons": list(dict.fromkeys(reasons)), "coverage_gaps": unit.get("coverage_gaps", [])}
 
     def skip(self, value, snapshot, suite, reason):

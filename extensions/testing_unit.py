@@ -300,12 +300,20 @@ def error_status(reason, snapshot=None):
             "finish_ok": False, "not_verified_reasons": reasons, "coverage_gaps": [], "instance": None, "error": text(reason)}
 
 
-def setup_status(state_dir, extensions_dir, *, client=None, hello=None, endpoint=None):
+def setup_status(state_dir, extensions_dir, *, client=None, hello=None, endpoint=None, rpc_principal=None):
     snapshot = None
     try:
         snapshot = read_snapshot(client, state_dir)
         snapshot, value = setup_scan(client, hello, state_dir, extensions_dir, endpoint, snapshot=snapshot)
-        return SetupStore(state_dir).status(value, snapshot)
+        if client is not None:
+            try:
+                resources = client.call("resource.list", {"kind": "agent"})["resources"]
+                if not isinstance(resources, list):
+                    raise ValueError("invalid runtime resource list")
+                snapshot = {**snapshot, "rpc_resources": resources}
+            except Exception as failure:
+                snapshot = {**snapshot, "rpc_resources": [], "rpc_lookup_error": text(str(failure))}
+        return SetupStore(state_dir).status(value, snapshot, rpc_principal=rpc_principal)
     except Exception as failure:
         return error_status(f"setup status unavailable: {failure}", snapshot)
 
@@ -351,6 +359,12 @@ def setup_page(status):
                       "style": "ok" if result["state"] == "pass" else "warn"})
         if result.get("skip_reason"):
             items.append({"type": "text", "text": "Integration skipped: " + result["skip_reason"], "style": "warn"})
+    rpc = status.get("rpc_testing", {})
+    for launch in rpc.get("launches", [])[:64]:
+        items.append({"type": "text", "text": f"Observed RPC launch {launch['agent']}: testing plugin {launch['state']}",
+                      "style": "ok" if launch["state"] == "loaded" else "warn"})
+    if rpc.get("lookup_error"):
+        items.append({"type": "text", "text": "RPC launch lookup unavailable: " + text(rpc["lookup_error"]), "style": "warn"})
     exception = status["unit"].get("exception")
     if exception:
         items.append({"type": "text", "text": f"Unit exception accepted by {exception['accepted_by']}: {exception['reason']}", "style": "warn"})
@@ -405,7 +419,10 @@ def extension_main():
 
     @ext.command("test.setup.status", "Inspect current setup identity, generation and finish evidence")
     def status_command(args):
-        return refresh()
+        status = refresh()  # Published UI always remains global, not upgraded by one caller's launch.
+        if isinstance(args.get("rpc_principal"), str):
+            return setup_status(state_dir, extensions_dir, client=ext.vqro, hello=ext.info, rpc_principal=args["rpc_principal"])
+        return status
 
     @ext.command("test.setup.skip", "Explain omitted integration evidence (args: suite, reason)")
     def skip(args):
@@ -528,7 +545,7 @@ def main(argv=None):
     try:
         if args.setup_status:
             status = (error_status("live setup is unavailable: " + str(error)) if client is None and not args.offline else
-                      setup_status(state_dir, extensions_dir, client=client, hello=hello, endpoint=socket))
+                      setup_status(state_dir, extensions_dir, client=client, hello=hello, endpoint=socket, rpc_principal=args.rpc_principal))
             if args.json:
                 print(json.dumps(status, ensure_ascii=False))
             else:

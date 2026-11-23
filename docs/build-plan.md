@@ -3,6 +3,16 @@
 D16: build vqro itself, smallest complete and usable first. The north star: an agent can substantially modify its own
 workspace through reliable public primitives, without changing the host or endangering underlying processes.
 
+## RPC setup-testing follow-up (2026-11-23, candidate)
+
+The default isolated Pi launcher negotiates one installed testing-plugin bridge field using bounded help discovery.
+Rust and legacy bridges admit only that plugin plus its derived skill; their native filters add exactly the two
+managed testing selectors. A native command/skill inventory, not argv, establishes a per-launch loading fact.
+Scoped status can clear only that launch's RPC caveat; global and older/unconfirmed launch coverage stays visibly
+unverified. Model-free controls exercise real hooks and finish refusal through the actual Rust bridge, plus optional
+read-only startup against actual Pi. No model work, launch replay or inbox change is introduced. Review/replay and
+installation qualification are separate; existing HC environment passthrough is a reported, deferred finding.
+
 ## Opt-in setup completion evidence (2026-11-23)
 
 Versioned recursive setup identity and observed generations bind recorded Unit evidence before/after a run.

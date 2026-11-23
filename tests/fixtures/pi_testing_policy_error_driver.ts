@@ -8,6 +8,7 @@ let providerRequests = 0;
 plugin({
   on: (name: string, fn: Function) => handlers.set(name, fn),
   registerTool: (tool: any) => tools.set(tool.name, tool),
+  registerCommand() {},
   sendMessage: () => { providerRequests++; throw new Error("unexpected inference"); },
   sendUserMessage: () => { providerRequests++; throw new Error("unexpected inference"); },
 });

@@ -9,6 +9,7 @@
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/panel.rs"] mod panel;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/origins.rs"] mod origins;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/startup.rs"] mod startup;
+#[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/testing.rs"] mod testing;
 #[path="../src/bin/vqro-bridge-pi/state.rs"] mod state;
 use admission::Signals;
 use native::{Event,Exit};

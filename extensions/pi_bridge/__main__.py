@@ -42,7 +42,7 @@ async def run(args):
     watch_stdin(sys.stdin.buffer, asyncio.get_running_loop(), stop)
     bridge = Bridge(args.argv, cwd=args.cwd, env=os.environ, token=os.environ["VQRO_BRIDGE_TOKEN"],
                     endpoint=os.environ["VQRO_SOCKET"], interval=args.interval,
-                    transcript_bytes=args.transcript_bytes)
+                    transcript_bytes=args.transcript_bytes, testing_plugin=args.testing_plugin)
     result = await bridge.run(stop)
     code = result.get("exit_code", 0)
     return code if isinstance(code, int) and code >= 0 else 1
@@ -51,6 +51,7 @@ async def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cwd", type=Path, default=Path.cwd())
+    parser.add_argument("--testing-plugin", type=Path)
     parser.add_argument("--interval", type=float, default=.2, help="seconds between coalesced updates (>=0.1)")
     parser.add_argument("--transcript-bytes", type=int, default=16384)
     parser.add_argument("argv", nargs=argparse.REMAINDER, help="-- <Pi command and RPC arguments>; no runtime default")

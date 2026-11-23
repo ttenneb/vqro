@@ -12,6 +12,7 @@ mod panel;
 mod views;
 mod origins;
 mod startup;
+mod testing;
 #[path="../launcher_account/mod.rs"]
 mod launcher_account;
 use std::collections::HashMap;
@@ -33,6 +34,7 @@ struct Args {
     #[arg(long)] name:Option<String>,
     #[arg(long)] instance:Option<String>,
     #[arg(long)] cwd:Option<std::path::PathBuf>,
+    #[arg(long)] testing_plugin:Option<std::path::PathBuf>,
     #[arg(last=true,required=true)] native:Vec<String>,
 }
 struct Shared {agent:Mutex<Agent>,fallback:panel::Fallback,connected:std::sync::atomic::AtomicBool,native:OnceLock<Native>,starts:OnceLock<Starts>,changed:Notify,metadata_refresh:Notify,cwd:String,provider_name:String,instance:String,ui_slots:Arc<tokio::sync::Semaphore>}
@@ -100,12 +102,24 @@ async fn main()->Result<()> {
     // The runtime's own --version from the exact binary the launcher starts (agent-v0 startup, version_source cli).
     let version_argv=args.native.clone();
     let expanders_on=launch_may_transform(&args.native);
-    let argv=controlled(args.native)?;
+    let mut argv=controlled(args.native)?;
+    let testing_plugin = match args.testing_plugin {
+        Some(path) => {
+            let admitted = vqro::paths::extensions_dir().and_then(|root|
+                testing::Plugin::validate(&path, &root, std::env::var("VQRO_PRINCIPAL").ok()));
+            match admitted {
+                Ok(plugin) => { plugin.append(&mut argv); Some(plugin) }
+                Err(error) => { eprintln!("NOT VERIFIED: testing plugin refused: {error}; launching without testing hooks"); None }
+            }
+        }
+        None => None,
+    };
     let cwd=args.cwd.unwrap_or(std::env::current_dir()?).canonicalize()?;
     let signals=admission::Signals::new();
     let account_raw=std::env::var("VQRO_ACCOUNT").ok();
     let mut agent=Agent::with_cwd(instance.clone(),signals.clone(),cwd.to_string_lossy().into_owned());
     agent.account=launcher_account::parse(account_raw.as_deref()).map_err(anyhow::Error::msg)?;
+    agent.testing_plugin=testing_plugin;
     let shared=Arc::new(Shared {agent:Mutex::new(agent),fallback:panel::Fallback::tty(),connected:std::sync::atomic::AtomicBool::new(false),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),metadata_refresh:Notify::new(),cwd:cwd.to_string_lossy().into_owned(),provider_name:name.clone(),instance:instance.clone(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
     shared.agent.lock().unwrap().expanders_on=expanders_on;
     let weak=Arc::downgrade(&shared);

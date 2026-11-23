@@ -485,7 +485,8 @@ class HealthChecks(unittest.TestCase):
         ext.command.side_effect = command
         with patch("vqro_ext.Extension", return_value=ext), patch.dict(os.environ, {"VQRO_EXTENSIONS_DIR": str(self.extensions)}):
             unit.extension_main()
-            self.assertEqual([call.args[0] for call in self.client.call.call_args_list], ["workspace.snapshot"])
+            self.assertEqual([call.args[0] for call in self.client.call.call_args_list], ["workspace.snapshot", "resource.list"])
+            self.assertEqual(self.client.call.call_args_list[1].args[1], {"kind": "agent"})
             self.assertEqual([call.args[0] for call in ext.publish.call_args_list], ["testing.status", "settings.page.testing"])
             ext.contribute.assert_called_once()
             self.assertEqual(ext.contribute.call_args.args[0]["view/test-unit.report"]["kind"], "panel")
@@ -502,7 +503,7 @@ class HealthChecks(unittest.TestCase):
             self.assertIn("sample: tests disabled by caller", saved["not_covered"])
             calls = self.client.call.call_count
             handlers["test.unit.show"]({})
-            self.assertEqual(self.client.call.call_count, calls + 1)  # current status rescan, not another Unit run.
+            self.assertEqual(self.client.call.call_count, calls + 2)  # workspace + runtime facts, not another Unit run.
             self.assertEqual(ext.publish.call_args.args[0], "test-unit.report")
             with patch.object(unit.SetupStore, "observe", side_effect=RuntimeError("observer unavailable")), patch.object(unit, "save_receipt", side_effect=AssertionError("unsupported recording must not publish a receipt")):
                 portable = handlers["test.unit"]({})

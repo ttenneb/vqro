@@ -14,7 +14,7 @@ function status(id = "a", generation = 0, patch: any = {}): any {
 
 function fixture(initial: any = status()) {
   const handlers = new Map<string, Function>();
-  const tools = new Map<string, any>();
+  const tools = new Map<string, any>(), commands = new Map<string, any>();
   const statuses: string[] = [], stderr: string[] = [], calls: string[] = [];
   let value = initial, units = 0, providerRequests = 0;
   let unit: () => Promise<void> = async () => {
@@ -24,6 +24,11 @@ function fixture(initial: any = status()) {
   const pi = {
     on: (event: string, handler: Function) => handlers.set(event, handler),
     registerTool: (tool: any) => tools.set(tool.name, tool),
+    registerCommand: (name: string, command: any) => {
+      expect(tools.has("vqro_setup_finish")).toBe(true);
+      for (const event of ["session_start", "before_agent_start", "context", "tool_result", "agent_before_settle"]) expect(handlers.has(event)).toBe(true);
+      commands.set(name, command);
+    },
     sendMessage: () => { providerRequests++; throw new Error("must not queue model work"); },
     sendUserMessage: () => { providerRequests++; throw new Error("must not queue model work"); },
   };
@@ -34,7 +39,7 @@ function fixture(initial: any = status()) {
     stderr: (message) => stderr.push(message),
   });
   return {
-    ctx, statuses, stderr, calls, handlers,
+    ctx, statuses, stderr, calls, handlers, commands,
     get units() { return units; }, get providerRequests() { return providerRequests; },
     set: (next: any) => { value = next; },
     unit: (next: () => Promise<void>) => { unit = next; },
@@ -45,6 +50,13 @@ function fixture(initial: any = status()) {
 }
 
 describe("model-free Pi testing policy", () => {
+  test("native inventory marker registers after hooks and tool; status command never requests inference", async () => {
+    const f = fixture();
+    expect([...f.commands.keys()]).toEqual(["vqro-testing-status"]);
+    await f.commands.get("vqro-testing-status").handler("", f.ctx);
+    expect(f.units).toBe(0);
+    expect(f.providerRequests).toBe(0);
+  });
   test("real CLI transport uses explicit selectors and --record, with no chosen filename", async () => {
     const root = mkdtempSync(join(tmpdir(), "pi-testing-cli-"));
     const names = ["VQRO_EXTENSIONS_DIR", "VQRO_TESTING_EXTENSIONS_DIR", "VQRO_TESTING_SOCKET", "VQRO_TESTING_STATE_DIR", "HERDR_SOCKET", "VQRO_EXTENSION_TOKEN"];
@@ -79,7 +91,7 @@ else:
  'instance':{'socket':'opaque:selected-test-endpoint','state_dir':str(root.parent/'state'),'extensions_dir':str(root),'epoch':'fixture'}}))
 `);
       const handlers = new Map<string, Function>(), tools = new Map<string, any>();
-      plugin({ on: (name: string, fn: Function) => handlers.set(name, fn), registerTool: (tool: any) => tools.set(tool.name, tool) });
+      plugin({ on: (name: string, fn: Function) => handlers.set(name, fn), registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand() {} });
       const ctx = { hasUI: true, ui: { setStatus() {} } };
       await handlers.get("session_start")!({}, ctx);
       writeFileSync(join(ext, "generation"), "1");

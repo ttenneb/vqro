@@ -27,6 +27,20 @@ def testing_args(extensions_dir, ext=None):
     return []
 
 
+def rpc_testing_args(extensions_dir, ext=None):
+    """One named bridge field, never native -e or a development-tree fallback."""
+    root = Path(extensions_dir).resolve()
+    plugin = root / "tier1/vqro-testing.ts"
+    skill = root / "tier1/skills/vqro-setup-testing/SKILL.md"
+    try:
+        if plugin.resolve(strict=True) == plugin and skill.resolve(strict=True).is_relative_to(root) and plugin.is_file() and skill.is_file():
+            return ["--testing-plugin", str(plugin)]
+    except (OSError, RuntimeError):
+        pass
+    testing_notice(ext, "testing plugin unavailable: installed RPC testing assets are missing; launching without testing hooks (NOT VERIFIED)")
+    return []
+
+
 def testing_notice(ext, message):
     """A per-extension-lifetime notice, never a native launch veto."""
     if ext is not None and not getattr(ext, "_testing_unavailable_notified", False):

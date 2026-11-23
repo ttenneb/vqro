@@ -90,7 +90,7 @@ class PiTestingPluginTests(unittest.TestCase):
                     for line in self.rfile:
                         request = json.loads(line)
                         methods.append(request["method"])
-                        values = {"hello": hello, "workspace.snapshot": snapshot, "extension.list": {"extensions": facts}}
+                        values = {"hello": hello, "workspace.snapshot": snapshot, "extension.list": {"extensions": facts}, "resource.list": {"resources": []}}
                         result = values[request["method"]]
                         self.wfile.write((json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}) + "\n").encode())
                         self.wfile.flush()
@@ -147,7 +147,7 @@ class PiTestingPluginTests(unittest.TestCase):
                 self.assertTrue(finished["finish_ok"], finished)
                 self.assertIn("Coverage gaps:", finished["summary"])
                 self.assertEqual(len(list((state / "test-unit").glob("receipt-*.json"))), 1)
-                self.assertTrue(set(methods) <= {"hello", "workspace.snapshot", "extension.list"})
+                self.assertTrue(set(methods) <= {"hello", "workspace.snapshot", "extension.list", "resource.list"})
                 env["VQRO_TESTING_SOCKET"] = str(root / "missing.sock")
                 unavailable = drive("finish")
                 self.assertFalse(unavailable["finish_ok"])
@@ -218,6 +218,9 @@ raise SystemExit(unit.main())
                             else:
                                 snapshot["entries"]["doc/settings/testing.require_unit"] = {"version": 1, "value": config["policy"]}
                                 response = {"result": snapshot}
+                        elif request["method"] == "resource.list":
+                            assert request["params"] == {"kind": "agent"}
+                            response = {"result": {"resources": []}}
                         else:
                             assert request["method"] == "hello"
                             response = {"result": hello}
@@ -260,7 +263,7 @@ raise SystemExit(unit.main())
                 self.assertEqual(result["providerRequests"], 0)
                 calls = [json.loads(line) for line in (state / "fixture-calls.jsonl").read_text().splitlines()]
                 self.assertTrue(all("--setup-status" in call and "--record" not in call for call in calls))
-                self.assertTrue(set(methods) <= {"hello", "workspace.snapshot"})
+                self.assertTrue(set(methods) <= {"hello", "workspace.snapshot", "resource.list"})
             finally:
                 server.shutdown()
                 server.server_close()

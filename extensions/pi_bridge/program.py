@@ -6,10 +6,12 @@ import os
 from pathlib import Path
 import re
 import random
+import sys
 import uuid
 
 from vqro_provider import Limits as ProviderLimits, Provider, ProviderError
 from . import control
+from .testing import Plugin as TestingPlugin, SELECTORS, controlled
 from .client import DIALOGS, EFFECTS, PiRpcClient
 from .display import Fallback, Transcript, agent_data, plain, tail
 
@@ -31,18 +33,25 @@ OPS = sorted(EFFECTS | {"command", "configure"})
 class Bridge:
     def __init__(self, argv, *, cwd, env, token, endpoint=None, sock=None,
                  provider=None, fallback=None, interval=.2, transcript_bytes=16384,
-                 pi_limits=None, connector=None, retry_initial=.25, retry_max=30):
+                 pi_limits=None, connector=None, retry_initial=.25, retry_max=30, testing_plugin=None):
         if not argv:
             raise ValueError("Pi argv is required; no installed runtime is selected implicitly")
         if not isinstance(token, str) or not token:
             raise ValueError("VQRO_BRIDGE_TOKEN is required")
         if not isinstance(interval, (int, float)) or not math.isfinite(interval) or interval < .1:
             raise ValueError("publication interval must be finite and at least 0.1 seconds")
-        self.argv, self.cwd = list(argv), cwd
+        self.argv, self.cwd = controlled(argv), cwd
+        self.testing_plugin = None
+        if testing_plugin is not None:
+            try:
+                self.testing_plugin = TestingPlugin(testing_plugin, Path(__file__).resolve().parent.parent, env.get("VQRO_PRINCIPAL"))
+                self.argv.extend(self.testing_plugin.arguments())
+            except (ValueError, OSError, RuntimeError) as error:
+                print("NOT VERIFIED: testing plugin refused: " + str(error) + "; launching without testing hooks", file=sys.stderr)
         # Pi/tools receive the endpoint and cooperative assertion, never bridge/supervisor credentials or
         # core configuration. Keep the marker so an agent's scratch VQRO_STATE_DIR wins.
         self.env = {k: v for k, v in env.items() if not k.startswith("HERDR_") and
-                    (not k.startswith("VQRO_") or k in ("VQRO_SOCKET", "VQRO_PRINCIPAL"))}
+                    (not k.startswith("VQRO_") or k in ("VQRO_SOCKET", "VQRO_PRINCIPAL", *SELECTORS))}
         if "VQRO_SOCKET" in self.env:
             self.env["VQRO_SOCKET_SOURCE"] = "terminal"
         # Legacy/custom launchers may still use PYTHONPATH for the bridge. Remove only this
@@ -112,7 +121,7 @@ class Bridge:
                 "name": "Pi", "title": "Pi RPC", "cwd": str(self.cwd),
                 "status": {"state": snapshot["status"]}, "data": {**agent_data(snapshot),
                     # Agent standard v0 section 6.3 lists (the rest of data.agent is not adopted yet).
-                    "agent": self.declared.facts(),
+                    "agent": {**self.declared.facts(), **({"testing_plugin": self.testing_plugin.fact()} if self.testing_plugin else {})},
                     "views": [view for view in (self.status_view, self.view) if view is not None],
                     **({"view_error": self.view_problem} if self.view_problem else {})}}
 
@@ -165,7 +174,7 @@ class Bridge:
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
         if native == "new_session" and data.get("cancelled") is True:
             return {"outcome": "rejected", "error": {"kind": "backend", "message": "a Pi extension cancelled the new session"}}
-        options, commands = await control.read(self.pi)
+        options, commands = await control.read(self.pi, observe_commands=self.testing_plugin.observe if self.testing_plugin else None)
         self.declared.update(options, commands)
         if op == "configure" and options is not None and self.declared.current(args["id"]) == args["value"]:
             return {"outcome": "observed", "data": {"id": args["id"], "value": args["value"]}}
@@ -178,7 +187,7 @@ class Bridge:
         return {"outcome": "accepted", **({"data": data} if data else {})}
 
     async def _read_config(self):
-        self.declared.update(*await control.read(self.pi))
+        self.declared.update(*await control.read(self.pi, observe_commands=self.testing_plugin.observe if self.testing_plugin else None))
         self._publish_now.set()
 
     def _remember(self, provider):

@@ -502,7 +502,7 @@ def save_receipt(result, state_dir, destination=None):
 class PlainClient:
     """One-shot read client; unlike the extension SDK, transport EOF never exits the process."""
     MAX_RECORD_BYTES = 64 * 1024 * 1024
-    ALLOWED = {"hello", "extension.list", "workspace.snapshot"}
+    ALLOWED = {"hello", "extension.list", "workspace.snapshot", "resource.list"}
 
     def __init__(self, path, timeout=15):
         self.socket = connect_endpoint(path, timeout=timeout)
@@ -552,6 +552,7 @@ def cli_parser():
     output.add_argument("--out")
     output.add_argument("--record", action="store_true")
     parser.add_argument("--setup-status", action="store_true")
+    parser.add_argument("--rpc-principal", help="Read-only RPC launch scope; never owner authority or a finish override")
     return parser
 
 

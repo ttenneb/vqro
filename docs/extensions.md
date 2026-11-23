@@ -89,12 +89,31 @@ entry, treated as false when absent. Only arm it deliberately after a clean setu
 change: record fresh Unit evidence and attach Integration or explain its omission afterwards. This extension does
 not prevent prose such as “done”, add a Pi runtime veto, or enforce policy for every runtime. Participating
 plugins and explicit finish tools may use its deterministic assessment; this is cooperative workflow policy,
-not a security boundary. The Pi plugin in this slice is supported only for terminal (tier1) Pi launches.
+not a security boundary. Terminal (tier1) Pi and the negotiated default RPC launcher can load the plugin explicitly.
 Missing plugin/skill assets do not stop Pi launching: they produce one unavailable notice/log and no testing flags.
-RPC Pi launches remain unchanged at the bridge boundary and report testing-plugin support as unavailable;
-no extension injection or environment-filter exception is added to those bridges. This is only the first slice:
-RPC coverage is a **required follow-up**, not dropped scope. While a declared RPC Pi launcher is enabled,
-the status menu's full report, Settings page, setup-status reasons and receipts retain:
+
+RPC admits exactly one separate bridge field, `--testing-plugin`, before the native `--`: the regular installed
+`tier1/vqro-testing.ts`, anchored to the bridge host's extensions directory. Its sibling testing skill is derived,
+never another arbitrary path. The bridge maps that field to native `-e`/`--skill`; arbitrary native `-e`, extension
+and prompt-template flags remain refused. Only `VQRO_TESTING_SOCKET` and `VQRO_TESTING_STATE_DIR` are added to the
+native protected-name allowlist. The existing unrelated environment policy is unchanged. The isolated host wrapper
+probes the resolved bridge's `--help` once per path/mtime, with a two-second execution and bounded output. An older
+bridge that does not advertise the field gets one warning and a single ordinary launch without the field, never a
+retry. Unknown configured `bridge_argv` launchers also stay unhooked/NOT VERIFIED rather than receiving an
+unnegotiated field.
+
+Passing argv is not loading evidence. The bridge publishes `resource.data.agent.testing_plugin` only for an
+admitted plugin: `state: loaded | unverified`, installed `path`/`skill`, existing per-launch `principal`, and
+`source: rpc:get_commands`. `loaded` requires Pi itself to report the marker command `vqro-testing-status` from
+that exact plugin and the derived skill path. The marker is registered after the hooks and finish tool, and its
+handler only inspects evidence; it never requests inference. These are registration/path facts, not loaded-byte
+attestation or proof the skill body was read.
+
+`test.setup.status {rpc_principal: <launch principal>}` (CLI `--setup-status --rpc-principal ...`) removes the RPC
+caveat only for that available, confirmed launch; the plugin requests this scope in RPC mode using the already
+inherited principal. It is read-only display scope, never owner authority or a finish override. `rpc_testing`
+lists the individual launches and whether that scope is confirmed. The global menu/settings/receipt view keeps
+its caveat, and old, unavailable or unconfirmed launches remain visible as unverified:
 **NOT VERIFIED: rule not active for vqro-launched Pi agents yet**.
 The bottom-bar segment is deliberately compact (warn style): while policy is ON it shows `tests !` when
 finish is not ok. With ON and an enabled RPC Pi launcher, an accepted finish still shows `not verified`:
@@ -163,7 +182,7 @@ including change/revert, increment the persisted generation while armed or expli
 restart/missed events invalidate prior evidence and rescan. OFF assessments use read-only previews, not a
 persisted observer. Filesystem changes are detected on explicit status checks and while armed evidence is pending. This does
 not claim perfect detection of unobserved transient external file edits. Live notices use only `view.publish`:
-`testing.status`, a status-menu item, and `settings.page.testing`. The fixed RPC first-slice caveat is retained
+`testing.status`, a status-menu item, and `settings.page.testing`. The unscoped/unconfirmed RPC caveat is retained
 in bounded Unit/Integration/Performance error/size fallback receipts, not dropped by replacement reporting.
 Missing, stale, failed, pending or unknown evidence
 is prominent; a coverage gap is a warning, not a failed or unverified Unit result.

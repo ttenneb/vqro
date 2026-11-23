@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use vqro::native_process::{Codec, Process};
 // Compatibility exports are used by the binary and independent path-based integration tests.
 #[allow(unused_imports)]
-pub use vqro::native_process::{Error, Event, Exit, MAX_RECORD, Observe, Reply, Ticket, native_env};
+pub use vqro::native_process::{Error, Event, Exit, MAX_RECORD, Observe, Reply, Ticket};
 
 struct PiCodec;
 impl Codec for PiCodec {
@@ -34,9 +34,16 @@ impl Codec for PiCodec {
 
 #[derive(Clone)]
 pub struct Native(Process);
+/// Pi alone admits the two dedicated selectors; the shared/Codex default remains unchanged.
+pub fn native_env(command:&mut tokio::process::Command,env:&HashMap<String,String>) {
+    vqro::native_process::native_env(command,env);
+    for key in ["VQRO_TESTING_SOCKET", "VQRO_TESTING_STATE_DIR"] {
+        if let Some(value)=env.get(key) { command.env(key,value); }
+    }
+}
 impl Native {
     pub async fn spawn(argv: &[String], cwd: &std::path::Path, env: &HashMap<String,String>, observe: Observe) -> Result<Self, Error> {
-        Process::spawn(argv, cwd, env, Arc::new(PiCodec), observe).await.map(Self)
+        Process::spawn_with_env(argv, cwd, env, Arc::new(PiCodec), observe, native_env).await.map(Self)
     }
 }
 impl Deref for Native {

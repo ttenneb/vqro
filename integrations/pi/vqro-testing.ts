@@ -261,6 +261,11 @@ export function installTesting(pi: any, deps: Dependencies) {
       return { content: [{ type: "text", text: JSON.stringify(details) }], details };
     },
   });
+  // Native get_commands reports this command's source path only after all hooks/tool are registered.
+  pi.registerCommand("vqro-testing-status", {
+    description: "Inspect this launch's vqro setup testing evidence (no model call)",
+    handler: async (_args: string, ctx: any) => { await check(ctx, "baseline"); },
+  });
 }
 
 function execute(script: string, args: string[], timeout: number): Promise<Result> {
@@ -297,13 +302,15 @@ export default function (pi: any) {
   const socket = process.env.VQRO_TESTING_SOCKET || process.env.VQRO_SOCKET;
   const script = join(extensions, "testing_unit.py");
   const selectors = ["--extensions-dir", extensions, "--socket", socket || "", "--state-dir", state || ""];
+  const rpc = process.argv.some((arg, index) => arg === "--mode=rpc" || arg === "--mode" && process.argv[index + 1] === "rpc");
+  const scope = rpc ? ["--rpc-principal", process.env.VQRO_PRINCIPAL || ""] : [];
   const selected = () => {
     if (!socket || !state) throw new Error("explicit vqro socket and state directory required; refusing default-install fallback");
   };
   installTesting(pi, {
     async status() {
       selected();
-      const result = await execute(script, ["--setup-status", "--json", ...selectors], 30_000);
+      const result = await execute(script, ["--setup-status", "--json", ...selectors, ...scope], 30_000);
       if (result.code !== 0 && result.code !== 2) throw new Error(`setup status unavailable: exit ${result.code}: ${result.stderr}`);
       const value = JSON.parse(result.stdout);
       if (result.code === 2 && !isErrorStatus(value)) throw new Error("invalid setup error-status document on exit 2");

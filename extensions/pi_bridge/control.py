@@ -30,7 +30,7 @@ async def _data(pi, command, field):
     return value if isinstance(value, list) else None
 
 
-async def read(pi):
+async def read(pi, *, observe_commands=None):
     """(options without rev, Pi commands) from get_state and Pi's lists; options None when Pi did not
     answer get_state (never guessed). Pi commands None when unknown."""
     state = await pi.request("get_state")
@@ -60,6 +60,8 @@ async def read(pi):
             options.append({"id": "auto_compaction", "label": "Auto-compaction", "category": "_compaction", "type": "boolean",
                             "value": data["autoCompactionEnabled"]})
     native = await _data(pi, "get_commands", "commands")
+    if observe_commands is not None:
+        observe_commands(native)
     commands = None
     if native is not None:
         builtin = {c["name"] for c in BUILTIN}

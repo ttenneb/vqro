@@ -7,6 +7,7 @@ const handlers = new Map<string, Function>(), tools = new Map<string, any>(), no
 plugin({
   on: (name: string, fn: Function) => handlers.set(name, fn),
   registerTool: (tool: any) => tools.set(tool.name, tool),
+  registerCommand() {},
   sendMessage: () => { throw new Error("unexpected provider-work injection"); },
   sendUserMessage: () => { throw new Error("unexpected provider-work injection"); },
 });
