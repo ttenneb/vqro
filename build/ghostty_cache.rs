@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 /// Bump when the installed layout, manifest, or build semantics change.
 pub const SCHEMA: u32 = 1;
+pub const DEFAULT_KEEP: usize = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -173,8 +174,13 @@ pub fn ensure(
     root: &Path,
     inputs: &Inputs,
     required: &[&str],
+    keep: usize,
     build: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    use_entry: impl FnOnce(&Path) -> io::Result<()>,
 ) -> io::Result<Entry> {
+    if keep == 0 {
+        return Err(invalid("cache retention must be positive"));
+    }
     fs::create_dir_all(root)?;
     // Zig runs from the vendored directory, so caller-relative roots must become absolute first.
     let root = root.canonicalize()?;
@@ -186,38 +192,134 @@ pub fn ensure(
         .write(true)
         .open(root.join(format!("{key}.lock")))?;
     lock.lock()?;
+    // Only a live builder holding this key's lock may create a stage. Abruptly exited builders cannot
+    // run TempDir's destructor, so reclaim their directories before either rebuilding or reusing.
+    let stage_prefix = format!(".{key}-");
+    for entry in fs::read_dir(&root)? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(&stage_prefix))
+            && entry.file_type()?.is_dir()
+        {
+            // file_type does not follow symlinks: never traverse a similarly named symlink target.
+            fs::remove_dir_all(entry.path())?;
+        }
+    }
     let path = root.join(&key);
-    if verify(&path, inputs, required).is_ok() {
-        return Ok(Entry { path, reused: true });
+    let reused = verify(&path, inputs, required).is_ok();
+    if !reused {
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() && !meta.is_symlink() => fs::remove_dir_all(&path)?,
+            Ok(_) => fs::remove_file(&path)?,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => (),
+            Err(err) => return Err(err),
+        }
+        let stage = tempfile::Builder::new()
+            .prefix(&format!(".{key}-"))
+            .tempdir_in(&root)?;
+        let prefix = stage.path().join("install");
+        let work = stage.path().join("zig-cache");
+        fs::create_dir(&prefix)?;
+        fs::create_dir(&work)?;
+        build(&prefix, &work)?;
+        let artifacts = inventory(&prefix, false)?;
+        require(&artifacts, required)?;
+        let manifest = Manifest {
+            inputs: inputs.clone(),
+            artifacts,
+        };
+        fs::write(
+            prefix.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+        verify(&prefix, inputs, required)?;
+        fs::rename(&prefix, &path)?;
     }
-    match fs::symlink_metadata(&path) {
-        Ok(meta) if meta.is_dir() && !meta.is_symlink() => fs::remove_dir_all(&path)?,
-        Ok(_) => fs::remove_file(&path)?,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => (),
-        Err(err) => return Err(err),
+    // Consumers copy their link inputs while this lock is still held. The shared entry may be evicted
+    // immediately after return; a Cargo linker must never depend on that shared path's lifetime.
+    use_entry(&path)?;
+    OpenOptions::new()
+        .write(true)
+        .open(path.join("manifest.json"))?
+        .set_modified(std::time::SystemTime::now())?;
+    prune(&root, keep)?;
+    Ok(Entry { path, reused })
+}
+
+/// Copy just the link inputs into private output, checking bytes against the manifest while the caller
+/// holds the shared entry lock. Identical snapshots retain their mtime to avoid repeated Cargo rebuilds.
+pub fn materialize(entry: &Path, required: &[&str], out: &Path) -> io::Result<()> {
+    let manifest: Manifest = serde_json::from_slice(&fs::read(entry.join("manifest.json"))?)?;
+    require(&manifest.artifacts, required)?;
+    for name in required {
+        let destination = out.join(name);
+        let expected = &manifest.artifacts[*name];
+        if fs::symlink_metadata(&destination).is_ok_and(|m| m.file_type().is_file())
+            && file_digest(&destination)? == *expected
+        {
+            continue;
+        }
+        let parent = destination
+            .parent()
+            .ok_or_else(|| invalid("snapshot parent missing"))?;
+        fs::create_dir_all(parent)?;
+        let copy = tempfile::NamedTempFile::new_in(parent)?;
+        fs::copy(entry.join(name), copy.path())?;
+        if file_digest(copy.path())? != *expected {
+            return Err(invalid("snapshot hash mismatch"));
+        }
+        copy.persist(&destination).map_err(|err| err.error)?;
     }
-    let stage = tempfile::Builder::new()
-        .prefix(&format!(".{key}-"))
-        .tempdir_in(&root)?;
-    let prefix = stage.path().join("install");
-    let work = stage.path().join("zig-cache");
-    fs::create_dir(&prefix)?;
-    fs::create_dir(&work)?;
-    build(&prefix, &work)?;
-    let artifacts = inventory(&prefix, false)?;
-    require(&artifacts, required)?;
-    let manifest = Manifest {
-        inputs: inputs.clone(),
-        artifacts,
-    };
-    fs::write(
-        prefix.join("manifest.json"),
-        serde_json::to_vec_pretty(&manifest)?,
-    )?;
-    verify(&prefix, inputs, required)?;
-    fs::rename(&prefix, &path)?;
-    Ok(Entry {
-        path,
-        reused: false,
-    })
+    Ok(())
+}
+
+/// Busy keys may temporarily exceed the limit. Never wait while holding a different key's lock, and
+/// recheck use time under the candidate lock so a recent use after our directory scan is not evicted.
+fn prune(root: &Path, keep: usize) -> io::Result<()> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(key) = name.to_str() else { continue };
+        if key.len() != 64
+            || !key.bytes().all(|c| c.is_ascii_hexdigit())
+            || !entry.file_type()?.is_dir()
+        {
+            continue;
+        }
+        match fs::symlink_metadata(entry.path().join("manifest.json")) {
+            Ok(meta) if meta.file_type().is_file() => {
+                entries.push((meta.modified()?, key.to_owned()))
+            }
+            Ok(_) => (),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => (),
+            Err(err) => return Err(err),
+        }
+    }
+    entries.sort_by(|a, b| b.cmp(a));
+    for (used, key) in entries.into_iter().skip(keep) {
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(root.join(format!("{key}.lock")))?;
+        match lock.try_lock() {
+            Ok(()) => (),
+            Err(std::fs::TryLockError::WouldBlock) => continue,
+            Err(std::fs::TryLockError::Error(err)) => return Err(err),
+        }
+        let path = root.join(key);
+        match fs::symlink_metadata(path.join("manifest.json")) {
+            Ok(meta) if meta.file_type().is_file() && meta.modified()? == used => {
+                fs::remove_dir_all(path)?
+            }
+            Ok(_) => (),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => (),
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
 }

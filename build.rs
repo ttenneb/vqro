@@ -3,6 +3,8 @@
 //!
 //! The library is built out of tree into a verified per-user content cache, shared by worktrees and profiles.
 //! `VQRO_LIBGHOSTTY_CACHE` overrides the cache root; `off` disables sharing and builds in `OUT_DIR` for audits.
+//! `VQRO_LIBGHOSTTY_CACHE_KEEP` sets retained shared keys (default 6). Verified link archives are copied into
+//! `OUT_DIR` under the key lock so eviction never races a later Cargo link.
 //! `OUT_DIR/libghostty-cache.json` records the key, reuse/build result, and elapsed time without Cargo warnings.
 //! Environment:
 //! `ZIG` (the zig binary; else `zig` on PATH when it is the version the source needs, else a user-local
@@ -119,7 +121,7 @@ fn main() {
     for path in ["build.zig", "build.zig.zon", "include", "pkg", "src", "LIB_VERSION"] {
         println!("cargo:rerun-if-changed=vendor/libghostty-vt/{path}");
     }
-    for var in ["LIBGHOSTTY_VT_OPTIMIZE", "LIBGHOSTTY_VT_SIMD", "LIBGHOSTTY_VT_ZIG_PKG_DIR", "ZIG", "VQRO_LIBGHOSTTY_CACHE", "XDG_CACHE_HOME", "HOME", "USERPROFILE", "LOCALAPPDATA"] {
+    for var in ["LIBGHOSTTY_VT_OPTIMIZE", "LIBGHOSTTY_VT_SIMD", "LIBGHOSTTY_VT_ZIG_PKG_DIR", "ZIG", "VQRO_LIBGHOSTTY_CACHE", "VQRO_LIBGHOSTTY_CACHE_KEEP", "XDG_CACHE_HOME", "HOME", "USERPROFILE", "LOCALAPPDATA"] {
         println!("cargo:rerun-if-env-changed={var}");
     }
 
@@ -191,22 +193,24 @@ fn main() {
         else if target.contains("-windows-") { "lib/libghostty-vt-static.a" }
         else { "lib/libghostty-vt.a" };
     let cache_setting = env::var_os("VQRO_LIBGHOSTTY_CACHE");
-    let (prefix, result) = if cache_setting.as_deref() == Some(std::ffi::OsStr::new("off")) {
+    let (result, cache_entry) = if cache_setting.as_deref() == Some(std::ffi::OsStr::new("off")) {
         build(&out, &out.join("zig-cache")).expect("uncached libghostty-vt build");
-        (out.clone(), "disabled")
+        ("disabled", None)
     } else {
         let root = cache_setting.filter(|p| !p.is_empty()).map(PathBuf::from)
             .unwrap_or_else(|| cache_root().join("libghostty-vt"));
-        let entry = ghostty_cache::ensure(&root, &inputs, &[required], build).expect("verified libghostty-vt cache");
-        (entry.path, if entry.reused { "reused" } else { "built" })
+        let keep = env::var("VQRO_LIBGHOSTTY_CACHE_KEEP").map(|v| v.parse::<usize>().expect("VQRO_LIBGHOSTTY_CACHE_KEEP must be a positive integer")).unwrap_or(ghostty_cache::DEFAULT_KEEP);
+        let entry = ghostty_cache::ensure(&root, &inputs, &[required], keep, build,
+            |path| ghostty_cache::materialize(path, &[required], &out)).expect("verified libghostty-vt cache");
+        (if entry.reused { "reused" } else { "built" }, Some(entry.path))
     };
-    let note = serde_json::json!({"key": inputs.key(), "result": result, "elapsed_ms": started.elapsed().as_millis()});
+    let note = serde_json::json!({"key": inputs.key(), "result": result, "cache_entry": cache_entry, "elapsed_ms": started.elapsed().as_millis()});
     fs::write(out.parent().expect("OUT_DIR").join("libghostty-cache.json"), serde_json::to_vec_pretty(&note).expect("cache note")).expect("write cache note");
     println!("cargo:rustc-env=VQRO_LIBGHOSTTY_CACHE_KEY={}", inputs.key());
-    // Cargo may reuse build-script output on later links: watch the installed entry too, so removal or
-    // corruption invalidates that output and forces verification/rebuild before another link.
-    println!("cargo:rerun-if-changed={}", prefix.display());
-    let lib = prefix.join("lib");
+    // Cargo links a verified private snapshot, never an evictable shared path. Watch only the archive,
+    // not the changing FFI-check object or shared LRU timestamps.
+    if result != "disabled" { println!("cargo:rerun-if-changed={}", out.join(required).display()); }
+    let lib = out.join("lib");
     println!("cargo:rustc-link-search=native={}", lib.display());
     if target.contains("apple-darwin") {
         println!("cargo:rustc-link-arg={}", lib.join("libghostty-vt.a").display());
