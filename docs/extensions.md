@@ -117,8 +117,11 @@ errors return exit 2 and NOT VERIFIED.
 Fingerprint version 2 covers `extension/*` declarations, `doc/settings/*` values, recursive installed packages,
 tests/scenarios and assets, and each declaration's resolved executable/script bytes. It excludes runtime
 receipts/logs/results and caches, including the checker's own state. Limits are 10,000 entries, 32 MiB per asset,
-256 MiB per executable, 512 MiB total and depth 64. Unreadable, unresolved or oversized inputs make identity
-unknown (`setup_id: null`), never a successful empty digest. External directory links and an overlapping
+256 MiB per executable, 512 MiB total and depth 64. A disabled declaration's missing or unresolvable
+program/script is deterministically fingerprinted with its declaration bytes and an `absent` marker; it does not
+make identity unknown. Appearance of that input changes identity, and enabling an unresolved declaration makes
+identity unknown. Existing files that cannot be read (even for disabled declarations), oversized inputs and
+unresolved enabled inputs make identity unknown (`setup_id: null`), never a successful empty digest. External directory links and an overlapping
 state/extensions root are unsupported inputs. Hashes describe configured bytes, not verified loaded images or
 arbitrary unmanaged imports. Selected endpoint/state/extensions paths and the core epoch bind the evidence.
 

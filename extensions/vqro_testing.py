@@ -134,12 +134,19 @@ def digest(parts):
     return result.hexdigest()
 
 
-def _literal_program(program, cwd, path):
+def _literal_program(program, cwd, path, *, executable_only=True):
     if "/" in program or "\\" in program:
         candidate = Path(program)
         candidate = candidate if candidate.is_absolute() else Path(cwd) / candidate
-        return candidate if candidate.is_file() and (sys.platform == "win32" or os.access(candidate, os.X_OK)) else None
-    found = shutil.which(program, path=path)
+        if not executable_only:
+            try:
+                candidate.stat()
+            except FileNotFoundError:
+                return None
+            except OSError:
+                return candidate  # Inaccessible metadata must not be reported as known absence.
+        return candidate if candidate.is_file() and (sys.platform == "win32" or not executable_only or os.access(candidate, os.X_OK)) else None
+    found = shutil.which(program, path=path, mode=os.X_OK if executable_only else os.F_OK)
     return Path(found).resolve() if found else None
 
 
@@ -175,12 +182,12 @@ def _windows_python_program(dirs, exists):
     return None
 
 
-def resolve_program(program, cwd, *, binary=None, path=None):
+def resolve_program(program, cwd, *, binary=None, path=None, executable_only=True):
     path = os.environ.get("PATH", os.defpath) if path is None else path
     if program == "python3":
         override = os.environ.get("VQRO_PYTHON")
         if override:
-            return _literal_program(override, cwd, path)
+            return _literal_program(override, cwd, path, executable_only=executable_only)
         if sys.platform == "win32":
             return _windows_python_program(_windows_path_dirs(path),
                                            lambda candidate: candidate.is_file())
@@ -188,9 +195,9 @@ def resolve_program(program, cwd, *, binary=None, path=None):
         binary = binary or shutil.which("vqro", path=path)
         if binary:
             sibling = Path(binary).resolve().parent / program
-            if sibling.is_file() and os.access(sibling, os.X_OK):
+            if sibling.is_file() and (not executable_only or os.access(sibling, os.X_OK)):
                 return sibling
-    return _literal_program(program, cwd, path)
+    return _literal_program(program, cwd, path, executable_only=executable_only)
 
 
 def script_path(declaration, extensions_dir):
@@ -243,8 +250,21 @@ def fingerprint(extensions_dir, declarations, hello, *, settings=None, state_dir
     programs = {key: resolve_program(value["argv"][0], value.get("cwd") or root) if value.get("argv") else None
                 for key, value in declarations.items()}
     images = {path.resolve() for path in programs.values() if path is not None}
+    absent_allowed = set()
+    for key, declaration in declarations.items():
+        if declaration.get("enabled") is not False:
+            continue
+        script = script_path(declaration, root)
+        if script is not None:
+            absent_allowed.add(Path(os.path.abspath(script)))
+        manifest = Path(declaration.get("manifest") or f"manifests/{key.removeprefix('extension/')}.json")
+        absent_allowed.add(Path(os.path.abspath(manifest if manifest.is_absolute() else root / manifest)))
+        argv = declaration.get("argv") or []
+        if argv and ("/" in argv[0] or "\\" in argv[0]):
+            path = Path(argv[0])
+            absent_allowed.add(Path(os.path.abspath(path if path.is_absolute() else Path(declaration.get("cwd") or root) / path)))
 
-    def file_hash(path, limit):
+    def file_hash(path, limit, *, absent_ok=False):
         path = Path(path)
         try:
             resolved = path.resolve(strict=True)
@@ -274,6 +294,11 @@ def fingerprint(extensions_dir, declarations, hello, *, settings=None, state_dir
             total[0] += count
             cache[resolved] = value.hexdigest()
             return cache[resolved]
+        except FileNotFoundError as error:
+            if absent_ok:
+                return "absent"
+            unknown.append(text(f"{path}: {error}"))
+            return None
         except (OSError, ValueError, RuntimeError) as error:
             unknown.append(text(f"{path}: {error}"))
             return None
@@ -307,7 +332,7 @@ def fingerprint(extensions_dir, declarations, hello, *, settings=None, state_dir
                 return
             if path.is_symlink():
                 try:
-                    target = path.resolve(strict=True)
+                    target = path.resolve()
                     link = os.readlink(path)
                     if target.is_dir():
                         if not target.is_relative_to(root):
@@ -317,14 +342,14 @@ def fingerprint(extensions_dir, declarations, hello, *, settings=None, state_dir
                             raise ValueError("directory link targets excluded runtime/cache inputs")
                         files[relative.as_posix()] = {"link": link}
                     else:
-                        files[relative.as_posix()] = {"link": link, "sha256": file_hash(path, IMAGE_FILE_BYTES if target in images else ASSET_FILE_BYTES)}
+                        files[relative.as_posix()] = {"link": link, "sha256": file_hash(path, IMAGE_FILE_BYTES if target in images else ASSET_FILE_BYTES, absent_ok=path in absent_allowed)}
                 except (OSError, ValueError, RuntimeError) as error:
                     unknown.append(text(f"{path}: {error}"))
                     files[relative.as_posix()] = None
             elif path.is_dir():
                 walk(path, depth + 1)
             else:
-                files[relative.as_posix()] = file_hash(path, IMAGE_FILE_BYTES if path in images else ASSET_FILE_BYTES)
+                files[relative.as_posix()] = file_hash(path, IMAGE_FILE_BYTES if path in images else ASSET_FILE_BYTES, absent_ok=path in absent_allowed)
 
     if root.is_dir():
         walk(root)
@@ -335,16 +360,22 @@ def fingerprint(extensions_dir, declarations, hello, *, settings=None, state_dir
     for key, declaration in sorted(declarations.items()):
         name = key.removeprefix("extension/")
         program = programs[key]
-        executable = file_hash(program, IMAGE_FILE_BYTES) if program else None
-        if program is None:
+        disabled = declaration.get("enabled") is False
+        candidate = program
+        if candidate is None and disabled and declaration.get("argv"):
+            candidate = resolve_program(declaration["argv"][0], declaration.get("cwd") or root, executable_only=False)
+        executable = file_hash(candidate, IMAGE_FILE_BYTES, absent_ok=disabled) if candidate else "absent" if disabled else None
+        if program is None and not disabled:
             unknown.append(text(f"{key}: unresolved argv[0]"))
-        executables[name] = {"path": str(program) if program else None, "sha256": executable}
+        resolution = "unknown" if executable is None else "absent" if program is None or executable == "absent" else "resolved"
+        executables[name] = {"path": str(candidate) if candidate else None,
+                             "sha256": executable if executable != "absent" else None, "resolution": resolution}
         script = script_path(declaration, root)
-        script_hash = file_hash(script, ASSET_FILE_BYTES) if script is not None else None
+        script_hash = file_hash(script, ASSET_FILE_BYTES, absent_ok=disabled) if script is not None else None
         manifest = Path(declaration.get("manifest") or f"manifests/{name}.json")
         if not manifest.is_absolute():
             manifest = root / manifest
-        manifest_hash = file_hash(manifest, ASSET_FILE_BYTES) if manifest.exists() or declaration.get("manifest") else None
+        manifest_hash = file_hash(manifest, ASSET_FILE_BYTES, absent_ok=disabled) if manifest.exists() or declaration.get("manifest") else None
         tests = {path: value for path, value in files.items() if path.startswith(f"tests/{name}/")}
         pieces = {"declaration": declaration, "program": executables[name], "script": script_hash,
                   "manifest": manifest_hash, "tests": tests}
