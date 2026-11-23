@@ -630,3 +630,22 @@ vqro-owned default, a separate optional extension, reverse engineering allowed w
   copies the binary and the optional files. Gate step `e2e-rex` (SKIP without Rex): 26/26 on private servers.
 - Limits: no per-terminal env (spawn with env rejected), UTF-8 input only, Rex's alpha API pinned to revision 19.
   `research/rex.md`.
+
+## Native Windows install attempt (2026-11-23)
+
+- Native MSVC debug/release builds, Python overlapped/proactor named-pipe smokes, real herdr-core 0.1.22
+  terminal spawn/kill/forget and installed TUI PowerShell input/output + recovery/quit succeeded.
+- Fixed quarantine backup publication by closing the reserved destination handle while retaining its cleanup
+  guard. Added byte-preserving vendor attributes after autocrlf broke hash checks (1400-file check now passes).
+- User then reported 24+ separate console windows reopening when closed. Stopped the private services.
+  Added `CREATE_NO_WINDOW` to stdio-only Rust service launches and Python background helper boundaries;
+  left interactive clients and backend-owned terminals unchanged. Console flags are not inherited by helpers.
+- Native detached-core fixture: extension, Python helper, herdr connector all report zero console handles
+  across restart; stdio and shutdown pass (debug + release). Installed full-bundle smoke: 24 declarations,
+  real private herdr/PowerShell echo, Git scan + extension restart, zero new visible desktop windows.
+  All test terminals/services cleaned up. Corrected binaries/helpers installed; nothing left running.
+- Full shell gate still fails on Linux assumptions. Native library rerun: 360 pass / 9 fail / 1 ignored;
+  open-reader persistence, log rotation, fixtures and other recorded failures remain unresolved. No release
+  qualification claimed. Branch: `fix/windows-background-console-windows`.
+- Evidence, installation paths, reproduction commands, test failures and follow-up:
+  `research/windows-native-install.md`. No agent-runtime or cross-user security certification implied.
