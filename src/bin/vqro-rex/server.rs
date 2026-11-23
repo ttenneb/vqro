@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{json, Value};
+#[cfg(all(test, unix))]
+#[path = "status_tests.rs"]
+mod status_tests;
 
 /// The owned server's runtime directory: `<vqro state>/rex`. Unix Rex puts `server.sock` there;
 /// Windows Rex derives an isolated pipe suffix from it. Saved sessions go to `<vqro state>/rex/state`.
@@ -93,14 +96,12 @@ pub fn rex(bin: &Path, dir: &Path) -> std::process::Command {
 /// variables, not a fresh login environment or vqro's own (`VQRO_*`, `HERDR_*`). Windows endpoint discovery uses
 /// Rex's reported value, never a guessed pipe. The marker/reachability are not authentication against same-user replacement.
 pub fn ensure(bin: &Path, dir: &Path) -> Result<PathBuf, String> {
-    #[cfg(unix)]
-    if vqro::rex::transport::connect_sync(&socket(dir)).is_ok() {
-        return if marked(dir) { Ok(socket(dir)) } else {
-            Err("existing Rex endpoint is not marked vqro-owned; use --rex-socket for an external server".into())
-        };
-    }
-    #[cfg(windows)]
-    if let Some(endpoint) = reported_endpoint(bin, dir)? {
+    ensure_with_probe(bin, dir, || native_endpoint(bin, dir))
+}
+
+/// Shared decision path; tests inject the real CLI/socket classifiers without needing native Windows.
+fn ensure_with_probe(bin: &Path, dir: &Path, mut probe: impl FnMut() -> Result<Option<PathBuf>, String>) -> Result<PathBuf, String> {
+    if let Some(endpoint) = probe().map_err(|e| format!("status unknown: {e}; refusing owned server start"))? {
         return if marked(dir) { Ok(endpoint) } else {
             Err("existing Rex endpoint is not marked vqro-owned; use --rex-socket for an external server".into())
         };
@@ -119,13 +120,7 @@ pub fn ensure(bin: &Path, dir: &Path) -> Result<PathBuf, String> {
         }
     }
     for _ in 0..50 {
-        #[cfg(unix)]
-        if vqro::rex::transport::connect_sync(&socket(dir)).is_ok() {
-            if should_mark { vqro::store::write_atomic(&dir.join("vqro-owned"), OWNED_MARKER.as_bytes()).map_err(|e| e.to_string())?; }
-            return Ok(socket(dir));
-        }
-        #[cfg(windows)]
-        if let Some(endpoint) = reported_endpoint(bin, dir)? {
+        if let Some(endpoint) = probe().map_err(|e| format!("status unknown after start: {e}"))? {
             if should_mark { vqro::store::write_atomic(&dir.join("vqro-owned"), OWNED_MARKER.as_bytes()).map_err(|e| e.to_string())?; }
             return Ok(endpoint);
         }
@@ -134,15 +129,41 @@ pub fn ensure(bin: &Path, dir: &Path) -> Result<PathBuf, String> {
     Err("rex server start reported success but its socket does not answer".into())
 }
 
+fn native_endpoint(bin: &Path, dir: &Path) -> Result<Option<PathBuf>, String> {
+    #[cfg(unix)]
+    { let _ = bin; socket_probe(&socket(dir), vqro::rex::transport::connect_sync(&socket(dir))) }
+    #[cfg(windows)]
+    { reported_endpoint(bin, dir) }
+}
+
+#[cfg(unix)]
+fn socket_probe<T>(endpoint: &Path, result: std::io::Result<T>) -> Result<Option<PathBuf>, String> {
+    match result {
+        Ok(_) => Ok(Some(endpoint.to_path_buf())),
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => Ok(None),
+        Err(error) => Err(format!("socket probe {}: {error}", endpoint.display())),
+    }
+}
+
+/// https://www.superlogical.com/rex/docs/automate/cli#machine-readable-output:
+/// only exit 4 means "the server could not be reached". It is the sole CLI absence witness here;
+/// permission/config/protocol failures and invalid JSON are unknown, never permission to start.
+fn cli_json(out: &std::process::Output, operation: &str) -> Result<Option<Value>, String> {
+    if out.status.code() == Some(4) { return Ok(None); }
+    if !out.status.success() {
+        return Err(format!("{operation} failed ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    serde_json::from_slice(&out.stdout).map(Some).map_err(|e| format!("{operation} returned invalid JSON: {e}"))
+}
+
 /// Never derive the pipe SID or REX_RUNTIME_DIR suffix: Rex is the authority on its endpoint.
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn reported_endpoint(bin: &Path, dir: &Path) -> Result<Option<PathBuf>, String> {
     let out = rex(bin, dir).args(["server", "status", "--json"]).output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Ok(None);
+    match cli_json(&out, "rex server status")? {
+        Some(value) => endpoint_from_status(&value).map(Some),
+        None => Ok(None),
     }
-    let value: Value = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
-    endpoint_from_status(&value).map(Some)
 }
 
 #[cfg(any(windows, test))]
@@ -152,24 +173,20 @@ fn endpoint_from_status(value: &Value) -> Result<PathBuf, String> {
 }
 
 fn status(bin: &Path, dir: &Path) -> Result<Value, String> {
-    #[cfg(unix)]
-    let socket = socket(dir);
-    #[cfg(unix)]
-    if vqro::rex::transport::connect_sync(&socket).is_err() {
-        return Ok(json!({"running": false, "socket": socket}));
-    }
-    #[cfg(windows)]
-    let socket = match reported_endpoint(bin, dir)? {
-        Some(endpoint) => endpoint,
-        None => return Ok(json!({"running": false})),
-    };
-    let out = rex(bin, dir).args(["api", "call", "server.status", "{}"]).output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(format!("rex server.status failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    let s: Value = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
-    Ok(json!({"running": true, "socket": socket, "instance": s["instance_id"], "sessions": s["session_count"],
-              "version": s["version"]}))
+    Ok(status_with_probe(bin, dir, || native_endpoint(bin, dir)))
+}
+
+fn status_with_probe(bin: &Path, dir: &Path, mut probe: impl FnMut() -> Result<Option<PathBuf>, String>) -> Value {
+    let observed = (|| {
+        let Some(endpoint) = probe()? else { return Ok(json!({"running":false})); };
+        let out = rex(bin, dir).args(["api", "call", "server.status", "{}"]).output().map_err(|e| e.to_string())?;
+        let Some(s) = cli_json(&out, "rex server.status")? else { return Ok(json!({"running":false})); };
+        if s["instance_id"].as_str().is_none_or(str::is_empty) || !s["session_count"].is_u64() {
+            return Err("rex server.status returned invalid identity/session count".into());
+        }
+        Ok(json!({"running":true,"socket":endpoint,"instance":s["instance_id"],"sessions":s["session_count"],"version":s["version"]}))
+    })();
+    observed.unwrap_or_else(|reason: String| json!({"running":"unknown","reason":format!("status unknown: {reason}")}))
 }
 
 /// Count a complete control snapshot before stop, not an atomic promise about clients arriving afterwards.
@@ -225,6 +242,9 @@ pub async fn command(args: &[String]) -> Result<(), String> {
         println!("{before}");
         return Ok(());
     }
+    if before["running"] == "unknown" {
+        return Err(format!("{}; nothing stopped", before["reason"].as_str().unwrap_or("status unknown")));
+    }
     if before["running"] != true {
         return Err("no reachable vqro-owned rex server; nothing stopped".into());
     }
@@ -242,6 +262,9 @@ pub async fn command(args: &[String]) -> Result<(), String> {
     // Do not hold the coordination lock while waiting for human confirmation.
     let _lock = lock(&dir).await?;
     let current = status(&bin, &dir)?;
+    if current["running"] == "unknown" {
+        return Err(format!("{}; nothing stopped", current["reason"].as_str().unwrap_or("status unknown")));
+    }
     let current = current["instance"].as_str().filter(|s| !s.is_empty())
         .ok_or("rex returned no non-empty instance id on recheck; nothing stopped")?;
     if expected != instance || current != instance {

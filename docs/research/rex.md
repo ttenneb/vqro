@@ -63,7 +63,13 @@ community clients and observing our own private server's traffic; the Rex binary
   server. No conditional-stop API is evidenced. The owned directory must contain the `vqro-owned` marker,
   written only after a successful new owned-server start; an unmarked reachable endpoint is refused, never adopted.
   Markers and socket reachability are coordination evidence, not ownership authentication; same-user path/symlink
-  replacement remains a boundary.
+  replacement remains a boundary. On every platform, only a positive absence witness permits owned startup:
+  the [documented CLI exit4](https://www.superlogical.com/rex/docs/automate/cli#machine-readable-output)
+  ("the server could not be reached"), or Unix socket NotFound/ConnectionRefused. PermissionDenied, other socket
+  errors, other CLI failures, malformed JSON or invalid status shapes are **status unknown**, never absence.
+  Startup refuses without running start or creating a marker on an unknown initial probe. Admin status reports
+  `running:"unknown"` and a reason; stop refuses it. A false result means the recognised negative reachability
+  witness, not an invented program exit. CLI/protocol status failures after a reachable probe stay unknown too.
 - **Terminal environment.** The owned server inherits selected PATH, HOME, LANG, SHELL, USER and LOGNAME values
   from the provider process, not vqro's own variables. These are not a freshly acquired login environment.
 - **Ownership.** Sizing a terminal makes vqro its Rex owner (like any Rex app that resizes it).
@@ -177,7 +183,7 @@ community clients and observing our own private server's traffic; the Rex binary
   sign-out lifetime and real control/data handshakes remain **unverified at runtime**: no Windows host is available.
   Cross-compilation alone cannot establish those behaviours.
 - Checks after rebasing onto the corrected Rex provider plus integrated Windows transport:
-  Linux `cargo test --lib rex::` (9) and `cargo test --bin vqro-rex` (33) pass. The corrected provider's
+  Linux `cargo test --lib rex::` (9) and `cargo test --bin vqro-rex` (38) pass. The corrected provider's
   private-server `tests/e2e_rex.py TARGET` passes all 27 checks.
   `cargo check --target x86_64-pc-windows-gnu --all-targets` passes, including the complete provider
   and owned-server Windows code. An earlier module-only dependency check was blocked by then-unmigrated

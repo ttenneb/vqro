@@ -34,6 +34,10 @@ lock used by vqro's owned-server creation and attach calls. **Other Rex clients 
 outside vqro attaching or creating terminals after the check would be stopped too. Native stop is unconditional,
 so external replacement after the check is still a race; the instance confirmation is not an atomic guarantee.
 
+Only documented CLI exit4 (server unreachable) or Unix missing/refused socket means absent. Permission, config,
+other transport failures and invalid status output are unknown: startup refuses to start, and status reports
+`running: "unknown"` with a reason rather than `false`. Stop refuses unknown status too.
+
 Other arguments: `--rex BIN` (the `rex` program), `--history LINES` (most history sent in a repaint, default 2000).
 
 ## What it does and doesn't do
