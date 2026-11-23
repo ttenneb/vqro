@@ -20,16 +20,18 @@
   (model, thinking level, …) and command rows; `agents.configure {id, value, rev}` / `agents.command {name, text?}` send
   only declared values (a choice from an outdated popup is rejected as stale) and report the outcome honestly (`observed` vs not yet confirmed). Agents without
   declarations show nothing.
-- **Work** in the conversation shows native child agents, background tasks and plan/todo lists when the adapter
+- **Work** in the conversation shows native child agents, background tasks, goals and plan/todo lists when the adapter
   reports them. Child rows follow reported parent relationships, including nested children; missing/cyclic relations
   remain visible rather than being invented. Status, roles, usage, task owners/progress and list items come from the
-  item stream. Unknown states remain unknown, absent sections stay absent, and clipping is explicit. This is derived
+  item stream. A Goal is a separate runtime objective, showing only reported budget/usage; it is never converted
+  into plan steps or an invented percentage. Unknown states remain unknown, absent sections stay absent, and clipping is explicit. This is derived
   observation, not a second task store, coordination inbox or an editable todo list.
   **Open view** follows a child endpoint through ordinary agent navigation (its own capabilities apply), or opens
   an explicitly scoped child in a read-only popup using the parent's stream. Tagged child messages/tools are not
   flattened into the main conversation. Scoped tools stay inline; parent-only tool tables and a message composer
   are not offered there. Requests remain ordinary requests handled through existing parent/native controls.
-  Retained activity is labelled possibly stale during reconstruction/disconnection; item-only updates refresh open
+  Retained activity is labelled possibly stale during reconstruction/disconnection or a resource/item epoch mismatch;
+  the child display shares the inventory's full freshness predicate. Item-only updates refresh open
   child popups. Display-only children do not acquire invented endpoints or controls. Opening a child does not grant
   send/stop authority or imply that stopping its parent stops it. Pi gets no synthetic children/tasks/plans.
 - **Customizations** in Agent settings is a read-only native startup inventory (skills, prompt templates/commands,

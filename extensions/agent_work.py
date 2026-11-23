@@ -1,4 +1,6 @@
 """Bounded native child/task/plan observations; no lifecycle or coordination policy."""
+import math
+
 import agent_transcript as transcript
 
 MAX_ITEMS = 128
@@ -27,7 +29,7 @@ def transcript_entities(entities, scope=None):
         value = record[1]
         if not isinstance(value, dict):
             continue
-        if kind in ('child', 'task') or kind == 'plan' and isinstance(value.get('items'), list):
+        if kind in ('child', 'task', 'goal') or kind == 'plan' and isinstance(value.get('items'), list):
             continue
         if kind == 'receipt':
             out[key] = record
@@ -53,6 +55,7 @@ def work_rows(entities, resource, scope=None):
     children = values(entities, 'child')
     tasks = values(entities, 'task')
     plans = values(entities, 'plan')
+    goals = values(entities, 'goal')
     sections = []
     by_parent = {}
     for eid, value in children.items():
@@ -195,6 +198,29 @@ def work_rows(entities, resource, scope=None):
     if task_rows:
         sections.append({'id': 'work:tasks', 'text': 'Background tasks', 'style': 'heading', 'expanded': True,
                          'children': transcript.bounded_children(task_rows, WORK_BYTES, 'tasks')})
+
+    for eid, value in list(goals.items())[:MAX_ITEMS]:
+        if scope is not None and value.get('owner') != scope:
+            continue
+        state = status(value, ('active', 'paused', 'blocked', 'completed', 'unknown'))
+        body = [{'type': 'text', 'text': shown(value.get('objective'), 512) or 'Objective not reported'}]
+        budget = value.get('budget') if isinstance(value.get('budget'), dict) else {}
+        used = value.get('used') if isinstance(value.get('used'), dict) else {}
+        reported = []
+        if type(budget.get('tokens')) is int and budget['tokens'] >= 0:
+            reported.append('Budget tokens: ' + str(budget['tokens']))
+        if type(used.get('tokens')) is int and used['tokens'] >= 0:
+            reported.append('Used tokens: ' + str(used['tokens']))
+        seconds = used.get('seconds')
+        if (type(seconds) is int and seconds >= 0) or (type(seconds) is float and seconds >= 0 and math.isfinite(seconds)):
+            reported.append('Used seconds: ' + str(seconds))
+        if reported:
+            body.append({'type': 'text', 'style': 'dim', 'text': shown(' · '.join(reported), 1024)})
+        sections.append({'id': 'work:goal:' + eid, 'text': 'Goal · ' + state,
+                         'style': 'heading', 'expanded': True, 'description': 'Owner: ' + owner(value),
+                         'children': body})
+    if len(goals) > MAX_ITEMS:
+        sections.append({'type': 'text', 'style': 'dim', 'text': 'More goals not shown here (pane limit)'})
 
     for eid, value in list(plans.items())[:MAX_ITEMS]:
         items = value.get('items')

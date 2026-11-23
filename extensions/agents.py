@@ -987,8 +987,8 @@ class Agents:
                               "if it sends that much, the conversation stops updating and says so."})
             if c.view.epoch is None:
                 return notes + [{"type": "text", "style": "dim", "text": "Loading the conversation…"}]
-            if not c.reconstruction_ready:
-                notes.append({"type": "text", "style": "warn", "text": "Retained conversation and customization inventory may be stale; waiting for valid reconstruction on this stream."})
+            if not self.view_ready(c, r):
+                notes.append({"type": "text", "style": "warn", "text": "Retained conversation and native work may be stale; waiting for matching valid reconstruction on this stream."})
             session = agent_facts(r).get("session") if isinstance(agent_facts(r).get("session"), dict) else {}
             live = agent_transcript.notice_rows(c.notices, names.agent_name(r["id"]))
             out = notes + agent_transcript.rows(agent_work.transcript_entities(c.view.entities), names, c.view.coverage, self.view_of(r["id"]),
@@ -1134,12 +1134,22 @@ class Agents:
         result = self.ext.invoke("tabs.show", {"view": view(r["id"]), "title": label(r.get("name") or "Agent")+" "+r["id"]})
         return {"resource": r["id"], "view": view(r["id"]), "tab": result, "client": {"close": True, "focus": {"view": view(r["id"])}}}
 
+    @staticmethod
+    def view_ready(c, r):
+        """One freshness predicate for native inventory and child display; caller holds the view lock."""
+        epoch = c.view.epoch
+        reported_epoch = agent_facts(r).get("epoch")
+        return bool(c.reconstruction_ready and epoch is not None and not c.view.broken
+                    and not c.view.snapshot_pending and c.stream is not None
+                    and r.get("available") and r.get("state") == "live"
+                    and (reported_epoch is None or reported_epoch == epoch))
+
     def child_snapshot(self, r):
         c = self.conversations.get(r["id"])
         if c is None:
             return {}, False, None
         with c.lock:
-            return dict(c.view.entities), bool(c.reconstruction_ready and r.get("available") and r.get("state") == "live"), c.view.coverage
+            return dict(c.view.entities), self.view_ready(c, r), c.view.coverage
 
     def child_panel(self, r, child):
         entities, ready, coverage = self.child_snapshot(r)
@@ -1479,10 +1489,9 @@ class Agents:
         if conversation is not None:
             with conversation.lock:
                 epoch = conversation.view.epoch
-                ready = conversation.reconstruction_ready and epoch is not None and not conversation.view.broken and not conversation.view.snapshot_pending and conversation.stream is not None
+                ready = self.view_ready(conversation, r)
                 rev, startup = conversation.view.entities.get(("startup", "current"), (None, {}))
         resource_epoch = agent_facts(r).get("epoch")
-        ready = ready and (resource_epoch is None or resource_epoch == epoch)
         stamp = hashlib.sha256(json.dumps([epoch, resource_epoch, ready, rev, commands], sort_keys=True).encode()).hexdigest()
         return stamp, commands, startup if isinstance(startup, dict) else {}, epoch, ready
 

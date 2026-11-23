@@ -82,6 +82,24 @@ class WorkRows(unittest.TestCase):
         self.assertTrue(any(row.get('args', {}).get('child') == 'not-reported' for row in rows))
         self.assertIn('not reported', json.dumps(rows))
 
+    def test_native_goal_is_distinct_from_plan_and_keeps_reported_budget_and_usage(self):
+        values = self.fixture()
+        values.update(entities({('goal', 'main'): {'owner': None, 'objective': 'Keep the service healthy', 'status': 'active',
+                                                  'budget': {'tokens': 10000}, 'used': {'tokens': 120, 'seconds': 2.5}},
+                                ('goal', 'child'): {'owner': 'review', 'objective': 'Review security', 'status': 'blocked'}}))
+        rows = list(flatten(agent_work.work_rows(values, 'r2')))
+        goal = next(row for row in rows if row.get('id') == 'work:goal:main')
+        self.assertIn('Goal', goal['text'])
+        self.assertNotIn('Plan', goal['text'])
+        shown = json.dumps(goal)
+        for reported in ('Keep the service healthy', '10000', '120', '2.5'):
+            self.assertIn(reported, shown)
+        self.assertNotIn('%', shown)
+        child = json.dumps(agent_work.work_rows(values, 'r2', scope='review'))
+        self.assertIn('Review security', child)
+        self.assertNotIn('Keep the service healthy', child)
+        self.assertNotIn(('goal', 'main'), agent_work.transcript_entities(values))
+
     def test_long_lists_are_bounded_and_explicitly_clipped(self):
         values = entities({('plan', 'big'): {'items': [{'text': 'x' * 4000, 'status': 'pending'} for _ in range(500)]}})
         shown = json.dumps(agent_work.work_rows(values, 'r2'))

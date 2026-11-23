@@ -692,6 +692,23 @@ class AgentPane(unittest.TestCase):
         with self.assertRaises(VqroError):
             self.agents.child_view({'resource': 'r2', 'child': 'display'})
 
+    def test_child_popup_marks_resource_epoch_ahead_of_items_and_recovers(self):
+        values = {('child', 'review'): {'parent': None, 'items': 'scoped', 'status': 'running'},
+                  ('message', 'kid'): {'child': 'review', 'position': 1, 'role': 'assistant', 'content': text('OLD EPOCH')}}
+        self.core.resources['r2']['data']['agent'] = {'epoch': 'e1'}
+        self.feed(snapshot(values))
+        self.agents.child_view({'resource': 'r2', 'child': 'review'})
+        self.assertNotIn('may be stale', json.dumps(self.core.live['agents-children-r2']))
+        self.core.resources['r2']['data']['agent']['epoch'] = 'e2'
+        self.agents.publish_panel(self.core.resources['r2'])
+        self.assertIn('may be stale', json.dumps(self.core.live['agents-children-r2']))
+        values[('message', 'kid')]['content'] = text('NEW EPOCH')
+        self.feed(snapshot(values).replace(b'"epoch": "e1"', b'"epoch": "e2"'))
+        current = json.dumps(self.core.live['agents-children-r2'])
+        self.assertNotIn('may be stale', current)
+        self.assertIn('NEW EPOCH', current)
+        self.assertNotIn('OLD EPOCH', current)
+
     def test_parent_tool_table_and_scoped_inline_tools_do_not_cross_scopes(self):
         self.feed(snapshot({
             ('child', 'review'): {'parent': None, 'items': 'scoped'},
