@@ -56,6 +56,36 @@ async fn until(mut predicate: impl FnMut() -> bool) {
     }
 }
 
+// Readiness is an observed hello, not a startup-latency assertion. Race it
+// against child death, including while hello itself is pending. The wall bound
+// only catches hangs (the same 30s convention as support/timing.rs).
+async fn ready(child: &mut Child, socket: &Path) -> Result<vqro::rpc::Peer, String> {
+    let connect = async {
+        loop {
+            match client::connect(socket, "lifetime-test").await {
+                Ok((peer, _incoming, _hello)) => break peer,
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    };
+    let exited = async {
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break format!("core exited: {status}"),
+                Err(error) => break format!("cannot observe core exit: {error}"),
+                Ok(None) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    };
+    tokio::select! {
+        biased;
+        error = exited => Err(error),
+        peer = connect => Ok(peer),
+        _ = tokio::time::sleep(Duration::from_secs(30)) =>
+            Err("core still running but hello readiness hang bound exceeded".into()),
+    }
+}
+
 async fn exercise(signal: &str, include_reader: bool) {
     let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(base).unwrap();
@@ -76,6 +106,8 @@ if sys.argv[1] == 'connected':
 pathlib.Path(sys.argv[2]).write_text(str(__import__('os').getpid()))
 threading.Event().wait()
 "#).unwrap();
+    let log_path = root.path().join("core.log");
+    let log = std::fs::File::create(&log_path).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["serve", "--fake"]).env_clear()
         .env("HOME", root.path().join("home")).env("PATH", "/usr/bin:/bin")
@@ -87,19 +119,12 @@ threading.Event().wait()
         .env("VQRO_EXTENSIONS_DIR", root.path().join("extensions"))
         .env("PYTHONPATH", PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("extensions"))
         .current_dir(root.path())
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(log)
         .spawn().unwrap();
     let mut core = Core { child, owned: Vec::new(), root };
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let peer = loop {
-        match client::connect(&socket, "lifetime-test").await {
-            Ok((peer, _incoming, _hello)) => break peer,
-            Err(_) => {
-                assert!(Instant::now() < deadline, "private core did not start");
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }
-    };
+    let peer = ready(&mut core.child, &socket).await.unwrap_or_else(|error| {
+        panic!("{error}\ncore stderr:\n{}", std::fs::read_to_string(&log_path).unwrap());
+    });
     let names: &[&str] = if include_reader { &["connected", "blocked", "reader"] } else { &["connected", "blocked"] };
     for &name in names {
         let ready = core.root.path().join(format!("{name}.ready"));
@@ -126,6 +151,52 @@ threading.Event().wait()
     until(|| core.child.try_wait().unwrap().is_some()).await;
     // A retained dead socket connection must not keep any extension alive.
     until(|| core.live().is_empty()).await;
+}
+
+#[tokio::test]
+async fn readiness_reports_early_core_exit() {
+    let root = tempfile::tempdir().unwrap();
+    let mut core = Core {
+        child: Command::new("/bin/sh").env_clear().args(["-c", "exit 23"])
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+            .spawn().unwrap(),
+        owned: Vec::new(),
+        root,
+    };
+    let socket = core.root.path().join("never-bound.sock");
+    let error = ready(&mut core.child, &socket).await.err().expect("dead child is not ready");
+    assert!(error.contains("core exited: exit status: 23"), "{error}");
+}
+
+#[tokio::test]
+async fn readiness_reports_exit_while_hello_is_pending() {
+    use tokio::io::AsyncBufReadExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("pending-hello.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let mut core = Core {
+        child: Command::new("/bin/sh").env_clear().args(["-c", "read token; exit 23"])
+            .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null())
+            .spawn().unwrap(),
+        owned: Vec::new(),
+        root,
+    };
+    let input = core.child.stdin.take().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut reader = tokio::io::BufReader::new(stream);
+        let mut hello = String::new();
+        reader.read_line(&mut hello).await.unwrap();
+        // Exit only after receiving hello; keep its reply deliberately pending.
+        drop(input);
+        std::future::pending::<()>().await;
+        drop(reader);
+    });
+    let result = ready(&mut core.child, &socket).await;
+    server.abort();
+    let error = result.err().expect("dead child with pending hello is not ready");
+    assert!(error.contains("core exited: exit status: 23"), "{error}");
 }
 
 #[tokio::test]
