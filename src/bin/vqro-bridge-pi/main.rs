@@ -332,7 +332,10 @@ async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant,owner_proven:bool
         if agent.configuration.pending{return rejected("busy","native configuration change is unresolved");}
         if args["mode"]=="start" && agent.state()!="idle"{return rejected("busy","endpoint is not evidenced idle");}
         if agent.caps()["agent.send"]["modes"].get(args["mode"].as_str().unwrap_or("")).is_none(){return rejected("unsupported","mode not in current capabilities");}
-        let slash_names=agent.commands.slash_names();
+        // While extensions are loaded they can register commands at any time (Pi's registerCommand stays callable and the
+        // runner reads live maps), and Pi reports no change: the start-up get_commands list is no proof that a
+        // /name is free. The slash namespace is then unknown: every leading /name is refused (contract::send).
+        let slash_names=if agent.expanders_on{None}else{agent.commands.slash_names()};
         let context=contract::Context {caps_rev:agent.caps()["rev"].as_u64().unwrap(),epoch:agent.epoch(),session:current.metadata["sessionId"].as_str(),owner_proven,
             images:agent.caps()["agent.send"]["content"]["types"].as_array().is_some_and(|types|types.iter().any(|kind|kind=="image")),literal:true,
             slash_names:slash_names.as_deref()};

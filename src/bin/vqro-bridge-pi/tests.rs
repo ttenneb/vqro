@@ -428,3 +428,33 @@ fn launch_argv_never_proves_no_input_transforms(){
         assert!(launch_may_transform(&argv),"{argv:?}");
     }
 }
+
+/// lead-secondary on 0cba2157: a command a Pi extension registers after start-up (never in get_commands) cannot slip
+/// through: with extensions loaded the slash namespace is unknown, so a send of "/late" is refused before any native
+/// write, also after an epoch change; agent.command stays the explicit route.
+#[tokio::test]
+async fn a_late_registered_command_name_is_refused_while_extensions_are_loaded(){
+    let root=tempfile::tempdir().unwrap();
+    let fake=format!("{}/tests/fixtures/fake_pi.py",env!("CARGO_MANIFEST_DIR"));
+    let (shared,provider,mut core)=fixture_native(root.path(),&["/usr/bin/python3".into(),fake]).await;
+    shared.native.get().unwrap().call("get_state",json!({}),Duration::from_secs(2)).await.unwrap();
+    shared.native.get().unwrap().call("get_commands",json!({}),Duration::from_secs(2)).await.unwrap();
+    assert!(shared.agent.lock().unwrap().commands.slash_names().is_some_and(|names|!names.iter().any(|n|n=="late")),"/late is not advertised");
+    // The proven owner's own plain text: the only text Pi could read as a leading /name (others are framed).
+    async fn owner_send(shared:&Arc<Shared>,provider:&Provider,core:&mut Core,id:u64,mode:&str,text:&str)->Outcome{
+        let wire=json!({"jsonrpc":"2.0","id":id,"method":"effect.invoke","params":{"generation":1,"effect":format!("o{id}"),"op":"agent.send","ref":"agent","incarnation":"","deadline_ms":2000,
+            "principal":"person:owner","actor":"extension:agents","initiator":"person:owner",
+            "args":{"v":0,"mode":mode,"delivery":format!("o{id}"),"origin":{"kind":"human"},"content":[{"type":"text","text":text}]}}});
+        core.w.write_all(format!("{wire}\n").as_bytes()).await.unwrap();
+        let Request::Effect(effect)=core.requests.as_mut().unwrap().recv().await.unwrap() else{panic!("not effect")};
+        let owner=async{let get=core.recv().await;core.reply(&get,json!({"value":"person:owner"})).await;};
+        let (outcome,())=tokio::join!(invoke(shared,provider,&effect),owner);let outcome=outcome.unwrap();
+        effect.respond(Ok(outcome.clone()));let reply=core.recv().await;assert_eq!(reply["id"],id);outcome
+    }
+    let refused=|outcome:&Outcome|matches!(outcome,Outcome::Rejected{kind,message} if kind=="unsupported" && message.contains("may run as a Pi command"));
+    let outcome=owner_send(&shared,&provider,&mut core,1,"start","/late").await;assert!(refused(&outcome),"{outcome:?}");
+    shared.agent.lock().unwrap().new_session_epoch();
+    let outcome=owner_send(&shared,&provider,&mut core,2,"settle","/late again").await;assert!(refused(&outcome),"{outcome:?}");
+    assert!(shared.agent.lock().unwrap().receipts.is_empty(),"nothing reached Pi");
+    dispose(&shared,&provider).await;
+}

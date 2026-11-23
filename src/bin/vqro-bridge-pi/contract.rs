@@ -201,8 +201,12 @@ pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
         // excludes U+0085), its extension-command lookup on ' ' only. Refuse if any reading names a known item.
         let candidates=[rest.split(js_space).next().unwrap_or(""),rest.split(' ').next().unwrap_or(""),rest.split(char::is_whitespace).next().unwrap_or("")];
         for name in candidates.into_iter().filter(|name|!name.is_empty()) {
-            if context.slash_names.is_none_or(|names|names.iter().any(|known|known==name)) {
-                return Err(reject("unsupported",format!("/{name} would be expanded or run by the native runtime (template or command), not delivered literally; run it with agent.command").as_str()));
+            match context.slash_names {
+                // Unknown namespace (extensions can register commands at any time): never claim a known command.
+                None=>return Err(reject("unsupported",format!("text starting with /{name} may run as a Pi command or template; to send it as text, start with a space or another character; to run a command use agent.command").as_str())),
+                Some(names) if names.iter().any(|known|known==name)=>
+                    return Err(reject("unsupported",format!("/{name} would be expanded or run by the native runtime (template or command), not delivered literally; run it with agent.command").as_str())),
+                Some(_)=>{},
             }
         }
     }

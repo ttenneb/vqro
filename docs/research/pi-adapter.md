@@ -17,8 +17,10 @@ Fake/public-wire evidence and the final installed-Pi1 regression/smoke remain se
   unknown) is refused as non-literal: run it with agent.command. With extensions loaded, agent.send.literal is
   "none", input_transform is "may" (Pi names only command-bearing extensions) and every receipt carries
   may_transform "unknown". The launch argv never proves "none" (only Pi's own parsing, possibly behind a wrapper,
-  decides whether --no-extensions took effect, and Pi does not report it). A leading /name is read the ways Pi reads
-  it (JavaScript \s for templates, ' ' for extension commands) and refused if any reading names a known item.
+  decides whether --no-extensions took effect, and Pi does not report it). With extensions loaded the slash namespace is
+  unknown (an extension may register a command at any time; Pi reports no change), so every literal send whose text
+  Pi would read as a leading /name (JavaScript \s, ' ', or Rust whitespace) is refused, with a reason that names no
+  command: start the text with another character to send it as text, or use agent.command.
   Extensions carry their path as name (Pi names none).
 - Snapshots are tail coverage, not complete native history. Shared ItemJournal owns the sole retained entity
   document; native events become puts/appends, with explicit oversized-content omissions.

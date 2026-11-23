@@ -253,3 +253,21 @@ fn slash_name_readings_follow_javascript_whitespace(){
     }
     args["content"]=json!([{"type":"text","text":"/reviewer\u{FEFF}x"}]);assert!(send(&args,&owner).is_ok());
 }
+
+/// lead-secondary on 0cba2157: with an unknown slash namespace (extensions may register commands later) every leading
+/// /name is refused in every mode, and the reason never claims a known command.
+#[test]
+fn unknown_slash_namespace_refuses_every_leading_name_without_claiming_a_command(){
+    for mode in ["start","admit","boundary","settle"] {
+        let mut args=input();args["mode"]=json!(mode);args["origin"]["kind"]=json!("human");args["render"]=json!(["user"]);
+        let owner=Context {owner_proven:true,slash_names:None,..context()};
+        for text in ["/late","/late run it","/late\u{FEFF}x","/anything-never-advertised"] {
+            args["content"]=json!([{"type":"text","text":text}]);
+            let error=send(&args,&owner).err().unwrap();
+            assert_eq!(error.kind,"unsupported","{mode} {text:?}");
+            assert!(error.message.contains("may run as a Pi command") && error.message.contains("start with a space") && error.message.contains("agent.command"),"{}",error.message);
+            assert!(!error.message.contains("would be expanded"),"never asserts a known command: {}",error.message);
+        }
+        for text in [" /late","late","/"] {args["content"]=json!([{"type":"text","text":text}]);assert_eq!(send(&args,&owner).unwrap().args["message"],text,"{mode} {text:?}");}
+    }
+}
