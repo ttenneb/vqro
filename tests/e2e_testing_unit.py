@@ -34,10 +34,13 @@ class Control(unittest.TestCase):
         self.assertTrue(True)
 '''
 FAIL_TEST = PASS_TEST.replace('self.assertTrue(True)', 'self.fail("intentional negative control")')
-ENV_TEST = '''import os, unittest
+ENV_TEST = '''import os, pathlib, unittest
 class Control(unittest.TestCase):
     def test_no_endpoint_or_supervision_environment(self):
-        self.assertEqual([], sorted(k for k in os.environ if k.startswith(("VQRO_", "HC_", "HERDR_"))))
+        self.assertEqual(["VQRO_TEST_EXTENSIONS_DIR"], sorted(
+            k for k in os.environ if k.startswith(("VQRO_", "HC_", "HERDR_"))))
+        self.assertEqual(str(pathlib.Path(__file__).resolve().parents[2]),
+                         os.environ["VQRO_TEST_EXTENSIONS_DIR"])
 '''
 
 
@@ -275,6 +278,16 @@ def negative(core, oracle):
     core.seed("ctl-traceback", script='import sys\nprint("Traceback (most recent call last):", file=sys.stderr, flush=True)\n' + HEALTHY)
     core.seed("ctl-failtest", test=FAIL_TEST)
     core.seed("ctl-envleak", test=ENV_TEST)
+    # Prove the exception cannot hide an endpoint or another inherited live variable.
+    environment = {"HOME": core.env["HOME"], "PATH": core.env["PATH"],
+                   "VQRO_TEST_EXTENSIONS_DIR": str(core.ext)}
+    for variable in ("VQRO_TEST_EXTENSIONS_DIR", "VQRO_SOCKET", "HC_SOCKET", "HERDR_SOCKET"):
+        contaminated = dict(environment, **{variable: str(core.sock)})
+        control = subprocess.run([sys.executable, "-B", "-m", "unittest", "discover", "-s", "."],
+                                 cwd=core.ext / "tests/ctl-envleak", env=contaminated,
+                                 capture_output=True, text=True, timeout=10)
+        oracle.check("environment control rejects " + variable, control.returncode != 0,
+                     control.stdout + control.stderr)
     core.seed("ctl-needs", needs=True)
     core.seed("ctl-off", enabled=False)
     core.settled({"ctl-ok": "running", "ctl-crash": "failed", "ctl-missing": "failed",
