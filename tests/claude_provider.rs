@@ -162,6 +162,18 @@ fn inputs(path: &std::path::Path) -> Vec<Value> {
 async fn synthetic_process_provider_vertical_slice() {
     let root = tempfile::tempdir().unwrap();
     let log = root.path().join("synthetic-wire.jsonl");
+    struct Dump(std::path::PathBuf);
+    impl Drop for Dump {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                eprintln!(
+                    "synthetic wire evidence:\n{}",
+                    std::fs::read_to_string(&self.0).unwrap_or_default()
+                );
+            }
+        }
+    }
+    let _dump = Dump(log.clone());
     let shared = Shared::new(
         "fixture-boot".into(),
         "claude-fixture".into(),
