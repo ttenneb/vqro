@@ -38,6 +38,85 @@ def row(check, subject, status, evidence, advice=None):
             "evidence": text(evidence), "advice": text(advice) if advice else None}
 
 
+CHECKER_CLIENTS = frozenset(("test-unit", "test-integration", "test-perf"))
+FAKE_BACKEND_COVERAGE = "needs a real backend; the sandbox uses the fake backend"
+
+
+def dependency_facts(dependencies):
+    """Checker clients are observers, not rendering clients whose UI support is under test."""
+    if not dependencies:
+        return dependencies
+    result = dict(dependencies)
+    for field in ("needs", "works_with"):
+        if field not in dependencies:
+            continue
+        kept = []
+        for original in dependencies[field]:
+            item = dict(original)
+            if item.get("cap", "").startswith("ui/") and item.get("status") in ("unknown", "lacking"):
+                labels = item.get("unknown_in", []) + item.get("lacking_in", [])
+                if labels and all(label in CHECKER_CLIENTS for label in labels):
+                    continue
+                if labels:
+                    for key in ("unknown_in", "lacking_in"):
+                        item[key] = [label for label in item.get(key, []) if label not in CHECKER_CLIENTS]
+                    item["status"] = "lacking" if item["lacking_in"] else "unknown" if item["unknown_in"] else "satisfied"
+            kept.append(item)
+        result[field] = kept
+    if dependencies.get("status") in ("ok", "degraded", "missing") and any(field in dependencies for field in ("needs", "works_with")):
+        hard = [item for item in result.get("needs", []) if item.get("status") != "satisfied" and not item.get("cap", "").startswith("ui/")]
+        other = [item for field in ("needs", "works_with") for item in result.get(field, []) if item.get("status") != "satisfied"]
+        result["status"] = "missing" if hard else "degraded" if other else "ok"
+    return result
+
+
+def dependency_row(name, facts, *, fake_providers=None):
+    dependencies = dependency_facts(facts.get("dependencies"))
+    if facts.get("enabled") is False or not dependencies:
+        return row("deps", name, "skip", "off" if facts.get("enabled") is False else "no dependency facts")
+    status = {"missing": "fail", "degraded": "warn", "ok": "pass"}.get(dependencies.get("status"), "unverified")
+    unmet = [(field, item) for field in ("needs", "works_with") for item in dependencies.get(field, []) if item.get("status") != "satisfied"]
+    backend, remaining = [], []
+    for field, item in unmet:
+        providers = item.get("providers") or []
+        names = [provider.get("name") for provider in providers]
+        if (fake_providers and item.get("status") == "off" and names
+                and all(provider.get("display_status") == "off" for provider in providers)
+                and all(provider in fake_providers for provider in names)
+                and any(fake_providers[provider] for provider in names)):
+            backend.append(item)
+        else:
+            remaining.append((field, item))
+    if backend and status != "unverified":
+        hard = any(field == "needs" and not item.get("cap", "").startswith("ui/") for field, item in remaining)
+        status = "fail" if hard else "warn" if remaining else "unverified"
+    evidence = {"status": dependencies.get("status"), "unmet": [item for _, item in remaining]}
+    message = FAKE_BACKEND_COVERAGE + ": " + text([item["cap"] for item in backend]) if backend and not remaining else evidence
+    result = row("deps", name, status, message,
+                 "; ".join(str(item["suggest"]) for _, item in remaining if item.get("suggest")))
+    if backend:
+        result["backend_unavailable"] = [item["cap"] for item in backend]
+    return result
+
+
+def source_mark(client):
+    snapshot = client.call("workspace.snapshot")
+    facts = client.call("extension.list")["extensions"]
+    declarations = {key: entry["value"] for key, entry in snapshot["entries"].items() if key.startswith("extension/")}
+    return snapshot, {"seq": snapshot["seq"], "epoch": snapshot["epoch"],
+                      "declarations": digest([canonical(declarations)]),
+                      "generations": {name: fact.get("generation") for name, fact in facts.items()}}
+
+
+def source_untouched(before, after):
+    changed = [field for field in ("declarations", "generations") if before[field] != after[field]]
+    evidence = ("source setup changed during the run; results are not about one setup: " + ", ".join(changed)) if changed else (
+        f"source declarations/generations unchanged; seq {before['seq']} -> {after['seq']} (informational)")
+    result = row("live", "untouched", "fail" if changed else "pass", evidence)
+    result["observed"] = {"before": before, "after": after}
+    return result
+
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
@@ -405,7 +484,7 @@ class Sandbox:
             self.env["VQRO_HERDR"] = '["/bin/false"]'
         self.process = self.client = self.log = None
         self.groups, self.declarations, self.audit_rows = [], {}, []
-        self.info = {"root": str(self.root), "backend": backend, "started": False, "not_copied": [],
+        self.info = {"root": str(self.root), "backend": backend, "started": False, "not_copied": [], "fake_providers": {},
                      "canary": {"status": "not run", "checked": {"env": [], "paths": {}}, "violations": []},
                      "excluded": [], "rebased": [], "vqro": None}
         self.leftovers, self.lifetime_rows = [], []
@@ -507,6 +586,7 @@ class Sandbox:
         if external and not self.allow_external:
             value["enabled"] = False
         if provider and self.backend == "fake":
+            self.info["fake_providers"][name] = value.get("enabled", True)
             value["enabled"] = False
         status = "unverified" if external and not self.allow_external else "pass"
         why = "external launch paths kept off: " + ", ".join(external) if status == "unverified" else "launch paths rebased/contained"
@@ -740,8 +820,7 @@ def smoke(sandbox, *, readiness=60, window=10):
                    and previous.get("display_status") == "running"
                    and fact.get("generation") == previous.get("generation"))
         rows.append(row("start", name, "pass" if healthy else "fail", fact if not healthy else "running, 0 crashes across survival window"))
-        deps = fact.get("dependencies")
-        rows.append(row("deps", name, {"ok": "pass", "missing": "fail", "degraded": "warn"}.get((deps or {}).get("status"), "skip"), deps or "no dependency facts"))
+        rows.append(dependency_row(name, fact, fake_providers=sandbox.info["fake_providers"]))
         provides = (fact.get("manifest") or {}).get("provides", [])
         missing_commands = [cap[8:].split("@")[0] for cap in provides if cap.startswith("command/")
                             and not any(fnmatchcase(c, cap[8:].split("@")[0]) for c in commands)]
@@ -911,6 +990,11 @@ def compare_runs(baseline, candidate, scenarios):
         rows.append(row("compare/scenario", name, status, evidence))
     for ident, current in after.items():
         if not ident.startswith("scenario/") and current["status"] != "pass":
+            if ident.startswith("deps/") and current["status"] == "unverified" and current.get("backend_unavailable"):
+                result = row("compare/smoke", ident, "unverified", FAKE_BACKEND_COVERAGE)
+                result["backend_unavailable"] = current["backend_unavailable"]
+                rows.append(result)
+                continue
             regression = before.get(ident, {}).get("status") == "pass"
             rows.append(row("compare/smoke", ident, "fail" if regression else "warn",
                             "regression" if regression else "already failing before the change"))

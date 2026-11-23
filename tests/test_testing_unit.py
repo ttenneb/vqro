@@ -90,13 +90,36 @@ class HealthChecks(unittest.TestCase):
     def test_dependency_statuses_and_unmet_suggestion(self):
         for status, expected in [("missing", "fail"), ("degraded", "warn"), ("ok", "pass"), ("future", "unverified")]:
             with self.subTest(status=status):
-                facts = {"enabled": True, "dependencies": {"status": status, "needs": [
-                    {"cap": "command/fixture", "status": "missing", "suggest": "fixture"}]}}
+                field = "works_with" if status == "degraded" else "needs"
+                facts = {"enabled": True, "dependencies": {"status": status, field: [
+                    {"cap": "command/fixture", "status": "satisfied" if status == "ok" else "missing", "suggest": "fixture"}]}}
                 item = unit.dependency_row("sample", facts)
                 self.assertEqual(item["status"], expected)
-                self.assertIn("command/fixture", item["evidence"])
-                self.assertEqual(item["advice"], "fixture")
+                if status != "ok":
+                    self.assertIn("command/fixture", item["evidence"])
+                self.assertEqual(item["advice"], None if status == "ok" else "fixture")
         self.assertEqual(unit.dependency_row("sample", {"dependencies": None})["status"], "skip")
+
+    def test_ui_dependency_ignores_only_the_checkers_own_labels(self):
+        for labels, expected in [(["test-unit"], "pass"), (["test-unit", "test-integration", "test-perf"], "pass"),
+                                 (["test-unit", "other-client"], "warn"), (["other-client"], "warn"), ([], "warn")]:
+            for kind in ("unknown_in", "lacking_in"):
+                with self.subTest(labels=labels, kind=kind):
+                    dependencies = {"status": "degraded", "needs": [
+                        {"cap": "ui/vqro.items", "status": "unknown" if kind == "unknown_in" else "lacking", kind: labels}]}
+                    original = json.loads(json.dumps(dependencies))
+                    item = unit.dependency_row("sample", {"dependencies": dependencies})
+                    self.assertEqual(item["status"], expected)
+                    self.assertEqual(dependencies, original)
+                    if "other-client" in labels:
+                        self.assertIn("other-client", item["evidence"])
+                        self.assertNotIn("test-unit", item["evidence"])
+        real_missing = {"status": "missing", "needs": [
+            {"cap": "ui/vqro.items", "status": "unknown", "unknown_in": ["test-unit"]},
+            {"cap": "ability/missing", "status": "missing", "providers": []}]}
+        self.assertEqual(unit.dependency_row("sample", {"dependencies": real_missing})["status"], "fail")
+        real_ui = {"status": "ok", "needs": [{"cap": "ui/vqro.items", "status": "unknown", "unknown_in": ["other-client"]}]}
+        self.assertEqual(unit.dependency_row("sample", {"dependencies": real_ui})["status"], "warn")
 
     def test_disabled_paths_warn_without_runtime_checks(self):
         self.facts["sample"].update(enabled=False, display_status="off")

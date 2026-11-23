@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_testing import (EXIT_CODES, RECEIPT_BYTES, STATUSES, PlainClient, Sandbox, canonical,
                           discover_scenarios, endpoints, fingerprint, private_processes,
                           row, script_path, text, utc_now, write_receipt,
-                          scenario_matches, run_scenarios)
+                          scenario_matches, run_scenarios, source_mark, source_untouched)
 from testing_unit import offline_facts
 
 DEFAULTS = {"relative_slowdown": 0.25, "noise_ms": 5, "rss_relative": 0.25, "noise_rss_mb": 10,
@@ -176,7 +176,8 @@ def verdict(rows, error=False):
         return "error"
     if any(r["status"] == "fail" for r in rows):
         return "fail"
-    if not rows or any(r["status"] == "unverified" for r in rows):
+    counting = [r for r in rows if r["id"] != "live/untouched"]
+    if not counting or any(r["status"] == "unverified" for r in counting):
         return "unverified"
     return "pass"
 
@@ -199,13 +200,6 @@ def parser():
     result.add_argument("--repeats", default=5)
     result.add_argument("--window", default=10)
     return result
-
-
-def source_mark(client):
-    snapshot = client.call("workspace.snapshot")
-    facts = client.call("extension.list")["extensions"]
-    return snapshot, {"seq": snapshot["seq"], "epoch": snapshot["epoch"],
-                      "generations": {name: fact.get("generation") for name, fact in facts.items()}}
 
 
 class Monitor:
@@ -539,8 +533,7 @@ def run(args):
         if live:
             try:
                 _, after = source_mark(live)
-                rows.append(row("live", "untouched", "pass" if before == after else "unverified",
-                                "source seq/generations unchanged" if before == after else "source changed; other clients may be active"))
+                rows.append(source_untouched(before, after))
             except Exception as failure:
                 rows.append(row("live", "untouched", "unverified", str(failure)))
             live.close()

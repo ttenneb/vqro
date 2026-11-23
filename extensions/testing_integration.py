@@ -15,7 +15,8 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_testing import (EXIT_CODES, RECEIPT_BYTES, STATUSES, PlainClient, Sandbox, canonical,
                           compare_runs, discover_scenarios, endpoints, fingerprint, print_result,
-                          row, run_scenarios, smoke, text, utc_now, write_receipt)
+                          row, run_scenarios, smoke, source_mark, source_untouched, text, utc_now, write_receipt,
+                          FAKE_BACKEND_COVERAGE)
 
 
 STATUSES = STATUSES + ("weak",)
@@ -29,13 +30,6 @@ def parser():
         result.add_argument("--" + flag)
     result.add_argument("--backend", choices=("fake", "private"), default="fake")
     return result
-
-
-def source_mark(client):
-    snapshot = client.call("workspace.snapshot")
-    facts = client.call("extension.list")["extensions"]
-    return snapshot, {"seq": snapshot["seq"], "epoch": snapshot["epoch"],
-                      "generations": {name: fact.get("generation") for name, fact in facts.items()}}
 
 
 def summarize(rows, counting_run, *, error=False):
@@ -78,7 +72,8 @@ def run_copy(sandbox, scenarios):
     rows += list(lifetime.values())
     rows.append(row("leftovers", "sandbox", "fail" if sandbox.leftovers else "pass", sandbox.leftovers or "none"))
     return {"rows": rows, "sandbox": sandbox.info, "leftovers": sandbox.leftovers, "error": error,
-            "not_covered": [f"{r['id']}: {r['evidence']}" for r in rows if r["id"].startswith("views/") and "view family needs live resources" in r["evidence"]],
+            "not_covered": ([f"{r['id']}: {r['evidence']}" for r in rows if r["id"].startswith("views/") and "view family needs live resources" in r["evidence"]]
+                            + [f"{r['id']}: {FAKE_BACKEND_COVERAGE}: {text(r['backend_unavailable'])}" for r in rows if r.get("backend_unavailable")]),
             "fingerprint": fingerprint(sandbox.ext, sandbox.declarations, sandbox.info.get("vqro") or {}),
             "verdict": summarize(rows, rows, error=error)}
 
@@ -175,8 +170,7 @@ def run(args):
         if live:
             try:
                 _, after = source_mark(live)
-                rows.append(row("live", "untouched", "pass" if before == after else "unverified",
-                                "source seq and extension generations unchanged" if before == after else "source changed while testing; other clients may be active"))
+                rows.append(source_untouched(before, after))
             except Exception as failure:
                 rows.append(row("live", "untouched", "unverified", str(failure)))
             live.close()

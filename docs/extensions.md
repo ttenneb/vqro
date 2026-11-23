@@ -38,6 +38,8 @@ panel enhancement in `spec/core-protocol.md`; other extensions can use exactly t
 Run `vqro run test.unit` to check observed extension status, crashes, manifests, dependencies, launch paths,
 log tracebacks and any installed `tests/<extension>/test_*.py` suites. `test.unit.show` reopens the last panel.
 There are no background checks. The report only reads core facts; it never restarts or changes extensions.
+UI dependency facts caused solely by the checkers' own non-rendering client labels are ignored; another
+client's unknown or missing UI support still warns. Other unmet dependencies remain visible.
 Receipts include a fingerprint and coverage gaps, live under `<state dir>/test-unit/` (0600), and retain 20 runs.
 
 When the core or extensions are broken, use the plain CLI:
@@ -89,7 +91,11 @@ this slice. New scenarios (`"new": true`) must fail on the baseline and pass on 
 `weak` and yields exit 77, never a pass. Existing failures are distinguished from regressions in comparisons.
 
 `--backend private` allows sandbox-local herdr-core/tmux providers; the harness stops only its private endpoints.
-External launch paths stay off and unverified unless explicitly allowed with `--allow-external`. Credential-like
+External launch paths stay off and unverified unless explicitly allowed with `--allow-external`.
+Dependencies blocked only because the fake-backend audit disabled their providers are unverified and listed
+as not covered, including in candidate comparisons. At least one provider must have been enabled before that
+audit; genuinely missing/incompatible providers, or requirements with only externally blocked or already-disabled
+providers, still fail when unmet. This does not claim real-backend integration coverage. Credential-like
 workspace entries and contributed documents are excluded and listed; the extension tree is copied whole,
 with symlinks preserved rather than dereferenced. Protected documents refused by the private core are reported
 as not copied. This is
@@ -98,8 +104,10 @@ are not copied yet. Use `--self-test` for crashing-extension and zero-coverage n
 
 `--root DIR` must be absent or empty and short enough for sockets under 100 bytes. Copies are removed unless
 `--keep`; CLI receipts are written only with `--out` (choose a path outside the disposable root). The report
-records source seq/generations before and after; concurrent source changes are unverified, not attributed to the
-harness. Exit codes remain 0 pass, 1 fail, 77 unverified, 2 harness/canary error.
+records the source declarations digest, generations and seq before and after. Only declaration or generation
+changes fail the setup-consistency check: results would no longer describe one setup. Seq movement from normal
+client/agent activity is informational, and unavailable consistency proof does not change the verdict. A changed
+setup is not attributed to the harness without evidence. Exit codes remain 0 pass, 1 fail, 77 unverified, 2 harness/canary error.
 
 ### Repeated performance measurements
 

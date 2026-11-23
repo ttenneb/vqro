@@ -12,7 +12,7 @@ import time
 # CLI reporting must not write __pycache__ into the installed extensions directory.
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from vqro_testing import (EXIT_CODES, cli_parser, endpoints, fingerprint, print_result, receipt,
+from vqro_testing import (EXIT_CODES, cli_parser, dependency_row, endpoints, fingerprint, print_result, receipt,
                           resolve_program, row, save_receipt, script_path, text, utc_now, write_receipt)
 
 LOG_BYTES = 64 * 1024
@@ -65,18 +65,6 @@ def status_row(name, facts):
         return row("status", name, "fail", {"status": status, "failure": facts.get("failure"),
                                           "last_exits": facts.get("last_exits")})
     return row("status", name, "unverified", status)
-
-
-def dependency_row(name, facts):
-    dependencies = facts.get("dependencies")
-    if facts.get("enabled") is False or not dependencies:
-        return row("deps", name, "skip", "off" if facts.get("enabled") is False else "no dependency facts")
-    status = dependencies.get("status")
-    mapped = {"missing": "fail", "degraded": "warn", "ok": "pass"}.get(status, "unverified")
-    unmet = [item for field in ("needs", "works_with") for item in dependencies.get(field, [])
-             if item.get("status") != "satisfied"]
-    return row("deps", name, mapped, {"status": status, "unmet": unmet},
-               "; ".join(str(item["suggest"]) for item in unmet if item.get("suggest")))
 
 
 def dev_tree(path, extensions_dir):

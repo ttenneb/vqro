@@ -66,6 +66,32 @@ class SandboxTests(unittest.TestCase):
         self.assertFalse((sandbox.ext / "link").is_symlink())
         self.assertEqual(external.read_text(), "private")
 
+    def test_fake_backend_deps_are_unverified_only_when_audit_caused_the_outage(self):
+        for name, enabled in (("herdr", True), ("tmux", False)):
+            self.snapshot["entries"]["extension/" + name] = {"value": {"argv": ["vqro-" + name], "kind": "provider", "enabled": enabled}}
+        sandbox = self.sandbox().prepare()
+        providers = [{"name": name, "display_status": "off"} for name in ("herdr", "tmux")]
+        need = {"cap": "ability/vqro.terminals", "status": "off", "providers": providers}
+        facts = {"dependencies": {"status": "missing", "needs": [need]}}
+        item = harness.dependency_row("example", facts, fake_providers=sandbox.info["fake_providers"])
+        self.assertEqual(sandbox.info["fake_providers"], {"herdr": True, "tmux": False})
+        self.assertEqual(item["status"], "unverified")
+        self.assertIn(harness.FAKE_BACKEND_COVERAGE, item["evidence"])
+        self.assertEqual(item["backend_unavailable"], [need["cap"]])
+        self.assertEqual(harness.dependency_row("example", facts)["status"], "fail")
+        self.assertEqual(harness.dependency_row("example", facts, fake_providers={"herdr": False, "tmux": False})["status"], "fail")
+        for missing in ({"cap": "ability/actually-missing", "status": "missing", "providers": []},
+                        {"cap": "ability/other", "status": "off", "providers": [{"name": "other", "display_status": "off"}]}):
+            with self.subTest(missing=missing):
+                mixed = {"dependencies": {"status": "missing", "needs": [need, missing]}}
+                failed = harness.dependency_row("example", mixed, fake_providers=sandbox.info["fake_providers"])
+                self.assertEqual(failed["status"], "fail")
+                self.assertIn(missing["cap"], failed["evidence"])
+        for baseline in ("pass", "unverified"):
+            compared = harness.compare_runs({"rows": [harness.row("deps", "example", baseline, "baseline")]}, {"rows": [item]}, {})
+            self.assertEqual(compared[0]["status"], "unverified")
+            self.assertIn(harness.FAKE_BACKEND_COVERAGE, compared[0]["evidence"])
+
     def test_fake_disables_providers(self):
         self.snapshot["entries"]["extension/example"]["value"].update(kind="provider")
         sandbox = self.sandbox().prepare()
@@ -258,6 +284,14 @@ class IntegrationModesTests(unittest.TestCase):
         self.assertEqual(result["rows"][1]["id"], "compare/scenario/example/new")
         self.assertFalse((self.root / "run").exists())
 
+    def test_fake_backend_dependency_gap_is_listed_as_not_covered(self):
+        sandbox = Mock(audit_rows=[], lifetime_rows=[], leftovers=[], info={}, declarations={}, ext=self.source)
+        backend = harness.row("deps", "example", "unverified", harness.FAKE_BACKEND_COVERAGE)
+        backend["backend_unavailable"] = ["ability/vqro.terminals"]
+        with patch.object(integration, "smoke", return_value=[backend, harness.row("recovery", "restart", "pass", "ready")]), patch.object(integration, "run_scenarios", return_value=[]):
+            result = integration.run_copy(sandbox, {})
+        self.assertTrue(any(harness.FAKE_BACKEND_COVERAGE in gap and "ability/vqro.terminals" in gap for gap in result["not_covered"]))
+
     def test_cli_canary_error_has_no_spawn_and_existing_root_is_untouched(self):
         state = self.write_source()
         root = self.root / ("deep" * 30)
@@ -310,6 +344,49 @@ class IntegrationModesTests(unittest.TestCase):
             self.assertEqual(ext.publish.call_args.args[0], "test-integration.report")
             popup = handlers["test.integration.show"]({})
             self.assertEqual(popup["client"]["popup"]["view"], "test-integration.report")
+
+
+class SourceMarkTests(unittest.TestCase):
+    def test_source_seq_and_unrelated_documents_are_informational(self):
+        before = {"seq": 10, "epoch": "fixture", "entries": {"extension/example": {"version": 1, "value": {"argv": ["python3", "example.py"]}}}}
+        after = json.loads(json.dumps(before))
+        after["seq"] = 20
+        after["entries"]["doc/unrelated"] = {"version": 1, "value": "busy client"}
+        facts = {"extensions": {"example": {"generation": 1}}}
+        client = Mock()
+        client.call.side_effect = [before, facts, after, facts]
+        _, start = harness.source_mark(client)
+        _, end = harness.source_mark(client)
+        item = harness.source_untouched(start, end)
+        self.assertEqual(item["status"], "pass")
+        self.assertEqual(item["observed"]["after"]["seq"], 20)
+        self.assertIn("informational", item["evidence"])
+        self.assertEqual(start["declarations"], end["declarations"])
+
+    def test_setup_changes_fail_both_suite_verdicts_but_missing_proof_does_not(self):
+        import testing_perf as perf
+        before = {"seq": 10, "epoch": "fixture", "declarations": "original", "generations": {"example": 1}}
+        for field, value in (("declarations", "changed"), ("generations", {"example": 2})):
+            with self.subTest(field=field):
+                after = {**before, field: value, "seq": 20}
+                failed = harness.source_untouched(before, after)
+                self.assertEqual(failed["status"], "fail")
+                self.assertEqual(perf.verdict([failed]), "fail")
+                self.assertEqual(integration.summarize([failed], [harness.row("start", "example", "pass", "ready")]), "fail")
+        informational = harness.row("live", "untouched", "unverified", "source disconnected; proof unavailable")
+        valid = harness.row("startup", "core", "pass", "finite samples")
+        self.assertEqual(perf.verdict([valid, informational]), "pass")
+        self.assertEqual(integration.summarize([informational], [harness.row("start", "example", "pass", "ready")]), "pass")
+        self.assertIs(perf.source_mark, integration.source_mark)
+
+    def test_declaration_values_are_in_the_source_digest(self):
+        snapshots = [{"seq": 1, "epoch": "fixture", "entries": {"extension/example": {"value": {"argv": ["python3", script]}}}} for script in ("before.py", "after.py")]
+        client = Mock(side_effect=None)
+        client.call.side_effect = [snapshots[0], {"extensions": {}}, snapshots[1], {"extensions": {}}]
+        _, before = harness.source_mark(client)
+        _, after = harness.source_mark(client)
+        self.assertNotEqual(before["declarations"], after["declarations"])
+        self.assertEqual(harness.source_untouched(before, after)["status"], "fail")
 
 
 class ScenarioTests(unittest.TestCase):
