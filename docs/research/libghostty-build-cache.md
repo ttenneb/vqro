@@ -16,16 +16,23 @@ A persistent `<key>.lock` serializes verification and building (`File::lock`: fl
 Windows). Builders install into a unique temporary directory under the cache root. A manifest records all
 installed artifacts and their SHA-256 hashes, and the complete directory is atomically renamed into place.
 Zig's intermediate compiler cache is temporary, not retained in the shared installed entry. Under the key's
-lock, the next access considers that key's abandoned `.<key>-*` stage directories, including on cache hits.
-Each stage records its owner PID and observed process start identity. Removal requires **both** proof that
-that owner identity is gone **and** no modification anywhere in the stage tree for at least one hour. Unknown
+lock, an access with GC explicitly enabled considers that key's abandoned `.<key>-*` stage directories,
+including on cache hits. Each stage records its owner PID and observed process start identity. The cleanup
+**heuristic** requires **both** a positive owner-identity-gone observation **and** no modification anywhere
+in the stage tree for at least one hour. Unknown
 owner/start records, failed process queries, unreadable or future timestamps, live owners, and recent writes
 are retained. Start identity is observed from Linux boot ID/start ticks, Unix `ps` start time, or Windows
-process creation time; unavailable probes record unknown and disable removal. No process is killed. A quiet
-hour is a conservative heuristic, not proof that every orphan descendant exited. Missing, changed,
+process creation time; unavailable probes record unknown and disable removal. Windows recognizes only the
+specific `NoProcessFoundForGivenId`/`ObjectNotFound` error as absence; access/query/start-time failures stay
+unknown. Unix `ps` failure or empty output is also unknown; Linux requires positive directory absence in a
+working proc view. No process is killed. Owner gone plus a quiet hour is not proof that an orphan exited:
+a paused/idle orphan or activity after the scan can still lose staging. Automatic maintenance assumes a
+trusted host-local cache, process view and clock; it is not a no-active-writer certificate. Missing, changed,
 extra or corrupt artifacts and mismatched inputs cause a rebuild; they are never linked as a cache hit.
-File symlinks must be relative and resolve within the entry; rooted/absolute artifact links and directory
-symlinks are refused before publication, so staging-path links cannot break after relocation. The GNU Windows archive alias
+File symlinks must be relative, never lexically ascend above the entry root, and resolve within the entry.
+Rooted/absolute links, escape-and-return links such as `../../install/lib/native.a`, and directory symlinks
+are refused before publication. This confines the supported relative-alias subset; pre-rename canonical
+containment alone is not a relocation guarantee. The GNU Windows archive alias
 is created before publication, so consumers never modify a shared entry. While holding the key lock, each
 consumer copies only its required link archive into `OUT_DIR`, checking the copy against the manifest before
 publication. Cargo links and watches that private snapshot, never the evictable shared path. Unchanged copies
@@ -98,7 +105,13 @@ ordinary version/path changes; this is not compiler authentication or a host-SDK
 
 ## Disk usage and manual pruning
 
-Successful builds and reuses keep the **six most recently used keys** by default. Set
+**GC is off by default during vqro-lead's machine-wide pruning pause (2026-11-23).** Only
+`VQRO_LIBGHOSTTY_CACHE_GC=1` enables stale-stage reclamation and LRU eviction; do not enable it against
+production until vqro-lead lifts the pause. Tests opt in only on disposable roots. With GC off, accesses do
+not reclaim abandoned stages or perform LRU eviction, so disk usage is not bounded by the retention setting.
+Ordinary per-build temporary cleanup and invalid-entry replacement remain build behavior.
+
+When GC is enabled, successful builds and reuses keep the **six most recently used keys** by default. Set
 `VQRO_LIBGHOSTTY_CACHE_KEEP` to a positive integer to change that limit. The manifest's modification time
 records the latest successful use under the key lock. Each eviction candidate is locked nonblocking, and its
 use time is checked again before deletion. Busy or newly used candidates are skipped, so the limit may be
@@ -136,6 +149,20 @@ builders. The next build recreates removed entries.
   no publication and no later stale hit), source changes before reuse/after a lock wait, explicit native reuse
   boundaries and key inputs, absolute-link rejection/relative-link relocation, and dead-owner plus one-hour
   recursive quiescence (including PID reuse, unknown identity and fresh descendant activity).
+- Renewed owner-query tests exercise the real generated PowerShell command and output/exit classifier
+  through subprocess transport controls, including the original suppressed-error-to-absence RED. Additional
+  native Windows tests inject cmdlet failures inside the real interpreter when run on Windows; they were
+  **not run natively on this Linux host**. Unix command/filesystem controls cover ambiguous `ps` output,
+  broken proc queries and positive absence. The error-ID/category selection is checked against PowerShell's
+  [`RetrieveMatchingProcessesById` source](https://github.com/PowerShell/PowerShell/blob/master/src/Microsoft.PowerShell.Commands.Management/commands/management/Process.cs):
+  `ProcessCommandException` alone also represents other errors and is not sufficient absence evidence.
+- Linux descriptor controls inspect the actual live production key-lock descriptors for `FD_CLOEXEC`
+  and confirm none survive a real exec child. Process-spawn and descriptor-owning fixtures are mutually
+  exclusive: CLOEXEC closes at exec, not at fork, so unrelated pre-exec copies must not interfere with
+  immediate private-fixture eviction assertions. No timer, polling retry, or production fd workaround is used.
+- The exact escape-return relative-link fixture is rejected before publication, while a confined parent
+  alias remains valid after rename. GC-off controls retain both old keys and otherwise-reclaimable stages;
+  the corresponding GC-on controls explicitly enable maintenance only in disposable roots.
 - The quick gate passed all nine steps with zero skips, including zero-warning builds, all Rust/Python tests,
   and the Windows GNU cross-check. The Windows GNU alias was therefore exercised as well as Linux native
   linking. This is not a native Windows runtime or lock-concurrency test.

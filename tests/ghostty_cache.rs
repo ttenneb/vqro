@@ -32,6 +32,15 @@ fn build(prefix: &Path, _work: &Path) -> std::io::Result<()> {
 
 const REQUIRED: &[&str] = &["lib/native.a"];
 
+// CLOEXEC closes descriptors at exec, not at fork. Keep unrelated process-spawn and lock-owning
+// fixtures mutually exclusive, so immediate eviction assertions cannot see pre-exec FD copies.
+static PROCESS_FD_FIXTURES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn serial_fixture() -> std::sync::MutexGuard<'static, ()> {
+    PROCESS_FD_FIXTURES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn ensure(
     root: &Path,
     input: &Inputs,
@@ -48,8 +57,229 @@ fn ensure(
     )
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn lock_descriptor_exec_child() {
+    let _serial = serial_fixture();
+    let Some(lock) = std::env::var_os("GHOSTTY_CACHE_EXPECT_NO_LOCK_FD") else {
+        return;
+    };
+    let lock = std::path::PathBuf::from(lock);
+    for entry in fs::read_dir("/proc/self/fd").unwrap() {
+        assert_ne!(
+            fs::read_link(entry.unwrap().path()).ok().as_ref(),
+            Some(&lock),
+            "cache lock must close at exec"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn actual_cache_lock_descriptors_are_cloexec_and_absent_after_exec() {
+    let _serial = serial_fixture();
+    let root = tempfile::tempdir().unwrap();
+    let input = inputs();
+    let lock = root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join(format!("{}.lock", input.key()));
+    ensure(root.path(), &input, REQUIRED, |prefix, work| {
+        let descriptors = fs::read_dir("/proc/self/fd")?
+            .filter_map(Result::ok)
+            .filter(|entry| fs::read_link(entry.path()).ok().as_ref() == Some(&lock))
+            .map(|entry| entry.file_name().to_str().unwrap().parse::<i32>().unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            !descriptors.is_empty(),
+            "inspect the actual live production lock, not a separate fixture fd"
+        );
+        for fd in descriptors {
+            // Read-only query; ensure's File guard owns and keeps this descriptor alive throughout.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(
+                flags >= 0 && flags & libc::FD_CLOEXEC != 0,
+                "cache fd {fd} lacks CLOEXEC"
+            );
+        }
+        assert!(
+            Command::new(std::env::current_exe()?)
+                .args(["--exact", "lock_descriptor_exec_child"])
+                .env_clear()
+                .env("GHOSTTY_CACHE_EXPECT_NO_LOCK_FD", &lock)
+                .status()?
+                .success()
+        );
+        build(prefix, work)
+    })
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn query_transport(root: &Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join(name);
+    fs::write(&path, format!("#!/usr/bin/env python3\n{body}\n")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    path
+}
+
+#[cfg(unix)]
+#[test]
+fn production_windows_wrapper_does_not_mask_query_errors_as_absent() {
+    let _serial = serial_fixture();
+    let root = tempfile::tempdir().unwrap();
+    for scenario in [
+        "denied",
+        "null",
+        "start-denied",
+        "failed-absent",
+        "stderr-absent",
+        "absent",
+        "live",
+    ] {
+        // Exercise the actual generated command and production decoder through a subprocess, not
+        // cleanup_stages' injected liveness seam. This transport models the original masking bug.
+        let body = format!(
+            r#"import sys
+assert sys.argv[1:4] == ['-NoProfile', '-NonInteractive', '-Command']
+script = sys.argv[4]
+scenario = {scenario:?}
+if scenario in ('denied', 'null'):
+    if '-ErrorAction SilentlyContinue' in script:
+        print('absent')
+        sys.exit(0)
+    assert '-ErrorAction Stop' in script
+    assert 'NoProcessFoundForGivenId' in script
+    sys.exit(1)
+if scenario == 'start-denied': sys.exit(1)
+if scenario == 'failed-absent':
+    print('absent')
+    sys.exit(1)
+if scenario == 'stderr-absent':
+    print('absent')
+    print('access denied', file=sys.stderr)
+    sys.exit(0)
+print('absent' if scenario == 'absent' else '123456')
+"#
+        );
+        let executable = query_transport(root.path(), scenario, &body);
+        let result = ghostty_cache::windows_process_start(&executable, 123);
+        match scenario {
+            "absent" => assert_eq!(result.unwrap(), None),
+            "live" => assert_eq!(result.unwrap().as_deref(), Some("123456")),
+            _ => assert!(result.is_err(), "{scenario} must be UNKNOWN, not absent"),
+        }
+    }
+    let script = ghostty_cache::windows_process_script(123);
+    assert!(!script.contains("SilentlyContinue"));
+    assert!(script.contains("-ErrorAction Stop"));
+    assert!(script.contains("NoProcessFoundForGivenId"));
+    assert!(script.contains("CategoryInfo.Category"));
+    let normalized = script.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(normalized.contains("if (($_.FullyQualifiedErrorId -split ',')[0] -eq 'NoProcessFoundForGivenId' -and $_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) { [Console]::Out.WriteLine('absent'); exit 0 } exit 1"));
+    assert!(normalized.contains("if ($null -eq $p) { exit 1 }"));
+    assert_eq!(script.matches("WriteLine('absent')").count(), 1);
+    assert!(script.find("NoProcessFoundForGivenId").unwrap() < script.find("StartTime").unwrap());
+}
+
+#[cfg(windows)]
+#[test]
+fn production_powershell_script_classifies_real_cmdlet_errors_before_start_time() {
+    let _serial = serial_fixture();
+    // Runs in the real PowerShell interpreter on Windows. Advanced-function failures have the same
+    // ErrorAction/error-record behavior as cmdlets, including nonterminating permission errors.
+    for (body, expected) in [
+        (
+            "Write-Error -Message denied -ErrorId AccessDenied -Category PermissionDenied",
+            "unknown",
+        ),
+        (
+            "Write-Error -Message missing -ErrorId NoProcessFoundForGivenId -Category ObjectNotFound",
+            "absent",
+        ),
+        ("return $null", "unknown"),
+        (
+            "$p = New-Object PSObject; $p | Add-Member ScriptProperty StartTime { throw 'denied' }; $p",
+            "unknown",
+        ),
+    ] {
+        let script = format!(
+            "function Get-Process {{ [CmdletBinding()] param([int]$Id) {body} }}; {}",
+            ghostty_cache::windows_process_script(123)
+        );
+        let result = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .unwrap();
+        let result = ghostty_cache::windows_process_result(result);
+        if expected == "absent" {
+            assert_eq!(result.unwrap(), None);
+        } else {
+            assert!(result.is_err(), "{body}");
+        }
+    }
+    assert!(
+        ghostty_cache::windows_process_start(Path::new("powershell.exe"), std::process::id())
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn production_unix_wrapper_keeps_ambiguous_ps_failures_unknown() {
+    let _serial = serial_fixture();
+    let root = tempfile::tempdir().unwrap();
+    for (name, body, known) in [
+        ("empty-failure", "import sys; sys.exit(1)", false),
+        ("empty-success", "", false),
+        (
+            "denied",
+            "import sys; print('denied', file=sys.stderr); sys.exit(1)",
+            false,
+        ),
+        ("live", "print('Mon Nov 23 17:00:00 2026')", true),
+    ] {
+        let ps = query_transport(root.path(), name, body);
+        let result = ghostty_cache::unix_process_start(&ps, 123);
+        if known {
+            assert!(result.unwrap().is_some());
+        } else {
+            assert!(result.is_err(), "{name} must never be read as absent");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn production_linux_wrapper_requires_positive_absence_in_a_working_proc_view() {
+    let _serial = serial_fixture();
+    let root = tempfile::tempdir().unwrap();
+    assert!(ghostty_cache::linux_process_start(root.path(), 123).is_err());
+    fs::create_dir(root.path().join("self")).unwrap();
+    fs::write(root.path().join("self/stat"), b"working self query").unwrap();
+    assert_eq!(
+        ghostty_cache::linux_process_start(root.path(), 123).unwrap(),
+        None
+    );
+    fs::create_dir(root.path().join("123")).unwrap();
+    assert!(
+        ghostty_cache::linux_process_start(root.path(), 123).is_err(),
+        "missing identity for an existing process is UNKNOWN"
+    );
+    fs::create_dir(root.path().join("123/stat")).unwrap();
+    assert!(
+        ghostty_cache::linux_process_start(root.path(), 123).is_err(),
+        "query errors are UNKNOWN"
+    );
+    assert!(ghostty_cache::linux_process_start(root.path(), 0).is_err());
+}
+
 #[test]
 fn every_input_changes_key_and_field_boundaries_are_unambiguous() {
+    let _serial = serial_fixture();
     let original = inputs();
     let mut variants = Vec::new();
     let mut changed = original.clone();
@@ -95,6 +325,7 @@ fn every_input_changes_key_and_field_boundaries_are_unambiguous() {
 
 #[test]
 fn native_reuse_boundary_is_explicit_for_every_supported_platform() {
+    let _serial = serial_fixture();
     let empty = std::collections::BTreeMap::new();
     assert!(
         !native_config::ENV.contains(&"LD_LIBRARY_PATH"),
@@ -120,6 +351,7 @@ fn native_reuse_boundary_is_explicit_for_every_supported_platform() {
 
 #[test]
 fn resolved_toolchain_host_and_every_caller_setting_affect_the_key() {
+    let _serial = serial_fixture();
     let config = native_config::capture(
         "/nonexistent-ghostty-cache-zig",
         "host-triple",
@@ -163,6 +395,7 @@ fn resolved_toolchain_host_and_every_caller_setting_affect_the_key() {
 
 #[test]
 fn actual_source_contents_not_checkout_path_determine_identity() {
+    let _serial = serial_fixture();
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
     for root in [a.path(), b.path()] {
@@ -184,6 +417,7 @@ fn actual_source_contents_not_checkout_path_determine_identity() {
 
 #[test]
 fn observed_source_edit_during_build_is_local_only_and_never_a_stale_hit() {
+    let _serial = serial_fixture();
     let root = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
@@ -196,6 +430,7 @@ fn observed_source_edit_during_build_is_local_only_and_never_a_stale_hit() {
         &input,
         REQUIRED,
         6,
+        false,
         || source_digest(source.path()),
         |prefix, work| {
             fs::write(&file, b"T")?;
@@ -217,6 +452,7 @@ fn observed_source_edit_during_build_is_local_only_and_never_a_stale_hit() {
         &input,
         REQUIRED,
         6,
+        false,
         || source_digest(source.path()),
         build,
         |_| Ok(()),
@@ -231,6 +467,7 @@ fn observed_source_edit_during_build_is_local_only_and_never_a_stale_hit() {
 
 #[test]
 fn source_is_rechecked_immediately_before_accepting_a_reuse() {
+    let _serial = serial_fixture();
     let root = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();
     let file = source.path().join("main.zig");
@@ -244,6 +481,7 @@ fn source_is_rechecked_immediately_before_accepting_a_reuse() {
         &input,
         REQUIRED,
         6,
+        false,
         || {
             calls.set(calls.get() + 1);
             if calls.get() == 2 {
@@ -262,6 +500,7 @@ fn source_is_rechecked_immediately_before_accepting_a_reuse() {
 
 #[test]
 fn source_edit_while_waiting_for_lock_cannot_accept_an_old_hit() {
+    let _serial = serial_fixture();
     let root = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();
     fs::write(source.path().join("main.zig"), b"S").unwrap();
@@ -285,6 +524,7 @@ fn source_edit_while_waiting_for_lock_cannot_accept_an_old_hit() {
             &candidate,
             REQUIRED,
             6,
+            false,
             || source_digest(&source_path),
             build,
             |_| Ok(()),
@@ -302,6 +542,7 @@ fn source_edit_while_waiting_for_lock_cannot_accept_an_old_hit() {
 
 #[test]
 fn source_digest_matches_checked_in_vendor_manifest() {
+    let _serial = serial_fixture();
     use sha2::{Digest, Sha256};
     let vendored = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/libghostty-vt");
     assert_eq!(
@@ -316,6 +557,7 @@ fn source_digest_matches_checked_in_vendor_manifest() {
 #[cfg(unix)]
 #[test]
 fn literal_backslashes_do_not_alias_path_separators() {
+    let _serial = serial_fixture();
     let root = tempfile::tempdir().unwrap();
     let result = ensure(root.path(), &inputs(), REQUIRED, build).unwrap();
     fs::write(result.path.join("lib\\native.a"), b"fake archive").unwrap();
@@ -324,6 +566,7 @@ fn literal_backslashes_do_not_alias_path_separators() {
 
 #[test]
 fn manifest_and_every_artifact_are_required_and_verified() {
+    let _serial = serial_fixture();
     let root = tempfile::tempdir().unwrap();
     let input = inputs();
     let result = ensure(root.path(), &input, REQUIRED, build).unwrap();
@@ -354,6 +597,7 @@ fn manifest_and_every_artifact_are_required_and_verified() {
 
 #[test]
 fn partial_entry_and_failed_build_are_never_published() {
+    let _serial = serial_fixture();
     let root = tempfile::tempdir().unwrap();
     let input = inputs();
     let entry = root.path().join(input.key());
@@ -374,6 +618,7 @@ fn partial_entry_and_failed_build_are_never_published() {
 
 #[test]
 fn interrupted_child() {
+    let _serial = serial_fixture();
     let Some(root) = std::env::var_os("GHOSTTY_CACHE_INTERRUPTED_ROOT") else {
         return;
     };
@@ -393,6 +638,7 @@ fn interrupted_child() {
 
 #[test]
 fn interrupted_stage_needs_dead_owner_and_one_hour_tree_quiescence() {
+    let _serial = serial_fixture();
     let root = tempfile::tempdir().unwrap();
     let child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "interrupted_child"])
@@ -459,6 +705,7 @@ fn interrupted_stage_needs_dead_owner_and_one_hour_tree_quiescence() {
 
 #[test]
 fn cache_hit_retains_unknown_stages_and_other_keys() {
+    let _serial = serial_fixture();
     let root = tempfile::tempdir().unwrap();
     let input = inputs();
     ensure(root.path(), &input, REQUIRED, build).unwrap();
@@ -502,10 +749,22 @@ fn cache_hit_retains_unknown_stages_and_other_keys() {
     fs::write(stale.join("owner.json"), br#"{"pid":123,"start":null}"#).unwrap();
     ghostty_cache::cleanup_stages(root.path(), &input.key(), later, |_| Ok(None)).unwrap();
     assert!(stale.exists(), "unknown start identity is retained");
+    for record in [
+        br#"{"pid":0,"start":"birth"}"#.as_slice(),
+        br#"{"pid":123,"start":""}"#.as_slice(),
+    ] {
+        fs::write(stale.join("owner.json"), record).unwrap();
+        ghostty_cache::cleanup_stages(root.path(), &input.key(), later, |_| {
+            panic!("invalid identity must not be queried")
+        })
+        .unwrap();
+        assert!(stale.exists(), "invalid owner identity must be retained");
+    }
 }
 
 #[test]
 fn second_checkout_reuses_but_key_mismatch_builds_again() {
+    let _serial = serial_fixture();
     let root = tempfile::tempdir().unwrap();
     let input = inputs();
     let first = ensure(root.path(), &input, REQUIRED, build).unwrap();
@@ -539,6 +798,7 @@ fn age_entry(path: &Path, index: u64) {
 
 #[test]
 fn seventh_key_evicts_least_recently_used_not_least_recently_built() {
+    let _serial = serial_fixture();
     let root = tempfile::tempdir().unwrap();
     for index in 0..6 {
         let entry = ensure(root.path(), &numbered_input(index), REQUIRED, build).unwrap();
@@ -559,6 +819,7 @@ fn seventh_key_evicts_least_recently_used_not_least_recently_built() {
 
 #[test]
 fn locked_eviction_candidate_is_skipped_then_pruned_on_next_use() {
+    let _serial = serial_fixture();
     let root = tempfile::tempdir().unwrap();
     for index in 0..6 {
         let entry = ensure(root.path(), &numbered_input(index), REQUIRED, build).unwrap();
@@ -579,7 +840,104 @@ fn locked_eviction_candidate_is_skipped_then_pruned_on_next_use() {
 }
 
 #[test]
+fn gc_opt_out_leaves_old_keys_until_explicitly_enabled() {
+    let _serial = serial_fixture();
+    let root = tempfile::tempdir().unwrap();
+    for index in 0..3 {
+        let input = numbered_input(index);
+        let entry = ghostty_cache::ensure_checked(
+            root.path(),
+            &input,
+            REQUIRED,
+            1,
+            false,
+            || Ok(input.source.clone()),
+            build,
+            |_| Ok(()),
+        )
+        .unwrap();
+        age_entry(&entry.path, index as u64);
+    }
+    for index in 0..3 {
+        assert!(root.path().join(numbered_input(index).key()).exists());
+    }
+    let input = numbered_input(2);
+    ghostty_cache::ensure_checked(
+        root.path(),
+        &input,
+        REQUIRED,
+        1,
+        true,
+        || Ok(input.source.clone()),
+        build,
+        |_| Ok(()),
+    )
+    .unwrap();
+    assert!(!root.path().join(numbered_input(0).key()).exists());
+    assert!(!root.path().join(numbered_input(1).key()).exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn gc_opt_out_retains_an_otherwise_reclaimable_stage() {
+    let _serial = serial_fixture();
+    let root = tempfile::tempdir().unwrap();
+    assert!(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "interrupted_child"])
+            .env_clear()
+            .env("GHOSTTY_CACHE_INTERRUPTED_ROOT", root.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let name = fs::read_to_string(root.path().join("abandoned-stage")).unwrap();
+    let stage = Path::new(&name);
+    for path in [
+        stage.join("owner.json"),
+        stage.join("zig-cache/unfinished.o"),
+        stage.join("zig-cache"),
+        stage.join("install"),
+        stage.to_owned(),
+    ] {
+        fs::File::open(path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH)
+            .unwrap();
+    }
+    let input = inputs();
+    ghostty_cache::ensure_checked(
+        root.path(),
+        &input,
+        REQUIRED,
+        6,
+        false,
+        || Ok(input.source.clone()),
+        build,
+        |_| Ok(()),
+    )
+    .unwrap();
+    assert!(
+        stage.exists(),
+        "disabled GC must not reclaim even a positively dead and quiet stage"
+    );
+    ghostty_cache::ensure_checked(
+        root.path(),
+        &input,
+        REQUIRED,
+        6,
+        true,
+        || Ok(input.source.clone()),
+        build,
+        |_| Ok(()),
+    )
+    .unwrap();
+    assert!(!stage.exists());
+}
+
+#[test]
 fn retention_is_configurable_and_zero_is_rejected() {
+    let _serial = serial_fixture();
     let root = tempfile::tempdir().unwrap();
     assert!(ghostty_cache::ensure(root.path(), &inputs(), REQUIRED, 0, build, |_| Ok(())).is_err());
     for index in 0..4 {
@@ -602,6 +960,7 @@ fn retention_is_configurable_and_zero_is_rejected() {
 
 #[test]
 fn verified_private_link_input_survives_shared_eviction_and_repairs_corruption() {
+    let _serial = serial_fixture();
     let root = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
     let input = inputs();
@@ -632,6 +991,7 @@ fn verified_private_link_input_survives_shared_eviction_and_repairs_corruption()
 
 #[test]
 fn snapshot_bytes_must_match_manifest_before_publication() {
+    let _serial = serial_fixture();
     let root = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
     let result = ghostty_cache::ensure(root.path(), &inputs(), REQUIRED, 6, build, |entry| {
@@ -644,6 +1004,7 @@ fn snapshot_bytes_must_match_manifest_before_publication() {
 
 #[test]
 fn concurrent_child() {
+    let _serial = serial_fixture();
     let Some(root) = std::env::var_os("GHOSTTY_CACHE_TEST_ROOT") else {
         return;
     };
@@ -663,6 +1024,7 @@ fn concurrent_child() {
 
 #[test]
 fn concurrent_processes_build_once_under_exclusive_lock() {
+    let _serial = serial_fixture();
     let root = tempfile::tempdir().unwrap();
     let executable = std::env::current_exe().unwrap();
     let mut children = (0..6)
@@ -688,6 +1050,7 @@ fn concurrent_processes_build_once_under_exclusive_lock() {
 #[cfg(unix)]
 #[test]
 fn entry_and_manifest_cannot_be_symlinks() {
+    let _serial = serial_fixture();
     use std::os::unix::fs::symlink;
     let root = tempfile::tempdir().unwrap();
     let input = inputs();
@@ -705,6 +1068,7 @@ fn entry_and_manifest_cannot_be_symlinks() {
 #[cfg(unix)]
 #[test]
 fn publication_rejects_absolute_internal_links_and_preserves_relative_links_after_relocation() {
+    let _serial = serial_fixture();
     use std::os::unix::fs::symlink;
     let root = tempfile::tempdir().unwrap();
     let input = inputs();
@@ -734,7 +1098,37 @@ fn publication_rejects_absolute_internal_links_and_preserves_relative_links_afte
 
 #[cfg(unix)]
 #[test]
+fn relocation_escape_return_relative_link_is_rejected_before_publication() {
+    let _serial = serial_fixture();
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let input = inputs();
+    let result = ensure(root.path(), &input, REQUIRED, |prefix, work| {
+        build(prefix, work)?;
+        symlink("../../install/lib/native.a", prefix.join("lib/alias.a"))
+    });
+    assert!(
+        result.is_err(),
+        "a link valid only under the install staging basename is nonrelocatable"
+    );
+    assert!(!root.path().join(input.key()).exists());
+    let good = ensure(root.path(), &input, REQUIRED, |prefix, work| {
+        build(prefix, work)?;
+        fs::create_dir(prefix.join("lib/nested"))?;
+        symlink("../native.a", prefix.join("lib/nested/alias.a"))
+    })
+    .unwrap();
+    verify(&good.path, &input, REQUIRED).unwrap();
+    assert_eq!(
+        fs::read(good.path.join("lib/nested/alias.a")).unwrap(),
+        b"fake archive"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn artifact_symlinks_must_stay_inside_entry() {
+    let _serial = serial_fixture();
     use std::os::unix::fs::symlink;
     let root = tempfile::tempdir().unwrap();
     let input = inputs();

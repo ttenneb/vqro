@@ -95,15 +95,22 @@ fn files(
         } else {
             if kind.is_symlink() {
                 let link = fs::read_link(&path)?;
-                if !source
-                    && link.components().any(|c| {
-                        matches!(
-                            c,
-                            std::path::Component::RootDir | std::path::Component::Prefix(_)
-                        )
-                    })
-                {
-                    return Err(invalid("nonrelocatable absolute artifact symlink"));
+                if !source {
+                    // Canonical containment before rename is insufficient: ../../install/... can
+                    // leave the entry and return only because its staging basename is `install`.
+                    let mut depth = relative.parent().map_or(0, |p| p.components().count());
+                    for component in link.components() {
+                        match component {
+                            std::path::Component::Normal(_) => depth += 1,
+                            std::path::Component::CurDir => (),
+                            std::path::Component::ParentDir if depth > 0 => depth -= 1,
+                            _ => {
+                                return Err(invalid(
+                                    "nonrelocatable artifact symlink escapes entry",
+                                ));
+                            }
+                        }
+                    }
                 }
                 let resolved = path.canonicalize()?;
                 if !resolved.starts_with(root) || !resolved.is_file() {
@@ -199,6 +206,7 @@ pub fn ensure(
         inputs,
         required,
         keep,
+        true, // Fake-artifact maintenance tests opt in explicitly on disposable roots.
         || Ok(inputs.source.clone()),
         build,
         use_entry,
@@ -210,6 +218,7 @@ pub fn ensure_checked(
     inputs: &Inputs,
     required: &[&str],
     keep: usize,
+    gc: bool,
     read_source: impl Fn() -> io::Result<String>,
     build: impl FnOnce(&Path, &Path) -> io::Result<()>,
     use_entry: impl FnOnce(&Path) -> io::Result<()>,
@@ -228,7 +237,9 @@ pub fn ensure_checked(
         .write(true)
         .open(root.join(format!("{key}.lock")))?;
     lock.lock()?;
-    cleanup_stages(&root, &key, std::time::SystemTime::now(), process_start)?;
+    if gc {
+        cleanup_stages(&root, &key, std::time::SystemTime::now(), process_start)?;
+    }
     // The pre-lock digest only routes us to a candidate lock. Accept its identity only after hashing
     // under that lock, then recheck immediately before accepting an existing entry (including waits).
     let locked_source = read_source()?;
@@ -242,7 +253,9 @@ pub fn ensure_checked(
             .write(true)
             .open(path.join("manifest.json"))?
             .set_modified(std::time::SystemTime::now())?;
-        prune(&root, keep)?;
+        if gc {
+            prune(&root, keep)?;
+        }
         return Ok(Entry {
             path,
             reused: true,
@@ -304,7 +317,9 @@ pub fn ensure_checked(
         .write(true)
         .open(path.join("manifest.json"))?
         .set_modified(std::time::SystemTime::now())?;
-    prune(&root, keep)?;
+    if gc {
+        prune(&root, keep)?;
+    }
     Ok(Entry {
         path,
         reused: false,
@@ -322,57 +337,134 @@ struct StageOwner {
 fn process_start(pid: u32) -> io::Result<Option<String>> {
     #[cfg(target_os = "linux")]
     {
-        let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
-            Ok(stat) => stat,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err),
-        };
-        let ticks = stat
-            .rsplit_once(')')
-            .and_then(|(_, fields)| fields.split_whitespace().nth(19))
-            .ok_or_else(|| invalid("process start time unavailable"))?;
-        let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
-        Ok(Some(format!("{}:{ticks}", boot.trim())))
+        linux_process_start(Path::new("/proc"), pid)
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
-        let result = std::process::Command::new("ps")
-            .env("LC_ALL", "C")
-            .env("TZ", "UTC")
-            .args(["-p", &pid.to_string(), "-o", "lstart="])
-            .output()?;
-        let start = String::from_utf8_lossy(&result.stdout).trim().to_owned();
-        if result.status.success() && !start.is_empty() {
-            return Ok(Some(start));
-        }
-        if result.status.code() == Some(1) && start.is_empty() && result.stderr.is_empty() {
-            return Ok(None);
-        }
-        Err(invalid("process identity query failed"))
+        unix_process_start(Path::new("ps"), pid)
     }
     #[cfg(windows)]
     {
-        let script = format!(
-            "$p = Get-Process -Id {pid} -ErrorAction SilentlyContinue; if ($null -eq $p) {{ 'absent' }} else {{ try {{ $p.StartTime.ToUniversalTime().Ticks }} catch {{ exit 1 }} }}"
-        );
-        let result = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .output()?;
-        let start = String::from_utf8_lossy(&result.stdout).trim().to_owned();
-        if result.status.success() && start == "absent" {
-            return Ok(None);
-        }
-        if result.status.success() && !start.is_empty() && start.bytes().all(|b| b.is_ascii_digit())
-        {
-            return Ok(Some(start));
-        }
-        Err(invalid("process identity query failed"))
+        windows_process_start(Path::new("powershell.exe"), pid)
     }
     #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         Err(invalid("process identity unavailable on this host"))
     }
+}
+
+#[cfg(any(target_os = "linux", all(unix, test)))]
+pub fn linux_process_start(proc_root: &Path, pid: u32) -> io::Result<Option<String>> {
+    if pid == 0 {
+        return Err(invalid("invalid owner PID"));
+    }
+    let directory = proc_root.join(pid.to_string());
+    let stat = match fs::read_to_string(directory.join("stat")) {
+        Ok(stat) => stat,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            // A missing stat file alone could be a broken/inaccessible proc view. Require a working
+            // self query and a positively absent process directory; all other outcomes stay unknown.
+            fs::read_to_string(proc_root.join("self/stat"))?;
+            return match fs::symlink_metadata(directory) {
+                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+                _ => Err(invalid(
+                    "process directory exists but identity is unavailable",
+                )),
+            };
+        }
+        Err(err) => return Err(err),
+    };
+    let ticks = stat
+        .rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().nth(19))
+        .filter(|ticks| !ticks.is_empty() && ticks.bytes().all(|b| b.is_ascii_digit()))
+        .ok_or_else(|| invalid("process start time unavailable"))?;
+    let boot = fs::read_to_string(proc_root.join("sys/kernel/random/boot_id"))?;
+    if boot.trim().is_empty() {
+        return Err(invalid("boot identity unavailable"));
+    }
+    Ok(Some(format!("{}:{ticks}", boot.trim())))
+}
+
+#[cfg(all(unix, any(not(target_os = "linux"), test)))]
+pub fn unix_process_start(ps: &Path, pid: u32) -> io::Result<Option<String>> {
+    if pid == 0 {
+        return Err(invalid("invalid owner PID"));
+    }
+    let result = std::process::Command::new(ps)
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .output()?;
+    let start = std::str::from_utf8(&result.stdout)
+        .map_err(|_| invalid("invalid ps response"))?
+        .trim();
+    if result.status.success()
+        && result.stderr.is_empty()
+        && !start.is_empty()
+        && start.lines().count() == 1
+    {
+        return Ok(Some(start.to_owned()));
+    }
+    // ps exit 1 plus empty output is not positive ESRCH evidence. Retain rather than guess absent.
+    Err(invalid("process identity query failed"))
+}
+
+#[cfg(any(windows, all(unix, test)))]
+pub fn windows_process_script(pid: u32) -> String {
+    // Get-Process emits this specific ID/category for a missing PID. ProcessCommandException alone
+    // is too broad: PowerShell uses it for other process errors too (see research note/source link).
+    format!(
+        r#"
+try {{ $p = Get-Process -Id {pid} -ErrorAction Stop }}
+catch {{
+    if (($_.FullyQualifiedErrorId -split ',')[0] -eq 'NoProcessFoundForGivenId' -and
+        $_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) {{
+        [Console]::Out.WriteLine('absent'); exit 0
+    }}
+    exit 1
+}}
+if ($null -eq $p) {{ exit 1 }}
+try {{
+    $ticks = $p.StartTime.ToUniversalTime().Ticks
+    if ($ticks -le 0) {{ exit 1 }}
+    [Console]::Out.WriteLine($ticks)
+}} catch {{ exit 1 }}
+"#
+    )
+}
+
+#[cfg(any(windows, all(unix, test)))]
+pub fn windows_process_result(result: std::process::Output) -> io::Result<Option<String>> {
+    let start = std::str::from_utf8(&result.stdout)
+        .map_err(|_| invalid("invalid process response"))?
+        .trim();
+    if result.status.success() && result.stderr.is_empty() {
+        if start == "absent" {
+            return Ok(None);
+        }
+        if start.parse::<u64>().is_ok_and(|ticks| ticks > 0) {
+            return Ok(Some(start.to_owned()));
+        }
+    }
+    Err(invalid("process identity query failed"))
+}
+
+#[cfg(any(windows, all(unix, test)))]
+pub fn windows_process_start(powershell: &Path, pid: u32) -> io::Result<Option<String>> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Err(invalid("invalid owner PID"));
+    }
+    let result = std::process::Command::new(powershell)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &windows_process_script(pid),
+        ])
+        .output()?;
+    windows_process_result(result)
 }
 
 fn newest_modified(path: &Path) -> io::Result<std::time::SystemTime> {
@@ -414,6 +506,9 @@ pub fn cleanup_stages(
             continue;
         };
         let Some(start) = owner.start else { continue };
+        if owner.pid == 0 || start.trim().is_empty() {
+            continue;
+        }
         let gone = match process_start(owner.pid) {
             Ok(None) => true,
             Ok(Some(current)) => current != start,
