@@ -1001,6 +1001,12 @@ mod tests {
         std::fs::write(&original, raw).unwrap();
         let error = backup_quarantine_with_publish(&original, |staged, destination| {
             assert_ne!(staged, destination, "syncing the final name alone is not publication");
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                // The reservation handle must be closed before publication, not just delete-shared.
+                drop(std::fs::OpenOptions::new().read(true).share_mode(0).open(destination).unwrap());
+            }
             assert_eq!(std::fs::read(staged).unwrap(), raw);
             assert_eq!(std::fs::read(&original).unwrap(), raw);
             Err(std::io::Error::other("fake write-through publication failure"))
