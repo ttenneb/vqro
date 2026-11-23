@@ -39,6 +39,16 @@ class CapacityProducerPipeline(unittest.TestCase):
             core.resources['target']['data']['agent']['incomplete'].remove('usage_limits')
             self.assertEqual(policy.capacities(list(core.resources.values()),[target])[target['id']],90)
 
+    def test_actual_sparse_transition_does_not_turn_dropped_restriction_into_capacity(self):
+        with patch('accounts_policy.now_ms',return_value=0):
+            core,accounts,target=self.fixture('transition_expected')
+            self.assertIn('usage_limits',core.resources['target']['data']['agent']['incomplete'])
+            self.assertIsNone(policy.capacities(list(core.resources.values()),[target])[target['id']])
+            accounts.handle_blocked('source');self.assertEqual(core.launches,[])
+            # Actual map10/secondary100 -> sparse same-id legacy11 lost a constraint, not its allocation.
+            core.resources['target']['data']['agent']['incomplete'].remove('usage_limits')
+            self.assertEqual(policy.capacities(list(core.resources.values()),[target])[target['id']],89)
+
     def test_actual_complete_dto_projection_remains_positive_fresh_empty_work(self):
         with patch('accounts_policy.now_ms',return_value=0):
             core,accounts,target=self.fixture('complete_expected')
