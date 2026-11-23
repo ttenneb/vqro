@@ -392,7 +392,7 @@ windows_check() {  # native Windows compiles with zero warnings (type check only
   fi
   env -i PATH="$PATH" grep -qx x86_64-pc-windows-gnu <<<"$installed" \
     || { echo "SKIP Windows check: rustup target x86_64-pc-windows-gnu not installed"; return "$SKIP_EXIT"; }
-  local cargo=(env -i HOME="$HOME" PATH="$PATH" CARGO_TARGET_DIR="$TARGET/windows" cargo check --target x86_64-pc-windows-gnu --all-targets)
+  local cargo=("${CARGO[@]}" CARGO_TARGET_DIR="$TARGET/windows" cargo check --target x86_64-pc-windows-gnu --all-targets)
   "${cargo[@]}" 2>&1 | env -i PATH="$PATH" tee /dev/stderr | env -i PATH="$PATH" grep -q '^warning' && return 1
   "${cargo[@]}" >/dev/null 2>&1
 }

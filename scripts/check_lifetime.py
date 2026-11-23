@@ -14,7 +14,7 @@ import sys
 import time
 
 # Never serialize arbitrary caller/manager credentials or HERDR_* into ExecStart arguments.
-FORWARDED = ("HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "CARGO_TARGET_DIR", "CHECK_JOBS",
+FORWARDED = ("HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "CARGO_TARGET_DIR", "ZIG", "CHECK_JOBS",
              "CHECK_RECEIPT", "VQRO_CHECK_INJECT_LEAK", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
              "VQRO_GATE_SLOT_DIR", "VQRO_GATE_SLOT_HELD", "VQRO_GATE_EXCLUSIVE", "VQRO_SCALE_TEST_EXE")
 

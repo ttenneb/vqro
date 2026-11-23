@@ -110,6 +110,26 @@ class CheckTests(unittest.TestCase):
         result = subprocess.run(['/bin/bash', '-c', body], env=env, capture_output=True, text=True, timeout=10)
         return result, logs, target, current, ran
 
+    def test_zig_reaches_clean_build_arrays_and_windows_cross_check(self):
+        fake = self.root/'bin'
+        fake.mkdir()
+        for name, body in [('rustup', 'echo x86_64-pc-windows-gnu'),
+                           ('cargo', 'printf "%s\\n%s\\n%s\\n" "$ZIG" "$CARGO_TARGET_DIR" "$*" >> "$HOME/invocations"')]:
+            path = fake/name
+            path.write_text('#!/bin/sh\n' + body + '\n')
+            path.chmod(0o700)
+        env = dict(self.env, PATH=str(fake) + ':' + self.env['PATH'], ZIG='/fixture/compiler with spaces/zig')
+        arrays = SOURCE[SOURCE.index('CARGO=(env'):SOURCE.index('STEPS=$LOGS/steps.tsv')]
+        body = '\n'.join(['set -u', 'CHECK_SYSTEM=Linux', 'SKIP_EXIT=77', 'TARGET=$HOME/target', arrays,
+                          '"${CARGO[@]}" cargo build', '"${CLEAN[@]}" /bin/sh -c \'test "$ZIG" = "/fixture/compiler with spaces/zig"\'',
+                          shell_function('windows_check'), 'windows_check'])
+        result = subprocess.run(['/bin/bash', '-c', body], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = (self.root/'invocations').read_text().splitlines()
+        self.assertEqual(lines, ['/fixture/compiler with spaces/zig', str(self.root/'target'), 'build'] +
+                         ['/fixture/compiler with spaces/zig', str(self.root/'target/windows'),
+                          'check --target x86_64-pc-windows-gnu --all-targets'] * 2)
+
     def test_platform_skips_are_receipted_and_linux_commands_unchanged(self):
         commands = '''
 step build-zero-warnings true

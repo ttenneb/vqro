@@ -186,6 +186,7 @@ class LifetimeUnitTests(unittest.TestCase):
 
     def test_service_uses_native_cleanup_and_does_not_forward_secrets(self):
         with patch.dict(os.environ, {'HOME': '/fixture', 'PATH': '/usr/bin:/bin', 'CHECK_JOBS': '2',
+                                     'ZIG': '/fixture/compiler with spaces/zig',
                                      'HERDR_SOCKET': 'do-not-forward', 'API_TOKEN': 'secret'}, clear=True), \
              patch.object(lifetime.subprocess, 'call', return_value=0) as run:
             self.assertEqual(lifetime.launch(['/bin/true']), 0)
@@ -196,6 +197,7 @@ class LifetimeUnitTests(unittest.TestCase):
         self.assertIn('--expand-environment=no', args)
         self.assertIn('-i', args)
         self.assertIn('CHECK_JOBS=2', args)
+        self.assertEqual(args.count('ZIG=/fixture/compiler with spaces/zig'), 1)
         self.assertFalse(any('secret' in arg or 'HERDR_' in arg for arg in args))
 
 
