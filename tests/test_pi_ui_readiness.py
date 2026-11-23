@@ -53,6 +53,24 @@ class Readiness(unittest.TestCase):
             probe.ui_launch()
         self.assertEqual(probe.assert_launch, ({'epoch': 'e', 'seq': 1}, 'observed', 'resource.spawn', 15))
 
+    def test_rust_ui_checks_structured_startup_without_running_legacy_script(self):
+        probe = StartupProbe()
+        probe.args.rust_bridge = True
+        probe.args.real_pi_metadata = False
+        probe.trace = lambda: []
+        frames = []
+        def frame(name, *texts):
+            if name == 'agent-ready':
+                self.assertTrue(probe.completed, 'completion barrier still precedes frame')
+                frames.append(texts)
+        probe.ui_frame = frame
+        probe.ui_navigation = lambda *args: self.fail('legacy navigation/input script cannot run on the v0 profile')
+        with patch.object(e2e, 'identity', return_value=None):
+            result = probe.ui_launch()
+        self.assertEqual(result, {'outcome': 'observed', 'host': 'r1', 'agent': 'r2'})
+        self.assertEqual(frames, [('Start-up', 'Message Pi…', '● idle')])
+        self.assertEqual(probe.assert_launch[-1], 15, 'no startup budget increase')
+
     def test_nonmatching_frame_is_preserved_in_failure_diagnostic(self):
         probe = object.__new__(e2e.E2E)
         probe.log = []

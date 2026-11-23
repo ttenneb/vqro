@@ -377,8 +377,17 @@ class E2E:
         # budget for the launch completion event, not an early resource followed by an 8-second race.
         # The notice is still asserted, but its four-second toast need not overlap the durable frame.
         event, agent = self.audit_error(cursor, 'observed', 'resource.spawn', ready=launched, timeout=15)
-        self.ui_frame('agent-ready', 'Ready for a prompt')
         rid = agent['id']
+        if args_rust(self.args):
+            # The structured pane has a startup card and composer, not the legacy bridge's prose status.
+            # Keep this an untouched-session UI startup smoke before rust_default_checks below; the
+            # legacy run/queues/settings/error-turn script has a different facts/rendering contract.
+            self.ui_frame('agent-ready', 'Start-up', 'Message Pi…', '● idle')
+            if not self.args.real_pi_metadata:
+                assert not any(row.get('type') == 'prompt' for row in self.trace()), 'UI startup sent native input'
+            self.log.append({'rust_ui_startup': 'PASS', 'scope': 'startup smoke; native checks follow'})
+            return {'outcome': event['outcome'], 'host': agent['host'], 'agent': rid}
+        self.ui_frame('agent-ready', 'Ready for a prompt')
         self.ui_navigation(rid, agent['host'])
         self.ui('send-keys', '-t', 'ui:0.0', 'C-g', 'p')  # typing stays on the prompt key, not right-click
         self.ui_frame('prompt-key-input', 'Prompt agent')
