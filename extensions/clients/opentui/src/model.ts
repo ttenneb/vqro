@@ -278,14 +278,48 @@ export function pageItems(value: Json, page = 0): Json[] {
   return Array.isArray(value.items) ? value.items : [];
 }
 
+export type ColumnSort = [number, boolean] | null;
+
+export function nextColumnSort(by: ColumnSort, column: number): ColumnSort {
+  return by?.[0] === column ? (by[1] ? null : [column, true]) : [column, false];
+}
+
+export function activeColumnSort(spec: Json[], by: ColumnSort): ColumnSort {
+  return by && spec[by[0]]?.sortable === true ? by : null;
+}
+
+function columnSorted(pairs: [Json, string][], by: ColumnSort): [Json, string][] {
+  if (!by) return pairs;
+  const data = (item: Json) => Array.isArray(item.columns) && item.table_header !== true && typeof item.pin !== "string" && !["header", "separator"].includes(kind(item));
+  const value = (item: Json) => (Array.isArray(item.column_sort) ? item.column_sort : item.columns)?.[by[0]];
+  const keyed = (v: Json) => typeof v === "number" || typeof v === "string";
+  const numeric = (v: Json): number | null => {
+    if (typeof v === "string" && !/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(v.trim())) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const values = pairs.filter(([item]) => data(item)).sort(([a], [b]) => {
+    const x = value(a), y = value(b);
+    if (!keyed(x) || !keyed(y)) return Number(keyed(y)) - Number(keyed(x));
+    const nx = numeric(x), ny = numeric(y);
+    const order = nx !== null && ny !== null ? (nx < ny ? -1 : nx > ny ? 1 : 0)
+      : nx !== null ? -1 : ny !== null ? 1 : cmp(String(x).toLowerCase(), String(y).toLowerCase());
+    return by[1] ? -order : order;
+  });
+  let i = 0;
+  return pairs.map(pair => data(pair[0]) ? values[i++] : pair);
+}
+
 export interface Row { item: Json; depth: number; id: string; parent: number | null; has_children: boolean; expanded: boolean; pinned: boolean; bottom: boolean }
 
 /** Visible rows: toolbar, page, element fallbacks, tree expansion and filter. */
 export function rows(value: Json, page = 0, filter = "", open: Record<string, boolean> = {}, features = BASE_FEATURES,
-  facets: Record<string, string> = {}, sort: number | null = null): Row[] {
+  facets: Record<string, string> = {}, sort: number | null = null, columnSort: ColumnSort = null): Row[] {
   const f = filter.toLowerCase();
   const out: Row[] = [];
   const chosen = chosenFacets(value, page, facets, features), by = chosenSort(value, page, sort, features);
+  const columnBy = features.includes("column_sort") ? activeColumnSort(declared(value, page, "columns") ?? [], columnSort) : null;
+  const order = (pairs: [Json, string][]) => columnSorted(sortedRows(pairs, by), columnBy);
   const one = (item: Json, rid: string, depth: number, parent: number | null, f: string, bottom: boolean) => {
     const mine = bottom ? [] : chosen; // pin: "bottom" rows are never filtered
     const narrowed = !!f || mine.length > 0;
@@ -295,14 +329,14 @@ export function rows(value: Json, page = 0, filter = "", open: Record<string, bo
     const { children: _, ...shown } = item;
     const me = out.length;
     out.push({ item: shown, depth, id: rid, parent, has_children: children.length > 0, expanded, pinned: false, bottom });
-    if (expanded) for (const [c, cid] of sortedRows(shownRows(children, rid + "/", features), by)) one(c, cid, depth + (kind(item) !== "header" ? 1 : 0), me, f, bottom);
+    if (expanded) for (const [c, cid] of (bottom ? sortedRows(shownRows(children, rid + "/", features), by) : order(shownRows(children, rid + "/", features)))) one(c, cid, depth + (kind(item) !== "header" ? 1 : 0), me, f, bottom);
   };
   shownRows(Array.isArray(value.toolbar) ? value.toolbar : [], "toolbar/", features).forEach(([item], n) =>
     out.push({ item, depth: 0, id: `toolbar/${n}`, parent: null, has_children: false, expanded: false, pinned: true, bottom: false }));
   // pin: "bottom" rows (feature pin) come last and are never filtered out; without the feature they stay in place.
   const pin = features.includes("pin");
   const top = shownRows(pageItems(value, page), "", features);
-  for (const [item, rid] of sortedRows(top.filter(([item]) => !(pin && item.pin === "bottom")), by)) one(item, rid, 0, null, f, false);
+  for (const [item, rid] of order(top.filter(([item]) => !(pin && item.pin === "bottom")))) one(item, rid, 0, null, f, false);
   for (const [item, rid] of top) if (pin && item.pin === "bottom") one(item, rid, 0, null, "", true);
   return out;
 }
@@ -310,13 +344,14 @@ export function rows(value: Json, page = 0, filter = "", open: Record<string, bo
 /** Search (feature search): matching selectable rows on the page, collapsed ones included, in display order, as
  *  [id, ids to open]. Toolbar and bottom-pinned rows are not searched; the filter still applies. */
 export function search(value: Json, query: string, page = 0, filter = "", features = BASE_FEATURES,
-  facets: Record<string, string> = {}, sort: number | null = null): [string, string[]][] {
+  facets: Record<string, string> = {}, sort: number | null = null, columnSort: ColumnSort = null): [string, string[]][] {
   const q = query.toLowerCase(), f = filter.toLowerCase();
   const out: [string, string[]][] = [];
   if (!q) return out;
   const chosen = chosenFacets(value, page, facets, features), by = chosenSort(value, page, sort, features);
+  const columnBy = features.includes("column_sort") ? activeColumnSort(declared(value, page, "columns") ?? [], columnSort) : null;
   const walk = (items: [Json, string][], path: string[]) => {
-    for (const [item, rid] of sortedRows(items, by)) {
+    for (const [item, rid] of columnSorted(sortedRows(items, by), columnBy)) {
       if ((f || chosen.length) && !subtree(item, rid, f, features, chosen)) continue;
       if (matches(item, q) && selectable(item)) out.push([rid, [...path]]);
       if (Array.isArray(item.children) && item.children.length) walk(shownRows(item.children, rid + "/", features), [...path, rid]);

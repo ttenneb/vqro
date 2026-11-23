@@ -6,13 +6,13 @@ import { Peer, RpcError, type Json } from "./rpc";
 import { Palette } from "./theme";
 import { Terminals } from "./terminal";
 
-export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail", "embedded_views", "markdown", "pin", "composer", "multiline", "search", "facets", "sort", "columns", "message", "card"];
+export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail", "embedded_views", "markdown", "pin", "composer", "multiline", "search", "facets", "sort", "columns", "column_sort", "message", "card"];
 export const PROFILES = ["base", "keys", "terminal"];
 const KINDS = ["panel", "terminal"];
 
 export interface Rect { x: number; y: number; w: number; h: number }
 interface Leaf { view: string; rect: Rect; inner: Rect; path: number[] }
-interface PState { sel: number; top: number; page: number; filter: string; open: Record<string, boolean>; chip: number; followEnd: number | null; manual: boolean; detailFocus: boolean; detailFor: string; composers: Map<string, m.Composer>; editing: string | null; search: string; searchHit: number; seenPages: string[]; facets: Record<string, string>; sort: number | null }
+interface PState { sel: number; top: number; page: number; filter: string; open: Record<string, boolean>; chip: number; followEnd: number | null; manual: boolean; detailFocus: boolean; detailFor: string; composers: Map<string, m.Composer>; editing: string | null; search: string; searchHit: number; seenPages: string[]; facets: Record<string, string>; sort: number | null; columnSort: m.ColumnSort }
 type Overlay =
   | { kind: "prefix"; sel: number }
   | { kind: "palette"; query: string; sel: number }
@@ -358,7 +358,7 @@ export class App {
         else if (args.action === "search_next" || args.action === "search_prev") this.searchStep(key, ctx.panel_view ?? key, args.action === "search_next" ? 1 : -1);
         else if (args.action === "clear_filter") st.filter = "";
         else if (args.action === "facet") { if (typeof args.key === "string") chooseFacet(value, st, args.key, typeof args.value === "string" ? args.value : null); }
-        else if (args.action === "sort") { const i = (m.declared(value, st.page, "sorts") ?? []).findIndex((s: Json) => s?.key === args.key); st.sort = i >= 0 ? i : null; }
+        else if (args.action === "sort") { const i = (m.declared(value, st.page, "sorts") ?? []).findIndex((s: Json) => s?.key === args.key); st.sort = i >= 0 ? i : null; st.columnSort = null; }
         else if (args.action === "expand_all" || args.action === "collapse_all") {
           for (const r of m.rows(value, st.page, "", {}, FEATURES)) if (r.has_children) st.open[r.id] = args.action === "expand_all";
         } else if (args.action === "activate") this.panelKey(outerKey, ctx.panel_view ?? outerKey, "Enter", ctx);
@@ -560,7 +560,7 @@ export class App {
 
   state(key: string): PState {
     let st = this.pstate.get(key);
-    if (!st) { st = { sel: 0, top: 0, page: 0, filter: "", open: {}, chip: 0, followEnd: null, manual: false, detailFocus: false, detailFor: "", composers: new Map(), editing: null, search: "", searchHit: 0, seenPages: [], facets: {}, sort: null }; this.pstate.set(key, st); }
+    if (!st) { st = { sel: 0, top: 0, page: 0, filter: "", open: {}, chip: 0, followEnd: null, manual: false, detailFocus: false, detailFor: "", composers: new Map(), editing: null, search: "", searchHit: 0, seenPages: [], facets: {}, sort: null, columnSort: null }; this.pstate.set(key, st); }
     return st;
   }
 
@@ -582,7 +582,7 @@ export class App {
   /** Show search match `searchHit + delta` (wrapping): open the rows around it and select it. */
   searchStep(key: string, view: string, delta: number, value: Json = this.panelValue(view)) {
     const st = this.state(key);
-    const hits = m.search(value, st.search, st.page, st.filter, FEATURES, st.facets, st.sort);
+    const hits = m.search(value, st.search, st.page, st.filter, FEATURES, st.facets, st.sort, st.columnSort);
     if (!hits.length) { this.message = st.search ? `/${st.search}: no match` : ""; return; }
     st.searchHit = (((st.searchHit + delta) % hits.length) + hits.length) % hits.length;
     const [id, open] = hits[st.searchHit];
@@ -1082,7 +1082,7 @@ function drawPanel(a: App, buf: OptimizedBuffer, area: Rect, key: string, view: 
 }
 
 /** A pane's rows with its own page, filter, expansion, facets and sort. */
-const rowsOf = (value: Json, st: PState) => m.rows(value, st.page, st.filter, st.open, FEATURES, st.facets, st.sort);
+const rowsOf = (value: Json, st: PState) => m.rows(value, st.page, st.filter, st.open, FEATURES, st.facets, st.sort, st.columnSort);
 
 const listDetailOn = (value: Json, page: number): boolean => {
   const pg = Array.isArray(value.pages) && value.pages.length ? value.pages[Math.min(page, value.pages.length - 1)] : value;
@@ -1211,7 +1211,28 @@ function drawList(a: App, buf: OptimizedBuffer, area: Rect, key: string, value: 
     const aligns = spec.map((c: Json) => c?.align === "right");
     for (const r of data) r.item = { ...r.item, text: " ".repeat(Math.max(0, start - prefix(r))) + columnText(r.item.columns, widths, aligns) };
     if (spec.some((c: Json) => typeof c?.label === "string") && y < bottom) {
-      text(buf, area.x + start, y, fit(columnText(spec.map((c: Json) => c?.label ?? ""), widths, aligns), Math.max(0, area.w - start)), p.color("muted"), undefined, TextAttributes.BOLD);
+      const by = m.activeColumnSort(spec, st.columnSort);
+      const labels = spec.map((c: Json, i: number) => by?.[0] === i
+        ? (widths[i] > 1 ? `${fit(c?.label ?? "", Math.max(0, widths[i] - 2))} ${by[1] ? "▼" : "▲"}` : by[1] ? "▼" : "▲")
+        : c?.label ?? "");
+      text(buf, area.x + start, y, fit(columnText(labels, widths, aligns), Math.max(0, area.w - start)), p.color("muted"), undefined, TextAttributes.BOLD);
+      let offset = 0;
+      for (let i = 0; i < spec.length; i++) {
+        if (!widths[i]) continue;
+        const labelWidth = width(fit(labels[i], widths[i]));
+        const x = area.x + start + offset + (aligns[i] ? widths[i] - labelWidth : 0);
+        const w = Math.min(labelWidth, Math.max(0, area.x + area.w - x));
+        if (spec[i]?.sortable === true && w > 0) a.hits.push({ rect: { x, y, w, h: 1 }, act: (e) => {
+          if (e.button !== 0) return;
+          const selected = rowsOf(value, st)[st.sel]?.id;
+          st.columnSort = m.nextColumnSort(st.columnSort, i); st.sort = null;
+          const after = rowsOf(value, st), at = after.findIndex(r => r.id === selected);
+          if (at >= 0) st.sel = at;
+          st.followEnd = after.findLastIndex(r => m.selectable(r.item) && !r.pinned && !r.bottom);
+          st.manual = false;
+        } });
+        offset += widths[i] + 1;
+      }
       y += 1; header = true;
     }
   }
@@ -1265,6 +1286,7 @@ function cycleFacet(value: Json, st: PState) {
 /** `s`: given order -> each sort -> given order. */
 function cycleSort(value: Json, st: PState): number | null {
   const n = m.declared(value, st.page, "sorts")?.length ?? 0;
+  st.columnSort = null;
   return st.sort === null ? (n > 0 ? 0 : null) : st.sort + 1 < n ? st.sort + 1 : null;
 }
 

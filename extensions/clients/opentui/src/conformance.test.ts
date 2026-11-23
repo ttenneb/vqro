@@ -48,6 +48,40 @@ test("optional group-local tables retain readable tree fallback", () => {
   expect(rows[2].item.copy).toBe("result");
 });
 
+test("column sorting cycles, keeps fixed rows and subtrees, and ignores absent capability", () => {
+  const panel = { columns: [{ label: "Value", sortable: true }], items: [
+    { id: "ten", text: "ten", columns: ["10"], expanded: true, children: [{ id: "child", text: "child" }] },
+    { id: "header", text: "header", columns: ["Value"], table_header: true },
+    { id: "two", text: "two", columns: ["2"] },
+    { id: "tie", text: "tie", columns: ["two"], column_sort: [2] },
+    { id: "null", text: "null", columns: ["ignored"], column_sort: [null] },
+    { id: "missing", text: "missing", columns: [] },
+    { id: "pin", text: "pin", columns: ["0"], pin: "bottom" },
+  ] };
+  const features = [...m.BASE_FEATURES, "columns", "column_sort", "pin"];
+  const rows = (by: m.ColumnSort, fs = features) => m.rows(panel, 0, "", {}, fs, {}, null, by);
+  const ids = (by: m.ColumnSort, fs = features) => rows(by, fs).map(r => r.id);
+  let by = m.nextColumnSort(null, 0);
+  expect(ids(by)).toEqual(["two", "header", "tie", "ten", "child", "null", "missing", "pin"]);
+  expect(rows(by)[4].parent).toBe(3);
+  by = m.nextColumnSort(by, 0);
+  expect(ids(by)).toEqual(["ten", "child", "header", "two", "tie", "null", "missing", "pin"]);
+  by = m.nextColumnSort(by, 0);
+  expect(by).toBeNull();
+  expect(ids(by)).toEqual(ids(null));
+  expect(ids([0, false], features.filter(f => f !== "column_sort"))).toEqual(ids(null));
+  expect(m.nextColumnSort([0, true], 1)).toEqual([1, false]);
+});
+
+test("column text keys compare case-insensitively with stable ties", () => {
+  const panel = {columns: [{sortable: true}], items: [
+    {id: "z", text: "z", columns: ["Zebra"]},
+    {id: "a", text: "a", columns: ["alpha"]},
+    {id: "a2", text: "a2", columns: ["Alpha"]},
+  ]};
+  expect(m.rows(panel, 0, "", {}, ["columns", "column_sort"], {}, null, [0, false]).map(r => r.id)).toEqual(["a", "a2", "z"]);
+});
+
 test("views", async () => {
   const doc = await fixture("views.json");
   const entries = new Map(Object.entries(doc.entries)), live = new Map(Object.entries(doc.live));

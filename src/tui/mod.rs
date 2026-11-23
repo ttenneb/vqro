@@ -2931,7 +2931,8 @@ impl App {
         }
         let facet = hits.facets.iter().find(|(r, _, _)| r.contains(pos)).map(|(_, k, v)| (k.clone(), v.clone()));
         let sort = hits.sort.is_some_and(|r| r.contains(pos));
-        if facet.is_some() || sort {
+        let column = hits.column_sorts.iter().find(|(r, _, _)| r.contains(pos)).map(|(_, group, i)| (group.clone(), *i));
+        if facet.is_some() || sort || column.is_some() {
             let value = self.panel_value(view);
             let root = self.pstate.entry(key.to_string()).or_default();
             root.detail_focus = in_detail;
@@ -2940,7 +2941,11 @@ impl App {
                 Some((id, v)) => { panel::sync_detail(root, id); (Arc::new(v.clone()), root.detail.get_or_insert_with(Box::default).as_mut()) }
                 None => (value, root),
             };
-            match facet { Some((k, v)) => panel::choose_facet(&value, st, &k, v.as_deref()), None => panel::cycle_sort(&value, st) }
+            if let Some((group, i)) = column {
+                if button == MouseButton::Left { panel::cycle_column_sort(&value, st, group.as_deref(), i); }
+            } else {
+                match facet { Some((k, v)) => panel::choose_facet(&value, st, &k, v.as_deref()), None => panel::cycle_sort(&value, st) }
+            }
             return true;
         }
         let toggle=hits.toggles.iter().any(|(r,_)|r.contains(pos));
@@ -4225,6 +4230,43 @@ mod tests {
         draw(&mut app);
         assert!(!app.pstate["p"].manual_scroll, "at the end it follows again");
         assert!(draw(&mut app).contains("message 59"));
+    }
+
+    #[tokio::test]
+    async fn column_sort_header_clicks_reorder_without_activating_or_losing_the_row() {
+        for child in [false, true] {
+            let (mut app, _) = app();
+            let columns = json!([{"label":"Name","width":16,"sortable":true}]);
+            let data = json!([{"id":"b","text":"beta","columns":["beta"],"command":"client.quit"},
+                {"id":"a","text":"alpha","columns":["alpha"],"command":"client.quit"}]);
+            let mut value = if child {
+                let mut children = vec![json!({"id":"h","text":"Name","table_header":true,"columns":["Name"]})];
+                children.extend(data.as_array().unwrap().iter().cloned());
+                json!({"kind":"panel","items":[{"id":"g","text":"Group","expanded":true,"child_table":{"columns":columns},"children":children}]})
+            } else { json!({"kind":"panel","columns":columns,"items":data}) };
+            value["follow"] = json!(true);
+            app.ws.entries.insert("view/p".into(), value);
+            app.leaves = vec!["p".into()];
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 14)).unwrap();
+            let mut draw = |app: &mut App| { terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, 60, 14), true, &Palette::default(), &Icons::default()); }).unwrap(); };
+            draw(&mut app);
+            let value = app.panel_value("p");
+            app.pstate.get_mut("p").unwrap().sel = panel::rows(&value, &app.pstate["p"]).iter().position(|r| r.id == "b").unwrap();
+            for expected in [Some((0, false)), Some((0, true)), None] {
+                draw(&mut app);
+                let (rect, _, _) = app.hit.panels["p"].column_sorts[0].clone();
+                let pos = Position::new(rect.x, rect.y);
+                assert!(app.panel_click("p", "p", pos, MouseButton::Left, json!({})));
+                draw(&mut app);
+                let st = &app.pstate["p"];
+                assert_eq!(if child { st.child_column_sorts.get("g").copied() } else { st.column_sort }, expected);
+                let rows = panel::rows(&value, st);
+                assert_eq!(rows[st.sel].id, "b", "selection follows the same row even in a following panel");
+                assert_eq!(rows.iter().find(|r| ["a", "b"].contains(&r.id.as_str())).unwrap().id,
+                    if expected == Some((0, false)) { "a" } else { "b" });
+                assert!(!app.quit, "a header click must not activate a data row");
+            }
+        }
     }
 
     #[tokio::test]

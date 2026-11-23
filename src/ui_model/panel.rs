@@ -41,12 +41,15 @@ pub struct State {
     pub facets: BTreeMap<String, String>,
     /// The chosen entry of the panel's `sorts` (feature `sort`); None is the given order.
     pub sort: Option<usize>,
+    /// Column and direction (false: ascending), per panel or child table group id.
+    pub column_sort: Option<(usize, bool)>,
+    pub child_column_sorts: HashMap<String, (usize, bool)>,
     pub(crate) prepared: Option<Arc<Prepared>>,
 }
 
 /// Only fields that affect flattening belong to this cache key. Selection/scroll/chips do not.
 pub(crate) struct Prepared {
-    value: Arc<Value>, page: usize, filter: String, open: HashMap<String,bool>, facets: BTreeMap<String,String>, sort: Option<usize>, pub(crate) rows: Vec<Flat>, pub(crate) total:usize,
+    value: Arc<Value>, page: usize, filter: String, open: HashMap<String,bool>, facets: BTreeMap<String,String>, sort: Option<usize>, column_sort: Option<(usize, bool)>, child_column_sorts: HashMap<String, (usize, bool)>, pub(crate) rows: Vec<Flat>, pub(crate) total:usize,
 }
 impl State {
     /// Flattened rows for this value and state, reused while content and page/filter/expansion are unchanged.
@@ -63,11 +66,11 @@ impl State {
     pub(crate) fn prepare(&mut self, value: &Arc<Value>) -> Arc<Prepared> {
         self.keep_page(value);
         if let Some(cache) = &self.prepared {
-            if Arc::ptr_eq(&cache.value,value) && cache.page==self.page && cache.filter==self.filter && cache.open==self.open && cache.facets==self.facets && cache.sort==self.sort { return cache.clone(); }
+            if Arc::ptr_eq(&cache.value,value) && cache.page==self.page && cache.filter==self.filter && cache.open==self.open && cache.facets==self.facets && cache.sort==self.sort && cache.column_sort==self.column_sort && cache.child_column_sorts==self.child_column_sorts { return cache.clone(); }
         }
         let shown=rows(value,self);
         let total=if self.filter.is_empty()&&self.facets.is_empty(){shown.iter().filter(|r|selectable(&r.item)).count()}else{let mut unfiltered=self.clone();unfiltered.filter.clear();unfiltered.facets.clear();rows(value,&unfiltered).iter().filter(|r|selectable(&r.item)).count()};
-        let prepared=Arc::new(Prepared { value:value.clone(),page:self.page,filter:self.filter.clone(),open:self.open.clone(),facets:self.facets.clone(),sort:self.sort,rows:shown,total });
+        let prepared=Arc::new(Prepared { value:value.clone(),page:self.page,filter:self.filter.clone(),open:self.open.clone(),facets:self.facets.clone(),sort:self.sort,column_sort:self.column_sort,child_column_sorts:self.child_column_sorts.clone(),rows:shown,total });
         self.prepared=Some(prepared.clone()); prepared
     }
 }
@@ -89,7 +92,7 @@ pub struct Flat {
 
 
 /// Panel features this client renders. A panel may list what it needs in `requires`.
-pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow", "markdown", "pin", "composer", "multiline", "search", "facets", "sort", "columns", "message", "fold", "actions", "title_actions", "composer_buttons", "card", "lazy_children", "child_table"];
+pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow", "markdown", "pin", "composer", "multiline", "search", "facets", "sort", "columns", "message", "fold", "actions", "title_actions", "composer_buttons", "card", "lazy_children", "child_table", "column_sort"];
 
 /// Features a panel needs that this client lacks.
 pub fn missing(v: &Value) -> Vec<String> { missing_for(v, SUPPORTED) }
@@ -317,6 +320,88 @@ fn sorted(list: Vec<(Value, String)>, by: &Option<(String, bool)>) -> Vec<(Value
     out
 }
 
+/// A valid local table schema; shared by ordering and rendering.
+fn child_columns(item: &Value) -> Option<&Vec<Value>> {
+    item["child_table"]["columns"].as_array().filter(|s| !s.is_empty() && s.iter().all(Value::is_object))
+}
+
+/// Validate a saved sort against the current schema (live content may have changed).
+pub fn active_column_sort(spec: &[Value], by: Option<(usize, bool)>) -> Option<(usize, bool)> {
+    by.filter(|(i, _)| spec.get(*i).is_some_and(|c| c["sortable"] == true))
+}
+
+fn column_value(item: &Value, i: usize) -> &Value {
+    // An explicit array owns the whole sort key, including null/missing entries.
+    if item["column_sort"].is_array() { &item["column_sort"][i] } else { &item["columns"][i] }
+}
+
+fn compare_column(a: &Value, b: &Value, i: usize, desc: bool) -> Ordering {
+    let (x, y) = (column_value(a, i), column_value(b, i));
+    let keyed = |v: &Value| v.is_string() || v.is_number();
+    match (keyed(x), keyed(y)) {
+        (false, false) => return Ordering::Equal,
+        (false, true) => return Ordering::Greater,
+        (true, false) => return Ordering::Less,
+        _ => {}
+    }
+    let number = |v: &Value| v.as_f64().or_else(|| v.as_str()?.trim().parse::<f64>().ok()).filter(|n| n.is_finite());
+    let text = |v: &Value| v.as_str().map(str::to_lowercase).unwrap_or_else(|| v.to_string());
+    let order = match (number(x), number(y)) {
+        (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => text(x).cmp(&text(y)),
+    };
+    if desc { order.reverse() } else { order }
+}
+
+/// Sort only data slots; non-data rows stay put, and recursion moves each entire subtree with its root.
+fn column_sorted(mut list: Vec<(Value, String)>, by: Option<(usize, bool)>) -> Vec<(Value, String)> {
+    let Some((i, desc)) = by else { return list };
+    let data = |item: &Value| item["columns"].is_array() && item["table_header"] != true
+        && !item["pin"].is_string() && !matches!(kind(item), "header" | "separator");
+    let mut values: Vec<_> = list.iter().filter(|(item, _)| data(item)).cloned().collect();
+    values.sort_by(|a, b| compare_column(&a.0, &b.0, i, desc));
+    let mut values = values.into_iter();
+    for pair in &mut list { if data(&pair.0) { *pair = values.next().unwrap(); } }
+    list
+}
+
+fn table_sort(v: &Value, st: &State, features: &[&str], group: Option<(&Value, &str)>) -> Option<(usize, bool)> {
+    if !features.contains(&"column_sort") { return None; }
+    match group.filter(|(item, _)| features.contains(&"child_table") && child_columns(item).is_some()) {
+        Some((item, id)) => active_column_sort(child_columns(item)?, st.child_column_sorts.get(id).copied()),
+        None => active_column_sort(declared(v, st, "columns")?, st.column_sort),
+    }
+}
+
+/// Click a sortable column: ascending, descending, then given order. Keep selection on the same row id.
+pub fn cycle_column_sort(v: &Value, st: &mut State, group: Option<&str>, column: usize) {
+    let before = rows(v, st);
+    let spec = match group {
+        Some(id) => before.iter().find(|r| r.id == id).and_then(|r| child_columns(&r.item)),
+        None => declared(v, st, "columns"),
+    };
+    if !spec.is_some_and(|s| s.get(column).is_some_and(|c| c["sortable"] == true)) { return; }
+    let selected = before.get(st.sel).map(|r| r.id.clone());
+    let current = group.map(|id| st.child_column_sorts.get(id).copied()).unwrap_or(st.column_sort);
+    let next = match current {
+        Some((i, false)) if i == column => Some((i, true)),
+        Some((i, true)) if i == column => None,
+        _ => Some((column, false)),
+    };
+    match group {
+        Some(id) => match next { Some(by) => { st.child_column_sorts.insert(id.to_string(), by); }, None => { st.child_column_sorts.remove(id); } },
+        None => st.column_sort = next,
+    }
+    st.sort = None;
+    let after = rows(v, st);
+    if let Some(id) = selected { if let Some(i) = after.iter().position(|r| r.id == id) { st.sel = i; } }
+    // Reordering must not look like new content to a following conversation.
+    st.follow_end = after.iter().rposition(|r| selectable(&r.item) && !r.pinned && !r.bottom);
+    st.manual_scroll = false;
+}
+
 /// One facet's chips: its key and label, the chosen value, the count under All and each value's count.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FacetCount {
@@ -385,12 +470,16 @@ pub fn cycle_facet(v: &Value, st: &mut State, features: &[&str]) {
 
 /// `client.panel {action: "sort", key?}`: sort by that entry of `sorts` (no key: the given order).
 pub fn choose_sort(v: &Value, st: &mut State, key: Option<&str>) {
+    st.column_sort = None;
+    st.child_column_sorts.clear();
     st.sort = key.and_then(|k| declared(v, st, "sorts")?.iter().position(|s| s["key"] == k));
 }
 
 /// The sort key `s` cycles: given order -> each entry of `sorts` -> given order.
 pub fn cycle_sort(v: &Value, st: &mut State) {
     let n = declared(v, st, "sorts").map(|s| s.len()).unwrap_or(0);
+    st.column_sort = None;
+    st.child_column_sorts.clear();
     st.sort = match st.sort { None if n > 0 => Some(0), Some(i) if i + 1 < n => Some(i + 1), _ => None };
 }
 
@@ -447,7 +536,7 @@ pub fn rows_for(v: &Value, st: &State, features: &[&str]) -> Vec<Flat> {
     let chosen = chosen_facets(v, st, features);
     let by = chosen_sort(v, st, features);
     let mut out = Vec::new();
-    struct Ctx<'a> { st: &'a State, features: &'a [&'a str], chosen: &'a [(String, String)], by: &'a Option<(String, bool)> }
+    struct Ctx<'a> { v: &'a Value, st: &'a State, features: &'a [&'a str], chosen: &'a [(String, String)], by: &'a Option<(String, bool)> }
     fn one(item: Value, id: String, depth: usize, parent: Option<usize>, c: &Ctx, f: &str, bottom: bool, out: &mut Vec<Flat>) {
         let (st, features) = (c.st, c.features);
         let chosen: &[(String, String)] = if bottom { &[] } else { c.chosen };  // pin: "bottom" rows are never filtered
@@ -468,19 +557,21 @@ pub fn rows_for(v: &Value, st: &State, features: &[&str]) -> Vec<Flat> {
         let me = out.len();
         out.push(Flat { item: row, depth, id: id.clone(), parent, has_children, expanded, pinned: false, bottom });
         if expanded {
-            for (child, cid) in sorted(shown(&children, &format!("{id}/"), features), c.by) {
+            let list = sorted(shown(&children, &format!("{id}/"), features), c.by);
+            let by = if bottom { None } else { table_sort(c.v, st, features, Some((&item, &id))) };
+            for (child, cid) in column_sorted(list, by) {
                 one(child, cid, depth + (kind(&item) != "header") as usize, Some(me), c, f, bottom, out);
             }
         }
     }
-    let c = Ctx { st, features, chosen: &chosen, by: &by };
+    let c = Ctx { v, st, features, chosen: &chosen, by: &by };
     let toolbar = v["toolbar"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
     for (n, (item, _)) in shown(toolbar, "toolbar/", features).into_iter().enumerate() {
         out.push(Flat { item, depth: 0, id: format!("toolbar/{n}"), parent: None, has_children: false, expanded: false, pinned: true, bottom: false });
     }
     let pin = features.contains(&"pin");
     let (bottom, list): (Vec<_>, Vec<_>) = shown(page_items(v, st), "", features).into_iter().partition(|(item, _)| pin && item["pin"] == "bottom");
-    for (item, id) in sorted(list, &by) { one(item, id, 0, None, &c, &f, false, &mut out); }
+    for (item, id) in column_sorted(sorted(list, &by), table_sort(v, st, features, None)) { one(item, id, 0, None, &c, &f, false, &mut out); }
     for (item, id) in bottom { one(item, id, 0, None, &c, "", true, &mut out); }
     out
 }
@@ -497,21 +588,21 @@ pub fn search(v: &Value, st: &State, query: &str, features: &[&str]) -> Vec<(Str
     let mut out = Vec::new();
     if q.is_empty() { return out; }
     #[allow(clippy::too_many_arguments)]
-    fn walk(items: Vec<(Value, String)>, path: &[String], q: &str, f: &str, chosen: &[(String, String)], by: &Option<(String, bool)>, features: &[&str], out: &mut Vec<(String, Vec<String>)>) {
-        for (item, id) in sorted(items, by) {
+    fn walk(items: Vec<(Value, String)>, path: &[String], q: &str, f: &str, chosen: &[(String, String)], by: &Option<(String, bool)>, features: &[&str], v: &Value, st: &State, group: Option<(&Value, &str)>, out: &mut Vec<(String, Vec<String>)>) {
+        for (item, id) in column_sorted(sorted(items, by), table_sort(v, st, features, group)) {
             if (!f.is_empty() || !chosen.is_empty()) && !subtree_matches(&item, &id, f, chosen, features) { continue; }
             if matches(&item, q) && selectable(&item) { out.push((id.clone(), path.to_vec())); }
             let children = item["children"].as_array().map(|c| c.as_slice()).unwrap_or(&[]);
             if !children.is_empty() {
                 let mut p = path.to_vec();
                 p.push(id.clone());
-                walk(shown(children, &format!("{id}/"), features), &p, q, f, chosen, by, features, out);
+                walk(shown(children, &format!("{id}/"), features), &p, q, f, chosen, by, features, v, st, Some((&item, &id)), out);
             }
         }
     }
     let pin = features.contains(&"pin");
     let list: Vec<_> = shown(page_items(v, st), "", features).into_iter().filter(|(item, _)| !(pin && item["pin"] == "bottom")).collect();
-    walk(list, &[], &q, &f, &chosen, &by, features, &mut out);
+    walk(list, &[], &q, &f, &chosen, &by, features, v, st, None, &mut out);
     out
 }
 
@@ -654,6 +745,81 @@ pub fn right(rows: &[Flat], st: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn column_sort_cycles_stably_with_nulls_and_keeps_selection_and_subtrees() {
+        let v = Arc::new(serde_json::json!({"columns":[{"label":"Value","sortable":true}],
+            "sorts":[{"key":"name"}], "toolbar":[{"text":"toolbar","columns":["0"]}], "items":[
+            {"id":"ten","text":"ten","columns":["10"],"expanded":true,"children":[{"id":"child","text":"child"}]},
+            {"id":"header","type":"text","text":"header","table_header":true,"columns":["Value"]},
+            {"id":"two","text":"two","columns":["2"]},
+            {"id":"tie","text":"tie","columns":["two"],"column_sort":[2]},
+            {"id":"null","text":"null","columns":["ignored"],"column_sort":[null]},
+            {"id":"missing","text":"missing","columns":[]},
+            {"id":"pin","text":"pin","pin":"bottom","columns":["0"]}]}));
+        let mut st = State { sel: 1, ..State::default() };
+        let original = st.prepare(&v);
+        let ids = |st: &State| rows(&v, st).iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+        cycle_column_sort(&v, &mut st, None, 0);
+        assert_eq!(ids(&st), ["toolbar/0","two","header","tie","ten","child","null","missing","pin"]);
+        assert_eq!(rows(&v, &st)[st.sel].id, "ten");
+        assert_eq!(rows(&v, &st)[5].parent, Some(4));
+        assert!(!Arc::ptr_eq(&original, &st.prepare(&v)), "sort invalidates cached rows");
+        cycle_column_sort(&v, &mut st, None, 0);
+        assert_eq!(ids(&st), ["toolbar/0","ten","child","header","two","tie","null","missing","pin"]);
+        cycle_column_sort(&v, &mut st, None, 0);
+        assert_eq!(ids(&st), original.rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>());
+        cycle_column_sort(&v, &mut st, None, 0);
+        let no_sort: Vec<_> = SUPPORTED.iter().copied().filter(|f| *f != "column_sort").collect();
+        assert_eq!(rows_for(&v, &st, &no_sort).iter().map(|r| r.id.clone()).collect::<Vec<_>>(), original.rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>());
+        choose_sort(&v, &mut st, Some("name"));
+        assert_eq!(st.column_sort, None);
+        cycle_column_sort(&v, &mut st, None, 0);
+        assert_eq!(st.sort, None);
+    }
+
+    #[test]
+    fn child_column_sort_is_local_and_text_sorts_case_insensitively() {
+        let v = serde_json::json!({"items":[{"id":"g","text":"group","expanded":true,
+            "child_table":{"columns":[{"sortable":true}]},"children":[
+            {"id":"h","text":"header","table_header":true,"columns":["Name"]},
+            {"id":"z","text":"z","columns":["zebra"],"expanded":true,"children":[{"id":"c","text":"child"}]},
+            {"id":"a","text":"a","columns":["Alpha"]},
+            {"id":"a2","text":"a2","columns":["alpha"]}]},
+            {"id":"other","text":"other","expanded":true,"children":[{"id":"b","text":"b","columns":["b"]},{"id":"a3","text":"a3","columns":["a"]}]}]});
+        let mut st = State { sel: 2, ..State::default() };
+        cycle_column_sort(&v, &mut st, Some("g"), 0);
+        let r = rows(&v, &st);
+        assert_eq!(r.iter().map(|r|r.id.as_str()).collect::<Vec<_>>(), ["g","h","a","a2","z","c","other","b","a3"]);
+        assert_eq!(r[st.sel].id, "z");
+        assert_eq!(r[5].parent, Some(4));
+        cycle_column_sort(&v, &mut st, Some("g"), 0);
+        assert_eq!(rows(&v, &st)[2].id, "z");
+        cycle_column_sort(&v, &mut st, Some("g"), 0);
+        assert!(st.child_column_sorts.is_empty());
+        cycle_column_sort(&v, &mut st, Some("other"), 0);
+        assert!(st.child_column_sorts.is_empty(), "no schema: ignore");
+    }
+
+    #[test]
+    fn column_sort_validates_schema_and_search_uses_display_order() {
+        let v = serde_json::json!({"columns":[{"label":"Value","sortable":true},{"label":"Fixed"}],"items":[
+            {"id":"z","text":"row z","columns":["z"]},
+            {"id":"ten","text":"row ten","columns":[" 1e1 "]},
+            {"id":"two","text":"row two","columns":["2"]},
+            {"id":"null","text":"row null","columns":["ignored"],"column_sort":[]}]});
+        let mut st = State::default();
+        cycle_column_sort(&v, &mut st, None, 1);
+        assert_eq!(st.column_sort, None, "non-sortable label is not a control");
+        cycle_column_sort(&v, &mut st, None, 99);
+        assert_eq!(st.column_sort, None);
+        cycle_column_sort(&v, &mut st, None, 0);
+        assert_eq!(rows(&v, &st).iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["two","ten","z","null"]);
+        assert_eq!(search(&v, &st, "row", SUPPORTED).iter().map(|(id,_)|id.as_str()).collect::<Vec<_>>(), ["two","ten","z","null"]);
+        let mut changed = v.clone();
+        changed["columns"][0]["sortable"] = serde_json::json!(false);
+        assert_eq!(rows(&changed, &st)[0].id, "z", "stale saved sort is ignored");
+    }
 
     #[test]
     fn composer_height_is_capped_for_drafts_past_u16_lines() {

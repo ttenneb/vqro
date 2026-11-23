@@ -53,6 +53,8 @@ pub struct Hits {
     pub facets: Vec<(Rect, String, Option<String>)>,
     /// The `Sort:` chip.
     pub sort: Option<Rect>,
+    /// Sortable header cells: rect, child table group id (None: panel), column index.
+    pub column_sorts: Vec<(Rect, Option<String>, usize)>,
     /// "↓ Latest · End" on a following list scrolled away from its end.
     pub latest: Option<Rect>,
     /// Inline row buttons (`actions`): rect, row index, action index.
@@ -308,10 +310,22 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
     let line_drawn = line_h > 0;
     y += line_h;
     // Columns (feature `columns`): one layout for every row of this pane, and a header line when labelled.
-    let layout = declared(v, st, "columns").filter(|c| !c.is_empty()).map(|spec| column_layout(spec, rows, area.width.saturating_sub(1), icons));
+    let spec = declared(v, st, "columns").filter(|c| !c.is_empty());
+    let layout = spec.map(|spec| column_layout(spec, rows, area.width.saturating_sub(1), icons));
     if let Some(l) = layout.as_ref().filter(|l| l.header.is_some()) {
         if y < area.bottom() {
-            buf.set_string(area.x + l.start, y, truncate(l.header.as_deref().unwrap_or(""), area.width.saturating_sub(l.start) as usize), pal.style(Some("muted")).add_modifier(Modifier::BOLD));
+            let spec = spec.unwrap();
+            let cells = spec.iter().map(|c| c["label"].as_str().unwrap_or("").to_string()).collect();
+            let cells = sort_header_cells(cells, &l.widths, active_column_sort(spec, st.column_sort));
+            let (header, spans) = join_cell_spans(cells, &l.widths, &l.aligns);
+            buf.set_string(area.x + l.start, y, truncate(&header, area.width.saturating_sub(l.start) as usize), pal.style(Some("muted")).add_modifier(Modifier::BOLD));
+            for (i, (column, span)) in spec.iter().zip(spans).enumerate() {
+                if column["sortable"] == true { if let Some((offset, width)) = span {
+                    let x = area.x.saturating_add(l.start).saturating_add(offset as u16);
+                    let width = (width.min(u16::MAX as usize) as u16).min(area.right().saturating_sub(x));
+                    if width > 0 { hits.column_sorts.push((Rect::new(x, y, width, 1), None, i)); }
+                } }
+            }
             y += 1;
         }
     }
@@ -330,7 +344,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
     }
     let laid: Vec<Flat>;
     let rows: &[Flat] = match &layout { Some(l) => { laid = rows.iter().map(|r| l.apply(r, icons)).collect(); &laid } None => rows };
-    let local = child_tables(rows, area.width.saturating_sub(1), icons);
+    let local = child_tables(rows, area.width.saturating_sub(1), icons, st);
     let rows = local.as_deref().unwrap_or(rows);
     // `pin: "bottom"` rows (feature pin): below the list, never scrolled, at most half of what is left.
     let first_bottom = rows.iter().position(|r| r.bottom).unwrap_or(rows.len());
@@ -510,6 +524,7 @@ struct ColumnLayout { start: u16, widths: Vec<usize>, aligns: Vec<bool>, header:
 
 /// Cells before a row's text: indent, expander, checkbox and icon, as `draw_row` lays them out.
 fn prefix_width(r: &Flat, icons: &Icons) -> u16 {
+    if matches!(kind(&r.item), "text" | "header") { return (r.depth * 2) as u16; }
     let mut x = (r.depth * 2) as u16 + 2 * (r.has_children || r.depth > 0) as u16;
     if kind(&r.item) == "toggle" { x += 4; } else if r.depth == 0 && !r.has_children { x += 1; }
     if let Some(icon) = icons.resolve(&r.item["icon"]) { let icon: String = icon.chars().take(2).collect(); x += icons.cell(&icon).1 + 1; }
@@ -541,7 +556,7 @@ fn column_layout(spec: &[Value], rows: &[Flat], width: u16, icons: &Icons) -> Co
 
 /// A group's `child_table` lays out only its immediate children. Descendants and
 /// neighbouring conversation rows keep their own layout; every row retains its id/hit index.
-fn child_tables(rows: &[Flat], width: u16, icons: &Icons) -> Option<Vec<Flat>> {
+fn child_tables(rows: &[Flat], width: u16, icons: &Icons, st: &State) -> Option<Vec<Flat>> {
     if !rows.iter().any(|r| r.item["child_table"].is_object()) { return None; }
     let mut out = rows.to_vec();
     let mut by_parent = std::collections::HashMap::<usize, Vec<usize>>::new();
@@ -557,11 +572,36 @@ fn child_tables(rows: &[Flat], width: u16, icons: &Icons) -> Option<Vec<Flat>> {
         let children: Vec<Flat> = indices.iter().map(|&i| rows[i].clone()).collect();
         let layout = column_layout(spec, &children, width, icons);
         for &i in indices {
-            out[i] = layout.apply(&rows[i], icons);
+            let mut row = rows[i].clone();
+            if row.item["table_header"] == true {
+                let cells = row.item["columns"].as_array().unwrap().iter().map(|c| c.as_str().unwrap_or("").to_string()).collect();
+                let cells = sort_header_cells(cells, &layout.widths, active_column_sort(spec, st.child_column_sorts.get(&group.id).copied()));
+                let (_, spans) = join_cell_spans(cells.clone(), &layout.widths, &layout.aligns);
+                row.item["columns"] = Value::from(cells);
+                let rects: Vec<Value> = spec.iter().zip(spans).enumerate().filter_map(|(col, (c, span))| {
+                    if c["sortable"] != true { return None; }
+                    let (offset, width) = span?;
+                    Some(serde_json::json!([layout.start as usize + offset, width, col]))
+                }).collect();
+                row.item["_column_sort_hits"] = Value::Array(rects);
+                row.item["_column_sort_group"] = Value::from(group.id.clone());
+            }
+            out[i] = layout.apply(&row, icons);
             out[i].item["_child_table_width"] = Value::from(width);
         }
     }
     Some(out)
+}
+
+/// Keep the direction visible even when a fixed-width label needs truncation.
+fn sort_header_cells(mut cells: Vec<String>, widths: &[usize], by: Option<(usize, bool)>) -> Vec<String> {
+    if let Some((i, desc)) = by {
+        if let (Some(cell), Some(&width)) = (cells.get_mut(i), widths.get(i)) {
+            let arrow = if desc { "▼" } else { "▲" };
+            *cell = if width > 1 { format!("{} {arrow}", truncate(cell, width.saturating_sub(2))) } else { arrow.to_string() };
+        }
+    }
+    cells
 }
 
 fn join_cells(cells: Vec<String>, widths: &[usize], aligns: &[bool]) -> String {
@@ -769,6 +809,15 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
     let row = Rect { width: item["_child_table_width"].as_u64().map(|w| (w.min(u16::MAX as u64) as u16).min(row.width)).unwrap_or(row.width), ..row };
     let w = row.width as usize;
     let y = row.y;
+    if skip == 0 {
+        if let Some(group) = item["_column_sort_group"].as_str() {
+            for cell in item["_column_sort_hits"].as_array().into_iter().flatten() {
+                let x = row.x.saturating_add(cell[0].as_u64().unwrap_or(0).min(u16::MAX as u64) as u16);
+                let width = (cell[1].as_u64().unwrap_or(0).min(u16::MAX as u64) as u16).min(row.right().saturating_sub(x));
+                if width > 0 { hits.column_sorts.push((Rect::new(x, y, width, 1), Some(group.to_string()), cell[2].as_u64().unwrap_or(0) as usize)); }
+            }
+        }
+    }
     let text = item["text"].as_str().unwrap_or("");
     let indent = (r.depth * 2) as u16;
     if skip>0 && !matches!(kind(item),"text"|"chips") {
@@ -970,6 +1019,55 @@ mod tests {
     }
 
     #[test]
+    fn column_sort_headers_have_exact_hits_and_direction_indicators() {
+        for child in [false, true] {
+            let columns = json!([{"label":"Name","width":14,"sortable":true},{"label":"Fixed","width":8},{"label":"Count","width":9,"align":"right","sortable":true}]);
+            let data = json!([{"id":"b","text":"b","columns":["beta","x","10"]}, {"id":"a","text":"a","columns":["alpha","y","2"]}]);
+            let value = Arc::new(if child {
+                let mut children = vec![json!({"id":"h","type":"text","text":"Name Fixed Count","table_header":true,"columns":["Name","Fixed","Count"]})];
+                children.extend(data.as_array().unwrap().iter().cloned());
+                json!({"items":[{"id":"g","text":"Group","expanded":true,"child_table":{"columns":columns,"max_width":52},"children":children}]})
+            } else { json!({"columns":columns,"items":data}) });
+            let area = Rect::new(3, 2, 70, 12);
+            let mut state = State::default();
+            for arrow in [None, Some("▲"), Some("▼"), None] {
+                let mut buf = Buffer::empty(area);
+                let hits = render(&mut buf, area, &value, &mut state, true, &Palette::default(), &Icons::default(), None);
+                assert_eq!(hits.column_sorts.len(), 2, "only sortable visible headers");
+                let (rect, table, column) = &hits.column_sorts[0];
+                assert_eq!(table.as_deref(), child.then_some("g"));
+                assert_eq!(*column, 0);
+                assert_eq!(buf[(rect.x, rect.y)].symbol(), "N", "hit starts on the label");
+                let (right, _, index) = &hits.column_sorts[1];
+                assert_eq!(*index, 2);
+                assert_eq!(buf[(right.x, right.y)].symbol(), "C", "right-aligned hit follows the actual text");
+                assert!(rect.right() < right.x, "the fixed column and gaps are not controls");
+                let line = (area.x..area.right()).map(|x|buf[(x,rect.y)].symbol()).collect::<String>();
+                assert_eq!(line.contains('▲'), arrow == Some("▲"));
+                assert_eq!(line.contains('▼'), arrow == Some("▼"));
+                if child { assert!(hits.column_sorts.iter().all(|(r,_,_)|r.right() <= area.x + 52)); }
+                let table = table.clone();
+                cycle_column_sort(&value, &mut state, table.as_deref(), *column);
+            }
+        }
+    }
+
+    #[test]
+    fn dropped_columns_and_unmarked_child_headers_have_no_sort_hits() {
+        let v = Arc::new(json!({"columns":[{"label":"Name","width":"fill","min_width":12,"sortable":true},
+            {"label":"Dropped","width":8,"priority":1,"sortable":true}],"items":[{"text":"a","columns":["a","b"]}]}));
+        let area = Rect::new(0, 0, 20, 8);
+        let mut buf = Buffer::empty(area);
+        let hits = render(&mut buf, area, &v, &mut State::default(), false, &Palette::default(), &Icons::default(), None);
+        assert_eq!(hits.column_sorts.len(), 1);
+        assert_eq!(hits.column_sorts[0].2, 0);
+        let v = Arc::new(json!({"items":[{"text":"Group","expanded":true,"child_table":{"columns":[{"sortable":true}]},
+            "children":[{"text":"ordinary","columns":["not a header"]}]}]}));
+        let hits = render(&mut buf, area, &v, &mut State::default(), false, &Palette::default(), &Icons::default(), None);
+        assert!(hits.column_sorts.is_empty());
+    }
+
+    #[test]
     fn child_tables_are_local_bounded_and_keep_actions_with_their_rows() {
         let v = json!({"requires":["child_table"], "items":[
             {"id":"g", "text":"Group", "expanded":true,
@@ -1029,7 +1127,7 @@ mod tests {
         for v in [json!({"items":[{"text":"ordinary"}]}),
                   json!({"items":[{"text":"ignored", "child_table":17}]})] {
             let rows = crate::ui_model::panel::rows(&v, &State::default());
-            assert!(child_tables(&rows, 100, &Icons::default()).is_none());
+            assert!(child_tables(&rows, 100, &Icons::default(), &State::default()).is_none());
         }
     }
 

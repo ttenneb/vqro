@@ -1398,6 +1398,19 @@ given rows in clients without the feature. Fixtures: `tests/fixtures/client/pane
   `column_styles: [style|null…]`, parallel to `columns`: a semantic style per cell (e.g. `["ok", null, "link"]` for
   ✓, a plain name and a path), drawn over that cell's text only; missing or `null` entries keep the row's style. It
   needs no feature: clients without it (today OpenTUI and the text client) draw every cell in the row's style.
+  **Column sorting** (optional feature `column_sort`): a column spec may add `sortable: true`. Clicking its label
+  in the client-drawn panel header cycles ascending → descending → given order; the sorted label shows `▲`/`▼`.
+  A `child_table` instead marks its ordinary header child with `table_header: true`; only that row's sortable
+  cells become controls. Sort state is client-local, per panel or child-table group id. Only data rows carrying
+  `columns` reorder; headers, non-data rows, toolbar and pinned rows stay put. Each row's entire subtree moves
+  with it, preserving row identity, hit targets and selection. Ties keep given order. Rows may supply
+  `column_sort: [number|string|null…]`, parallel to `columns`; absent that array, cell text supplies the values.
+  An explicit array's null/missing entries sort last in either direction. Two numeric values (including text
+  that parses as a finite number) compare numerically; numeric values come before text, which compares
+  case-insensitively. A column click replaces the panel's `sorts` choice; choosing a `sorts` entry clears column
+  sorts. Without `column_sort`, clients ignore these fields and retain the ordinary header and given order
+  (unless another supported sort is selected). Rust TUI supports panel and child-table headers; OpenTUI supports
+  panel headers (it does not render `child_table`); the text client ignores column sorting.
 
 - **Group-local tables** (feature `child_table`): a tree item may declare
   `child_table: {columns: [column-spec…], max_width?: positive-cell-count}`. Its immediate children carrying
