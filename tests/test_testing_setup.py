@@ -116,6 +116,37 @@ class SetupTests(unittest.TestCase):
                     self.assertFalse(recovered["finish_ok"], recovered)
                     self.assertNotEqual(recovered["unit"]["state"], "pass")
 
+    def test_in_app_invalidation_error_reads_fresh_policy_not_cached_on(self):
+        handlers = {}
+        ext = Mock()
+        ext.info, ext.vqro = self.hello, self.client
+        ext.entries = self.snapshot["entries"]
+        ext.value.side_effect = lambda key, default=None: True if key == setup.POLICY_KEY else default
+        ext.command.side_effect = lambda name, title: lambda fn: handlers.setdefault(name, fn)
+        with patch("vqro_ext.Extension", return_value=ext), patch.object(unit.threading, "Thread"), \
+             patch.object(setup.SetupStore, "invalidate", side_effect=OSError("evidence store inaccessible")), \
+             patch.dict(os.environ, {"VQRO_EXTENSIONS_DIR": str(self.ext)}):
+            unit.extension_main()
+            for raw, expected in ((True, "on"), (False, "off"), ("malformed", "unknown")):
+                self.snapshot["entries"][setup.POLICY_KEY]["value"] = raw
+                status = handlers["test.setup.status"]({})
+                self.assertEqual(status["policy_state"], expected)
+                self.assertEqual(status["require_unit"], raw is True)
+                self.assertFalse(status["finish_ok"])
+                self.assertEqual(status["unit"]["state"], "error")
+            original = self.client.call.side_effect
+
+            def unavailable(method, *args, **kwargs):
+                if method == "workspace.snapshot":
+                    raise OSError("fresh snapshot unavailable")
+                return original(method, *args, **kwargs)
+
+            self.client.call.side_effect = unavailable
+            status = handlers["test.setup.status"]({})
+            self.assertEqual(status["policy_state"], "unknown")
+            self.assertFalse(status["require_unit"])
+            self.assertFalse(status["finish_ok"])
+
     def test_malformed_policy_has_explicit_unknown_state(self):
         self.snapshot["entries"][setup.POLICY_KEY]["value"] = "not-a-boolean"
         status = self.status()

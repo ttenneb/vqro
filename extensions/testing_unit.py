@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_process import background_kwargs
 from vqro_testing import (EXIT_CODES, cli_parser, dependency_row, endpoints, fingerprint, is_settings_key, is_setup_key, print_result, receipt,
                           resolve_program, row, save_receipt, script_path, text, utc_now, write_receipt)
-from testing_setup import SetupStore, POLICY_KEY, RPC_RULE_NOTICE, rpc_rule_notice, scan as setup_scan, stamp_receipt
+from testing_setup import SetupStore, POLICY_KEY, RPC_RULE_NOTICE, rpc_rule_notice, read_snapshot, scan as setup_scan, stamp_receipt
 
 LOG_BYTES = 64 * 1024
 TEST_TIMEOUT = 120
@@ -277,25 +277,37 @@ def panel(result=None, destination=None):
     return {"title": "Unit health report", "items": items}
 
 
-def error_status(reason):
-    return {"setup_id": None, "generation": 0, "require_unit": False, "policy_state": "unknown",
+def error_status(reason, snapshot=None):
+    # Only this call's successfully read snapshot can establish policy, never cached state.
+    policy = None
+    if isinstance(snapshot, dict) and isinstance(snapshot.get("entries"), dict):
+        entry = snapshot["entries"].get(POLICY_KEY, {"value": False})
+        if isinstance(entry, dict) and type(entry.get("value")) is bool:
+            policy = entry["value"]
+    reasons = [text(reason)]
+    try:
+        scope_notice = rpc_rule_notice(snapshot) if isinstance(snapshot, dict) else None
+    except (AttributeError, TypeError):
+        scope_notice = None  # Malformed auxiliary metadata cannot erase a separately valid policy read.
+    if scope_notice:
+        reasons.insert(0, scope_notice)
+    return {"kind": "vqro.setup-status-error", "version": 1,
+            "setup_id": None, "generation": 0, "require_unit": policy is True,
+            "policy_state": "unknown" if policy is None else "on" if policy else "off",
             "unit": {"state": "error", "receipt": None, "verdict": None, "exception": None},
             "integration": {"state": "unverified", "receipt": None, "skip_reason": None},
             "performance": {"state": "unverified", "recommended": True, "why": "checker unavailable"},
-            "finish_ok": False, "not_verified_reasons": [text(reason)], "coverage_gaps": [], "instance": None, "error": text(reason)}
+            "finish_ok": False, "not_verified_reasons": reasons, "coverage_gaps": [], "instance": None, "error": text(reason)}
 
 
 def setup_status(state_dir, extensions_dir, *, client=None, hello=None, endpoint=None):
-    snapshot = {}
+    snapshot = None
     try:
-        snapshot, value = setup_scan(client, hello, state_dir, extensions_dir, endpoint)
+        snapshot = read_snapshot(client, state_dir)
+        snapshot, value = setup_scan(client, hello, state_dir, extensions_dir, endpoint, snapshot=snapshot)
         return SetupStore(state_dir).status(value, snapshot)
     except Exception as failure:
-        status = error_status(f"setup status unavailable: {failure}")
-        scope_notice = rpc_rule_notice(snapshot)
-        if scope_notice:
-            status["not_verified_reasons"].insert(0, scope_notice)
-        return status
+        return error_status(f"setup status unavailable: {failure}", snapshot)
 
 
 def notice(status):
@@ -359,7 +371,11 @@ def extension_main():
                     tracker.invalidate("previous setup observation failed; evidence invalidated")
                     last["observer_error"] = None
                 except Exception as failure:
-                    status = error_status(f"setup observation could not be persisted: {failure}")
+                    try:
+                        snapshot = read_snapshot(ext.vqro, state_dir)
+                    except Exception:
+                        snapshot = None
+                    status = error_status(f"setup observation could not be persisted: {failure}", snapshot)
                 else:
                     status = setup_status(state_dir, extensions_dir, client=ext.vqro, hello=ext.info)
             else:

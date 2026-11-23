@@ -35,12 +35,16 @@ RECEIPT_LIMIT = 1024 * 1024
 _LOCAL_LOCK = threading.RLock()
 
 
-def scan(client, hello, state_dir, extensions_dir, endpoint=None):
+def read_snapshot(client, state_dir):
     if client is not None:
-        snapshot = client.call("workspace.snapshot")
-    else:
-        with (Path(state_dir) / "workspace.json").open() as stream:
-            snapshot = json.load(stream)
+        return client.call("workspace.snapshot")
+    with (Path(state_dir) / "workspace.json").open() as stream:
+        return json.load(stream)
+
+
+def scan(client, hello, state_dir, extensions_dir, endpoint=None, *, snapshot=None):
+    if snapshot is None:
+        snapshot = read_snapshot(client, state_dir)
     entries = relevant_entries(snapshot)
     declarations = {key: entry["value"] for key, entry in entries.items() if key.startswith("extension/")}
     settings = {key: entry["value"] for key, entry in entries.items() if is_settings_key(key)}

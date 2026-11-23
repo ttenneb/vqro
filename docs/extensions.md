@@ -115,6 +115,13 @@ python3 extensions/testing_unit.py --setup-status --json --socket SOCKET --state
 python3 extensions/testing_unit.py --record --json --socket SOCKET --state-dir STATE --extensions-dir EXTENSIONS
 ```
 
+A status evidence-store/observer failure still exits 2 and refuses finish. Its version-1
+`vqro.setup-status-error` JSON document carries policy only from that call's successfully read snapshot:
+ON remains mandatory despite the evidence error; an unavailable/malformed policy is unknown, never a cached ON.
+The Pi adapter accepts exit-2 policy only after strict whole-document validation (null identity, no receipts,
+error/unverified suite states, `finish_ok:false`); arbitrary/malformed stdout or other exit codes establish no policy.
+The in-app invalidate-error path also reads a fresh snapshot, rather than treating its cached ON flag as authority.
+
 `--record` owns the receipt filename under `<state>/test-unit/`, writes atomically at 0600 and retains 20 runs.
 It cannot be combined with `--no-tests`: deliberately disabled installed tests cannot grant completion.
 Recorded in-app checks with `tests:false` remain unverified; adoption requires `tests_enabled:true`.

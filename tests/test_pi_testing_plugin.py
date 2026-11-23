@@ -160,6 +160,112 @@ class PiTestingPluginTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
+    @unittest.skipUnless(shutil.which("bun"), "Bun unavailable: real error-status CLI chain not executed")
+    @unittest.skipUnless(hasattr(socketserver, "ThreadingUnixStreamServer"), "requires private Unix-stream fixture, not native Windows coverage")
+    def test_fresh_policy_survives_real_producer_cli_exit_two_and_default_adapter(self):
+        with tempfile.TemporaryDirectory(prefix="pi-policy-error-") as temporary:
+            root = Path(temporary)
+            extensions, state, home = root / "ext", root / "state", root / "home"
+            for directory in (extensions, state, home):
+                directory.mkdir()
+            for name in ("testing_setup.py", "vqro_testing.py", "vqro_process.py", "vqro_transport.py"):
+                shutil.copyfile(ROOT / "extensions" / name, extensions / name)
+            shutil.copyfile(ROOT / "extensions/testing_unit.py", extensions / "real_unit.py")
+            (extensions / "sample.py").write_text("# private fingerprint input\n")
+            mode = state / "fixture-mode.json"
+            mode.write_text(json.dumps({"policy": True}))
+            # Fault injection surrounds the real producer/main, not synthetic frontend status.
+            (extensions / "testing_unit.py").write_text('''import contextlib, io, json, pathlib, sys
+import real_unit as unit
+state=pathlib.Path(sys.argv[sys.argv.index('--state-dir')+1])
+with (state/'fixture-calls.jsonl').open('a') as calls: calls.write(json.dumps(sys.argv)+'\\n')
+assert '--setup-status' in sys.argv, 'must not replay Unit'
+mode=json.loads((state/'fixture-mode.json').read_text())
+def fail(*args, **kwargs): raise OSError('private evidence store fault')
+unit.SetupStore.observe=fail
+unit.SetupStore.preview=fail
+if mode.get('malformed'):
+ with contextlib.redirect_stdout(io.StringIO()) as captured: code=unit.main()
+ assert code==2
+ value=json.loads(captured.getvalue())
+ kind=mode['malformed']
+ if kind=='text': print('not JSON')
+ elif kind=='partial': print(json.dumps({'require_unit':True,'policy_state':'on'}))
+ else:
+  if kind=='finish': value['finish_ok']=True
+  if kind=='extra': value['arbitrary']=True
+  if kind=='version': value['version']=2
+  print(json.dumps(value))
+ raise SystemExit(2)
+raise SystemExit(unit.main())
+''')
+            endpoint = root / "p.sock"
+            hello = {"server": "vqro", "version": "private-fixture", "epoch": "private", "socket": str(endpoint), "state_dir": str(state)}
+            snapshot = {"epoch": "private", "entries": {"extension/sample": {"version": 1, "value": {
+                "argv": [sys.executable, "sample.py"], "enabled": True}}, "extension/pi": {"version": 1, "value": {
+                "argv": [sys.executable, "sample.py"], "enabled": True}}}}
+            methods = []
+
+            class Handler(socketserver.StreamRequestHandler):
+                def handle(self):
+                    for line in self.rfile:
+                        request = json.loads(line)
+                        methods.append(request["method"])
+                        config = json.loads(mode.read_text())
+                        if request["method"] == "workspace.snapshot":
+                            if config.get("unavailable"):
+                                response = {"error": {"code": -32000, "message": "private snapshot unavailable"}}
+                            else:
+                                snapshot["entries"]["doc/settings/testing.require_unit"] = {"version": 1, "value": config["policy"]}
+                                response = {"result": snapshot}
+                        else:
+                            assert request["method"] == "hello"
+                            response = {"result": hello}
+                        self.wfile.write((json.dumps({"jsonrpc": "2.0", "id": request["id"], **response}) + "\n").encode())
+                        self.wfile.flush()
+
+            class Server(socketserver.ThreadingUnixStreamServer):
+                daemon_threads = True
+
+            server = Server(str(endpoint), Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            env = {"HOME": str(home), "PATH": os.environ.get("PATH", os.defpath), "VQRO_TESTING_EXTENSIONS_DIR": str(extensions),
+                   "VQRO_TESTING_SOCKET": str(endpoint), "VQRO_TESTING_STATE_DIR": str(state)}
+            try:
+                direct = subprocess.run([sys.executable, "-B", str(extensions / "testing_unit.py"), "--setup-status", "--json",
+                                         "--socket", str(endpoint), "--state-dir", str(state), "--extensions-dir", str(extensions)],
+                                        env=env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(direct.returncode, 2, direct.stdout + direct.stderr)
+                document = json.loads(direct.stdout)
+                self.assertEqual(document["policy_state"], "on")
+                self.assertTrue(document["require_unit"])
+                self.assertFalse(document["finish_ok"])
+                self.assertIn("NOT VERIFIED: rule not active for vqro-launched Pi agents yet", document["not_verified_reasons"])
+                driven = subprocess.run([shutil.which("bun"), "run", "tests/fixtures/pi_testing_policy_error_driver.ts"],
+                                        cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(driven.returncode, 0, driven.stdout + driven.stderr)
+                result = json.loads(driven.stdout)
+                for field in ("prompt", "context"):
+                    self.assertIn("Current setup policy ON", result["on"][field])
+                    self.assertIn("vqro_setup_finish is required", result["on"][field])
+                    self.assertIn("Current setup policy OFF", result["off"][field])
+                    for case in (result["invalidPolicy"], result["unavailable"], *result["malformed"]):
+                        self.assertIn("UNKNOWN/UNAVAILABLE", case[field])
+                        self.assertNotIn("Current setup policy ON", case[field])
+                for case in (result["on"], result["off"], result["invalidPolicy"], result["unavailable"], *result["malformed"]):
+                    self.assertFalse(case["finish"]["finish_ok"])
+                    self.assertIsNone(case["finish"]["status"])
+                    self.assertIn("NOT VERIFIED", case["finish"]["summary"])
+                self.assertEqual(result["providerRequests"], 0)
+                calls = [json.loads(line) for line in (state / "fixture-calls.jsonl").read_text().splitlines()]
+                self.assertTrue(all("--setup-status" in call and "--record" not in call for call in calls))
+                self.assertTrue(set(methods) <= {"hello", "workspace.snapshot"})
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
     @unittest.skipUnless(shutil.which("bun"), "Bun unavailable: model-free TypeScript controls not executed")
     def test_model_free_hook_controls(self):
         with tempfile.TemporaryDirectory(prefix="pi-testing-home-") as home:

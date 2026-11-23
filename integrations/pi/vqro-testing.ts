@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const KEY = "vqro-testing";
+const RPC_RULE_NOTICE = "NOT VERIFIED: rule not active for vqro-launched Pi agents yet";
 const GUIDANCE = "When providing evidence, include receipts with their actual verdicts and coverage gaps; never label missing, failed or stale evidence a pass. Performance is recommended only for hot paths and never blocks. This cooperative guard cannot prevent prose claims of done.";
 const UNIT_STATES = new Set(["pass", "fail", "error", "unverified", "missing", "stale", "pending"]);
 const INTEGRATION_STATES = new Set(["pass", "fail", "skipped", "unverified", "missing", "pending", "stale"]);
@@ -37,6 +38,26 @@ function policyEnvelope(value: any): Policy | undefined {
       value.policy_state !== undefined && (!["on", "off", "unknown"].includes(value.policy_state) ||
         value.policy_state === "on" && !value.require_unit || value.policy_state === "off" && value.require_unit)) return;
   return { require_unit: value.require_unit, policy_state: value.policy_state, not_verified_reasons: value.not_verified_reasons };
+}
+
+function isErrorStatus(value: any): boolean {
+  const exact = (object: any, keys: string[]) => object !== null && typeof object === "object" && !Array.isArray(object) &&
+    Object.keys(object).length === keys.length && keys.every(key => Object.hasOwn(object, key));
+  if (!exact(value, ["kind", "version", "setup_id", "generation", "require_unit", "policy_state", "unit", "integration",
+      "performance", "finish_ok", "not_verified_reasons", "coverage_gaps", "instance", "error"]) ||
+      value.kind !== "vqro.setup-status-error" || value.version !== 1 || value.setup_id !== null || value.generation !== 0 ||
+      value.instance !== null || value.finish_ok !== false || typeof value.error !== "string" || !value.error.trim() ||
+      [...value.error].length > 300 || !Array.isArray(value.coverage_gaps) || value.coverage_gaps.length !== 0 ||
+      !["on", "off", "unknown"].includes(value.policy_state) || !policyEnvelope(value) ||
+      value.require_unit !== (value.policy_state === "on")) return false;
+  const reasons = JSON.stringify(value.not_verified_reasons);
+  return (reasons === JSON.stringify([value.error]) || reasons === JSON.stringify([RPC_RULE_NOTICE, value.error])) &&
+    exact(value.unit, ["state", "receipt", "verdict", "exception"]) && value.unit.state === "error" &&
+    value.unit.receipt === null && value.unit.verdict === null && value.unit.exception === null &&
+    exact(value.integration, ["state", "receipt", "skip_reason"]) && value.integration.state === "unverified" &&
+    value.integration.receipt === null && value.integration.skip_reason === null &&
+    exact(value.performance, ["state", "recommended", "why"]) && value.performance.state === "unverified" &&
+    value.performance.recommended === true && value.performance.why === "checker unavailable";
 }
 
 function policyState(status?: Policy): "ON" | "OFF" | "UNKNOWN" {
@@ -138,6 +159,7 @@ export function installTesting(pi: any, deps: Dependencies) {
     try { value = await deps.status(); }
     catch (error) { policy = undefined; throw error; }
     policy = policyEnvelope(value); // Receipt/identity errors do not make a known ON policy optional.
+    if (isErrorStatus(value)) throw new Error(`setup evidence unavailable (exit 2): ${(value as any).error}`);
     return parseStatus(value);
   }
 
@@ -282,8 +304,10 @@ export default function (pi: any) {
     async status() {
       selected();
       const result = await execute(script, ["--setup-status", "--json", ...selectors], 30_000);
-      if (result.code !== 0) throw new Error(`setup status unavailable: exit ${result.code}: ${result.stderr}`);
-      return JSON.parse(result.stdout);
+      if (result.code !== 0 && result.code !== 2) throw new Error(`setup status unavailable: exit ${result.code}: ${result.stderr}`);
+      const value = JSON.parse(result.stdout);
+      if (result.code === 2 && !isErrorStatus(value)) throw new Error("invalid setup error-status document on exit 2");
+      return value; // Exit 2 can convey fresh policy, never a successful evidence assessment.
     },
     async unit() {
       selected();
