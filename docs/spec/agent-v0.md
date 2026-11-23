@@ -168,7 +168,11 @@ legacy window supersedes retained map rows. Switching legacy bucket identity (in
 named-to-anonymous) also discards the previous legacy rows: it never guesses which named pool an anonymous
 mirror represented. Sparse updates within the same representation retain unmentioned windows/fields; a push
 without a map or valid legacy window does not switch representations. This prevents retained mirrors from
-double-counting one pool. Codex converts native seconds/minutes to milliseconds with
+double-counting one pool. Because a replacement representation can itself be sparse, retiring any retained
+windows also marks the account inventory `incomplete: ["usage_limits"]` (alongside other markers). Even a
+same-bucket map-to-legacy transition cannot silently turn a dropped restrictive secondary window into positive
+capacity. This conservative incompleteness persists until account/epoch reset; retirement never proves recovery.
+Codex converts native seconds/minutes to milliseconds with
 checked arithmetic, and omits malformed/overflowing optional values. Any bucket/row truncation or malformed
 relevant identifier/window/value marks `data.agent.incomplete` with `"usage_limits"`: displayed positive subsets
 are not a complete capacity inventory. This conservative marker remains sticky until native-account or endpoint

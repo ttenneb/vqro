@@ -95,6 +95,11 @@ impl UsageLimits {
 
     fn select_representation(&mut self, representation: Representation) {
         if self.representation.as_ref() != Some(&representation) {
+            // The new representation may be sparse. Retiring old constraints is not proof
+            // that its surviving positive windows describe all applicable account limits.
+            if !self.rows.is_empty() {
+                self.incomplete = true;
+            }
             self.rows.clear();
             self.representation = Some(representation);
         }
