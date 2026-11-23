@@ -1,24 +1,11 @@
 //! A sparse representation replacement must not turn restrictive native evidence into capacity.
 use serde_json::json;
-use vqro::codex::runtime::Runtime;
-use vqro::rpc::{Incoming, Peer};
+use vqro::rpc::Incoming;
+#[path = "support/codex_account.rs"]
+mod codex_account;
 #[tokio::test]
 async fn sparse_same_id_legacy_after_restrictive_map_marks_public_inventory_unknown() {
-    let (io, _other) = tokio::io::duplex(1024);
-    let (read, write) = tokio::io::split(io);
-    let (peer, _) = Peer::spawn(read, write);
-    let runtime = Runtime::with_host_metadata(
-        peer,
-        1,
-        "inc".into(),
-        "fixture".into(),
-        "instance".into(),
-        None,
-        None,
-        Some(
-            json!({"id":"work","label":"Work","kind":"subscription","sources":{"id":"vqro:launcher","label":"vqro:launcher","kind":"vqro:launcher"}}),
-        ),
-    );
+    let runtime = codex_account::runtime(Some(json!({"id":"work","label":"Work","kind":"subscription","sources":{"id":"vqro:launcher","label":"vqro:launcher","kind":"vqro:launcher"}}))).await;
     runtime.incoming(Incoming::Notification {
         method: "account/rateLimits/updated".into(),
         params: json!({

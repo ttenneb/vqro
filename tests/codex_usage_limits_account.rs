@@ -1,28 +1,17 @@
 //! Integration of native limits with the separately configured launcher account seam.
 use serde_json::json;
-use vqro::codex::runtime::Runtime;
-use vqro::rpc::{Incoming, Peer};
+use vqro::rpc::Incoming;
+#[path = "support/codex_account.rs"]
+mod codex_account;
 
 #[tokio::test]
 async fn configured_account_links_every_public_fact_path_without_replacing_native_identity() {
     for configured in [false, true] {
-        let (io, _other) = tokio::io::duplex(1024);
-        let (read, write) = tokio::io::split(io);
-        let (peer, _) = Peer::spawn(read, write);
         let account = configured.then(|| {
             json!({"id":"configured-work","label":"Work","kind":"subscription",
             "sources":{"id":"vqro:launcher","label":"vqro:launcher","kind":"vqro:launcher"}})
         });
-        let runtime = Runtime::with_host_metadata(
-            peer,
-            1,
-            "inc".into(),
-            "fixture".into(),
-            "instance".into(),
-            None,
-            None,
-            account,
-        );
+        let runtime = codex_account::runtime(account).await;
         runtime.incoming(Incoming::Notification {
             method: "account/rateLimits/updated".into(),
             params: json!({"accountId":"native-workspace","rateLimits":{"limitId":"codex",

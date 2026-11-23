@@ -42,7 +42,14 @@ Every managed host performs its OWN native switch/readback; sibling auth reload 
 
 ## Native bridge mechanism
 
-Setup-enabled endpoints advertise generic `agent.command` entries:
+The bridge opts into Codex's experimental API for the native saved-login methods. All endpoints advertise
+read-only `_account.list` and `_account.bind`; setup-enabled endpoints add the fenced lifecycle commands:
+
+- `_account.bind`: verifies the active saved-login/workspace reference read-only before mapping a registered
+  account ID into public facts. It never changes credentials. Unverified launcher hints are private: limits keep
+  native scope but no configured account ID. A new launch requesting an inactive account is refused with
+  **Codex agents share one login; switch the group instead**, before provider publication or thread creation.
+  Normal shared-login launches bind the current login when its reference matches a registered account.
 
 - `_account.list`: read-only `accountSession/list`, projecting bounded opaque `sessionId`/workspace `accountId`
   and active flags only. No email, user ID, image, token, auth URL or unfiltered native response is published.
@@ -80,7 +87,9 @@ restart and remains the policy authority. Native bridge commands are mechanism, 
 old configured account projection before new usage can be labelled; unknown remains unknown. A new account fact
 for a cutover is installed only after native saved-login/workspace readback, not merely from the requested
 account's label. Initial launcher metadata remains a configured hint, not native login/authentication proof;
-initial attribution needs native active-reference verification before it can establish a quota source.
+initial attribution uses native active-reference verification before it can establish a quota source.
+`data.agent.account.native.login_ref` records that verified nonsecret reference; consumers must match the
+current registry binding, not trust a launcher label or reuse an old binding after a registry edit.
 
 ## Evidence and limits
 

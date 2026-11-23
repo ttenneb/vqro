@@ -191,7 +191,10 @@ nonsecret logical setup identifier explicitly configured by the launcher, never 
 login ID. Runtime-specific setup identifiers are opaque to generic consumers. `data.agent.account.rev?` is a
 monotonic in-process projection revision; a newer native authentication change invalidates the prior selected
 account fact and its usage labels until the adapter confirms a new native selection. Missing is unknown, not the
-old account. Configured registry IDs remain distinct from native saved-login/workspace IDs.
+old account. Configured registry IDs remain distinct from native saved-login/workspace IDs. Codex does not
+publish launcher hints as account IDs or quota scope: a read-only active-reference match must first verify the
+registered binding. Its `account.native.login_ref` is nonsecret native evidence; unknown values remain unknown.
+All Codex endpoints expose `_account.list`/`_account.bind` metadata commands, independent of cutover consent.
 
 A Codex host with an explicitly declared setup exposes native saved-login cutover through ordinary advertised
 `agent.command` names `_account.list`, `_account.fence`, `_account.status`, `_account.switch`, `_account.resume`,

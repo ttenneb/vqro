@@ -48,11 +48,40 @@ async fn main() {
 
 async fn run(args: Args) -> Result<(), String> {
     let setup = std::env::var("VQRO_CODEX_SETUP").ok();
-    if setup.as_ref().is_some_and(|s| s.is_empty() || s.len() > 64 || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))) {
+    if setup.as_ref().is_some_and(|s| {
+        s.is_empty()
+            || s.len() > 64
+            || !s
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+    }) {
         return Err("VQRO_CODEX_SETUP must be a bounded nonsecret setup identifier".into());
     }
+    let login_ref = match std::env::var("VQRO_CODEX_LOGIN_REF") {
+        Ok(encoded) => {
+            if encoded.len() > 2048 {
+                return Err("invalid nonsecret Codex login reference".into());
+            }
+            let value: serde_json::Value = serde_json::from_str(&encoded)
+                .map_err(|_| "invalid nonsecret Codex login reference")?;
+            if !value.as_object().is_some_and(|v| {
+                v.len() == 2
+                    && ["sessionId", "accountId"].iter().all(|key| {
+                        v.get(*key).and_then(|v| v.as_str()).is_some_and(|s| {
+                            !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control)
+                        })
+                    })
+            }) {
+                return Err("invalid nonsecret Codex login reference".into());
+            }
+            Some(value)
+        }
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => return Err("invalid nonsecret Codex login reference".into()),
+    };
     let account_raw = std::env::var("VQRO_ACCOUNT").ok();
-    let launcher_account = launcher_account::parse(account_raw.as_deref()).map_err(str::to_owned)?;
+    let launcher_account =
+        launcher_account::parse(account_raw.as_deref()).map_err(str::to_owned)?;
     if !(1..=200).contains(&args.slots) {
         return Err("--slots must be in 1..=200".into());
     }
@@ -122,6 +151,7 @@ async fn run(args: Args) -> Result<(), String> {
     let provider_name = format!("codex-{label}");
     let provider_instance = format!("{label}:{incarnation}");
     let observation = Observation::new(args.slots, incarnation.clone());
+    let account_for_verification = launcher_account.clone();
     let runtime = Runtime::with_host_metadata(
         native.clone(),
         args.slots,
@@ -132,7 +162,11 @@ async fn run(args: Args) -> Result<(), String> {
         endpoint_principal,
         launcher_account,
     );
-    if let Some(setup) = setup { runtime.set_cutover_setup(&setup).map_err(|_| "Codex setup configuration invalid")?; }
+    if let Some(setup) = setup {
+        runtime
+            .set_cutover_setup(&setup)
+            .map_err(|_| "Codex setup configuration invalid")?;
+    }
     let model = runtime.clone();
     let child_native = native.clone();
     let child_monitor = tokio::spawn(async move {
@@ -184,37 +218,54 @@ async fn run(args: Args) -> Result<(), String> {
         }
     });
     let init = tokio::select! {
-        result = native.call_with_timeout("initialize",json!({"clientInfo":{"name":"vqro-bridge-codex","title":"vqro","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":false}}),Duration::from_secs(15)) => result.map_err(|e|e.to_string()),
+        result = native.call_with_timeout("initialize",json!({"clientInfo":{"name":"vqro-bridge-codex","title":"vqro","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}),Duration::from_secs(15)) => result.map_err(|e|e.to_string()),
         _ = exit.changed() => Err("native app-server exited during initialization".into()),
     };
     let result = match init {
         Ok(init) => {
             runtime.initialize_startup(&init);
             native.notify("initialized", json!({}));
-            if runtime
-                .initialize_models(tokio::time::Instant::now() + Duration::from_secs(5))
+            let verified = match (login_ref, account_for_verification) {
+                (Some(reference), Some(account)) => runtime
+                    .verify_launcher_account(
+                        reference,
+                        account,
+                        tokio::time::Instant::now() + Duration::from_secs(5),
+                    )
+                    .await
+                    .map_err(|e| e.message),
+                (Some(_), None) => Err("registered launch account metadata required".into()),
+                (None, _) => Ok(()),
+            };
+            if let Err(error) = verified {
+                Err(error)
+            } else {
+                if runtime
+                    .initialize_models(tokio::time::Instant::now() + Duration::from_secs(5))
+                    .await
+                    .is_err()
+                {
+                    eprintln!(
+                        "native model discovery unavailable; model configuration is not advertised"
+                    );
+                }
+                let mut config =
+                    Config::new(provider_name, provider_instance, runtime.capabilities());
+                config.role = "runtime".into();
+                config.token = Some(token);
+                config.max_in_flight = 128;
+                config.max_item_streams = args.slots * VIEWERS;
+                config.software = json!({"name":"vqro-bridge-codex","version":env!("CARGO_PKG_VERSION"),"runtime":init["userAgent"].as_str().map(|s|s.chars().take(128).collect::<String>())});
+                serve(
+                    &core,
+                    runtime.clone(),
+                    observation.clone(),
+                    config,
+                    &mut exit,
+                    stop.subscribe(),
+                )
                 .await
-                .is_err()
-            {
-                eprintln!(
-                    "native model discovery unavailable; model configuration is not advertised"
-                );
             }
-            let mut config = Config::new(provider_name, provider_instance, runtime.capabilities());
-            config.role = "runtime".into();
-            config.token = Some(token);
-            config.max_in_flight = 128;
-            config.max_item_streams = args.slots * VIEWERS;
-            config.software = json!({"name":"vqro-bridge-codex","version":env!("CARGO_PKG_VERSION"),"runtime":init["userAgent"].as_str().map(|s|s.chars().take(128).collect::<String>())});
-            serve(
-                &core,
-                runtime.clone(),
-                observation.clone(),
-                config,
-                &mut exit,
-                stop.subscribe(),
-            )
-            .await
         }
         Err(error) => Err(error),
     };

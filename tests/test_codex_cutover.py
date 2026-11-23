@@ -17,7 +17,7 @@ def row(ident, host, native_host, state='idle'):
     return {'id':ident,'available':True,'host':host,'incarnation':'inc-'+ident,'status':{'app':'codex'},'data':{'agent':{
         'v':0,'lifecycle':'live','state':state,'run':None if state=='idle' else 'running','epoch':'epoch-'+ident,
         'host':{'id':native_host},'session':{'id':'thread-'+ident},'account_setup':{'id':'shared'},
-        'account':{'id':'a','kind':'subscription'},'caps':{'rev':1,'agent.command':{},'agent.availability':{'reasons':['quota','rate_limited']}},'commands':[{'name':n} for n in HOST_COMMANDS],'queue':None,'requests':[], 'background':None,
+        'account':{'id':'a','kind':'subscription','rev':1,'native':{'login_ref':{'sessionId':'saved-a','accountId':'workspace-a'}}},'caps':{'rev':1,'agent.command':{},'agent.availability':{'reasons':['quota','rate_limited']}},'commands':[{'name':n} for n in HOST_COMMANDS],'queue':None,'requests':[], 'background':None,
         'availability':{'state':'blocked','reason':'quota','native':{'threadId':'thread-'+ident,'turnId':'native-turn',
             'codexErrorInfo':'usageLimitExceeded','willRetry':False}}}}}
 
@@ -25,7 +25,7 @@ class Ext:
     def __init__(self):
         self.vqro=self;self.rows=[row('x','execution','native-x'),row('y','execution','native-y')];self.calls=[]
         probe=row('probe','execution','native-probe');p=probe['data']['agent']
-        p.update(account_setup={'id':'other-setup'},account={'id':'b'},availability={'state':'available'},incomplete=[])
+        p.update(account_setup={'id':'other-setup'},account={'id':'b','kind':'subscription','rev':1,'native':{'login_ref':{'sessionId':'saved-b','accountId':'workspace-b'}}},availability={'state':'available'},incomplete=[])
         now=int(time.time()*1000)
         p['usage_limits']=[{'scope':{'kind':'account','account':'b'},'window':{'id':'primary'},'used_percent':10,
             'source':'codex.account/rateLimits','observed_at_ms':now,'resets_at_ms':now+60000}]
@@ -56,7 +56,7 @@ class Ext:
             if self.reject==op:return {'outcome':'rejected','error':{'kind':'stale','message':'native precondition rejected'}}
             if op=='_account.switch':self.selected[args['resource']]='b'
             ident=self.selected[args['resource']]
-            account={'id':ident,'label':ident.upper(),'kind':'subscription','rev':1}
+            account={'id':ident,'label':ident.upper(),'kind':'subscription','rev':1,'native':{'login_ref':{'sessionId':'saved-'+ident,'accountId':'workspace-'+ident}}}
             if op in ('_account.resume','_account.restore') and not self.skip_publication:
                 target=next(r for r in self.rows if r['id']==args['resource'])
                 target['data']['agent'].update(epoch='resumed-'+target['id'],account=account)
@@ -129,6 +129,13 @@ class Tests(unittest.TestCase):
         p=c.prepare(dict(self.args(),automatic=False));result=c.cutover(self.claimed(ext,p,automatic=False))
         self.assertEqual(result['outcome'],'observed')
         self.assertFalse(any(a.get('op')=='agent.send' for m,a in ext.calls if m=='resource.invoke'))
+    def test_unverified_or_mismatched_native_binding_cannot_supply_target_headroom(self):
+        for mode in ('hint','wrong_ref'):
+            ext=Ext();account=ext.rows[-1]['data']['agent']['account']
+            if mode=='hint':account.pop('native');account.pop('rev')
+            else:account['native']['login_ref']['sessionId']='another-login'
+            with self.assertRaises(VqroError):Cutover(ext).prepare(self.args())
+            self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
     def test_unknown_or_blocked_target_is_never_auto_switched(self):
         for mode in ['unknown','blocked']:
             ext=Ext()

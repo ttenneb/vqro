@@ -40,7 +40,7 @@ fn malformed_account_is_rejected_by_both_executables_before_native_spawn() {
 }
 
 #[tokio::test]
-async fn codex_configured_account_is_consistent_on_every_public_fact_path() {
+async fn codex_launch_hint_is_unverified_on_every_public_fact_path() {
     use vqro::codex::runtime::Runtime;
     use vqro::rpc::Peer;
     let (io, _other) = tokio::io::duplex(1024);
@@ -49,9 +49,9 @@ async fn codex_configured_account_is_consistent_on_every_public_fact_path() {
     let account = json!({"id":"work","label":"Work","kind":"subscription",
         "sources":{"id":"vqro:launcher","label":"vqro:launcher","kind":"vqro:launcher"}});
     let runtime = Runtime::with_host_metadata(peer, 1, "inc".into(), "fixture".into(), "instance".into(), None, None, Some(account.clone()));
-    assert_eq!(runtime.facts()[0]["data"]["agent"]["account"], account);
-    assert_eq!(runtime.fact("endpoint-1").unwrap()["data"]["agent"]["account"], account);
-    assert_eq!(runtime.take_dirty_facts()[0]["data"]["agent"]["account"], account);
+    assert!(runtime.facts()[0]["data"]["agent"].get("account").is_none());
+    assert!(runtime.fact("endpoint-1").unwrap()["data"]["agent"].get("account").is_none());
+    assert!(runtime.take_dirty_facts()[0]["data"]["agent"].get("account").is_none());
     runtime.native.close();
 }
 

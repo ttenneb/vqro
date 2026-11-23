@@ -403,7 +403,7 @@ impl Runtime {
         if let Some(principal) = &self.launcher_principal {
             facts["data"]["agent"]["principal"] = json!(principal);
         }
-        if let Some(account) = self.launcher_account.lock().unwrap().as_ref() {
+        if let Some(account) = self.launcher_account.lock().unwrap().as_ref().filter(|_| self.account_projection_revision.load(Ordering::Acquire) > 0) {
             facts["data"]["agent"]["account"] = account.clone();
             let revision = self.account_projection_revision.load(Ordering::Acquire);
             if revision > 0 { facts["data"]["agent"]["account"]["rev"] = json!(revision); }
@@ -420,7 +420,8 @@ impl Runtime {
             facts["data"]["agent"]["caps"]["agent.command"] = json!({});
             facts["data"]["agent"]["commands"] = json!(cutover::COMMANDS.iter().map(|name| json!({"name":name})).collect::<Vec<_>>());
         } else {
-            facts["data"]["agent"]["caps"].as_object_mut().unwrap().remove("agent.command");
+            facts["data"]["agent"]["caps"]["agent.command"] = json!({});
+            facts["data"]["agent"]["commands"] = json!(cutover::METADATA_COMMANDS.iter().map(|name| json!({"name":name})).collect::<Vec<_>>());
         }
         if self.observer.is_none() {
             facts["data"]["agent"]["caps"]

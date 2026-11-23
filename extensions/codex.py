@@ -13,7 +13,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
-from account_credentials import choose as choose_account, environment as account_environment, runtime_environment, require_fresh
+from account_credentials import choose as choose_account, environment as account_environment, runtime_environment, require_fresh, snapshot, fact, selection_problem
 from codex_cutover import Cutover
 from agent_launch import initialize_request_route, launch, launch_cwd, runtimes as validate_runtimes
 
@@ -85,7 +85,9 @@ class Codex:
         # Shared with native sign-in: profile selectors match without reading a profile.
         env = account_environment(account, runtime_environment('codex', runtime))
         env.pop('VQRO_CODEX_SETUP', None)
+        env.pop('VQRO_CODEX_LOGIN_REF', None)
         if runtime.get('setup_id'): env['VQRO_CODEX_SETUP'] = runtime['setup_id']
+        if account: env['VQRO_CODEX_LOGIN_REF'] = json.dumps(account['login_ref'],separators=(',',':'))
         env['VQRO_PRINCIPAL'] = principal  # never inherit or accept a configured owner/other agent
         params = {'bridge': True, 'name': 'codex-bridge-' + uuid.uuid4().hex[:12],
                   'argv': [*runtime.get('bridge_argv', ['vqro-bridge-codex']), '--slots', '1', '--endpoint-principal', principal,
@@ -94,12 +96,33 @@ class Codex:
         session = {}
         def prepare(agent):
             route = initialize_request_route(self.ext, agent, brand='Codex')
+            self.bind_current_account(agent,account)
             session.update(self.initialize_session(agent, cwd))
             return route
         result = launch(self.ext, params, brand='Codex', initialize_route=prepare, expected_agents=1)
         result['principal'] = principal
         if session: result['session'] = session
         return result
+
+    def bind_current_account(self,agent,selected):
+        records,_ = snapshot(self.ext)
+        candidates = [r for r in records if r['runtime']=='codex' and r['kind']=='subscription' and not selection_problem(r)]
+        if not candidates:return
+        def invoke(name,args):
+            value = self.ext.vqro.call('resource.invoke',{'resource':agent,'op':'agent.command','args':{'v':0,'name':name,'args':args},'deadline_ms':5000})
+            if not isinstance(value,dict) or value.get('outcome')!='observed':
+                message = ((value or {}).get('error') or {}).get('message') if isinstance(value,dict) else None
+                raise VqroError(message or 'native account verification unavailable; do not replay launch','unavailable')
+            return value.get('data') or {}
+        logins = invoke('_account.list',{}).get('logins')
+        active = [r for r in logins if isinstance(r,dict) and r.get('active') is True] if isinstance(logins,list) else []
+        if len(active)!=1:raise VqroError('native active login unavailable; account attribution remains unknown','unavailable')
+        reference = {k:active[0].get(k) for k in ('sessionId','accountId')}
+        if selected and selected['login_ref']!=reference:
+            raise VqroError('Codex agents share one login; switch the group instead','invalid')
+        account = selected or next((r for r in candidates if r['login_ref']==reference),None)
+        if account and invoke('_account.bind',{'login_ref':reference,'account':fact(account)}).get('account_confirmed') is not True:
+            raise VqroError('native account binding unconfirmed; attribution remains unknown','indeterminate')
 
     def initialize_session(self, agent, cwd):
         # A2 intentionally starts with an empty slot. One explicit empty session

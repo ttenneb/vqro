@@ -7,7 +7,9 @@ use tokio::sync::OwnedMutexGuard;
 #[path = "cutover_tests.rs"]
 mod tests;
 
-pub(super) const COMMANDS: [&str; 8] = [
+pub(super) const METADATA_COMMANDS: [&str; 2] = ["_account.list", "_account.bind"];
+pub(super) const COMMANDS: [&str; 9] = [
+    "_account.bind",
     "_account.fence",
     "_account.status",
     "_account.switch",
@@ -186,6 +188,26 @@ impl Runtime {
         Ok(revision)
     }
 
+    /// Refuse an inactive launch selection before publishing a provider or creating a thread.
+    /// The reference is nonsecret; Codex owns all authentication and credential reads.
+    pub async fn verify_launcher_account(
+        self: &Arc<Self>,
+        reference: Value,
+        account: Value,
+        deadline: Instant,
+    ) -> Result<(), RpcError> {
+        match self
+            .account_command(
+                &json!({"name":"_account.bind","args":{"login_ref":reference,"account":account}}),
+                deadline,
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(Fault::Reject(error) | Fault::Unknown(error)) => Err(error),
+        }
+    }
+
     fn quiescent(&self) -> bool {
         self.slots.iter().all(|slot| {
             let e = slot.endpoint.lock().unwrap();
@@ -201,7 +223,9 @@ impl Runtime {
         let name = args["name"]
             .as_str()
             .ok_or_else(|| Fault::invalid("native account command name required"))?;
-        if !COMMANDS.contains(&name) || self.cutover_setup.lock().unwrap().is_none() {
+        if !COMMANDS.contains(&name)
+            || (!METADATA_COMMANDS.contains(&name) && self.cutover_setup.lock().unwrap().is_none())
+        {
             return Err(Fault::unsupported(
                 "native account switching is not configured",
             ));
@@ -209,7 +233,11 @@ impl Runtime {
         let p = &args["args"];
         let _native_permit = if matches!(
             name,
-            "_account.list" | "_account.switch" | "_account.resume" | "_account.restore"
+            "_account.list"
+                | "_account.bind"
+                | "_account.switch"
+                | "_account.resume"
+                | "_account.restore"
         ) {
             Some(
                 self.native_admissions
@@ -231,6 +259,44 @@ impl Runtime {
                 .await
                 .map_err(|_| unknown())?;
             return Ok(Outcome::Observed(Some(project_logins(&response)?)));
+        }
+        if name == "_account.bind" {
+            let session = bounded(&p["login_ref"]["sessionId"], 256)
+                .ok_or_else(|| Fault::invalid("native login reference required"))?;
+            let workspace = bounded(&p["login_ref"]["accountId"], 256)
+                .ok_or_else(|| Fault::invalid("native workspace reference required"))?;
+            let mut account = account_fact(&p["account"])?;
+            if self.cutover.lock().unwrap().is_some() {
+                return Err(reject("cannot rebind during a fenced account transition"));
+            }
+            let (login, revision) = self.read_current_login(deadline).await?;
+            if login.0 != session || login.1 != workspace {
+                return Err(reject(
+                    "Codex agents share one login; switch the group instead",
+                ));
+            }
+            account["native"] = json!({"login_ref":{"sessionId":login.0,"accountId":login.1},"source":"codex.accountSession/list"});
+            {
+                let barrier = self.cutover.lock().unwrap();
+                let mut projection = self.launcher_account.lock().unwrap();
+                if barrier.is_some() || self.auth_revision.load(Ordering::Acquire) != revision {
+                    return Err(unknown());
+                }
+                self.account_revision.fetch_add(1, Ordering::AcqRel);
+                self.account_projection_revision
+                    .fetch_add(1, Ordering::AcqRel);
+                *projection = Some(account.clone());
+            }
+            for (i, slot) in self.slots.iter().enumerate() {
+                let mut e = slot.endpoint.lock().unwrap();
+                // Do not relabel unbound historical windows. The current native limit episode
+                // remains intact; binding metadata is not a quota recovery or credential change.
+                e.usage_limits = Default::default();
+                self.emit(i, &e, vec![e.state_entity()], false);
+            }
+            return Ok(Outcome::Observed(Some(
+                json!({"account_confirmed":true,"account":account}),
+            )));
         }
         let operation = bounded(&p["operation"], 256)
             .ok_or_else(|| Fault::invalid("bounded cutover operation required"))?;
@@ -329,7 +395,7 @@ impl Runtime {
                     .ok_or_else(|| Fault::invalid("native saved login id required"))?;
                 let workspace = bounded(&p["login_ref"]["accountId"], 256)
                     .ok_or_else(|| Fault::invalid("native workspace id required"))?;
-                let account = account_fact(&p["account"])?;
+                let mut account = account_fact(&p["account"])?;
                 // Consume phase before ANY irreversible call. Unknown outcomes stay fenced.
                 {
                     let mut barrier = self.cutover.lock().unwrap();
@@ -382,6 +448,7 @@ impl Runtime {
                 // Fence the response itself, not just the eventual projection. A B
                 // snapshot followed by a queued C notification cannot certify C's revision.
                 let auth_revision = self.read_active_login(session, workspace, deadline).await?;
+                account["native"] = json!({"login_ref":{"sessionId":session,"accountId":workspace},"source":"codex.accountSession/list"});
                 self.account_projection_revision
                     .fetch_add(1, Ordering::AcqRel);
                 {
@@ -447,11 +514,14 @@ impl Runtime {
                         .ok_or_else(unknown)?
                         .stage = "restoring";
                     let (login, revision) = self.read_current_login(deadline).await?;
-                    let account = candidates
+                    let mut account = candidates
                         .into_iter()
                         .find(|(expected, _)| expected == &login)
                         .ok_or_else(unknown)?
                         .1;
+                    if let Some(account) = account.as_mut() {
+                        account["native"] = json!({"login_ref":{"sessionId":login.0,"accountId":login.1},"source":"codex.accountSession/list"});
+                    }
                     {
                         let mut projection = self.launcher_account.lock().unwrap();
                         if self.auth_revision.load(Ordering::Acquire) != revision {
@@ -580,7 +650,7 @@ fn account_fact(value: &Value) -> Result<Value, Fault> {
             "native saved login is subscription-only",
         ));
     }
-    let mut fact = json!({"id":id,"label":label,"kind":"subscription","sources":{"id":"vqro:cutover","label":"vqro:selection","kind":"vqro:selection"}});
+    let mut fact = json!({"id":id,"label":label,"kind":"subscription","sources":{"id":"vqro:binding","label":"vqro:selection","kind":"vqro:selection"}});
     if let Some(provider) = bounded(&value["provider"], 64) {
         fact["provider"] = json!(provider);
         fact["sources"]["provider"] = json!("vqro:selection");

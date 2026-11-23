@@ -123,11 +123,19 @@ class Cutover:
         if selection_problem(target) or target not in eligible:
             fail('target route is incomplete, blocked, duplicated or aliases the source account','stale')
         if args.get('automatic') is True:
-            if (a.get('account') or {}).get('kind') != 'subscription':
-                fail('current subscription selection is unknown; use notify/offer, not automatic switching','unavailable')
+            registered = {r['id']:r for r in target_rows if r['runtime']=='codex' and r['kind']=='subscription' and not selection_problem(r)}
+            def verified(row):
+                account = native(row).get('account') or {}; record = registered.get(account.get('id'))
+                return (row.get('status') or {}).get('app')=='codex' and record is not None \
+                    and type(account.get('rev')) is int and account['rev']>0 \
+                    and (account.get('native') or {}).get('login_ref')==record['login_ref']
+            if (a.get('account') or {}).get('kind') != 'subscription' or not verified(source):
+                fail('current native subscription binding is unverified; use notify/offer','unavailable')
             from accounts_policy import capacities
             identities = {r['id']:credential_identity(r) for r in target_rows}
-            headroom = capacities(rows, [target], credential_identities=identities).get(target['id'])
+            observations = [dict(row,data=dict(row.get('data') or {},agent=dict(native(row),usage_limits=None)))
+                if configured_id(row) in registered and not verified(row) else row for row in rows]
+            headroom = capacities(observations, [target], credential_identities=identities).get(target['id'])
             if headroom is None or headroom <= 0:
                 fail('target capacity is unknown, stale or blocked; use offer, no automatic switch','stale')
         consent = self._automatic_allowed(setup)

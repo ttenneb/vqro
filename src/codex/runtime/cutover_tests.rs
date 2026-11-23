@@ -155,6 +155,48 @@ fn target() -> Value {
     json!({"login_ref":{"sessionId":"saved-b","accountId":"workspace-b"},"account":{"id":"b","label":"B","kind":"subscription"}})
 }
 
+#[tokio::test]
+async fn unverified_launch_hint_b_never_labels_native_a_usage_as_b() {
+    let f = fake("ok").await;
+    *f.runtime.launcher_account.lock().unwrap() = Some(target()["account"].clone());
+    f.runtime.slots[0].endpoint.lock().unwrap().usage_limits.observe(&json!({"accountId":"workspace-a","rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300}}}));
+    let fact = f.runtime.fact("endpoint-1").unwrap();
+    assert!(fact["data"]["agent"]["account"]["id"].is_null());
+    assert!(fact["data"]["agent"]["usage_limits"][0]["scope"]["account"].is_null());
+}
+
+#[tokio::test]
+async fn native_binding_refuses_inactive_b_and_maps_current_a_readonly() {
+    let f = fake("ok").await;
+    let result = command(&f, "_account.bind", target()).await.unwrap();
+    let Outcome::Rejected { message, .. } = result else {
+        panic!("inactive selection must be refused")
+    };
+    assert_eq!(
+        message,
+        "Codex agents share one login; switch the group instead"
+    );
+    assert!(f.runtime.fact("endpoint-1").unwrap()["data"]["agent"]["account"]["id"].is_null());
+    let source = json!({"login_ref":{"sessionId":"saved-a","accountId":"workspace-a"},"account":{"id":"a","label":"A","kind":"subscription"}});
+    assert!(matches!(
+        command(&f, "_account.bind", source).await.unwrap(),
+        Outcome::Observed(_)
+    ));
+    let fact = f.runtime.fact("endpoint-1").unwrap();
+    assert_eq!(fact["data"]["agent"]["account"]["id"], "a");
+    assert_eq!(
+        fact["data"]["agent"]["account"]["native"]["login_ref"],
+        json!({"sessionId":"saved-a","accountId":"workspace-a"})
+    );
+    assert!(
+        f.methods
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|m| m == "accountSession/list")
+    );
+}
+
 fn restore_accounts() -> Value {
     json!({"accounts":[target(),{"login_ref":{"sessionId":"saved-a","accountId":"workspace-a"},"account":{"id":"a","label":"A","kind":"subscription"}}]})
 }

@@ -12,12 +12,21 @@ from agent_fixture import FakeCore
 
 
 class Core(FakeCore):
-    def __init__(self): super().__init__('codex')
+    def __init__(self): super().__init__('codex');self.native_ref={'sessionId':'saved-a','accountId':'workspace-a'}
     def add_agent(self):
         super().add_agent()
         self.resources['r2']['data']['agent'] = {'v': 0, 'epoch': 'fixture-e1', 'session': None,
             'caps': {'rev': 1, 'agent.session': {'actions': ['new']}}}
     def call(self, method, args):
+        if method=='resource.invoke' and args.get('op')=='agent.command':
+            self.calls.append((method,copy.deepcopy(args)))
+            command=args['args']
+            if command['name']=='_account.list':return {'outcome':'observed','data':{'logins':[dict(self.native_ref,active=True)]}}
+            if command['name']=='_account.bind':
+                if command['args']['login_ref']!=self.native_ref:return {'outcome':'rejected','error':{'message':'Codex agents share one login; switch the group instead'}}
+                account=dict(command['args']['account'],rev=1,native={'login_ref':self.native_ref})
+                self.resources[args['resource']]['data']['agent']['account']=account
+                return {'outcome':'observed','data':{'account_confirmed':True,'account':account}}
         if method == 'resource.invoke' and args.get('op') == 'agent.session':
             self.calls.append((method, copy.deepcopy(args)))
             self.resources[args['resource']]['data']['agent']['session'] = {'id': 'fixture-session'}
@@ -64,6 +73,22 @@ class CodexLauncherTests(unittest.TestCase):
         self.assertEqual(result['session'], {'confirmed': True, 'created': True})
         self.assertEqual(self.core.calls[-1], ('agents.show', {'resource': 'r2'}))
 
+    def registered(self):
+        self.core.apply([{'op':'set','key':'doc/settings/accounts','value':{'accounts':[
+            {'id':ident,'label':ident.upper(),'runtime':'codex','kind':'subscription','login_ref':{'sessionId':'saved-'+ident,'accountId':'workspace-'+ident}} for ident in ('a','b')]}}],'registry fixture')
+    def test_shared_login_maps_active_a_without_selecting_inactive_b(self):
+        self.registered();result=self.new(account='normal')
+        account=self.core.resources['r2']['data']['agent']['account']
+        self.assertEqual(account['id'],'a')
+        self.assertNotIn('VQRO_CODEX_LOGIN_REF',self.spawns()[0]['env'])
+        methods=[a['args'].get('name') for m,a in self.core.calls if m=='resource.invoke' and a['op']=='agent.command']
+        self.assertEqual(methods,['_account.list','_account.bind'])
+    def test_inactive_launch_selection_is_refused_before_empty_thread_or_prompt(self):
+        self.registered()
+        with self.assertRaisesRegex(VqroError,'Codex agents share one login; switch the group instead'):self.new(account='b')
+        self.assertEqual(__import__('json').loads(self.spawns()[0]['env']['VQRO_CODEX_LOGIN_REF']),{'sessionId':'saved-b','accountId':'workspace-b'})
+        self.assertFalse(any(m=='resource.invoke' and a['op']=='agent.session' for m,a in self.core.calls))
+        self.assertFalse(any((r.get('data') or {}).get('agent',{}).get('account',{}).get('id')=='b' for r in self.core.resources.values()))
     def test_fresh_principal_cannot_be_overridden_by_configured_owner(self):
         self.configure({'name': 'configured', 'argv': ['/literal codex', 'a;$(no-shell)'],
                         'bridge_env': {'VQRO_PRINCIPAL': 'owner'}})

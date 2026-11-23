@@ -1,7 +1,9 @@
 //! Shared producer DTO -> normalized facts golden, also consumed by capacity policy tests.
 use serde_json::{Value, json};
-use vqro::codex::{Endpoint, runtime::Runtime};
-use vqro::rpc::{Incoming, Peer};
+use vqro::codex::Endpoint;
+use vqro::rpc::Incoming;
+#[path = "support/codex_account.rs"]
+mod codex_account;
 
 #[tokio::test]
 async fn shared_native_dto_marks_positive_subset_unknown_for_capacity() {
@@ -12,19 +14,7 @@ async fn shared_native_dto_marks_positive_subset_unknown_for_capacity() {
         ("complete_dto", "complete_expected"),
         ("transition_dtos", "transition_expected"),
     ] {
-        let (io, _other) = tokio::io::duplex(1024);
-        let (read, write) = tokio::io::split(io);
-        let (peer, _) = Peer::spawn(read, write);
-        let runtime = Runtime::with_host_metadata(
-            peer,
-            1,
-            "inc".into(),
-            "fixture".into(),
-            "instance".into(),
-            None,
-            None,
-            Some(fixture[expected]["account"].clone()),
-        );
+        let runtime = codex_account::runtime(Some(fixture[expected]["account"].clone())).await;
         let observations = fixture[dto]
             .as_array()
             .cloned()

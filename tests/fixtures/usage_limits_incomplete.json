@@ -9,7 +9,7 @@
     }
   },
   "expected": {
-    "account": {"id": "work", "label": "Work", "kind": "subscription", "sources": {"id": "vqro:launcher", "label": "vqro:launcher", "kind": "vqro:launcher"}},
+    "account": {"id": "work", "label": "Work", "kind": "subscription", "sources": {"id": "vqro:binding", "label": "vqro:selection", "kind": "vqro:selection"}, "rev": 1, "native": {"login_ref": {"sessionId": "saved-native", "accountId": "native-workspace"}, "source": "codex.accountSession/list"}},
     "usage_limits": [{
       "scope": {"kind": "account", "account": "work", "native_account_id": "native-workspace", "bucket": "codex"},
       "window": {"id": "primary", "duration_ms": 18000000},
@@ -27,7 +27,7 @@
     }
   },
   "complete_expected": {
-    "account": {"id": "work", "label": "Work", "kind": "subscription", "sources": {"id": "vqro:launcher", "label": "vqro:launcher", "kind": "vqro:launcher"}},
+    "account": {"id": "work", "label": "Work", "kind": "subscription", "sources": {"id": "vqro:binding", "label": "vqro:selection", "kind": "vqro:selection"}, "rev": 1, "native": {"login_ref": {"sessionId": "saved-native", "accountId": "native-workspace"}, "source": "codex.accountSession/list"}},
     "usage_limits": [{
       "scope": {"kind": "account", "account": "work", "native_account_id": "native-workspace", "bucket": "codex"},
       "window": {"id": "primary", "duration_ms": 18000000},
@@ -48,7 +48,7 @@
     }}
   ],
   "transition_expected": {
-    "account": {"id": "work", "label": "Work", "kind": "subscription", "sources": {"id": "vqro:launcher", "label": "vqro:launcher", "kind": "vqro:launcher"}},
+    "account": {"id": "work", "label": "Work", "kind": "subscription", "sources": {"id": "vqro:binding", "label": "vqro:selection", "kind": "vqro:selection"}, "rev": 1, "native": {"login_ref": {"sessionId": "saved-native", "accountId": "native-workspace"}, "source": "codex.accountSession/list"}},
     "usage_limits": [{
       "scope": {"kind": "account", "account": "work", "native_account_id": "native-workspace", "bucket": "codex"},
       "window": {"id": "primary", "duration_ms": 18000000},
