@@ -17,24 +17,59 @@ Python unittest discovery. It neither installs tools nor installs/restarts vqro.
 Cargo, the pinned Zig required by build.rs, and Python must already be available.
 The licence checker requires all locked Cargo packages cached; missing offline
 metadata prerequisites fail visibly rather than triggering an implicit fetch.
+This is not a network-free gate: other Cargo build/test activity can fetch packages.
+A failed build blocks the Cargo test step (recorded FAIL), not an implicit rebuild.
+Full Python discovery is never removed or graded PASS around portability errors;
+it is expected to FAIL on Windows until the separately reviewed W11 fixes land.
 
 Interpreter discovery mirrors `src/program.rs`: literal `VQRO_PYTHON` first;
 otherwise walk PATH directories, skipping directories named WindowsApps, checking
 `py.exe -3`, `python.exe`, then `python3.exe` within each directory. A venv earlier
 on PATH wins over a later launcher. The selected interpreter must be 3.11+.
 
-The script retains Windows/toolchain discovery environment, removes inherited
-HERDR/VQRO/HC endpoint configuration, and selects unique temporary vqro state,
-empty extension directory, backend pipe/session, and XDG directories. The default
-herdr provider command is deliberately unavailable. The environment and working
-directory are restored afterward. Logs and temporary state are retained for
-inspection under the unique printed run directory; they are not live install
-paths. A new receipt is written there, plus the requested/latest receipt. Receipt
-fields follow `check.sh`'s kind/version/steps/result pattern; `mode` explicitly says
-`windows-baseline`. There is no Windows process-leftover scan, and the receipt
-explicitly reports `leftover_scope: not-scanned` (never a fabricated clean scan).
-This gate does not claim process-tree containment, a full release qualification,
-or real desktop acceptance. Tests must still own and clean up their children.
+Every child (including the source-revision query and first Python probe) uses a
+cleared `ProcessStartInfo.EnvironmentVariables` populated from an explicit
+allowlist. Only Windows OS/SDK/tool PATH discovery inputs, the pinned Zig
+executable/cache overrides and approved Rustup toolchains/settings survive.
+HOME, USERPROFILE, APPDATA, LOCALAPPDATA, TEMP/TMP and XDG config/cache/state are
+private. Cargo gets a private CARGO_HOME with junctions to only the approved
+registry/git package caches, never the real Cargo config or credentials files.
+No native agent/runtime/account/auth/import overrides are inherited: PYTHONPATH,
+PYTHONHOME, PYTHONSTARTUP and PYTHONUSERBASE are absent, not merely emptied.
+VQRO_SOCKET_SOURCE and inherited HC_/HERDR_ configuration are absent. Every direct
+Python launch also uses `-I -X utf8` (explicit flags, not ignored PYTHON* encoding
+injection); `PYTHONNOUSERSITE=1` protects ordinary descendant
+Python launches. No credentials are copied. Retained run directories can contain registry/git
+cache junctions: unlink those junctions before any recursive cleanup; never
+follow them into shared caches. This is environment isolation, not a
+sandbox against trusted repository tests deliberately accessing other files.
+
+Each run has explicit private VQRO_SOCKET/VQRO_STATE_DIR, empty extensions and
+backend pipe/session; the
+default herdr command is deliberately unavailable. The calling shell environment
+and working directory are never modified. Retained logs/state and a fresh retained
+receipt live under the printed unique run directory, plus a requested/latest
+receipt. These files are not called immutable, exclusive or read-only; latest
+publication is a direct write. A bootstrap or receipt write failure is nonzero,
+not evidence that an older latest receipt qualifies this run. Bind evidence to
+the fresh printed run path.
+
+Capture, decoding, log write and log read failures are sticky FAILs even after a
+native exit 0. Stdout/stderr drain concurrently; stderr warnings still count but
+ordinary stderr is not itself failure. Both streams are retained (stdout then
+stderr, not a promised interleaving). Native exit codes do not pass through a
+PowerShell redirection pipeline. All seven expected terminal steps must occur
+exactly once and the normal-completion sentinel must be true; empty, prefix,
+interrupted and duplicate-step runs fail. The receipt declares expected steps and
+normal completion explicitly.
+
+Receipt fields follow `check.sh`'s kind/version/steps/result pattern with mode
+`windows-baseline`. There is no Windows leftover scan: `leftover_scope: not-scanned`
+is not a clean-process proof. No process-tree containment, full release qualification
+or desktop acceptance is claimed; tests still own and clean up their children.
+The native helper tests cover injected auth/PYTHONPATH startup canaries, private
+roots, failed log writes/reads, ordinary stderr, stderr warnings, failed launch,
+exit codes and empty/prefix/interrupted/duplicate/complete verdict controls.
 
 ## W12: reproducible encoding failure, not target filtering
 
@@ -66,5 +101,5 @@ of its stale inventory still requires rerunning the checker on that Windows host
 PowerShell is not available on the Linux development host: the script and its
 native tests are **not executed here**. Native PowerShell 5.1 must verify parser,
 external process exit/stderr capture, zero-warning enforcement, receipt generation,
-interpreter discovery, private-state execution, and environment restoration. The
+interpreter discovery, private-state/cache isolation and canary tests. The
 Python encoding regression and unchanged offline inventory check run on Linux.
