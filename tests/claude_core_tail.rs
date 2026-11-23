@@ -12,6 +12,11 @@ use vqro::{
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn actual_core_viewer_keeps_final_tail_after_acknowledged_provider_disconnect() {
+    for _ in 0..20 {
+        one_core_tail_case().await;
+    }
+}
+async fn one_core_tail_case() {
     let dir = tempfile::Builder::new()
         .prefix("cc-tail-")
         .tempdir()
