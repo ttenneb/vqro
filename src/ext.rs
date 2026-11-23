@@ -486,6 +486,7 @@ mod qa2_tests {
         assert!(done.exists(),"500ms grace killed a cooperative provider during its bounded cleanup");
         assert!(core.lock().unwrap().exts.values().all(|rt|rt.pid.is_none()));
     }
+    #[cfg(unix)] // This control deliberately supervises /bin/cat, not a portable provider fixture.
     #[tokio::test(flavor = "current_thread")]
     async fn late_first_supervisor_poll_uses_spawn_deadline_for_notice_event() {
         let root = tempfile::tempdir().unwrap();

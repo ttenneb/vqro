@@ -56,6 +56,7 @@ async fn slow_provider_connects_then_clears_notice() {
     server::shutdown(&core).await;
 }
 
+#[cfg(unix)] // These hold/exit controls use /bin/cat and /bin/false.
 #[tokio::test]
 async fn expiry_and_real_failure_publish_unavailable_without_polling() {
     let root = tempfile::tempdir().unwrap();
