@@ -186,6 +186,23 @@ backend banners, guessed remaining amounts or reset-credit operations. No creden
 no new request timer, token refresh or billable probe is introduced. API-header observations require the runtime
 itself to expose documented header facts; generic header capture is not a capability promised by this contract.
 
+**Configured shared credential setup and switch-aware facts.** `data.agent.account_setup? {id}` is a bounded,
+nonsecret logical setup identifier explicitly configured by the launcher, never inferred from a native path or
+login ID. Runtime-specific setup identifiers are opaque to generic consumers. `data.agent.account.rev?` is a
+monotonic in-process projection revision; a newer native authentication change invalidates the prior selected
+account fact and its usage labels until the adapter confirms a new native selection. Missing is unknown, not the
+old account. Configured registry IDs remain distinct from native saved-login/workspace IDs.
+
+A Codex host with an explicitly declared setup exposes native saved-login cutover through ordinary advertised
+`agent.command` names `_account.list`, `_account.fence`, `_account.status`, `_account.switch`, `_account.resume`,
+`_account.release`, and `_account.abort`. These native mechanism commands fence all endpoints of that app-server,
+confirm a selected saved login/workspace and resume the exact old thread IDs without `turn/start`. Unknown
+commands/sources/setup facts are not synthesized by other adapters. Cross-host membership, explicit shared-login
+consent, protected policy claims and the one new labelled AUTO continuation are accounts-extension policy, not
+core transaction state or a bridge replay queue. Notify never switches; offer requires human click authority.
+A visible system notice says `continued on account B` only after confirmed native resume. Actual cross-account
+Codex0.170 resume acceptance remains unverified by fake tests. See [Codex account cutover](../research/codex-account-cutover.md).
+
 Pi's Rust bridge publishes the known controlled-launch working directory as `session.cwd` unless native state
 reports another directory. Its coalesced read-only `get_session_stats` observations supply the native
 `contextUsage` window/nullable occupancy and input/output/cache token totals, fenced by session/observation epoch

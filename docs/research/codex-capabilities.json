@@ -28,5 +28,6 @@
   "agent.receipt": {},
   "agent.respond": {"methods": ["permission", "form"], "scopes": ["session", "run"], "background_requests": true, "native_timeout": "none", "ack": "dispatched"},
   "agent.session": {"actions": ["new", "resume", "list"]},
+  "agent.command": {},
   "agent.configure": {}
 }

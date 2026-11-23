@@ -1,6 +1,7 @@
 //! Provider-facing orchestration. Native event draining and controls never wait on an admission.
 //! The shared SDK item producer is supplied as a callback; no second item reducer lives here.
 mod startup;
+mod cutover;
 
 use super::{Change, Endpoint, SendContext, configuration, provider_capabilities};
 use crate::provider_client::{Outcome, ProviderError};
@@ -45,7 +46,14 @@ pub struct Runtime {
     observer: Option<Observer>,
     incarnation: String,
     launcher_principal: Option<String>,
-    launcher_account: Option<Value>,
+    launcher_account: Mutex<Option<Value>>,
+    cutover_setup: Mutex<Option<String>>,
+    cutover: Mutex<Option<cutover::Barrier>>,
+    cutover_seen: Mutex<std::collections::BTreeSet<String>>,
+    account_projection_revision: AtomicU64,
+    auth_revision: AtomicU64,
+    cutover_sync: tokio::sync::mpsc::Sender<oneshot::Sender<()>>,
+    cutover_sync_results: Mutex<Option<tokio::sync::mpsc::Receiver<oneshot::Sender<()>>>>,
     account_revision: AtomicU64,
     availability_completed: tokio::sync::mpsc::Sender<AvailabilityRead>,
     availability_results: Mutex<Option<tokio::sync::mpsc::Receiver<AvailabilityRead>>>,
@@ -134,6 +142,7 @@ impl Runtime {
         let host = format!("codex:{incarnation}");
         let (availability_completed, availability_results) = tokio::sync::mpsc::channel(1);
         let (startup_completed, startup_results) = tokio::sync::mpsc::channel(1);
+        let (cutover_sync, cutover_sync_results) = tokio::sync::mpsc::channel(1);
         let runtime = Arc::new(Self {
             native,
             slots: (0..count)
@@ -159,7 +168,14 @@ impl Runtime {
             observer,
             incarnation,
             launcher_principal,
-            launcher_account,
+            launcher_account: Mutex::new(launcher_account),
+            cutover_setup: Mutex::new(None),
+            cutover: Mutex::new(None),
+            cutover_seen: Mutex::new(std::collections::BTreeSet::new()),
+            account_projection_revision: AtomicU64::new(0),
+            auth_revision: AtomicU64::new(0),
+            cutover_sync,
+            cutover_sync_results: Mutex::new(Some(cutover_sync_results)),
             account_revision: AtomicU64::new(0),
             availability_completed,
             availability_results: Mutex::new(Some(availability_results)),
@@ -283,12 +299,24 @@ impl Runtime {
             .unwrap()
             .take()
             .expect("one startup result drain");
+        let mut sync = self.cutover_sync_results.lock().unwrap().take().expect("one cutover sync drain");
         loop {
             tokio::select! {
                 biased;
                 message = incoming.recv() => match message {
                     Some(message) => self.incoming(message),
                     None => break,
+                },
+                result = sync.recv() => {
+                    let Some(done) = result else { break; };
+                    loop {
+                        match incoming.try_recv() {
+                            Ok(message) => self.incoming(message),
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return,
+                        }
+                    }
+                    let _ = done.send(());
                 },
                 result = startup.recv() => {
                     let Some(result) = result else { break; };
@@ -375,8 +403,10 @@ impl Runtime {
         if let Some(principal) = &self.launcher_principal {
             facts["data"]["agent"]["principal"] = json!(principal);
         }
-        if let Some(account) = &self.launcher_account {
+        if let Some(account) = self.launcher_account.lock().unwrap().as_ref() {
             facts["data"]["agent"]["account"] = account.clone();
+            let revision = self.account_projection_revision.load(Ordering::Acquire);
+            if revision > 0 { facts["data"]["agent"]["account"]["rev"] = json!(revision); }
             if let (Some(id), Some(limits)) = (account.get("id"), facts["data"]["agent"]["usage_limits"].as_array_mut()) {
                 for limit in limits {
                     if let Some(scope) = limit.get_mut("scope").and_then(Value::as_object_mut) {
@@ -384,6 +414,13 @@ impl Runtime {
                     }
                 }
             }
+        }
+        if let Some(setup) = self.cutover_setup.lock().unwrap().as_ref() {
+            facts["data"]["agent"]["account_setup"] = json!({"id":setup});
+            facts["data"]["agent"]["caps"]["agent.command"] = json!({});
+            facts["data"]["agent"]["commands"] = json!(cutover::COMMANDS.iter().map(|name| json!({"name":name})).collect::<Vec<_>>());
+        } else {
+            facts["data"]["agent"]["caps"].as_object_mut().unwrap().remove("agent.command");
         }
         if self.observer.is_none() {
             facts["data"]["agent"]["caps"]
@@ -444,6 +481,12 @@ impl Runtime {
                     self.native.close();
                     return;
                 }
+                let auth_changed = method == "account/updated" || (method == "account/login/completed" && params["success"] == true);
+                if auth_changed {
+                    self.auth_revision.fetch_add(1, Ordering::AcqRel);
+                    self.account_projection_revision.fetch_add(1, Ordering::AcqRel);
+                    *self.launcher_account.lock().unwrap() = None;
+                }
                 if matches!(
                     method.as_str(),
                     "account/updated" | "account/login/completed" | "account/rateLimits/updated"
@@ -456,7 +499,9 @@ impl Runtime {
                 ) {
                     for (index, slot) in self.slots.iter().enumerate() {
                         let mut endpoint = slot.endpoint.lock().unwrap();
-                        let changes = endpoint.notification(&method, &params);
+                        if auth_changed { endpoint.usage_limits = Default::default(); }
+                        let mut changes = endpoint.notification(&method, &params);
+                        if auth_changed && changes.is_empty() { changes.push(endpoint.state_entity()); }
                         if !changes.is_empty() {
                             self.emit(index, &endpoint, changes, false);
                         }
@@ -661,6 +706,9 @@ impl Runtime {
             .unwrap()
             .validate(&args)
             .map_err(Fault::Reject)?;
+        if op == "agent.command" && args["name"].as_str().is_some_and(|n| n.starts_with("_account.")) {
+            return self.account_command(&args, deadline).await;
+        }
         match op {
             "agent.send" => self.send(index, args, deadline, context).await,
             "agent.configure" => self.configure(index, args, deadline).await,

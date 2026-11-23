@@ -688,6 +688,10 @@ Agent resources may also carry read-only `data.agent.usage_limits` observations 
 limits with provenance and millisecond observation/reset times, not session token totals or inferred availability.
 The core transports these provider facts unchanged; grouping and usage panels are extension/live-view policy.
 Absent limits mean unknown, and unknown scope/source values degrade to displayable opaque labels.
+Optional `data.agent.account_setup {id}` and switch-aware `data.agent.account.rev` are provider-declared facts
+(agent-v0 §2.3), not a core credential store or login effect. Native saved-login controls use ordinary advertised
+`agent.command` operations; the accounts extension owns group consent/claims and continuation policy. Unknown
+setup or revision fields remain optional facts and never imply authenticated billing identity.
 
 `resource.forget_cached` is a separate core-owned mechanism: it retires **unavailable cached facts only**, with
 fresh durable identity bookkeeping and a `resource.removed` event. Available resources reject with `invalid`;

@@ -13,16 +13,21 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
-from account_profiles import choose as choose_account, environment as account_environment, runtime_environment, require_fresh
+from account_credentials import choose as choose_account, environment as account_environment, runtime_environment, require_fresh
+from codex_cutover import Cutover
 from agent_launch import initialize_request_route, launch, launch_cwd, runtimes as validate_runtimes
 
 SETTINGS = 'doc/settings/codex'
-DEFAULTS = {'runtimes': [{'name': 'codex', 'argv': ['codex', 'app-server', '--stdio']}]}
+DEFAULTS = {'runtimes': [{'name': 'codex', 'argv': ['codex', 'app-server', '--stdio'], 'setup_id': 'shared'}]}
 
 
 def runtimes(value):
     rows = validate_runtimes(value, brand='Codex')
     for row in rows:
+        setup = row.get('setup_id')
+        if 'setup_id' in row and (not isinstance(setup,str) or not 1 <= len(setup) <= 64
+                or any(not (c.isascii() and (c.isalnum() or c in '_.-')) for c in setup)):
+            raise VqroError('setup_id must be 1–64 safe ASCII characters', 'invalid')
         for name in ('codex_home', 'home'):
             if name in row and (not isinstance(row[name], str) or not row[name].strip() or '\0' in row[name]):
                 raise VqroError(name + ' must be a nonempty literal path on the terminal host', 'invalid')
@@ -32,6 +37,7 @@ def runtimes(value):
 class Codex:
     def __init__(self, ext):
         self.ext = ext
+        self.cutover = Cutover(ext)
         for name, fn, title in [('new', self.new, 'New Codex agent'), ('settings', self.settings, 'Codex runtime settings'),
                                 ('configure', self.configure, 'Configure Codex runtime argv/profile')]:
             ext.command('codex.' + name, title)(self.guarded(fn))
@@ -41,6 +47,7 @@ class Codex:
         ext.retrying(initialize)
         ext.contribute({
             'view/accounts-choice-codex-new': {'kind':'panel','title':'Codex account','items':[]},
+            'view/codex-cutover-settings': {'kind':'panel','title':'Codex shared-login consent','items':[]},
             'view/codex-runtimes': {'kind': 'panel', 'title': 'Codex runtimes', 'items': []},
             'view/codex-settings': {'kind': 'panel', 'title': 'Codex runtime settings', 'items': []},
         })
@@ -55,6 +62,10 @@ class Codex:
         return command
 
     def new(self, args):
+        with self.cutover.admission:
+            return self._new(args)
+
+    def _new(self, args):
         entry = self.ext.vqro.call('workspace.get', {'key': SETTINGS})
         options = runtimes(entry['value'] if entry else DEFAULTS)
         selected = args.get('runtime') or args.get('value')
@@ -73,6 +84,8 @@ class Codex:
         principal = 'p:' + uuid.uuid4().hex
         # Shared with native sign-in: profile selectors match without reading a profile.
         env = account_environment(account, runtime_environment('codex', runtime))
+        env.pop('VQRO_CODEX_SETUP', None)
+        if runtime.get('setup_id'): env['VQRO_CODEX_SETUP'] = runtime['setup_id']
         env['VQRO_PRINCIPAL'] = principal  # never inherit or accept a configured owner/other agent
         params = {'bridge': True, 'name': 'codex-bridge-' + uuid.uuid4().hex[:12],
                   'argv': [*runtime.get('bridge_argv', ['vqro-bridge-codex']), '--slots', '1', '--endpoint-principal', principal,
@@ -128,6 +141,7 @@ class Codex:
             {'type': 'text', 'text': 'Codex owns login/config. No vqro credential reads/copies or profile writes. No prompt is sent on launch.'},
             {'type': 'text', 'text': 'Optional codex_home and home are literal terminal-host paths; absent means native defaults. Never put credentials in settings.'},
             {'type': 'text', 'text': label(json.dumps(value.get('runtimes', value) if isinstance(value, dict) else value, ensure_ascii=False), 8192)},
+            {'text': 'Automatic shared-login switching consent', 'command':'codex.cutover.settings'},
             {'text': 'Edit Codex runtimes JSON list', 'input': 'JSON list of {name, argv, codex_home?, home?}', 'command': 'codex.configure'}]})
         return {'client': {'popup': {'view': 'codex-settings', 'width': 90}}}
 

@@ -47,6 +47,10 @@ async fn main() {
 }
 
 async fn run(args: Args) -> Result<(), String> {
+    let setup = std::env::var("VQRO_CODEX_SETUP").ok();
+    if setup.as_ref().is_some_and(|s| s.is_empty() || s.len() > 64 || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))) {
+        return Err("VQRO_CODEX_SETUP must be a bounded nonsecret setup identifier".into());
+    }
     let account_raw = std::env::var("VQRO_ACCOUNT").ok();
     let launcher_account = launcher_account::parse(account_raw.as_deref()).map_err(str::to_owned)?;
     if !(1..=200).contains(&args.slots) {
@@ -128,6 +132,7 @@ async fn run(args: Args) -> Result<(), String> {
         endpoint_principal,
         launcher_account,
     );
+    if let Some(setup) = setup { runtime.set_cutover_setup(&setup).map_err(|_| "Codex setup configuration invalid")?; }
     let model = runtime.clone();
     let child_native = native.clone();
     let child_monitor = tokio::spawn(async move {

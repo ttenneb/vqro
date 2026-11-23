@@ -52,7 +52,8 @@ class CodexLauncherTests(unittest.TestCase):
         spawn, = self.spawns()
         self.assertEqual(spawn['argv'], ['vqro-bridge-codex', '--slots', '1', '--endpoint-principal', result['principal'],
                                          '--', 'codex', 'app-server', '--stdio'])
-        self.assertEqual(set(spawn['env']), {'VQRO_PRINCIPAL'})
+        self.assertEqual(set(spawn['env']), {'VQRO_PRINCIPAL', 'VQRO_CODEX_SETUP'})
+        self.assertEqual(spawn['env']['VQRO_CODEX_SETUP'], 'shared')
         self.assertRegex(result['principal'], r'^p:[0-9a-f]{32}$')
         self.assertEqual(spawn['env']['VQRO_PRINCIPAL'], result['principal'])
         self.assertTrue(spawn['bridge']); self.assertEqual(spawn['cwd'], '/project')
