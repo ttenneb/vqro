@@ -857,14 +857,24 @@ def without_sidebar(root):
 
 @ext.command("sidebar.toggle", "Show or hide the sidebar (in every layout, so switching keeps it)")
 def toggle(args):
+    ext.fresh()
+    recovering = ext.context_layout(args) is None
+    if recovering and ext.value("layout/main") is None:
+        # Public, backend-independent recovery: one placeholder tab when no terminals exist.
+        ext.invoke("vqro.layout.reset", {})
+        ext.fresh()
+
     def attempt():
         # Recomputed from the reloaded cache on each try: a compare-and-set conflict with a concurrent
         # layout write is normal and must not surface to the user as an error.
         lay = ext.context_layout(args)  # what the invoking window shows decides show or hide
         if lay is None:
-            raise VqroError("no active layout yet", "invalid")
-        want = not has_sidebar(lay[2])
-        ops = []
+            root = ext.value("layout/main")
+            if root is None:
+                raise VqroError("recovery layout changed; open the recovery menu to reset it", "conflict")
+            lay = ("layout/main", ext.version("layout/main"), root)
+        want = recovering or not has_sidebar(lay[2])
+        ops = select_ops("main") if recovering else []
         with ext.cache_lock:
             layouts = [(k, e["version"], e["value"]) for k, e in ext.entries.items() if k.startswith("layout/")]
         for key, ver, root in layouts:
@@ -873,7 +883,8 @@ def toggle(args):
             new = {"split": "h", "children": [{"view": "sidebar"}, root], "sizes": [1, 3]} if want else without_sidebar(root)
             ops.append({"op": "set", "key": key, "value": new, "expect": ver})
         return ext.apply(ops, "sidebar: toggle") if ops else {}
-    return ext.retrying(attempt, attempts=8)
+    result = ext.retrying(attempt, attempts=8)
+    return dict(result or {}, client={"layout": "main"}) if recovering else result
 
 
 def select_ops(layout, path=None, tab=None):
