@@ -307,16 +307,21 @@ class SandboxClient:
 
     def wait(self, observe, predicate, timeout):
         deadline, last = time.monotonic() + timeout, None
-        while True:
-            last = observe()
-            if predicate(last):
-                return last
-            try:
+        previous_deadline = getattr(self, "step_deadline", float("inf"))
+        self.step_deadline = min(previous_deadline, deadline)
+        try:
+            while True:
+                last = observe()
+                if predicate(last):
+                    return last
                 self.next_event(deadline)
-            except TimeoutError:
-                raise TimeoutError("deadline; last observed: " + text(last)) from None
-            if time.monotonic() >= deadline:
-                raise TimeoutError("deadline; last observed: " + text(last))
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("event deadline")
+        except TimeoutError as error:
+            # An observation RPC can expire too, not only the event read between observations.
+            raise TimeoutError("deadline; last observed: " + text(last) + "; " + str(error)) from None
+        finally:
+            self.step_deadline = previous_deadline
 
     def apply(self, operations, note="test-integration: sandbox change"):
         entries = self.call("workspace.snapshot")["entries"]
@@ -583,8 +588,26 @@ class Sandbox:
 
     def wait_running(self, timeout=60):
         names = self.enabled()
-        return self.client.wait(lambda: self.client.call("extension.list")["extensions"],
-                                lambda facts: all(facts.get(n, {}).get("display_status") in ("running", "failed") for n in names), timeout)
+
+        def observe():
+            return {"extensions": self.client.call("extension.list")["extensions"],
+                    "commands": [c["name"] for c in self.client.call("command.list")["commands"] if c.get("available", True)]}
+
+        def ready(observed):
+            facts, commands = observed["extensions"], observed["commands"]
+            if any(facts.get(name, {}).get("display_status") == "failed" for name in names):
+                raise TimeoutError("extension failed before readiness")
+            for name in names:
+                fact = facts.get(name, {})
+                if fact.get("display_status") != "running":
+                    return False
+                for capability in (fact.get("manifest") or {}).get("provides", []):
+                    if capability.startswith("command/") and not any(
+                            fnmatchcase(command, capability[8:].split("@")[0]) for command in commands):
+                        return False
+            return True
+
+        return self.client.wait(observe, ready, timeout)["extensions"]
 
     def stop(self):
         if self.client:

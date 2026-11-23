@@ -209,6 +209,20 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(indexed["views/example"]["status"], "fail")
         sandbox.stop = Mock()
 
+    def test_readiness_waits_for_delayed_manifest_command_registration(self):
+        sandbox = self.sandbox().prepare()
+        client = object.__new__(harness.SandboxClient)
+        sandbox.client = client
+        facts = {"example": {"display_status": "running", "manifest": {"provides": ["command/example.ready"]}}}
+        client.call = Mock(side_effect=[{"extensions": facts}, {"commands": []},
+                                        {"extensions": facts}, {"commands": [{"name": "example.ready", "available": True}]}])
+        client.next_event = Mock(return_value={"method": "event", "params": {"type": "command"}})
+        self.assertEqual(sandbox.wait_running(), facts)
+        client.next_event.assert_called_once()
+        self.assertEqual([call.args[0] for call in client.call.call_args_list],
+                         ["extension.list", "command.list", "extension.list", "command.list"])
+        sandbox.client = None
+
     def test_smoke_zero_enabled_is_failure(self):
         sandbox = self.sandbox().prepare()
         sandbox.declarations["extension/example"]["enabled"] = False
@@ -261,6 +275,15 @@ class IntegrationModesTests(unittest.TestCase):
         result = integration.run(args)
         self.assertEqual(result["verdict"], "error")
         self.assertEqual(marker.read_text(), "untouched")
+
+    def test_scenarios_are_not_invoked_after_failed_restart_readiness(self):
+        sandbox = Mock(audit_rows=[], lifetime_rows=[], leftovers=[], info={}, declarations={}, ext=self.source)
+        with patch.object(integration, "smoke", return_value=[harness.row("recovery", "restart", "fail", "commands not ready")]), patch.object(integration, "run_scenarios") as scenarios:
+            result = integration.run_copy(sandbox, {"example/check": {"steps": [{"invoke": "example.check"}]}})
+            scenarios.assert_not_called()
+        failed = next(r for r in result["rows"] if r["id"] == "scenario/example/check")
+        self.assertEqual(failed["status"], "fail")
+        self.assertIn("readiness failed", failed["evidence"])
 
     def test_async_extension_returns_before_waiting_then_publishes_completion(self):
         handlers = {}
@@ -326,6 +349,17 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(rows[0]["status"], "fail")
         self.assertIn("last observed", rows[0]["evidence"])
         self.assertIn("not yet", rows[0]["evidence"])
+
+    def test_observation_rpc_timeout_preserves_previous_value(self):
+        client = object.__new__(harness.SandboxClient)
+        client.call = Mock(side_effect=[{"entries": {"doc/ctl-wait": {"value": "not-ready"}}},
+                                        TimeoutError("sandbox response/event deadline")])
+        client.next_event = Mock(return_value={"method": "event"})
+        rows = harness.run_scenarios(client, {"fixture/deadline": {"steps": [
+            {"wait": {"entry": "doc/ctl-wait", "equals": "ready"}, "within_ms": 300}]}})
+        self.assertEqual(rows[0]["status"], "fail")
+        self.assertIn("last observed", rows[0]["evidence"])
+        self.assertIn("not-ready", rows[0]["evidence"])
 
     def test_empty_unknown_and_runtime_steps_fail_closed(self):
         for steps in ([], [{"unknown": True}], [{"invoke": "pi.new"}], [{"invoke": "fixture.show", "within_ms": 0}]):

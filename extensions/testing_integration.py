@@ -54,8 +54,12 @@ def run_copy(sandbox, scenarios):
     error = False
     try:
         sandbox.start()
-        rows += smoke(sandbox)
-        rows += run_scenarios(sandbox.client, scenarios)
+        smoke_rows = smoke(sandbox)
+        rows += smoke_rows
+        if any(r["id"] == "recovery/restart" and r["status"] == "pass" for r in smoke_rows):
+            rows += run_scenarios(sandbox.client, scenarios)
+        else:
+            rows += [row("scenario", name, "fail", "not run: post-restart extension/command readiness failed") for name in sorted(scenarios)]
     except Exception as failure:
         rows.append(row("harness", "sandbox", "fail", f"{type(failure).__name__}: {failure}"))
         error = True
