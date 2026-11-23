@@ -171,6 +171,10 @@ community clients and observing our own private server's traffic; the Rex binary
 - Permanent connector verification refusal is preserved as a distinct control error. Startup and reconnect stop
   with a clear stderr diagnostic (visible in the extension log), rather than silently retrying before provider
   registration. No registered provider-unavailable fact is fabricated when startup never registered.
+- On Windows, `vqro-rex server status` (and the owned-server checks before start and stop) ask Rex's own CLI
+  (`rex server status --json`), not the shared connector's owner verification. Its `running: true` therefore means
+  only that Rex answered; it is not proof that the server is vqro's or the user's. Only connections through the
+  shared connector are owner-checked (windows-lead review of 871bedc0).
 - Owned marker publication uses `store::write_atomic` on Unix and Windows, under the existing owned-server lock;
   atomic/durability errors propagate as startup failure. This strengthens publication, not marker authentication.
 - The guide documents `\\\\.\\pipe\\rex-<SID>` and a suffix when `REX_RUNTIME_DIR` is set. vqro **does not derive**
