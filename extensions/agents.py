@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Runtime-neutral agent panels and native capability-driven controls. No launcher."""
 import collections
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -460,6 +461,7 @@ class Agents:
         self.strict, self.logged, self.log_lock = bool(getattr(ext, "strict_render", False)), {}, threading.Lock()
         self.open_requests = set()
         self.open_settings = set()
+        self.settings_inventory = {}
         self.open_pane, self.published_pane = set(), {}
         self.open_tools, self.published_tools = {}, {}  # rid -> the run its open tools table shows; last published  # ⚙ popups shown (republished as the view or agent changes)
         self.published = {}  # Only current agents; suppress unchanged derived panel RPCs.
@@ -477,7 +479,8 @@ class Agents:
                                 ("config", self.settings, "Agent settings and commands (popup)"),
                                 ("configure", self.configure, "Change an agent setting (args: id, value)"),
                                 ("command", self.command, "Run an agent command (args: name, text?)"),
-                                ("send", self.send, "Send a message in a declared delivery mode (args: mode?, text?)"),
+                                ("send", self.send, "Send literal data in a declared delivery mode (args: mode?, text?)"),
+                                ("compose", self.compose, "Submit the message box, including explicit slash invocation intent"),
                                 ("view", self.set_view, "Show, summarise or hide parts of an agent pane (args: set, value)"),
                                 ("stop", self.stop, "Stop an agent: kill its bridge terminal and the runtime in it (asks first)"),
                                 ("pane", self.pane_menu, "The agent pane's ⚙ popup: view filters, settings, bridge terminal, stop"),
@@ -646,6 +649,11 @@ class Agents:
             r = self.ext.resources.get(rid)
             if r is not None:
                 self.isolated(rid, "publish", self.publish_panel, r)
+                if rid in self.open_settings:
+                    stamp = self.invocation_inventory(r)[0]
+                    if self.settings_inventory.get(rid) != stamp:
+                        self.ext.publish("agents-settings-" + rid, self.settings_panel(r))
+                        self.settings_inventory[rid] = stamp
 
     def isolated(self, rid, what, fn, *args):
         """Run one agent's step so that its failure never stops the others' (review: one agent's render bug stalled
@@ -901,15 +909,17 @@ class Agents:
             options = [{"label": "auto", "value": "auto"}] + [
                 {"label": names.get(m, m), "value": m} for m in modes if m not in ("start", "admit")]
             rows.append({"type": "composer", "id": "compose", "pin": "bottom", "text": "Message " + name,
-                         "command": "agents.send", "args": {"resource": rid, "caps_rev": caps(r).get("rev")},
-                         "placeholder": f"Write a message to {name}…", "rows": COMPOSER_ROWS, "max_bytes": 65536, "submit": "Enter",
+                         "command": "agents.compose", "args": {"resource": rid, "caps_rev": caps(r).get("rev"),
+                                                                   "inventory_rev": self.invocation_inventory(r)[0]},
+                         "placeholder": f"Message {name}… /exact-name invokes a command (idle auto/start only)", "rows": COMPOSER_ROWS, "max_bytes": 65536, "submit": "Enter",
                          "autofocus": True, "requires": ["composer"], "send_button": False,  # Enter sends (the human, relay-11)
                          # One input-settings button (the human, relay-11): the delivery mode now, more input options later.
                          # Then the pane's ⚙ (the human, 17:00: no top bar; the settings button at the bottom).
                          "controls": [{"type": "select", "arg": "mode", "text": "Input", "value": "auto", "options": options},
                                       {"type": "button", **gear}],
-                         "fallback": {"text": f"Message {name}…", "command": "agents.send",
-                                      "args": {"resource": rid, "mode": "auto"}, "input": "Message", "multiline": True}})
+                         "fallback": {"text": f"Message {name}…", "command": "agents.compose",
+                                      "args": {"resource": rid, "mode": "auto", "caps_rev": caps(r).get("rev"),
+                                               "inventory_rev": self.invocation_inventory(r)[0]}, "input": "Message", "multiline": True}})
         # Clients without composer buttons (or a pane with no message box) get the ⚙ as a one-chip row at the bottom.
         rows.append({"type": "chips", "id": "gear", "pin": "bottom", "text": "Pane options", "chips": [gear],
                      **({"requires_absent": ["composer_buttons"]} if composing else {})})
@@ -1333,45 +1343,60 @@ class Agents:
                                   "items": items})
         return {"client": {"popup": {"view": target, "width": 76}}}
 
-    def send(self, args):
-        """agents.send {resource, mode?, text?}: a declared mode sends at once; no mode opens the choice."""
+    def invocation_inventory(self, r):
+        """Revision fence for a displayed composer: native commands plus retained startup identity."""
+        commands = advertised(r, "commands")
+        epoch, rev, startup = None, None, {}
+        conversation = self.conversations.get(r["id"])
+        if conversation is not None:
+            with conversation.lock:
+                epoch = conversation.view.epoch
+                rev, startup = conversation.view.entities.get(("startup", "current"), (None, {}))
+        stamp = hashlib.sha256(json.dumps([epoch, rev, commands], sort_keys=True).encode()).hexdigest()
+        return stamp, commands, startup if isinstance(startup, dict) else {}
+
+    def compose(self, args):
+        """Explicit message-box intent, distinct from the public literal-data send command."""
         self.ext.fresh()
         r = self.agent(args, "send")
+        stamp, commands, startup = self.invocation_inventory(r)
+        if args.get("caps_rev") != caps(r).get("rev") or args.get("inventory_rev") != stamp:
+            raise VqroError("agent capabilities or customization inventory changed; review the message box again. Nothing sent.", "stale")
         text, mode = args.get("text"), args.get("mode")
-        if isinstance(text, str) and len(text) > 1 and text.startswith("/") and not text[1].isspace():
-            parts = text[1:].split(maxsplit=1)
-            name = parts[0]
-            entries = advertised(r, "commands")
-            skill_aliases = {}
-            conversation = self.conversations.get(r["id"])
-            if conversation is not None:
-                with conversation.lock:
-                    startup = conversation.view.entities.get(("startup", "current"), (None, {}))[1]
-                    if isinstance(startup, dict):
-                        for field in ("commands", "prompts", "skills"):
-                            inventory = startup.get(field)
-                            if isinstance(inventory, list):
-                                for entry in inventory:
-                                    if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
-                                        continue
-                                    native_name = entry["name"]
-                                    if field == "skills" and any(e.get("name") == "skill:" + native_name for e in entries):
-                                        native_name = "skill:" + native_name
-                                    if field == "skills" and native_name != entry["name"]:
-                                        skill_aliases[entry["name"]] = native_name
-                                    entries = entries + [{"name": native_name}]
-            # Exact native commands/templates always win over optional short skill aliases.
-            if not any(entry.get("name") == name for entry in entries):
-                name = skill_aliases.get(name, name)
-            if name and any(entry.get("name") == name for entry in entries):
+        if isinstance(text, str) and text.startswith("/"):
+            # vqro composer grammar, deliberately not an emulation of any runtime's parser.
+            name, separator, arguments = text[1:].partition(" ")
+            names = {entry["name"] for entry in commands}
+            for field in ("commands", "prompts", "skills"):
+                inventory = startup.get(field)
+                if isinstance(inventory, list):
+                    for entry in inventory:
+                        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                            continue
+                        candidate = entry["name"]
+                        # A display skill name is not an alias for its advertised invocation spelling.
+                        if field != "skills" or "skill:" + candidate not in names:
+                            names.add(candidate)
+            if name and name in names:
+                if mode not in ("auto", "start") or busy(r) or "start" not in self.modes(r):
+                    raise VqroError("explicit invocation requires idle start/auto; the selected delivery mode cannot run agent.command. Nothing sent.", "unsupported")
                 if not self.supported(r, "command"):
                     raise VqroError("explicit invocation requires agent.command; nothing sent", "unsupported")
-                native = {"v": 0, "name": name}
-                if len(parts) > 1:
-                    native["args"] = parts[1]
+                native = {**self.v0_args(r), "name": name}
+                if separator:
+                    native["args"] = arguments
+                if self.invocation_inventory(r)[0] != stamp or args.get("caps_rev") != caps(r).get("rev"):
+                    raise VqroError("customization inventory or capabilities changed; review the message box again. Nothing sent.", "stale")
                 result = self.ext.vqro.call("resource.invoke", {"resource": r["id"], "op": "agent.command", "args": native})
                 self.ext.notify(label("/" + name + ": " + str(result.get("outcome", "unknown"))), "dim")
                 return {**result, "client": {"close": True}}
+        return self.send(args)
+
+    def send(self, args):
+        """Literal data only; an explicit composer invocation never changes this public command's semantics."""
+        self.ext.fresh()
+        r = self.agent(args, "send")
+        text, mode = args.get("text"), args.get("mode")
         if mode is None:
             return self.choose_mode(r, text if isinstance(text, str) and text.strip() else None)
         if not isinstance(text, str) or not text.strip():
@@ -1706,6 +1731,7 @@ class Agents:
             raise VqroError("this agent declares no settings or commands", "unsupported")
         target = "agents-settings-"+r["id"]
         self.open_settings.add(r["id"])
+        self.settings_inventory[r["id"]] = self.invocation_inventory(r)[0]
         self.ext.publish(target, self.settings_panel(r))
         return {"client": {"popup": {"view": target, "width": 76}}}
 

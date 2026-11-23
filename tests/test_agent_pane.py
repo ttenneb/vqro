@@ -652,6 +652,12 @@ class AgentPane(unittest.TestCase):
         self.agents.later = lambda delay, rid: self.timers.append((delay, rid))
         self.agents.flush_conversations()
 
+    def compose_submit(self, text, mode='auto', **extra):
+        r = self.core.resources['r2']
+        row = next(row for row in self.agents.bottom_rows(r) if row.get('id') == 'compose')
+        self.assertEqual(row['command'], 'agents.compose')
+        return self.agents.compose(dict(row['args'], text=text, mode=mode, **extra))
+
     def test_composer_invokes_only_exact_advertised_names(self):
         r = self.core.resources['r2']
         self.core.providers['items']['capabilities'].update({'agent.send': {}, 'agent.command': {}})
@@ -659,18 +665,47 @@ class AgentPane(unittest.TestCase):
             'agent.send': {'modes': {'start': {}}}, 'agent.command': {}}}
         self.feed(snapshot({('startup', 'current'): {'prompts': [{'name': 'review'}]}}))
         self.core.calls.clear()
-        self.agents.send({'resource': 'r2', 'mode': 'auto', 'text': '/review this diff'})
+        self.compose_submit('/review this diff')
         calls = [p for m, p in self.core.calls if m == 'resource.invoke']
         self.assertEqual(calls[-1]['op'], 'agent.command')
-        self.assertEqual(calls[-1]['args'], {'v': 0, 'name': 'review', 'args': 'this diff'})
-        self.agents.send({'resource': 'r2', 'mode': 'auto', 'text': '/reviewer this diff'})
+        self.assertEqual(calls[-1]['args'], {'v': 0, 'caps_rev': 1, 'name': 'review', 'args': 'this diff'})
+        self.compose_submit('/reviewer this diff')
         self.assertEqual([p for m, p in self.core.calls if m == 'resource.invoke'][-1]['op'], 'agent.send')
         r['data']['agent']['commands'] = [{'name': 'skill:review'}]
         self.feed(snapshot({('startup', 'current'): {'skills': [{'name': 'review'}]}}))
-        for typed in ('/review plan', '/skill:review plan'):
-            self.agents.send({'resource': 'r2', 'mode': 'auto', 'text': typed})
-            sent = [p for m, p in self.core.calls if m == 'resource.invoke'][-1]
-            self.assertEqual((sent['op'], sent['args']['name']), ('agent.command', 'skill:review'))
+        self.compose_submit('/skill:review plan')
+        sent = [p for m, p in self.core.calls if m == 'resource.invoke'][-1]
+        self.assertEqual((sent['op'], sent['args']['name']), ('agent.command', 'skill:review'))
+        self.compose_submit('/review plan')
+        self.assertEqual([p for m, p in self.core.calls if m == 'resource.invoke'][-1]['op'], 'agent.send')
+
+    def test_public_send_keeps_slash_data_literal_and_open_inventory_tracks_items(self):
+        r = self.core.resources['r2']
+        self.core.providers['items']['capabilities'].update({'agent.send': {}, 'agent.command': {}})
+        r['data']['agent'] = {'v': 0, 'state': 'idle', 'lifecycle': 'live',
+            'commands': [{'name': 'review'}],
+            'caps': {'rev': 1, 'agent.send': {'modes': {'start': {}}}, 'agent.command': {}}}
+        self.feed(snapshot({('startup', 'current'): {'prompts': [{'name': 'review'}]}}))
+        self.agents.send({'resource': 'r2', 'mode': 'start', 'text': '/review go'})
+        sent = [p for m, p in self.core.calls if m == 'resource.invoke'][-1]
+        self.assertEqual(sent['op'], 'agent.send')
+        self.agents.settings({'resource': 'r2'})
+        self.feed(line({'op': 'put', 'seq': 1, 'kind': 'startup', 'id': 'current', 'rev': 2,
+                        'value': {'prompts': [{'name': 'new-review'}]}}))
+        self.assertIn('new-review', json.dumps(self.core.live['agents-settings-r2']))
+        self.assertNotIn('"text": "review"', json.dumps(self.core.live['agents-settings-r2']))
+        self.feed(line({'op': 'remove', 'seq': 2, 'kind': 'startup', 'id': 'current', 'rev': 3}))
+        self.assertNotIn('new-review', json.dumps(self.core.live['agents-settings-r2']))
+        self.feed(snapshot({('startup', 'current'): {'prompts': [{'name': 'epoch-review'}]}}).replace(b'"epoch": "e1"', b'"epoch": "e2"'))
+        self.assertIn('epoch-review', json.dumps(self.core.live['agents-settings-r2']))
+
+    def test_open_customizations_follow_startup_revisions_without_resource_events(self):
+        self.feed(snapshot({('startup', 'current'): {'prompts': [{'name': 'before'}]}}))
+        self.agents.settings({'resource': 'r2'})
+        self.feed(line({'op': 'put', 'seq': 1, 'kind': 'startup', 'id': 'current', 'rev': 2,
+                        'value': {'prompts': [{'name': 'after'}]}}))
+        self.assertIn('after', json.dumps(self.core.live['agents-settings-r2']))
+        self.assertNotIn('before', json.dumps(self.core.live['agents-settings-r2']))
 
     def test_slash_dispatch_preserves_exact_names_and_literal_whitespace(self):
         r = self.core.resources['r2']
@@ -680,14 +715,49 @@ class AgentPane(unittest.TestCase):
             'caps': {'rev': 1, 'agent.send': {'modes': {'start': {}}}, 'agent.command': {}}}
         self.feed(snapshot({('startup', 'current'): {'commands': [{'name': 'review'}],
                                                     'skills': [{'name': 'review'}]}}))
-        self.agents.send({'resource': 'r2', 'mode': 'auto', 'text': '/review diff'})
+        self.compose_submit('/review diff')
         sent = [p for m, p in self.core.calls if m == 'resource.invoke'][-1]
         self.assertEqual(sent['args']['name'], 'review')
         for literal in ('/ review diff', '/\treview diff', '/\nreview diff'):
-            self.agents.send({'resource': 'r2', 'mode': 'auto', 'text': literal})
+            self.compose_submit(literal)
             sent = [p for m, p in self.core.calls if m == 'resource.invoke'][-1]
             self.assertEqual(sent['op'], 'agent.send')
             self.assertEqual(sent['args']['content'][0]['text'], literal)
+
+    def test_explicit_composer_fences_modes_caps_inventory_and_exact_argument_bytes(self):
+        r = self.core.resources['r2']
+        self.core.providers['items']['capabilities'].update({'agent.send': {}, 'agent.command': {}})
+        r['data']['agent'] = {'v': 0, 'state': 'idle', 'lifecycle': 'live',
+            'commands': [{'name': 'review'}, {'name': 'skill:review'}],
+            'caps': {'rev': 1, 'agent.send': {'modes': {'start': {}, 'settle': {}}}, 'agent.command': {}}}
+        self.feed(snapshot({('startup', 'current'): {'prompts': [{'name': 'template'}]}}))
+        row = next(row for row in self.agents.bottom_rows(r) if row.get('id') == 'compose')
+        draft = dict(row['args'], mode='auto', text='/review go')
+        for mode in ('settle', 'boundary', 'admit', 'preempt', None):
+            with self.assertRaises(VqroError):
+                self.agents.compose(dict(draft, mode=mode))
+        with self.assertRaises(VqroError):
+            self.agents.compose(dict(draft, caps_rev=0))
+        with self.assertRaises(VqroError):
+            self.agents.compose(dict(draft, inventory_rev='old'))
+        r['data']['agent']['state'] = 'running'
+        with self.assertRaises(VqroError):
+            self.agents.compose(draft)
+        r['data']['agent']['state'] = 'idle'
+        self.feed(line({'op': 'put', 'seq': 1, 'kind': 'startup', 'id': 'current', 'rev': 2,
+                        'value': {'prompts': [{'name': 'template'}]}}))
+        with self.assertRaises(VqroError):
+            self.agents.compose(draft)
+        self.assertFalse([p for m, p in self.core.calls if m == 'resource.invoke'])
+        for name in ('review', 'skill:review', 'template'):
+            for suffix in ('  repeated  spaces\tend\n', '\targ', '\u0085arg', '\ufeffarg'):
+                # First ASCII space only: every remaining argument byte is preserved for every kind.
+                self.compose_submit('/' + name + ' ' + suffix)
+                sent = [p for m, p in self.core.calls if m == 'resource.invoke'][-1]
+                self.assertEqual(sent['args'], {'v': 0, 'caps_rev': 1, 'name': name, 'args': suffix})
+                self.compose_submit('/' + name + suffix.lstrip(' '))
+                sent = [p for m, p in self.core.calls if m == 'resource.invoke'][-1]
+                self.assertEqual(sent['op'], 'agent.send')
 
     def test_customizations_are_read_only_and_show_native_extension_limits(self):
         self.feed(snapshot({('startup', 'current'): {'extensions': [
@@ -927,7 +997,8 @@ class AgentPane(unittest.TestCase):
         items = self.make_v0()
         composer = next(r for r in items if r.get("type") == "composer")
         self.assertEqual((composer["pin"], composer["autofocus"], composer["submit"], composer["args"]),
-                         ("bottom", True, "Enter", {"resource": "r2", "caps_rev": 2}))
+                         ("bottom", True, "Enter", {"resource": "r2", "caps_rev": 2,
+                                               "inventory_rev": self.agents.invocation_inventory(self.core.resources['r2'])[0]}))
         self.assertEqual((composer["controls"][0]["type"], composer["controls"][0]["value"]), ("select", "auto"), "one input-settings button")
         self.assertEqual(composer["controls"][1], {"type": "button", "text": "", "icon": {"name": "settings", "text": "⚙"},
                                                    "style": "control", "icon_style": "control", "command": "agents.pane", "args": {"resource": "r2"}}, "⚙ beside Input")

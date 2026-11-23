@@ -20,6 +20,24 @@
   (model, thinking level, …) and command rows; `agents.configure {id, value, rev}` / `agents.command {name, text?}` send
   only declared values (a choice from an outdated popup is rejected as stale) and report the outcome honestly (`observed` vs not yet confirmed). Agents without
   declarations show nothing.
+- **Customizations** in Agent settings is a read-only native startup inventory (skills, prompt templates/commands,
+  extensions, plugins and MCP servers), including reported sources and incomplete lists. An open view refreshes on
+  startup item revisions, removal and epoch changes. The frame warns when input may be transformed; each message's
+  historical possibility note comes from its own receipt, never today's inventory. Native `message.invoked` alone
+  supplies the transcript's “ran template/skill/command” label.
+- **Explicit slash invocation in the message box:** the composer submits `agents.compose`, not the public literal-data
+  command `agents.send`. Its vqro grammar is deliberately not a runtime parser: `/` immediately followed by an exact
+  advertised invocation name; the first ASCII space separates arguments, and everything after that space is passed
+  unchanged (including repeated spaces, tabs, newlines and Unicode). No trimming, short skill aliases or native
+  whitespace emulation. For example, use `/skill:review notes` when `skill:review` is the advertised spelling, not
+  `/review`. A template/command actually advertised as `review` still uses `/review`. A tab immediately following the
+  name is not the argument separator. Unmatched text remains literal `agents.send` data; a native refusal is shown.
+  The composer placeholder makes this command intent visible. Invocation requires idle **auto/start**; other selected
+  delivery modes are refused with an explanation, not silently bypassed (`agent.command` has no delivery-mode field).
+  Capabilities revision and startup epoch/revision plus advertised command declarations are fenced against the
+  displayed composer; changed declarations send nothing and require reviewing the current message box again.
+  `agents.compose` is explicit invocation intent, not an authentication boundary: callers wanting literal data must
+  use `agents.send`, which never promotes slash text to commands. No new core/client primitive is involved.
 - Prefix `P` (Shift-p) opens Agent settings for the agent in the focused pane (`binding/agents.config`, same `when`).
 - Prefix `p` prompts the agent in the focused pane (`binding/agents.prompt`, `when: {"resource_kind": "agent"}`): on any other pane the key does nothing and says so, before asking for text. A keymap profile's `p` still wins when selected.
 - Prompt-like actions use input. Answer opens a pending-request picker: confirm/select choices, input/editor text, explicit cancellation. Editor uses existing single-line input, not a new multiline editor.
