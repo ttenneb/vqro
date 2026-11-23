@@ -351,18 +351,9 @@ impl Runtime {
                 let response = self.native.call_with_timeout("accountSession/switch", json!({"sessionId":session,"accountId":workspace,"allowBrowserLogin":false}), remaining(deadline)).await.map_err(|_| unknown())?;
                 // Browser/SSO results never count as account confirmation; no token/URL publication.
                 require_login(&response, session, workspace, true)?;
-                let readback = self
-                    .native
-                    .call_with_timeout(
-                        "accountSession/list",
-                        json!({"refreshWorkspaceMetadata":false}),
-                        remaining(deadline),
-                    )
-                    .await
-                    .map_err(|_| unknown())?;
-                require_login(&readback, session, workspace, true)?;
-                self.sync_account_notifications(deadline).await?;
-                let auth_revision = self.auth_revision.load(Ordering::Acquire);
+                // Fence the response itself, not just the eventual projection. A B
+                // snapshot followed by a queued C notification cannot certify C's revision.
+                let auth_revision = self.read_active_login(session, workspace, deadline).await?;
                 self.account_projection_revision
                     .fetch_add(1, Ordering::AcqRel);
                 {

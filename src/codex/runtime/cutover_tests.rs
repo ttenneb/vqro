@@ -47,16 +47,29 @@ async fn fake(mode: &'static str) -> Fake {
             let sessions = |active: &str| {
                 json!({"activeSessionId":active,"sessions":[
                 {"sessionId":"saved-a","isActive":active=="saved-a","selectedWorkspaceAccountId":"workspace-a","workspaces":[{"accountId":"workspace-a"}],"email":"never-publish@example.test"},
-                {"sessionId":"saved-b","isActive":active=="saved-b","selectedWorkspaceAccountId":"workspace-b","workspaces":[{"accountId":"workspace-b"}],"accessToken":"never-publish"}]})
+                {"sessionId":"saved-b","isActive":active=="saved-b","selectedWorkspaceAccountId":"workspace-b","workspaces":[{"accountId":"workspace-b"}],"accessToken":"never-publish"},
+                {"sessionId":"saved-c","isActive":active=="saved-c","selectedWorkspaceAccountId":"workspace-c","workspaces":[{"accountId":"workspace-c"}]}]})
             };
             let result = match method {
-                "accountSession/list" => sessions(
-                    if mode == "wrong_readback" || native_foreign.load(Ordering::Acquire) {
+                "accountSession/list" => {
+                    let snapshot = sessions(if mode == "wrong_readback" {
                         "saved-a"
+                    } else if native_foreign.load(Ordering::Acquire) {
+                        "saved-c"
                     } else {
                         active
-                    },
-                ),
+                    });
+                    if mode == "foreign_during_readback"
+                        && switched
+                        && !native_foreign.load(Ordering::Acquire)
+                    {
+                        // The response is a B snapshot, but C is now active. Queue the C
+                        // notification before replying so production drain ordering is deterministic.
+                        native_foreign.store(true, Ordering::Release);
+                        write.write_all(format!("{}\n",json!({"method":"account/updated","params":{"authMode":"chatgpt"}})).as_bytes()).await.unwrap();
+                    }
+                    snapshot
+                }
                 "accountSession/switch" => {
                     assert_eq!(
                         request["params"],
@@ -412,6 +425,39 @@ async fn newer_native_login_change_invalidates_projection_and_blocks_resume() {
 }
 
 #[tokio::test]
+async fn queued_foreign_c_during_b_readback_is_not_b_confirmation() {
+    let f = fake("foreign_during_readback").await;
+    fence(&f).await;
+    assert!(
+        command(&f, "_account.switch", target()).await.is_err(),
+        "a stale B readback must not bless C's newer auth revision"
+    );
+    assert!(
+        f.runtime.fact("endpoint-1").unwrap()["data"]["agent"]
+            .get("account")
+            .is_none()
+    );
+    assert!(
+        f.runtime.slots[0]
+            .admission
+            .clone()
+            .try_lock_owned()
+            .is_err()
+    );
+    assert!(matches!(
+        command(&f, "_account.resume", json!({})).await.unwrap(),
+        Outcome::Rejected { .. }
+    ));
+    assert!(
+        !f.methods
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m == "thread/resume" || m == "turn/start")
+    );
+}
+
+#[tokio::test]
 async fn expected_shared_target_metadata_change_is_reconfirmed_not_false_foreign_failure() {
     let f = fake("ok").await;
     fence(&f).await;
@@ -450,6 +496,6 @@ async fn saved_login_projection_contains_only_opaque_refs_and_active_flag() {
     else {
         panic!()
     };
-    assert_eq!(result["logins"].as_array().unwrap().len(), 2);
+    assert_eq!(result["logins"].as_array().unwrap().len(), 3);
     assert!(!result.to_string().contains("never-publish"));
 }
