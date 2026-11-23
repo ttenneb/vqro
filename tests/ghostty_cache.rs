@@ -1,6 +1,8 @@
 //! Cache tests use tiny fake native artifacts; no Zig, network, or live services.
 #[path = "../build/ghostty_cache.rs"]
 mod ghostty_cache;
+#[path = "../build/native_config.rs"]
+mod native_config;
 
 use ghostty_cache::{Inputs, source_digest, verify};
 use std::fs;
@@ -14,6 +16,7 @@ fn inputs() -> Inputs {
         target: "x86_64-unknown-linux-gnu".into(),
         optimize: "ReleaseFast".into(),
         zig_version: "0.17.1".into(),
+        native: [("boundary".into(), Some("fixture".into()))].into(),
         flags: vec![
             "build".into(),
             "-Dsimd=true".into(),
@@ -64,6 +67,14 @@ fn every_input_changes_key_and_field_boundaries_are_unambiguous() {
     let mut changed = original.clone();
     changed.zig_version.push('x');
     variants.push(changed);
+    let mut changed = original.clone();
+    changed
+        .native
+        .insert("boundary".into(), Some("other".into()));
+    variants.push(changed);
+    let mut changed = original.clone();
+    changed.native.insert("caller".into(), None);
+    variants.push(changed);
     for index in 0..original.flags.len() {
         let mut changed = original.clone();
         changed.flags[index].push('x');
@@ -80,6 +91,74 @@ fn every_input_changes_key_and_field_boundaries_are_unambiguous() {
     let mut b = original;
     b.flags = vec!["a".into(), "bc".into()];
     assert_ne!(a.key(), b.key());
+}
+
+#[test]
+fn native_reuse_boundary_is_explicit_for_every_supported_platform() {
+    let empty = std::collections::BTreeMap::new();
+    assert!(
+        !native_config::ENV.contains(&"LD_LIBRARY_PATH"),
+        "Cargo's runtime loader path is not a native archive setting"
+    );
+    for target in [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "x86_64-pc-windows-gnu",
+        "aarch64-pc-windows-gnullvm",
+    ] {
+        assert!(native_config::reason(target, &empty).is_none(), "{target}");
+    }
+    for target in ["aarch64-apple-darwin", "x86_64-pc-windows-msvc", "other"] {
+        assert!(native_config::reason(target, &empty).is_some(), "{target}");
+    }
+    for variable in native_config::ENV {
+        let settings = [(variable.to_string(), Some("external".into()))].into();
+        let opted_out = native_config::reason("x86_64-unknown-linux-gnu", &settings).is_some();
+        assert_eq!(opted_out, *variable != "PROGRAMDATA", "{variable}");
+    }
+}
+
+#[test]
+fn resolved_toolchain_host_and_every_caller_setting_affect_the_key() {
+    let config = native_config::capture(
+        "/nonexistent-ghostty-cache-zig",
+        "host-triple",
+        "x86_64-unknown-linux-gnu",
+    );
+    assert!(
+        config.uncached.is_some(),
+        "unknown resolution must fail closed to a local build"
+    );
+    assert_eq!(
+        config.key["boundary"].as_deref(),
+        Some(native_config::BOUNDARY)
+    );
+    let mut input = inputs();
+    input.native = config.key;
+    for name in input.native.keys() {
+        let mut changed = input.clone();
+        changed.native.insert(name.clone(), Some("changed".into()));
+        assert_ne!(input.key(), changed.key(), "{name}");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("zig");
+    let lib = dir.path().join("lib");
+    fs::write(&exe, b"fixture").unwrap();
+    fs::create_dir(&lib).unwrap();
+    let output = format!(
+        ".{{\n .zig_exe = {},\n .lib_dir = {},\n .target = \"host-resolved-target\",\n}}",
+        serde_json::to_string(&exe.to_str().unwrap()).unwrap(),
+        serde_json::to_string(&lib.to_str().unwrap()).unwrap()
+    );
+    let resolved = native_config::parse_zig_env(&output).unwrap();
+    for (name, value) in resolved {
+        let mut a = input.clone();
+        a.native.insert(name.clone(), value);
+        let mut b = a.clone();
+        b.native.insert(name.clone(), Some("changed".into()));
+        assert_ne!(a.key(), b.key(), "{name}");
+    }
+    assert!(native_config::parse_zig_env("unrecognized output").is_err());
 }
 
 #[test]
@@ -101,6 +180,124 @@ fn actual_source_contents_not_checkout_path_determine_identity() {
     assert_ne!(original, source_digest(a.path()).unwrap());
     fs::write(b.path().join("added.zig"), b"new input").unwrap();
     assert_ne!(original, source_digest(b.path()).unwrap());
+}
+
+#[test]
+fn observed_source_edit_during_build_is_local_only_and_never_a_stale_hit() {
+    let root = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let file = source.path().join("main.zig");
+    fs::write(&file, b"S").unwrap();
+    let mut input = inputs();
+    input.source = source_digest(source.path()).unwrap();
+    let changed = ghostty_cache::ensure_checked(
+        root.path(),
+        &input,
+        REQUIRED,
+        6,
+        || source_digest(source.path()),
+        |prefix, work| {
+            fs::write(&file, b"T")?;
+            build(prefix, work)
+        },
+        |entry| ghostty_cache::materialize(entry, REQUIRED, out.path()),
+    )
+    .unwrap();
+    assert!(!changed.cached);
+    assert!(!changed.reused);
+    assert!(!root.path().join(input.key()).exists());
+    assert_eq!(
+        fs::read(out.path().join("lib/native.a")).unwrap(),
+        b"fake archive"
+    );
+    fs::write(&file, b"S").unwrap();
+    let next = ghostty_cache::ensure_checked(
+        root.path(),
+        &input,
+        REQUIRED,
+        6,
+        || source_digest(source.path()),
+        build,
+        |_| Ok(()),
+    )
+    .unwrap();
+    assert!(next.cached);
+    assert!(
+        !next.reused,
+        "a source edit must never publish T under key(S)"
+    );
+}
+
+#[test]
+fn source_is_rechecked_immediately_before_accepting_a_reuse() {
+    let root = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let file = source.path().join("main.zig");
+    fs::write(&file, b"S").unwrap();
+    let mut input = inputs();
+    input.source = source_digest(source.path()).unwrap();
+    ensure(root.path(), &input, REQUIRED, build).unwrap();
+    let calls = std::cell::Cell::new(0);
+    let result = ghostty_cache::ensure_checked(
+        root.path(),
+        &input,
+        REQUIRED,
+        6,
+        || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                fs::write(&file, b"T")?;
+            }
+            source_digest(source.path())
+        },
+        build,
+        |_| Ok(()),
+    )
+    .unwrap();
+    assert!(!result.cached);
+    assert!(!result.reused);
+    verify(&root.path().join(input.key()), &input, REQUIRED).unwrap();
+}
+
+#[test]
+fn source_edit_while_waiting_for_lock_cannot_accept_an_old_hit() {
+    let root = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("main.zig"), b"S").unwrap();
+    let mut input = inputs();
+    input.source = source_digest(source.path()).unwrap();
+    ensure(root.path(), &input, REQUIRED, build).unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.path().join(format!("{}.lock", input.key())))
+        .unwrap();
+    lock.lock().unwrap();
+    let (started, waiting) = std::sync::mpsc::channel();
+    let root_path = root.path().to_owned();
+    let source_path = source.path().to_owned();
+    let candidate = input.clone();
+    let builder = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        ghostty_cache::ensure_checked(
+            &root_path,
+            &candidate,
+            REQUIRED,
+            6,
+            || source_digest(&source_path),
+            build,
+            |_| Ok(()),
+        )
+        .unwrap()
+    });
+    waiting.recv().unwrap();
+    fs::write(source.path().join("main.zig"), b"T").unwrap();
+    drop(lock);
+    let result = builder.join().unwrap();
+    assert!(!result.cached);
+    assert!(!result.reused);
+    verify(&root.path().join(input.key()), &input, REQUIRED).unwrap();
 }
 
 #[test]
@@ -195,7 +392,7 @@ fn interrupted_child() {
 }
 
 #[test]
-fn interrupted_build_stage_is_removed_before_rebuilding() {
+fn interrupted_stage_needs_dead_owner_and_one_hour_tree_quiescence() {
     let root = tempfile::tempdir().unwrap();
     let child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "interrupted_child"])
@@ -206,18 +403,62 @@ fn interrupted_build_stage_is_removed_before_rebuilding() {
     assert!(child.success());
     let stage = fs::read_to_string(root.path().join("abandoned-stage")).unwrap();
     assert!(Path::new(&stage).join("zig-cache/unfinished.o").exists());
-    ensure(root.path(), &inputs(), REQUIRED, |prefix, work| {
-        assert!(
-            !Path::new(&stage).exists(),
-            "abandoned stage must be gone before a new build"
-        );
-        build(prefix, work)
+    let stage = Path::new(&stage);
+    // Deterministic liveness seam: the recorded process is gone, independent of host query support.
+    fs::write(stage.join("owner.json"), br#"{"pid":123,"start":"birth"}"#).unwrap();
+    let now = std::time::SystemTime::now();
+    let later = now + std::time::Duration::from_secs(7200);
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.path().join(format!("{}.lock", inputs().key())))
+        .unwrap();
+    lock.lock().unwrap();
+    ghostty_cache::cleanup_stages(root.path(), &inputs().key(), now, |_| Ok(None)).unwrap();
+    assert!(
+        stage.exists(),
+        "a dead owner alone does not prove orphan Zig stopped"
+    );
+    ghostty_cache::cleanup_stages(root.path(), &inputs().key(), later, |_| {
+        Ok(Some("birth".into()))
     })
     .unwrap();
+    assert!(stage.exists(), "a quiet tree with a live owner must remain");
+    let object = stage.join("zig-cache/unfinished.o");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&object)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    ghostty_cache::cleanup_stages(root.path(), &inputs().key(), later, |_| Ok(None)).unwrap();
+    assert!(
+        stage.exists(),
+        "newest descendant activity must protect the whole stage"
+    );
+    fs::OpenOptions::new()
+        .write(true)
+        .open(object)
+        .unwrap()
+        .set_modified(now)
+        .unwrap();
+    ghostty_cache::cleanup_stages(root.path(), &inputs().key(), later, |_| {
+        Err(std::io::Error::other("unknown"))
+    })
+    .unwrap();
+    assert!(stage.exists(), "unknown process identity must be retained");
+    ghostty_cache::cleanup_stages(root.path(), &inputs().key(), later, |_| {
+        Ok(Some("new-process-birth".into()))
+    })
+    .unwrap();
+    assert!(
+        !stage.exists(),
+        "PID reuse with a different start identity means the recorded owner is gone"
+    );
 }
 
 #[test]
-fn cache_hit_removes_only_its_own_keys_stale_stage_directories() {
+fn cache_hit_retains_unknown_stages_and_other_keys() {
     let root = tempfile::tempdir().unwrap();
     let input = inputs();
     ensure(root.path(), &input, REQUIRED, build).unwrap();
@@ -243,9 +484,24 @@ fn cache_hit_removes_only_its_own_keys_stale_stage_directories() {
         .unwrap()
         .reused
     );
-    assert!(!stale.exists());
+    assert!(
+        stale.exists(),
+        "an ownerless stage must never be inferred abandoned"
+    );
     assert!(active_other.is_dir());
     assert!(unrelated.is_file());
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.path().join(format!("{}.lock", input.key())))
+        .unwrap();
+    lock.lock().unwrap();
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(7200);
+    ghostty_cache::cleanup_stages(root.path(), &input.key(), later, |_| Ok(None)).unwrap();
+    assert!(stale.exists(), "even an old ownerless stage is retained");
+    fs::write(stale.join("owner.json"), br#"{"pid":123,"start":null}"#).unwrap();
+    ghostty_cache::cleanup_stages(root.path(), &input.key(), later, |_| Ok(None)).unwrap();
+    assert!(stale.exists(), "unknown start identity is retained");
 }
 
 #[test]
@@ -444,6 +700,36 @@ fn entry_and_manifest_cannot_be_symlinks() {
     fs::rename(&manifest, &external).unwrap();
     symlink(external, manifest).unwrap();
     assert!(verify(&result.path, &input, REQUIRED).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn publication_rejects_absolute_internal_links_and_preserves_relative_links_after_relocation() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let input = inputs();
+    assert!(
+        ensure(root.path(), &input, REQUIRED, |prefix, work| {
+            build(prefix, work)?;
+            symlink(prefix.join("lib/native.a"), prefix.join("lib/alias.a"))
+        })
+        .is_err()
+    );
+    assert!(
+        !root.path().join(input.key()).exists(),
+        "absolute staging paths must never be published"
+    );
+    let entry = ensure(root.path(), &input, REQUIRED, |prefix, work| {
+        build(prefix, work)?;
+        symlink("native.a", prefix.join("lib/alias.a"))
+    })
+    .unwrap();
+    assert_eq!(entry.path.file_name().unwrap(), input.key().as_str());
+    verify(&entry.path, &input, REQUIRED).unwrap();
+    assert_eq!(
+        fs::read(entry.path.join("lib/alias.a")).unwrap(),
+        b"fake archive"
+    );
 }
 
 #[cfg(unix)]

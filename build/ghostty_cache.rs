@@ -7,7 +7,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 /// Bump when the installed layout, manifest, or build semantics change.
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
 pub const DEFAULT_KEEP: usize = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,6 +18,8 @@ pub struct Inputs {
     pub target: String,
     pub optimize: String,
     pub zig_version: String,
+    /// Main-approved reuse boundary, host/resolved Zig install and consumed native caller settings.
+    pub native: BTreeMap<String, Option<String>>,
     /// The complete Zig argv, with output/cache paths replaced by stable placeholders.
     pub flags: Vec<String>,
 }
@@ -42,6 +44,7 @@ struct Manifest {
 pub struct Entry {
     pub path: PathBuf,
     pub reused: bool,
+    pub cached: bool,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -91,6 +94,17 @@ fn files(
             files(root, &path, source, result)?;
         } else {
             if kind.is_symlink() {
+                let link = fs::read_link(&path)?;
+                if !source
+                    && link.components().any(|c| {
+                        matches!(
+                            c,
+                            std::path::Component::RootDir | std::path::Component::Prefix(_)
+                        )
+                    })
+                {
+                    return Err(invalid("nonrelocatable absolute artifact symlink"));
+                }
                 let resolved = path.canonicalize()?;
                 if !resolved.starts_with(root) || !resolved.is_file() {
                     return Err(invalid("artifact symlink escapes entry or is not a file"));
@@ -170,11 +184,33 @@ pub fn verify(path: &Path, inputs: &Inputs, required: &[&str]) -> io::Result<()>
 /// on Unix and LockFileEx on Windows, and is released even when a builder exits unsuccessfully.
 /// Verification and publication happen under that lock. A build is private until the complete install tree
 /// and manifest can be atomically renamed into place; the temporary Zig work tree is never cached.
+#[cfg(test)]
 pub fn ensure(
     root: &Path,
     inputs: &Inputs,
     required: &[&str],
     keep: usize,
+    build: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    use_entry: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<Entry> {
+    // Fake-artifact tests have an immutable literal source identity.
+    ensure_checked(
+        root,
+        inputs,
+        required,
+        keep,
+        || Ok(inputs.source.clone()),
+        build,
+        use_entry,
+    )
+}
+
+pub fn ensure_checked(
+    root: &Path,
+    inputs: &Inputs,
+    required: &[&str],
+    keep: usize,
+    read_source: impl Fn() -> io::Result<String>,
     build: impl FnOnce(&Path, &Path) -> io::Result<()>,
     use_entry: impl FnOnce(&Path) -> io::Result<()>,
 ) -> io::Result<Entry> {
@@ -192,33 +228,46 @@ pub fn ensure(
         .write(true)
         .open(root.join(format!("{key}.lock")))?;
     lock.lock()?;
-    // Only a live builder holding this key's lock may create a stage. Abruptly exited builders cannot
-    // run TempDir's destructor, so reclaim their directories before either rebuilding or reusing.
-    let stage_prefix = format!(".{key}-");
-    for entry in fs::read_dir(&root)? {
-        let entry = entry?;
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(&stage_prefix))
-            && entry.file_type()?.is_dir()
-        {
-            // file_type does not follow symlinks: never traverse a similarly named symlink target.
-            fs::remove_dir_all(entry.path())?;
-        }
-    }
+    cleanup_stages(&root, &key, std::time::SystemTime::now(), process_start)?;
+    // The pre-lock digest only routes us to a candidate lock. Accept its identity only after hashing
+    // under that lock, then recheck immediately before accepting an existing entry (including waits).
+    let locked_source = read_source()?;
+    let mut stable = locked_source == inputs.source;
     let path = root.join(&key);
-    let reused = verify(&path, inputs, required).is_ok();
-    if !reused {
+    let valid = verify(&path, inputs, required).is_ok();
+    stable &= read_source()? == locked_source;
+    if valid && stable {
+        use_entry(&path)?;
+        OpenOptions::new()
+            .write(true)
+            .open(path.join("manifest.json"))?
+            .set_modified(std::time::SystemTime::now())?;
+        prune(&root, keep)?;
+        return Ok(Entry {
+            path,
+            reused: true,
+            cached: true,
+        });
+    }
+    if !valid {
         match fs::symlink_metadata(&path) {
             Ok(meta) if meta.is_dir() && !meta.is_symlink() => fs::remove_dir_all(&path)?,
             Ok(_) => fs::remove_file(&path)?,
             Err(err) if err.kind() == io::ErrorKind::NotFound => (),
             Err(err) => return Err(err),
         }
+    }
+    let before_build = read_source()?;
+    stable &= before_build == locked_source;
+    {
         let stage = tempfile::Builder::new()
             .prefix(&format!(".{key}-"))
             .tempdir_in(&root)?;
+        let owner = StageOwner {
+            pid: std::process::id(),
+            start: process_start(std::process::id()).ok().flatten(),
+        };
+        fs::write(stage.path().join("owner.json"), serde_json::to_vec(&owner)?)?;
         let prefix = stage.path().join("install");
         let work = stage.path().join("zig-cache");
         fs::create_dir(&prefix)?;
@@ -235,6 +284,17 @@ pub fn ensure(
             serde_json::to_vec_pretty(&manifest)?,
         )?;
         verify(&prefix, inputs, required)?;
+        stable &= read_source()? == before_build;
+        if !stable {
+            // Keep this result local, as before shared caching: never publish it under an observed
+            // stale source key. The caller copies/verifies it before this temporary tree is dropped.
+            use_entry(&prefix)?;
+            return Ok(Entry {
+                path,
+                reused: false,
+                cached: false,
+            });
+        }
         fs::rename(&prefix, &path)?;
     }
     // Consumers copy their link inputs while this lock is still held. The shared entry may be evicted
@@ -245,7 +305,130 @@ pub fn ensure(
         .open(path.join("manifest.json"))?
         .set_modified(std::time::SystemTime::now())?;
     prune(&root, keep)?;
-    Ok(Entry { path, reused })
+    Ok(Entry {
+        path,
+        reused: false,
+        cached: true,
+    })
+}
+
+#[derive(Serialize, Deserialize)]
+struct StageOwner {
+    pid: u32,
+    // Unknown creation time is recorded explicitly and never treated as a dead owner.
+    start: Option<String>,
+}
+
+fn process_start(pid: u32) -> io::Result<Option<String>> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let ticks = stat
+            .rsplit_once(')')
+            .and_then(|(_, fields)| fields.split_whitespace().nth(19))
+            .ok_or_else(|| invalid("process start time unavailable"))?;
+        let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+        Ok(Some(format!("{}:{ticks}", boot.trim())))
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let result = std::process::Command::new("ps")
+            .env("LC_ALL", "C")
+            .env("TZ", "UTC")
+            .args(["-p", &pid.to_string(), "-o", "lstart="])
+            .output()?;
+        let start = String::from_utf8_lossy(&result.stdout).trim().to_owned();
+        if result.status.success() && !start.is_empty() {
+            return Ok(Some(start));
+        }
+        if result.status.code() == Some(1) && start.is_empty() && result.stderr.is_empty() {
+            return Ok(None);
+        }
+        Err(invalid("process identity query failed"))
+    }
+    #[cfg(windows)]
+    {
+        let script = format!(
+            "$p = Get-Process -Id {pid} -ErrorAction SilentlyContinue; if ($null -eq $p) {{ 'absent' }} else {{ try {{ $p.StartTime.ToUniversalTime().Ticks }} catch {{ exit 1 }} }}"
+        );
+        let result = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()?;
+        let start = String::from_utf8_lossy(&result.stdout).trim().to_owned();
+        if result.status.success() && start == "absent" {
+            return Ok(None);
+        }
+        if result.status.success() && !start.is_empty() && start.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Ok(Some(start));
+        }
+        Err(invalid("process identity query failed"))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        Err(invalid("process identity unavailable on this host"))
+    }
+}
+
+fn newest_modified(path: &Path) -> io::Result<std::time::SystemTime> {
+    let metadata = fs::symlink_metadata(path)?;
+    let mut newest = metadata.modified()?;
+    if metadata.file_type().is_dir() {
+        for child in fs::read_dir(path)? {
+            newest = newest.max(newest_modified(&child?.path())?);
+        }
+    }
+    Ok(newest)
+}
+
+/// Called only under this key's lock. A dead builder does NOT prove its Zig descendants stopped:
+/// retain the stage unless the owner identity is gone AND the entire tree has been quiet for an hour.
+/// Missing/unknown owner records, probe failures, and unreadable/newer timestamps are all retained.
+pub fn cleanup_stages(
+    root: &Path,
+    key: &str,
+    now: std::time::SystemTime,
+    process_start: impl Fn(u32) -> io::Result<Option<String>>,
+) -> io::Result<()> {
+    let prefix = format!(".{key}-");
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.starts_with(&prefix))
+            || !entry.file_type()?.is_dir()
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Some(owner) = fs::read(path.join("owner.json"))
+            .ok()
+            .and_then(|v| serde_json::from_slice::<StageOwner>(&v).ok())
+        else {
+            continue;
+        };
+        let Some(start) = owner.start else { continue };
+        let gone = match process_start(owner.pid) {
+            Ok(None) => true,
+            Ok(Some(current)) => current != start,
+            Err(_) => false,
+        };
+        if gone
+            && newest_modified(&path)
+                .ok()
+                .and_then(|mtime| now.duration_since(mtime).ok())
+                .is_some_and(|age| age >= std::time::Duration::from_secs(3600))
+        {
+            fs::remove_dir_all(path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Copy just the link inputs into private output, checking bytes against the manifest while the caller

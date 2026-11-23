@@ -7,7 +7,8 @@ root is the user's cache directory under `vqro/libghostty-vt` (`XDG_CACHE_HOME`,
 
 Each key hashes a versioned JSON record containing the actual vendored source manifest (the same sorted
 path/SHA-256 representation as `scripts/check_vendor.py`), Rust target triple, optimization mode, Zig version,
-and complete Zig command arguments. Only the install prefix and temporary compiler-cache paths are replaced
+complete Zig command arguments, and native configuration: approved reuse boundary, Cargo host triple,
+resolved Zig executable/library directories and host target (`zig env`), and consumed compiler/SDK caller settings. Only the install prefix and temporary compiler-cache paths are replaced
 by stable placeholders. Dirty source files change the key even before the vendor manifest is regenerated.
 The layout schema must be bumped when installed layout or build semantics change.
 
@@ -15,11 +16,16 @@ A persistent `<key>.lock` serializes verification and building (`File::lock`: fl
 Windows). Builders install into a unique temporary directory under the cache root. A manifest records all
 installed artifacts and their SHA-256 hashes, and the complete directory is atomically renamed into place.
 Zig's intermediate compiler cache is temporary, not retained in the shared installed entry. Under the key's
-lock, the next access removes that key's abandoned `.<key>-*` stage directories, including on cache hits.
-This recovers work directories left by abrupt exits that bypass temporary-directory destructors; it does not
-stop any orphan Zig process, which may fail when its abandoned directory is removed. Missing, changed,
+lock, the next access considers that key's abandoned `.<key>-*` stage directories, including on cache hits.
+Each stage records its owner PID and observed process start identity. Removal requires **both** proof that
+that owner identity is gone **and** no modification anywhere in the stage tree for at least one hour. Unknown
+owner/start records, failed process queries, unreadable or future timestamps, live owners, and recent writes
+are retained. Start identity is observed from Linux boot ID/start ticks, Unix `ps` start time, or Windows
+process creation time; unavailable probes record unknown and disable removal. No process is killed. A quiet
+hour is a conservative heuristic, not proof that every orphan descendant exited. Missing, changed,
 extra or corrupt artifacts and mismatched inputs cause a rebuild; they are never linked as a cache hit.
-File symlinks must resolve within the entry; directory symlinks are refused. The GNU Windows archive alias
+File symlinks must be relative and resolve within the entry; rooted/absolute artifact links and directory
+symlinks are refused before publication, so staging-path links cannot break after relocation. The GNU Windows archive alias
 is created before publication, so consumers never modify a shared entry. While holding the key lock, each
 consumer copies only its required link archive into `OUT_DIR`, checking the copy against the manifest before
 publication. Cargo links and watches that private snapshot, never the evictable shared path. Unchanged copies
@@ -41,6 +47,54 @@ Regression tests: `tests/ghostty_cache.rs` includes the same small module used b
 artifacts and subprocess builders. It covers every key input, dirty-source identity, partial/corrupt entries,
 required artifacts, failed builds, cross-checkout reuse, target mismatch, symlink rejection, and six competing
 processes producing exactly one build.
+
+## Source observations and their limit
+
+The initial source digest only routes the candidate key lock. The source is hashed again under that lock,
+including after waiting for another builder, and immediately before a verified reuse is accepted. Builds
+rehash after output verification and before publication. If any observed digest changes, the artifact is
+copied/verified only into this build's `OUT_DIR`, never published into the shared cache, with the diagnostic
+`vendored source changed during the build; not cached` in stderr and the JSON note.
+
+These are before/after checks, **not proof of an immutable source or of the exact executed revision**.
+Sources and the Zig installation/packages must remain stable while building. Changes restored between
+observations (ABA) or concurrent reads can escape observation. The separate FFI header check does not
+authenticate artifact provenance. This preserves local build behavior without knowingly sharing an observed
+source/key mismatch.
+
+## Approved platform reuse boundary
+
+Approved by vqro-lead (Main), 2026-11-23: shared reuse is limited to explicit Linux GNU/musl and Windows GNU
+targets using Zig's bundled libc, archive tools and target linker. Every other supported target still builds;
+only shared caching is disabled with a reason recorded in stderr and `OUT_DIR/libghostty-cache.json`.
+
+| Target/configuration | Behavior |
+| --- | --- |
+| x86_64/aarch64 Linux GNU or musl, explicit target, bundled toolchain | Shared cache |
+| x86_64/aarch64 Windows GNU (including Rust `gnullvm`), explicit Zig GNU target | Shared cache |
+| Darwin, native or cross | Local uncached build; Darwin caching deferred until SDK/toolchain keying is proven |
+| Windows MSVC | Local uncached build; Windows SDK/Visual Studio registry discovery is not claimed keyed |
+| Any external CC/CXX, sysroot, libc, SDK, linker/header/library or packaging override | Local uncached build naming the setting |
+| Unrecognized/unresolvable `zig env` executable/library paths | Local uncached build; never guess configuration |
+
+The exact environment allow/opt-out policy is `build/native_config.rs::ENV/reason`, with matching Cargo
+`rerun-if-env-changed` declarations. It includes `SDKROOT`, `DEVELOPER_DIR`, deployment targets, Windows SDK,
+VC/VS, `CC`-related variables, sysroot/libc settings, Nix/include/library flags, pkg-config and install overrides.
+`PROGRAMDATA` alone is an ordinary Windows host setting: it is keyed but does not select an external SDK.
+Native SDK discovery (`xcrun` SDK path/version, Apple archive postprocessing, or Windows registry/VS discovery)
+is deliberately not approximated: those builds are uncached. The SDK is still chosen by the original producer.
+
+The cached configuration's explicit OS/ABI prevents native-libc discovery (`std.Target.Query.isNativeAbi` /
+`canDetectLibC` and `std.zig.LibCDirs.detect` in Zig 0.17.1). `Config.zig::genericMacOSTarget`,
+`GhosttyLibVt.zig::initLib`, and `pkg/apple-sdk` have additional host behavior, hence the Darwin opt-out.
+The static producer's optimize/SIMD/features/target arguments remain in the single keyed/executed argv.
+Cargo's Rust linker flags and target features are not forwarded to Zig; they govern the caller's separate
+Rust/link step, not the native archive. Cargo injects a worktree-specific `LD_LIBRARY_PATH` to run build
+scripts; it is not keyed or treated as an external compiler setting. Ghostty reads it only in its native-CPU
+Nix branch, which explicit CPU targets cannot enter; `IN_NIX_SHELL` independently opts out of shared reuse.
+An integration probe caught the overly broad runtime-path opt-out before release.
+Toolchain installations/packages are assumed immutable between
+ordinary version/path changes; this is not compiler authentication or a host-SDK fingerprinting framework.
 
 ## Disk usage and manual pruning
 
@@ -78,6 +132,10 @@ builders. The next build recreates removed entries.
 - Audit follow-up RED: both interrupted-stage cleanup regressions failed before the fix. With cleanup,
   bounded LRU and private snapshots, all nineteen cache tests pass; a copied link input remains intact after
   its shared entry is evicted, and copied bytes that disagree with the manifest are never published.
+- Source-hold follow-up: twenty-five cache tests cover source mutation inside the build seam (local result,
+  no publication and no later stale hit), source changes before reuse/after a lock wait, explicit native reuse
+  boundaries and key inputs, absolute-link rejection/relative-link relocation, and dead-owner plus one-hour
+  recursive quiescence (including PID reuse, unknown identity and fresh descendant activity).
 - The quick gate passed all nine steps with zero skips, including zero-warning builds, all Rust/Python tests,
   and the Windows GNU cross-check. The Windows GNU alias was therefore exercised as well as Linux native
   linking. This is not a native Windows runtime or lock-concurrency test.

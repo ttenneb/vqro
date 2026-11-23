@@ -16,6 +16,8 @@
 //! `vendor/libghostty-vt.patches.md`.
 #[path = "build/ghostty_cache.rs"]
 mod ghostty_cache;
+#[path = "build/native_config.rs"]
+mod native_config;
 
 use std::env;
 use std::fs;
@@ -114,6 +116,9 @@ fn cache_root() -> PathBuf {
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build/ghostty_cache.rs");
+    println!("cargo:rerun-if-changed=build/native_config.rs");
+    for var in native_config::ENV { println!("cargo:rerun-if-env-changed={var}"); }
+    println!("cargo:rerun-if-env-changed=HOST");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt.vendor.json");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt.sha256");
     // All source files (including additions), not only the previously known source subdirectories.
@@ -160,12 +165,15 @@ fn main() {
         "--prefix".into(), "{prefix}".into(),
         "--cache-dir".into(), "{work}".into(),
     ];
+    let native = native_config::capture(&zig, &env::var("HOST").expect("HOST"), &target);
+    let native_uncached = native.uncached;
     let inputs = ghostty_cache::Inputs {
         schema: ghostty_cache::SCHEMA,
         source: ghostty_cache::source_digest(&vendored).expect("hash vendored libghostty-vt source"),
         target: target.clone(),
         optimize,
         zig_version: String::from_utf8(version.stdout).expect("UTF-8 zig version").trim().into(),
+        native: native.key,
         flags,
     };
     let build = |prefix: &std::path::Path, work: &std::path::Path| -> std::io::Result<()> {
@@ -193,23 +201,34 @@ fn main() {
         else if target.contains("-windows-") { "lib/libghostty-vt-static.a" }
         else { "lib/libghostty-vt.a" };
     let cache_setting = env::var_os("VQRO_LIBGHOSTTY_CACHE");
-    let (result, cache_entry) = if cache_setting.as_deref() == Some(std::ffi::OsStr::new("off")) {
+    let disabled = cache_setting.as_deref() == Some(std::ffi::OsStr::new("off"));
+    let (result, cache_entry, reason) = if disabled || native_uncached.is_some() {
+        let reason = if disabled { "cache disabled explicitly".to_owned() } else { native_uncached.expect("uncached reason") };
+        eprintln!("libghostty-vt built locally, not cached: {reason}");
         build(&out, &out.join("zig-cache")).expect("uncached libghostty-vt build");
-        ("disabled", None)
+        (if disabled { "disabled" } else { "uncached-native-configuration" }, None, Some(reason))
     } else {
         let root = cache_setting.filter(|p| !p.is_empty()).map(PathBuf::from)
             .unwrap_or_else(|| cache_root().join("libghostty-vt"));
         let keep = env::var("VQRO_LIBGHOSTTY_CACHE_KEEP").map(|v| v.parse::<usize>().expect("VQRO_LIBGHOSTTY_CACHE_KEEP must be a positive integer")).unwrap_or(ghostty_cache::DEFAULT_KEEP);
-        let entry = ghostty_cache::ensure(&root, &inputs, &[required], keep, build,
+        let entry = ghostty_cache::ensure_checked(&root, &inputs, &[required], keep,
+            || ghostty_cache::source_digest(&vendored), build,
             |path| ghostty_cache::materialize(path, &[required], &out)).expect("verified libghostty-vt cache");
-        (if entry.reused { "reused" } else { "built" }, Some(entry.path))
+        if !entry.cached {
+            eprintln!("vendored source changed during the build; not cached");
+            ("uncached-source-changed", None, Some("vendored source changed during the build; not cached".to_owned()))
+        } else {
+            (if entry.reused { "reused" } else { "built" }, Some(entry.path), None)
+        }
     };
-    let note = serde_json::json!({"key": inputs.key(), "result": result, "cache_entry": cache_entry, "elapsed_ms": started.elapsed().as_millis()});
+    let note = serde_json::json!({"key": inputs.key(), "result": result, "reason": reason, "cache_entry": cache_entry, "elapsed_ms": started.elapsed().as_millis()});
     fs::write(out.parent().expect("OUT_DIR").join("libghostty-cache.json"), serde_json::to_vec_pretty(&note).expect("cache note")).expect("write cache note");
     println!("cargo:rustc-env=VQRO_LIBGHOSTTY_CACHE_KEY={}", inputs.key());
     // Cargo links a verified private snapshot, never an evictable shared path. Watch only the archive,
     // not the changing FFI-check object or shared LRU timestamps.
-    if result != "disabled" { println!("cargo:rerun-if-changed={}", out.join(required).display()); }
+    if result != "disabled" && result != "uncached-native-configuration" {
+        println!("cargo:rerun-if-changed={}", out.join(required).display());
+    }
     let lib = out.join("lib");
     println!("cargo:rustc-link-search=native={}", lib.display());
     if target.contains("apple-darwin") {
