@@ -4,6 +4,9 @@ use serde_json::{Value, json};
 #[derive(Default)]
 pub struct Availability { causes: BTreeMap<&'static str, Value>, pub rate_info: Option<Value>, pub limit_episode: Option<Value>, reported: bool }
 impl Availability {
+    /// Withhold an old limit freshness witness as soon as newer work may supersede it.
+    /// Absence does not claim that a new native turn actually started or completed.
+    pub fn invalidate_episode(&mut self) { self.limit_episode=None; }
     pub fn observe(&mut self, frame: &Value, active: bool) {
         if frame["type"] == "rate_limit_event" {
             let info = &frame["rate_limit_info"];

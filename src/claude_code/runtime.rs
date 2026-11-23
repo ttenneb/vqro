@@ -20,6 +20,7 @@ pub struct Shared {
     viewers: AtomicUsize,
     viewers_changed: Notify,
     stdout_done: std::sync::atomic::AtomicBool,
+    background_probe: std::sync::atomic::AtomicBool,
     pub name: String,
     pub instance: String,
 }
@@ -40,14 +41,16 @@ impl Shared {
     pub fn new(boot: String, name: String, instance: String) -> Arc<Self> {
         Arc::new(Self {state:Mutex::new(State::new(boot)),process:Mutex::new(None),changed:Notify::new(),outgoing:Notify::new(),
             effects:tokio::sync::Mutex::new(()),generation:AtomicU64::new(1),viewers:AtomicUsize::new(0),viewers_changed:Notify::new(),
-            stdout_done:std::sync::atomic::AtomicBool::new(false),name,instance})
+            stdout_done:std::sync::atomic::AtomicBool::new(false),background_probe:std::sync::atomic::AtomicBool::new(false),name,instance})
     }
     pub fn process(&self) -> Option<Process> {self.process.lock().unwrap().clone()}
     pub fn facts(&self) -> Value {self.state.lock().unwrap().facts(&self.name,&self.instance)}
     pub fn wake(&self) {self.changed.notify_waiters();self.outgoing.notify_one();}
     pub async fn spawn_native(self:&Arc<Self>, argv:&[String], cwd:&std::path::Path, env:&HashMap<String,String>) -> Result<Process, NativeError> {
         let weak=Arc::downgrade(self);let generation=self.generation.load(Ordering::SeqCst);
-        let process=Process::spawn(argv,cwd,env,Arc::new(ClaudeCodec),Arc::new(move|event|{
+        let mut env=env.clone();
+        env.remove("CLAUDE_CODE_RESUME_INTERRUPTED_TURN");env.remove("CLAUDE_CODE_RESUME_REASON");
+        let process=Process::spawn(argv,cwd,&env,Arc::new(ClaudeCodec),Arc::new(move|event|{
             if let Some(shared)=weak.upgrade(){
                 if shared.generation.load(Ordering::SeqCst)!=generation{return;}
                 shared.state.lock().unwrap().observe(&event);shared.wake();
@@ -59,12 +62,22 @@ impl Shared {
         let Some(native)=self.process() else{return;};
         // No prompt, model request, transcript scan, custom system prompt or settings-source override.
         let result=native.call("initialize",json!({"supportedDialogKinds":[]}),Duration::from_secs(15)).await;
-        let mut state=self.state.lock().unwrap();
-        match result {
-            Ok(reply) if reply.success=>state.initialized(&reply.data),
-            _=>{state.incomplete.insert("initialize".into());state.ready=false;state.refresh();},
+        let probe={
+            let mut state=self.state.lock().unwrap();
+            match result {
+                Ok(reply) if reply.success=>state.initialized(&reply.data),
+                _=>{state.incomplete.insert("initialize".into());state.ready=false;state.refresh();},
+            }
+            state.literal_supported() && !self.background_probe.swap(true,Ordering::SeqCst)
+        };
+        self.wake();
+        if probe {
+            // The pinned native protocol emits a COMPLETE background level behind repeated
+            // initialize, even when empty. Until that FRAME arrives, background remains unknown.
+            // This is metadata/control only, never a user prompt or input replay.
+            let _=native.call("initialize",json!({"supportedDialogKinds":[]}),Duration::from_secs(15)).await;
+            self.wake();
         }
-        drop(state);self.wake();
     }
     /// Unsupported native questions are cancelled once where that protocol has a cancellation response.
     /// A failed/unknown write is reported, never retried on the next wake or reconnect.
@@ -103,6 +116,7 @@ impl Shared {
                 let prepared={
                     let mut state=self.state.lock().unwrap();
                     let prepared=match contract::send(&effect.args,&state,&effect.attribution,&owner,uuid){Ok(p)=>p,Err(e)=>return rejected(e.kind,e.message)};
+                    state.availability.invalidate_episode();
                     state.inputs.insert(prepared.uuid.clone(),(prepared.delivery.clone(),prepared.epoch.clone()));
                     state.save_receipt(&prepared.delivery,prepared.receipt.clone());prepared
                 };
@@ -135,7 +149,6 @@ impl Shared {
                 match result {Ok(())=>Ok(Outcome::Dispatched(None)),Err(error)=>native_failure(error)}
             }
             "agent.interrupt"=>{
-                if self.state.lock().unwrap().status()=="idle"{return Ok(Outcome::Observed(Some(json!({"noop":true}))));}
                 let remaining=effect.deadline.saturating_duration_since(Instant::now());
                 let result=native.call("interrupt",json!({}),remaining).await;
                 match result {
@@ -168,7 +181,7 @@ impl Shared {
         let _guard=Guard(self.clone());
         loop {
             let changed=self.changed.notified();tokio::pin!(changed);changed.as_mut().enable();
-            let next={let state=self.state.lock().unwrap();cursor.next(&state.journal,8192)};
+            let next={let mut state=self.state.lock().unwrap();cursor.next(&mut state.journal,8192)};
             match next {
                 Next::Data(data)=>if stream.send(&data).await.is_err(){break;},
                 Next::Gap(reason)=>{let _=stream.gap(reason).await;break;},

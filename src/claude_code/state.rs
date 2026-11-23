@@ -31,6 +31,8 @@ pub struct State {
     pub changed: u64,
     pub version: Option<String>,
     pub native_caps: BTreeSet<String>,
+    pub background: Option<Vec<Value>>,
+    ledger_complete: bool,
     boot: String,
     epoch_number: u64,
     serial: u64,
@@ -53,7 +55,7 @@ impl State {
         let mut state = Self { journal,requests:Requests::default(),startup:Startup::new(),availability:Availability::default(),
             ready:false,session:None,retired_session:None,completion:None,foreground:"unknown",run:None,exit:None,incomplete:BTreeSet::new(),
             receipts:BTreeMap::new(),inputs:BTreeMap::new(),outgoing:VecDeque::new(),account:None,generation:1,changed:0,version:None,
-            native_caps:BTreeSet::new(),boot,epoch_number:1,serial:0,position:0,caps_rev:1,last_caps:Value::Null,
+            native_caps:BTreeSet::new(),background:None,ledger_complete:true,boot,epoch_number:1,serial:0,position:0,caps_rev:1,last_caps:Value::Null,
             entries:BTreeMap::new(),normal:VecDeque::new(),receipt_order:VecDeque::new(),tools:BTreeMap::new(),active_tools:BTreeSet::new() };
         state.refresh(); state
     }
@@ -103,7 +105,7 @@ impl State {
                     "incarnation":self.generation.to_string(),"kind":"process","owns_lifecycle":true},
                 "session":self.session.as_ref().map(|id|json!({"id":id})),"epoch":self.epoch(),"caps":caps,
                 "completion":self.completion,"availability":self.availability.value(),"requests":self.requests.summaries(),
-                "queue":null,"background":null,"config":[],"commands":[],"account":self.account,"incomplete":self.incomplete,
+                "queue":null,"background":self.background,"_claude":{"input_ledger":self.input_ledger()},"config":[],"commands":[],"account":self.account,"incomplete":self.incomplete,
                 "items":{"retain_bytes":RETAIN,"entities":512,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"coverage":"tail"}}}})
     }
     fn protected(&self, key: &Key) -> bool {
@@ -167,7 +169,7 @@ impl State {
     }
     pub fn observe(&mut self, event: &Event) {
         match event {
-            Event::Exited(exit)=>{self.exit=Some(exit.clone());self.ready=false;self.foreground="unknown";for change in self.requests.expire(){self.put("request",&change.id,change.value);} }
+            Event::Exited(exit)=>{self.exit=Some(exit.clone());self.ready=false;self.background=None;self.foreground="unknown";for change in self.requests.expire(){self.put("request",&change.id,change.value);} }
             Event::ProtocolError(_)=>{self.ready=false;self.foreground="unknown";self.incomplete.insert("native_protocol".into());}
             Event::Record(frame)=>self.record(frame),
         }
@@ -193,6 +195,7 @@ impl State {
             return;
         }
         if state {
+            if matches!(frame["state"].as_str(),Some("running"|"requires_action")){self.availability.invalidate_episode();}
             self.foreground=match frame["state"].as_str(){Some("idle")=>"idle",Some("running")=>"running",Some("requires_action")=>"requires_action",_=>"unknown"};
             if self.foreground=="idle" {self.run=None;}
             else if self.foreground=="running" && self.run.is_none(){self.run=Some(self.next("turn"));}
@@ -222,6 +225,10 @@ impl State {
         if frame["parent_tool_use_id"].is_string() || frame["agent_id"].is_string() {
             self.incomplete.insert("children".into());return;
         }
+        if matches!(kind,"assistant"|"tool_progress") || (kind=="user" && frame["isReplay"]==true)
+            || (kind=="system" && matches!(frame["subtype"].as_str(),Some("api_retry"|"task_started"))) {
+            self.availability.invalidate_episode();
+        }
         let active=self.run.is_some() || kind=="assistant" || (kind=="system" && frame["subtype"]=="api_retry");
         self.availability.observe(frame,active);
         match kind {
@@ -235,6 +242,13 @@ impl State {
             }
             "rate_limit_event"=>{},
             "auth_status"=>{}, // Never retain login output, which can contain authentication material.
+            "system" if frame["subtype"]=="background_tasks_changed"=>{
+                if frame["tasks"].as_array().is_some_and(Vec::is_empty){
+                    self.background=Some(Vec::new());self.incomplete.remove("background");
+                } else {
+                    self.background=None;self.incomplete.insert("background".into());self.availability.invalidate_episode();
+                }
+            }
             "system" if frame["subtype"]=="api_retry"=>{},
             "system" if frame["subtype"]=="session_writes_lost"=>{self.incomplete.insert("persistence".into());},
             _=>{self.incomplete.insert("native_events".into());},
@@ -307,6 +321,13 @@ impl State {
         self.correlate(&uuids,"completed",Some(&run));
         // Result is not an invented idle signal; session_state_changed:idle is authoritative.
     }
+    /// vqro reservations, NOT a native queue. Count unresolved old epochs too: changing the
+    /// observation epoch does not establish that a previously accepted input cannot still run.
+    pub fn input_ledger(&self) -> Value {
+        let pending=self.inputs.values().filter(|(id,_)|self.receipts.get(id).is_some_and(|r|matches!(r["stage"].as_str(),Some("unknown"|"dispatched"|"admitted")))).count();
+        json!({"v":0,"source":"vqro-ledger","epoch":self.epoch(),"complete":self.ledger_complete,
+            "pending":if self.ledger_complete{Some(pending)}else{None}})
+    }
     pub fn delivery_active(&self, delivery: &str) -> bool {
         self.inputs.values().any(|(id,epoch)|id==delivery && epoch==self.epoch())
             && self.receipts.get(delivery).is_some_and(|r|matches!(r["stage"].as_str(),Some("unknown"|"dispatched"|"admitted")))
@@ -318,7 +339,11 @@ impl State {
         while self.receipt_order.len()>256 {
             let at=self.receipt_order.iter().position(|id|!self.delivery_active(id));
             let Some(at)=at else {self.incomplete.insert("receipts".into());break;};
-            let old=self.receipt_order.remove(at).unwrap();self.receipts.remove(&old);self.inputs.retain(|_,(delivery,_)|delivery!=&old);
+            let old=self.receipt_order.remove(at).unwrap();
+            if self.inputs.values().any(|(d,_)|d==&old) && self.receipts.get(&old).is_some_and(|r|matches!(r["stage"].as_str(),Some("unknown"|"dispatched"|"admitted"))){
+                self.ledger_complete=false;self.incomplete.insert("input_ledger".into());
+            }
+            self.receipts.remove(&old);self.inputs.retain(|_,(delivery,_)|delivery!=&old);
         }
         self.changed+=1;
     }

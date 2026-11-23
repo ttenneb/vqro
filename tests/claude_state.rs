@@ -53,6 +53,39 @@ fn native_multi_input_completion_binds_each_member_but_does_not_invent_idle() {
     assert_eq!(s.status(),"idle");
 }
 #[test]
+fn newer_native_work_invalidates_idle_limit_episode_without_inventing_queue_empty() {
+    let mut s=state();
+    observe(&mut s,json!({"type":"rate_limit_event","session_id":"s1","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"}}));
+    observe(&mut s,json!({"type":"result","uuid":"limited-result","session_id":"s1","terminal_reason":"blocking_limit","is_error":true,"queued_turn_count":0}));
+    observe(&mut s,json!({"type":"system","subtype":"session_state_changed","state":"idle","session_id":"s1"}));
+    assert_eq!(s.availability.value().unwrap()["native"]["episode"],"limited-result");
+    assert_eq!(s.availability.value().unwrap()["state"],"available");
+    assert!(s.facts("claude-test","instance")["data"]["agent"]["queue"].is_null(),"partial native count0 is not a complete empty queue witness");
+    observe(&mut s,json!({"type":"system","subtype":"session_state_changed","state":"running","session_id":"s1"}));
+    observe(&mut s,json!({"type":"system","subtype":"session_state_changed","state":"idle","session_id":"s1"}));
+    assert!(s.availability.value().unwrap()["native"].get("episode").is_none(),"start/cancel/idle cannot revive old limit");
+}
+#[test]
+fn owned_ledger_is_not_native_queue_and_keeps_unresolved_old_epochs() {
+    let mut s=state();assert_eq!(s.input_ledger()["pending"],0);
+    let epoch=s.epoch().to_owned();s.inputs.insert("input1".into(),("delivery1".into(),epoch));
+    s.save_receipt("delivery1",json!({"stage":"dispatched","may_transform":"unknown"}));
+    assert_eq!(s.input_ledger()["pending"],1);
+    observe(&mut s,json!({"type":"conversation_reset","new_conversation_id":"s2","session_id":"s1"}));
+    assert_eq!(s.input_ledger()["pending"],1,"new epoch must not turn unresolved old input into an empty ledger");
+    assert!(s.facts("claude-test","instance")["data"]["agent"]["queue"].is_null());
+}
+#[test]
+fn only_complete_native_background_level_establishes_known_empty() {
+    let mut s=state();assert!(s.background.is_none());
+    observe(&mut s,json!({"type":"system","subtype":"background_tasks_changed","session_id":"s1","tasks":[]}));
+    assert_eq!(s.background,Some(Vec::new()));
+    observe(&mut s,json!({"type":"system","subtype":"background_tasks_changed","session_id":"s1","tasks":[{"task_id":"native-task"}]}));
+    assert!(s.background.is_none(),"unprojected nonempty level cannot become known empty");
+    observe(&mut s,json!({"type":"system","subtype":"background_tasks_changed","session_id":"s1","tasks":[]}));
+    assert_eq!(s.background,Some(Vec::new()));
+}
+#[test]
 fn pending_snapshots_on_control_wrapper_are_not_lost_or_rendered_twice() {
     let mut s=state();
     let question=json!({"type":"control_request","request_id":"p1","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"tool1","input":{}}});
