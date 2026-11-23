@@ -22,7 +22,8 @@ Child data never grants coordination authority. No model call was used in tests.
   `native.status`. Idle loaded threads are waiting, not finished. Turn completion does
   not prove child-thread termination. Both thread/started and thread-status updates
   share the same lifecycle merge: idle cannot undo a completed/failed/cancelled child;
-  an explicit new turn can reactivate it.
+  an explicit new turn can reactivate it. This is a narrow terminal-idle guard, not
+  general turn-ID ordering or an only-new-turn authority; those are not claimed fixed.
 - All main and child items/deltas use a shared injective namespace: `n:` followed
   by URL-safe base64 of a JSON pair `[native_thread_id,native_item_id]`. Pairs too
   long for the 128-byte entity-ID bound use compact epoch-local `l:` IDs instead.
@@ -56,8 +57,10 @@ Ordinary reversible IDs do not consume that map. IDs/threads are at most
 128 bytes; native child payload fields are bounded. Whole plans accept at most 256
 steps, bounded text and total entity bytes. Over-bound deltas and whole plans emit a
 bounded refusal witness through the existing projection: a known entity retains its
-old contents but is marked incomplete, as is the item stream. They never silently
-leave an old prefix or list looking complete, and no bound is raised. Other
+old contents but is marked incomplete, as is the item stream. Omission-only refusal
+witnesses carry no synthetic lifecycle: they do not reopen a final message. Real
+native lifecycle reports still apply; final items are not frozen. Refusals never
+silently leave an old prefix or list looking complete, and no bound is raised. Other
 unrepresentable/unattributable observations are omitted, not claims that native
 children are absent. The ordinary tail-coverage item
 journal can evict old entities; active child facts are protected like active tools.

@@ -55,6 +55,58 @@ fn oversized_main_and_child_deltas_retain_prefix_and_mark_entity_and_stream_inco
 }
 
 #[test]
+fn omission_only_delta_refusal_keeps_final_main_and_child_messages_final_in_snapshots() {
+    for thread in ["main", "child"] {
+        let mut endpoint = endpoint();
+        let mut projection = Projection::new("epoch2".into());
+        projection.apply(vec![endpoint.state_entity()]);
+        let completed = endpoint.notification(
+            "item/completed",
+            &json!({"threadId":thread,
+            "item":{"id":"finished","type":"agentMessage","text":"finished text"}}),
+        );
+        let id = completed[0].id.clone();
+        // A prior start is needed by the projection's existing final-put policy.
+        projection.apply(endpoint.notification(
+            "item/started",
+            &json!({"threadId":thread,
+            "item":{"id":"finished","type":"agentMessage","text":"initial"}}),
+        ));
+        projection.apply(completed);
+        assert_eq!(
+            projection.journal.entity("message", &id).unwrap().1["final"],
+            true
+        );
+        let refusal = endpoint.notification(
+            "item/agentMessage/delta",
+            &json!({"threadId":thread,
+            "itemId":"finished","delta":"x".repeat(ENTITY_BYTES+1)}),
+        );
+        projection.apply(refusal);
+        let value = &projection.journal.entity("message", &id).unwrap().1;
+        assert_eq!(value["content"][0]["text"], "finished text");
+        assert_eq!(value["final"], true);
+        assert_eq!(value["incomplete"], true);
+        let mut view = ItemView::new();
+        let mut cursor = projection.journal.open(None);
+        drain(&mut cursor, &mut projection, &mut view);
+        assert_eq!(view.entity("message", &id).unwrap().1["final"], true);
+        assert_eq!(view.entity("message", &id).unwrap().1["incomplete"], true);
+        // Do not freeze final items: a real native lifecycle report remains authoritative.
+        projection.apply(endpoint.notification(
+            "item/started",
+            &json!({"threadId":thread,
+            "item":{"id":"finished","type":"agentMessage","text":"native new activity"}}),
+        ));
+        let value = &projection.journal.entity("message", &id).unwrap().1;
+        assert_eq!(value["final"], false);
+        assert_eq!(value["content"][0]["text"], "native new activity");
+        drain(&mut cursor, &mut projection, &mut view);
+        assert_eq!(view.entity("message", &id).unwrap().1["final"], false);
+    }
+}
+
+#[test]
 fn over_bound_whole_plans_retain_old_list_but_mark_it_incomplete() {
     for thread in ["main", "child"] {
         for oversized in [
