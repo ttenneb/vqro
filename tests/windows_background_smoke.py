@@ -76,6 +76,24 @@ def wait_for(check, description, seconds=15):
     raise TimeoutError(description)
 
 
+def close_fixture_handles(handles, api, *, unobserved=()):
+    """Wait/close only: a PID report does not authorize terminating a later process with that PID."""
+    incomplete = [f"unobserved report {name}" for name in unobserved]
+    for pid, handle in handles.items():
+        try:
+            if api.WaitForSingleObject(handle, 5000) != api.WAIT_OBJECT_0:
+                incomplete.append(f"captured fixture {pid} did not confirm exit")
+        except OSError as error:
+            incomplete.append(f"captured fixture {pid}: {error}")
+        finally:
+            try:
+                api.CloseHandle(handle)
+            except OSError as error:
+                incomplete.append(f"close fixture {pid}: {error}")
+    if incomplete:
+        raise RuntimeError("fixture cleanup unconfirmed; no PID-based termination attempted: " + "; ".join(incomplete))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vqro", type=Path, required=True)
@@ -83,8 +101,6 @@ def main():
     if os.name != "nt":
         parser.error("requires native Windows CPython 3.11+")
     import _winapi
-    # PROCESS_TERMINATE from winnt.h/windows-sys; CPython doesn't export this constant.
-    process_terminate = 0x0001
     binary = args.vqro.resolve()
     provider = binary.with_name("vqro-herdr.exe")
     if not binary.is_file() or not provider.is_file():
@@ -118,8 +134,9 @@ def main():
         rows = {}
         client = None
         core = None
+        summary = None
 
-        def collect(validate=True):
+        def collect():
             for path in reports.glob("*.json"):
                 if path.name in rows:
                     continue
@@ -132,16 +149,10 @@ def main():
                 # Never open/terminate that helper by a potentially recycled, already-dead PID.
                 if row["mode"] == "helper":
                     continue
-                try:
-                    handle = _winapi.OpenProcess(_winapi.SYNCHRONIZE | process_terminate,
-                                                 False, row["pid"])
-                except OSError:
-                    if validate:
-                        raise  # A service must remain alive until restart/shutdown.
-                    continue  # Core shutdown may already have reaped this fixture.
+                # Observation only; never acquire termination access based on a reported PID.
+                handle = _winapi.OpenProcess(_winapi.SYNCHRONIZE, False, row["pid"])
                 handles[row["pid"]] = handle
-            if validate:
-                assert all(row["console"] == 0 for row in rows.values()), rows
+            assert all(row["console"] == 0 for row in rows.values()), rows
             return rows
 
         try:
@@ -176,8 +187,8 @@ def main():
             assert core.returncode == 0, core.returncode
             wait_for(lambda: all(_winapi.WaitForSingleObject(h, 0) == _winapi.WAIT_OBJECT_0
                                  for h in handles.values()), "fixture children survived shutdown")
-            print(json.dumps({"result": "pass", "fixture_reports": list(rows.values()),
-                              "restart": "pass", "stdio": "pass", "cleanup": "pass"}, indent=2))
+            summary = {"result": "pass", "fixture_reports": list(rows.values()),
+                       "restart": "pass", "stdio": "pass", "cleanup": "pass"}
         finally:
             if client:
                 if core and core.poll() is None:
@@ -192,15 +203,12 @@ def main():
                 except subprocess.TimeoutExpired:
                     core.kill()
                     core.wait(timeout=5)
-            # Handle-bound cleanup applies only to these fixture processes, never a PID scan/kill.
-            collect(validate=False)
-            for handle in handles.values():
-                try:
-                    if _winapi.WaitForSingleObject(handle, 0) == _winapi.WAIT_TIMEOUT:
-                        _winapi.TerminateProcess(handle, 1)
-                        _winapi.WaitForSingleObject(handle, 5000)
-                finally:
-                    _winapi.CloseHandle(handle)
+            # Never open late PID reports or terminate fixture handles. Only the Popen-owned core
+            # above can be killed; uncertain fixture cleanup is a visible failure, not a guessed effect.
+            unobserved = sorted(path.name for path in reports.glob("*.json") if path.name not in rows)
+            close_fixture_handles(handles, _winapi, unobserved=unobserved)
+        # Do not emit a passing result until failure-path cleanup also confirmed all observed exits.
+        print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":

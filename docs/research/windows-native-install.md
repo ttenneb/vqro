@@ -3,6 +3,9 @@
 Historical human-agent report through `76d3e4f0`, preserved with machine-specific paths redacted below. Its native
 results belong to that predecessor, not automatically to the later consolidated background-launch follow-ups.
 The consolidated candidate requires a new native run; this report is not a full-gate or installation certificate.
+Its native-smoke follow-up also hardens failure cleanup: captured fixture handles are wait/close only, no late PID
+reports authorize termination, and incomplete cleanup fails before a passing result is printed. Historical positive
+restart/stdio observations below are preserved, not recertified by that source-only follow-up.
 
 Date: 2026-11-23
 Base checkout: `9ddd1e2`; feature branch: `fix/windows-background-console-windows`

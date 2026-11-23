@@ -48,9 +48,13 @@ No workspace-terminal argv or backend spawn contract, restart budget, replay or 
   requiring zero GetConsoleWindow and working stdin/stdout/stderr. [API meaning](https://learn.microsoft.com/en-us/windows/console/getconsolewindow).
 - Linux fake setter tests exact Windows flag/no Unix setter; wiring controls cover eleven helper calls plus explicit
   exceptions. Compile-time Windows SDK constant assertion guards the numeric value.
-- Preserve `tests/windows_background_smoke.py`: two private declarations, detached core, extension/helper/native
-  connector, restart, log draining and handle-bound cleanup; no real backend/agent/terminal. Run it natively after
-  building the consolidated candidate, not as a Linux/Wine desktop certificate.
+- Preserve the authored `tests/windows_background_smoke.py` foundation: two private declarations, detached core,
+  extension/helper/native connector, restart and log draining; no real backend/agent/terminal. A Lead-approved safety
+  follow-up changes failure cleanup only: no late PID report lookup or fixture termination access; captured handles
+  are wait/close only, and only the Popen-owned core may be killed. Unobserved reports/timeouts fail visibly, and a
+  passing result is emitted only after cleanup succeeds. Four powerless Windows-API/source controls cover this;
+  reintroducing fixture TerminateProcess fails them. Positive restart/stdio assertions stay intact. Run it natively
+  after building the consolidated candidate, not as a Linux/Wine desktop certificate.
 
 The final candidate and extra runtime boundaries still need native Windows reruns and actual desktop/descendant
 inspection. Human predecessor results are valuable evidence, not a passing full Windows gate or an install approval.
