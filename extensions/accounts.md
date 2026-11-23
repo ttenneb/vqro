@@ -112,8 +112,12 @@ fallback. Normal new-agent selection and notifications still work. After durable
 selected target/registry and current policy are re-read; automatic work also requires fresh known positive headroom
 and an unambiguous inert executable AGAIN. Manual labelled-unknown offers remain explicit choices, but revalidate
 target, API policy and registry too. The same account only: stale/unknown/disallowed automatic admission consumes
-the claim with NO launch, no reselection/retry/undo, even if later data recovers. Final reads are not an atomic native
-quota reservation; changes after validation remain possible. Native launch/readback errors are reported without
+the claim with NO launch, no reselection/retry/undo, even if later data recovers. The report snapshot (including its
+observed-age/reset deadlines) is retained and checked against the LOCAL clock after the LAST blocking validation
+read, immediately before invoke; expiry during runtime/policy reads also consumes without launch. This is a local
+calculation, not a reread loop. Final checks are not an atomic native quota reservation; changes or native/SDK
+dispatch latency after validation remain possible. Overflow reporting and its logging are best-effort: notification
+failure never kills the worker or retries a native effect, and queued/later work continues draining. Native launch/readback errors are reported without
 copying raw native error bodies into workspace state.
 
 Disabling the accounts extension removes its UI and stops its background blocked-agent handling; existing

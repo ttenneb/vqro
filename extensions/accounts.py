@@ -162,7 +162,7 @@ class Accounts:
         blocked_ids={policy.configured_id(row) for row in observed if policy.blocked(row)}
         candidates=[row for row in rows if row['id']!=policy.configured_id(source) and row['id'] not in blocked_ids
                     and (row['kind']!='api_key' or configured['api_key_overflow'])]
-        return candidates,revision,policy.capacities(observed,candidates)
+        return candidates,revision,policy.capacities(observed,candidates),observed
 
     def notify_once(self,source,mode,text):
         key=(source['id'],policy.episode(source),mode)
@@ -173,7 +173,7 @@ class Accounts:
 
     def offer(self,args):
         source=self.source(args.get('resource'))
-        candidates,revision,scores=self.alternatives(source,policy.settings(self.ext))
+        candidates,revision,scores,_=self.alternatives(source,policy.settings(self.ext))
         token=policy.episode(source)
         items=[{'type':'text','text':'ONE new empty agent. The blocked conversation stays where it is; no prompt, history, queue, model choice or session ID is copied.'}]
         for target in candidates:
@@ -189,7 +189,7 @@ class Accounts:
     def restart(self,args):
         source=self.source(args.get('resource'))
         if args.get('episode')!=policy.episode(source): raise VqroError('blocked agent changed; reopen fresh-work options','stale')
-        candidates,revision,_=self.alternatives(source,policy.settings(self.ext))
+        candidates,revision,_,_=self.alternatives(source,policy.settings(self.ext))
         if type(args.get('_account_revision')) is not int or args['_account_revision']!=revision:
             raise VqroError('account registry changed; reopen fresh-work options','stale')
         target=next((row for row in candidates if row['id']==args.get('account')),None)
@@ -219,7 +219,7 @@ class Accounts:
         # Recheck the native source. A failed/stale check consumes this claim; never retry it automatically.
         current=self.source(source['id'])
         if policy.episode(current)!=token: raise VqroError('source changed after fresh-launch claim; no launch','stale')
-        candidates,current_revision,scores=self.alternatives(current,policy.settings(self.ext))
+        candidates,current_revision,scores,observations=self.alternatives(current,policy.settings(self.ext))
         selected=next((row for row in candidates if row['id']==target['id']),None)
         if current_revision!=revision or selected!=target:
             raise VqroError('target/registry changed after fresh-launch claim; claim consumed, no launch','stale')
@@ -232,6 +232,12 @@ class Accounts:
         # This is not an atomic native quota reservation; later native changes remain possible.
         if not permitted(policy.settings(self.ext)):
             raise VqroError('fresh-work policy changed after claim; claim consumed, no launch','stale')
+        if automatic:
+            # Frozen reports retain their age/reset deadlines. Recheck with the LOCAL clock
+            # after the last blocking read; no RPC/reread loop and no native quota reservation.
+            headroom=policy.capacities(observations,[target]).get(target['id'])
+            if headroom is None or headroom<=0:
+                raise VqroError('target report expired during final validation; claim consumed, no launch','stale')
         try:
             result=self.ext.invoke(COMMANDS[target['runtime']],{'account':target['id'],'_account_revision':revision,'fresh':True})
         except VqroError:
@@ -252,7 +258,7 @@ class Accounts:
             if mode=='offer_restart':
                 self.offer({'resource':rid})
                 return self.notify_once(source,mode,message+' Open Accounts for explicit fresh-work options.')
-            candidates,revision,scores=self.alternatives(source,configured)
+            candidates,revision,scores,_=self.alternatives(source,configured)
             candidates=[row for row in candidates if scores.get(row['id']) is not None and scores[row['id']]>0]
             if not policy.configured_id(source) or not candidates:
                 return self.notify_once(source,mode,message+' No known positive reported alternative; no automatic launch.')
@@ -315,12 +321,18 @@ class Accounts:
             self.pending.update(fresh[:room])
         self.wake.set()
 
+    @staticmethod
+    def worker_error(text):
+        try: print(text,file=sys.stderr,flush=True)
+        except Exception: pass  # reporting must not terminate the sole daemon
+
     def worker(self):
         while True:
             self.wake.wait();self.wake.clear()
             if self.overloaded and not self.warned_overflow:
                 self.warned_overflow=True
-                self.ext.notify('Account limit-policy queue is full; inspect Agent status. Excess work was not automatically launched.','warn')
+                try: self.ext.notify('Account limit-policy queue is full; inspect Agent status. Excess work was not automatically launched.','warn')
+                except Exception: self.worker_error('accounts: overflow notification failed; worker continues without retry')
             while True:
                 with self.pending_lock:
                     if not self.pending: break
@@ -328,7 +340,7 @@ class Accounts:
                 try: self.handle_blocked(rid)
                 except Exception:
                     # Keep the worker alive, but never retry an unexpected failure's popped action.
-                    print('accounts: fresh-work handling failed; no automatic retry',file=sys.stderr,flush=True)
+                    self.worker_error('accounts: fresh-work handling failed; no automatic retry')
 
 
 def main():
