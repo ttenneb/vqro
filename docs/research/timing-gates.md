@@ -85,7 +85,8 @@ lock descriptors. Pool sizes must agree across callers.
 ## Strict proof before installation
 
 Prebuild from the revision being graded, outside the timing-only run. The stdlib
-helper reads Cargo's successful JSON stream and selects this manifest's `scale`
+helper requires one terminal successful build-finished record with no later records,
+then selects this manifest's `scale`
 test target (including its package/target source), not an inventory of old hashed
 executables. Its stdout is the path callers pass; no prebuild attestation file is
 required. Optional `--record` is diagnostic/provenance output only.
@@ -99,7 +100,7 @@ VQRO_SCALE_TEST_EXE=$(
 ) || exit 1
 export VQRO_SCALE_TEST_EXE
 "$GATE_SLOT" env -i HOME="$HOME" PATH="$PATH" CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-  cargo build --release --bin vqro
+  cargo build --release --bin vqro || exit 1
 "$GATE_SLOT" --exclusive --wait-seconds 1800 env -i HOME="$HOME" PATH="$PATH" \
   CARGO_TARGET_DIR="$CARGO_TARGET_DIR" VQRO_SCALE_TEST_EXE="$VQRO_SCALE_TEST_EXE" scripts/check.sh timing
 ```

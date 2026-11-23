@@ -58,6 +58,15 @@ class ScaleArtifactTests(unittest.TestCase):
             with self.subTest(rows=rows), self.assertRaises(ValueError):
                 selector.select_artifact(rows, self.manifest, self.target)
 
+    def test_requires_one_terminal_success_with_no_following_records(self):
+        ordinary = dict(reason='unknown-ordinary-message')
+        path, _ = selector.select_artifact([ordinary, self.message(), ordinary, self.finished], self.manifest, self.target)
+        self.assertEqual(path, self.current)
+        for rows in ([self.finished, self.message()], [self.message(), self.finished, self.finished],
+                     [self.message(), self.finished, ordinary], [self.message(), self.finished, self.message()]):
+            with self.subTest(rows=rows), self.assertRaises(ValueError):
+                selector.select_artifact(rows, self.manifest, self.target)
+
     def test_missing_nonexec_outside_and_symlink_escape_paths_are_rejected(self):
         nonexec = self.target/'release/deps/no-exec'
         nonexec.write_text('not executable')
@@ -87,6 +96,42 @@ class ScaleArtifactTests(unittest.TestCase):
         lifetime = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(lifetime)
         self.assertIn('VQRO_SCALE_TEST_EXE', lifetime.FORWARDED)
+
+
+class PrebuildRecipeTests(unittest.TestCase):
+    def test_failed_prebuild_never_reaches_exclusive_timing_even_with_old_files(self):
+        doc = (ROOT/'docs/research/timing-gates.md').read_text()
+        recipe = doc.split('## Strict proof before installation', 1)[1].split('```sh\n', 1)[1].split('\n```', 1)[0]
+        with tempfile.TemporaryDirectory(prefix='prebuild-recipe-') as temp:
+            root = Path(temp)
+            target = root/'target'
+            (target/'release/deps').mkdir(parents=True)
+            for name in ('release/vqro', 'release/deps/scale-selected'):
+                old = target/name
+                old.write_text('#!/bin/sh\nexit 0\n')  # Old executable retained after a failed build.
+                old.chmod(0o700)
+            marker, wrapper = root/'exclusive-ran', root/'fake-slot'
+            wrapper.write_text('''#!/usr/bin/python3
+import os,pathlib,sys
+if '--exclusive' in sys.argv[1:]:
+    pathlib.Path(os.environ['EXCLUSIVE_MARKER']).write_text('must not run')
+    raise SystemExit(0)
+release_build = 'cargo' in sys.argv and 'build' in sys.argv
+if release_build:
+    raise SystemExit(9 if os.environ['FAIL_PREBUILD']=='vqro' else 0)
+if os.environ['FAIL_PREBUILD']=='scale':
+    raise SystemExit(8)
+print(pathlib.Path(os.environ['CARGO_TARGET_DIR'])/'release/deps/scale-selected')
+''')
+            wrapper.chmod(0o700)
+            for failed in ('scale', 'vqro'):
+                with self.subTest(failed=failed):
+                    marker.unlink(missing_ok=True)
+                    env = dict(HOME=str(root), PATH='/usr/bin:/bin', GATE_SLOT=str(wrapper),
+                               CARGO_TARGET_DIR=str(target), EXCLUSIVE_MARKER=str(marker), FAIL_PREBUILD=failed)
+                    result = subprocess.run(['/bin/bash', '-c', recipe], env=env, capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertFalse(marker.exists(), 'known failed prebuild must not enter exclusive timing')
 
 
 if __name__ == '__main__':

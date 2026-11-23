@@ -42,6 +42,8 @@ def select_artifact(messages, manifest, target):
     for row in messages:
         if not isinstance(row, dict):
             raise ValueError("invalid Cargo JSON message")
+        if finished:
+            raise ValueError("Cargo prebuild has records after terminal build-finished")
         if row.get("reason") == "build-finished":
             if row.get("success") is not True:
                 raise ValueError("scale prebuild failed")
