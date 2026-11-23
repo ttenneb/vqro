@@ -46,6 +46,10 @@ def status(value, allowed):
     return native if isinstance(native, str) and native in allowed else 'unknown'
 
 
+def partial(value):
+    return ' · incomplete' if value.get('incomplete') is True else ''
+
+
 def style(state):
     return {'completed': 'ok', 'failed': 'error', 'waiting': 'warn', 'running': 'accent',
             'in_progress': 'accent'}.get(state, 'dim')
@@ -94,7 +98,7 @@ def work_rows(entities, resource, scope=None):
         value = children[eid]
         state = status(value, allowed_child)
         text = ' · '.join(filter(None, (shown(value.get('name')) or shown(eid), shown(value.get('role')), state)))
-        row = {'id': 'work:child:' + eid, 'text': text, 'style': style(state), 'expanded': False}
+        row = {'id': 'work:child:' + eid, 'text': text + partial(value), 'style': style(state), 'expanded': False}
         mode = value.get('items')
         if mode == 'scoped' or mode == 'endpoint' and isinstance(value.get('endpoint'), str):
             navigation(row, eid)
@@ -159,7 +163,7 @@ def work_rows(entities, resource, scope=None):
         task_seen.add(eid)
         value = selected_tasks[eid]
         state = status(value, ('running', 'completed', 'failed', 'stopped', 'unknown'))
-        row = {'id': 'work:task:' + eid, 'text': (shown(value.get('title')) or shown(eid)) + ' · ' + state,
+        row = {'id': 'work:task:' + eid, 'text': (shown(value.get('title')) or shown(eid)) + ' · ' + state + partial(value),
                'style': style(state), 'description': 'Owner: ' + owner(value), 'expanded': False}
         details = usage(value)
         if isinstance(value.get('child'), str):
@@ -216,7 +220,7 @@ def work_rows(entities, resource, scope=None):
             reported.append('Used seconds: ' + str(seconds))
         if reported:
             body.append({'type': 'text', 'style': 'dim', 'text': shown(' · '.join(reported), 1024)})
-        sections.append({'id': 'work:goal:' + eid, 'text': 'Goal · ' + state,
+        sections.append({'id': 'work:goal:' + eid, 'text': 'Goal · ' + state + partial(value),
                          'style': 'heading', 'expanded': True, 'description': 'Owner: ' + owner(value),
                          'children': body})
     if len(goals) > MAX_ITEMS:
@@ -227,6 +231,8 @@ def work_rows(entities, resource, scope=None):
         if not isinstance(items, list) or scope is not None and value.get('owner') != scope:
             continue
         body = []
+        if partial(value):
+            body.append({'type': 'text', 'style': 'warn', 'text': 'Native plan incomplete; omitted details are unknown.'})
         if shown(value.get('explanation'), 512):
             body.append({'type': 'text', 'text': shown(value['explanation'], 512), 'style': 'dim'})
         for index, item in enumerate(items[:MAX_ITEMS]):
@@ -253,9 +259,9 @@ def work_rows(entities, resource, scope=None):
         if len(items) > MAX_ITEMS:
             body.append({'type': 'text', 'text': 'More list items not shown here (pane limit)', 'style': 'dim'})
         if not items:
-            body.append({'type': 'text', 'text': 'Empty list (reported)', 'style': 'dim'})
+            body.append({'type': 'text', 'text': 'No list items in this partial report' if partial(value) else 'Empty list (reported)', 'style': 'dim'})
         source = value.get('source')
-        title = 'Plan / todo list' + (' · ' + source if source in ('native', 'tool') else '')
+        title = 'Plan / todo list' + (' · ' + source if source in ('native', 'tool') else '') + partial(value)
         sections.append({'id': 'work:plan:' + eid, 'text': title, 'style': 'heading', 'expanded': True,
                          'description': 'Owner: ' + owner(value),
                          'children': transcript.bounded_children(body, WORK_BYTES // 2, 'list items')})

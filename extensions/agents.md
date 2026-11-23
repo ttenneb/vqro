@@ -25,7 +25,9 @@
   remain visible rather than being invented. Status, roles, usage, task owners/progress and list items come from the
   item stream. A Goal is a separate runtime objective, showing only reported budget/usage; it is never converted
   into plan steps or an invented percentage. Unknown states remain unknown, absent sections stay absent, and clipping is explicit. This is derived
-  observation, not a second task store, coordination inbox or an editable todo list.
+  observation, not a second task store, coordination inbox or an editable todo list. Every plan entity is rendered
+  as its whole installed current list; `update: items` describes the runtime's granularity, not a client-side merge.
+  Native `incomplete` reports are labelled; an incomplete list with no items is not presented as an empty plan.
   **Open view** follows a child endpoint through ordinary agent navigation (its own capabilities apply), or opens
   an explicitly scoped child in a read-only popup using the parent's stream. Tagged child messages/tools are not
   flattened into the main conversation. Scoped tools stay inline; parent-only tool tables and a message composer

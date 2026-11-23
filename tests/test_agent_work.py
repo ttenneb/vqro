@@ -100,6 +100,21 @@ class WorkRows(unittest.TestCase):
         self.assertNotIn('Keep the service healthy', child)
         self.assertNotIn(('goal', 'main'), agent_work.transcript_entities(values))
 
+    def test_plan_revisions_are_whole_values_and_incomplete_never_means_empty(self):
+        values = entities({('plan', 'current'): {'source': 'native', 'update': 'items',
+                                               'items': [{'id': 'old', 'text': 'OLD ITEM', 'status': 'pending'}]}})
+        self.assertIn('OLD ITEM', json.dumps(agent_work.work_rows(values, 'r2')))
+        values[('plan', 'current')] = (2, {'source': 'native', 'update': 'items', 'incomplete': True,
+                                          'items': [{'id': 'new', 'text': 'NEW ITEM', 'status': 'completed'}]})
+        shown = json.dumps(agent_work.work_rows(values, 'r2'))
+        self.assertNotIn('OLD ITEM', shown)
+        self.assertIn('NEW ITEM', shown)
+        self.assertIn('incomplete', shown)
+        values[('plan', 'current')][1]['items'] = []
+        shown = json.dumps(agent_work.work_rows(values, 'r2'))
+        self.assertNotIn('Empty list (reported)', shown)
+        self.assertIn('partial', shown)
+
     def test_long_lists_are_bounded_and_explicitly_clipped(self):
         values = entities({('plan', 'big'): {'items': [{'text': 'x' * 4000, 'status': 'pending'} for _ in range(500)]}})
         shown = json.dumps(agent_work.work_rows(values, 'r2'))

@@ -1158,7 +1158,7 @@ class Agents:
         name = agent_work.shown(value.get("name")) or "Child " + label(child)
         rows = [{"type": "text", "style": "dim", "text": "Read-only child view; Esc returns. Requests use the parent agent's existing controls."}]
         if value:
-            state = agent_work.shown(value.get("status")) or "not reported"
+            state = (agent_work.shown(value.get("status")) or "not reported") + agent_work.partial(value)
             rows.append({"type": "text", "style": "dim", "text": "Reported child status: " + state})
             if isinstance(value.get("usage"), dict) and value["usage"]:
                 usage = agent_transcript.facts_footer({"usage": value["usage"]}, "Reported child usage")
