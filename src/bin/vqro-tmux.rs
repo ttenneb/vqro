@@ -487,7 +487,7 @@ impl App {
                 eprintln!("vqro-tmux: recording {option} on {pane}: {error}");
             }
         }
-        self.state.lock().unwrap().argv.insert(pane.clone(), argv);
+        self.state.lock().unwrap().argv.insert(pane.clone(), argv.clone());
         // Publish it now, so the core can map the reply's facts.
         if let Err(e) = self.reconcile(false).await {
             eprintln!("vqro-tmux: reconcile after spawn: {e}");
@@ -497,7 +497,7 @@ impl App {
             Some(f) => Ok(Outcome::Observed(Some(json!({"facts": f})))),
             // Spawned, but already gone (a program that exits at once).
             None => Ok(Outcome::Observed(Some(json!({"facts": {"ref": pane, "incarnation": "", "kind": "terminal", "state": "finished",
-                "exit": {"reason": "exited"}}})))),
+                "argv": argv, "exit": {"reason": "exited"}}})))),
         }
     }
 

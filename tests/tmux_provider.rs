@@ -132,15 +132,19 @@ async fn start(tmux: &Tmux) -> (Core, Provider) {
 }
 
 async fn start_with(tmux: &Tmux, extra: &[&str]) -> (Core, Provider) {
-    let endpoint = tmux.root.path().join("core.sock");
+    start_at(tmux.root.path(), &tmux.socket, Path::new("/usr/bin/tmux"), extra).await
+}
+
+async fn start_at(root: &Path, socket: &Path, binary: &Path, extra: &[&str]) -> (Core, Provider) {
+    let endpoint = root.join("core.sock");
     let listener = UnixListener::bind(&endpoint).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_vqro-tmux"))
-        .args(["--tmux", "/usr/bin/tmux", "--tmux-socket"])
-        .arg(&tmux.socket)
+        .arg("--tmux").arg(binary).arg("--tmux-socket")
+        .arg(socket)
         .args(["--name", "tmux@test"])
         .args(extra)
         .env_clear()
-        .env("HOME", tmux.root.path())
+        .env("HOME", root)
         .env("PATH", "/usr/bin:/bin")
         .env("TERM", "xterm-256color")
         .env("VQRO_SOCKET", &endpoint)
@@ -162,6 +166,36 @@ fn data_of(m: &Value) -> Vec<u8> {
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
+}
+
+#[tokio::test]
+async fn already_gone_spawn_keeps_explicit_and_resolved_default_argv() {
+    let root = tempfile::Builder::new().prefix("ptpgone").tempdir_in("/tmp").unwrap();
+    let socket = root.path().join("s");
+    std::fs::write(root.path().join("s.conf"), r#"{"spawn_gone":true}"#).unwrap();
+    let fake = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_tmux_cc.py");
+    let (mut core, _provider) = start_at(root.path(), &socket, &fake, &[]).await;
+    let registration = core.read().await;
+    assert_eq!(registration["method"], "provider.register");
+    core.reply(&registration, json!({"provider":"tmux@test","generation":1})).await;
+    let sync = core.read().await;
+    assert_eq!(sync["method"], "provider.sync");
+    core.reply(&sync, json!({})).await;
+    for (id, argv, expected) in [(1, json!(["/bin/sh","-c","exit 0"]), json!(["/bin/sh","-c","exit 0"])),
+                               (2, json!([]), json!(["/fixture/default-shell"]))] {
+        core.send(json!({"jsonrpc":"2.0","id":id,"method":"effect.invoke","params":{
+            "generation":1,"effect":format!("gone-{id}"),"op":"terminal.spawn","args":{"argv":argv},"deadline_ms":10000}})).await;
+        let reply = core.until(|m| m["id"] == id).await;
+        assert_eq!(reply["result"]["outcome"], "observed", "{reply}");
+        let facts = &reply["result"]["data"]["facts"];
+        assert_eq!(facts["state"], "finished");
+        assert_eq!(facts["exit"], json!({"reason":"exited"}));
+        assert_eq!(facts["argv"], expected);
+        assert_eq!(vqro::provider_wire::parse_facts(facts.clone()).unwrap().argv.unwrap(),
+                   expected.as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_string()).collect::<Vec<_>>());
+    }
+    let log = std::fs::read_to_string(root.path().join("s.log")).unwrap();
+    assert_eq!(log.lines().filter(|line| line.starts_with("'new-window'")).count(), 2, "no spawn replay");
 }
 
 #[tokio::test]
