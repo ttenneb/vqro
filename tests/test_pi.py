@@ -10,7 +10,6 @@ from unittest.mock import patch
 EXT = Path(os.environ.get("VQRO_TEST_EXTENSIONS_DIR", Path(__file__).resolve().parents[1] / "extensions"))
 sys.path.insert(0, str(EXT))
 from pi import Pi, DEFAULTS, EXTENSIONS, LEGACY, SETTINGS, default_bridge, runtimes
-from pi_testing import testing_args
 from vqro_ext import VqroError
 from agent_fixture import FakeCore
 
@@ -40,30 +39,31 @@ class PiTests(unittest.TestCase):
         spawn = self.native()[0][1]
         self.assertTrue(spawn["bridge"])
         self.assertEqual(spawn["argv"][:3], default_bridge())
-        self.assertEqual(spawn["argv"][3:], ["--", "/node", "literal $(not-a-shell)", "--mode", "rpc", *testing_args(EXTENSIONS)])
+        self.assertEqual(spawn["argv"][3:], ["--", "/node", "literal $(not-a-shell)", "--mode", "rpc"])
         self.assertRegex(spawn["env"]["VQRO_PRINCIPAL"], r"^p:[0-9a-f]{32}$")
         self.assertEqual(set(spawn["env"]), {"VQRO_PRINCIPAL"})
         self.assertEqual(spawn["cwd"], "/private/project")
         self.assertEqual(self.core.calls[-1], ("agents.show", {"resource": "r2"}))
         self.assertEqual(len(self.native()), 1)
 
-    def test_testing_plugin_gets_the_actual_core_selection_without_changing_bridge_endpoint_env(self):
+    def test_rpc_testing_is_explicitly_unsupported_without_extension_or_environment_injection(self):
         self.core.info = {"socket": "/private/core.sock", "state_dir": "/private/state", "extension_token": "never-forward"}
         self.command("new")
         env = self.native()[0][1]["env"]
-        self.assertEqual(env["VQRO_TESTING_SOCKET"], "/private/core.sock")
-        self.assertEqual(env["VQRO_TESTING_STATE_DIR"], "/private/state")
-        self.assertEqual(env["VQRO_TESTING_EXTENSIONS_DIR"], str(Path(EXTENSIONS).resolve()))
+        self.assertFalse(any(key.startswith("VQRO_TESTING_") for key in env))
+        self.assertNotIn("-e", self.native()[0][1]["argv"])
+        self.assertNotIn("--skill", self.native()[0][1]["argv"])
+        self.assertTrue(any("testing plugin unsupported for RPC Pi" in text for text, _ in self.core.notices))
         self.assertNotIn("VQRO_SOCKET", env)
         self.assertNotIn("VQRO_EXTENSION_TOKEN", env)
 
-    def test_missing_testing_asset_does_not_stop_pi_launch_and_warns_once(self):
+    def test_rpc_missing_testing_asset_does_not_stop_pi_launch_and_warns_once(self):
         with tempfile.TemporaryDirectory(prefix="missing-pi-testing-") as directory, patch("pi.EXTENSIONS", directory):
             self.command("new")
             self.command("new")
         self.assertEqual(len(self.native()), 2)
         self.assertTrue(all("-e" not in params["argv"] and "--skill" not in params["argv"] for _, params in self.native()))
-        notices = [text for text, style in self.core.notices if "testing plugin unavailable" in text]
+        notices = [text for text, style in self.core.notices if "testing plugin unsupported for RPC Pi" in text]
         self.assertEqual(len(notices), 1)
         self.assertIn("NOT VERIFIED", notices[0])
 
@@ -141,7 +141,7 @@ class PiTests(unittest.TestCase):
             "bridge_argv": ["/Host Tools/python", "-m", "pi_bridge"], "bridge_env": {"PYTHONPATH": "/Host Modules"}}]}}], "host")
         self.command("new")
         spawn = self.native()[0][1]
-        self.assertEqual(spawn["argv"], ["/Host Tools/python", "-m", "pi_bridge", "--", "pi-host", "--mode", "rpc", *testing_args(EXTENSIONS)])
+        self.assertEqual(spawn["argv"], ["/Host Tools/python", "-m", "pi_bridge", "--", "pi-host", "--mode", "rpc"])
         self.assertEqual(spawn["env"]["PYTHONPATH"], "/Host Modules")
         self.assertRegex(spawn["env"]["VQRO_PRINCIPAL"], r"^p:[0-9a-f]{32}$")
 
@@ -173,7 +173,7 @@ class PiTests(unittest.TestCase):
         self.assertEqual(result["client"]["popup"]["view"], "pi-runtimes")
         self.assertEqual(self.native(), [])
         self.command("new", runtime="two")
-        self.assertEqual(self.native()[0][1]["argv"][-len(testing_args(EXTENSIONS))-1], "/two")
+        self.assertEqual(self.native()[0][1]["argv"][-1], "/two")
 
     def test_late_agent_retains_observed_terminal_and_never_repeats_spawn(self):
         self.core.make_agent = False

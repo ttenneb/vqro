@@ -89,7 +89,10 @@ entry, treated as false when absent. Only arm it deliberately after a clean setu
 change: record fresh Unit evidence and attach Integration or explain its omission afterwards. This extension does
 not prevent prose such as “done”, add a Pi runtime veto, or enforce policy for every runtime. Participating
 plugins and explicit finish tools may use its deterministic assessment; this is cooperative workflow policy,
-not a security boundary.
+not a security boundary. The Pi plugin in this slice is supported only for terminal (tier1) Pi launches.
+Missing plugin/skill assets do not stop Pi launching: they produce one unavailable notice/log and no testing flags.
+RPC Pi launches remain unchanged at the bridge boundary and report testing-plugin support as unavailable;
+no extension injection or environment-filter exception is added to those bridges.
 
 `test.setup.status {}` returns the current `setup_id`, observed `generation`, `require_unit`, Unit/Integration/
 Performance evidence and `finish_ok`. Unit is required only when armed: a current recorded Unit pass or an
@@ -106,6 +109,8 @@ python3 extensions/testing_unit.py --record --json --socket SOCKET --state-dir S
 ```
 
 `--record` owns the receipt filename under `<state>/test-unit/`, writes atomically at 0600 and retains 20 runs.
+It cannot be combined with `--no-tests`: deliberately disabled installed tests cannot grant completion.
+Recorded in-app checks with `tests:false` remain unverified; adoption requires `tests_enabled:true`.
 JSON includes its path. `--out` is mutually exclusive, ad hoc and **never adopted** as Unit completion evidence.
 Status reads adopt only complete, supported, recorded receipts for this setup, generation and selected instance;
 wrong suites/instances, old generations, incomplete JSON and unfinished runs never count as a pass. Integration

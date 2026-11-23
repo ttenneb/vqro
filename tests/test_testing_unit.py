@@ -493,9 +493,10 @@ class HealthChecks(unittest.TestCase):
             with patch.object(unit, "collect", wraps=unit.collect) as collect:
                 first = handlers["test.unit"]({"tests": False})
                 self.assertEqual(collect.call_args.kwargs["tests_budget"], 20)
-            self.assertEqual(first["verdict"], "pass")
+            self.assertEqual(first["verdict"], "unverified", "recorded caller-disabled tests cannot grant completion")
             self.assertTrue(Path(first["receipt"]).is_file())
             saved = json.loads(Path(first["receipt"]).read_text())
+            self.assertFalse(saved["tests_enabled"])
             self.assertIn("sample: tests disabled by caller", saved["not_covered"])
             calls = self.client.call.call_count
             handlers["test.unit.show"]({})

@@ -170,7 +170,7 @@ export function installTesting(pi: any, deps: Dependencies) {
       await check(ctx, "finish");
       const details = { finish_ok: current?.finish_ok === true, status: current || null, error: failure || null,
         summary: summary(current, failure) };
-      // Pi requires execute to THROW to mark tool failure; returning isError would be ignored.
+      // Throw for an unambiguous failed tool result; do not rely on version-specific return flags.
       if (!details.finish_ok) throw new Error(JSON.stringify(details));
       return { content: [{ type: "text", text: JSON.stringify(details) }], details };
     },

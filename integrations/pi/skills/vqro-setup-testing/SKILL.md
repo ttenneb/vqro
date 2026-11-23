@@ -6,10 +6,12 @@ description: Finish a vqro setup change with current Unit evidence and an Integr
 # Finish a vqro setup change
 
 Changes to installed extensions, settings, bindings, themes, launchers or tests need evidence.
-The Pi testing plugin runs Unit deterministically after observed setup changes; no AI call is needed.
+The terminal (tier1) Pi testing plugin runs Unit deterministically after observed setup changes; no AI call is needed.
+RPC Pi bridges do not support this plugin; their launch notice must not be described as testing-hook coverage.
 
 1. Use `vqro_setup_finish` before claiming a setup change finished. Attach its Unit receipt reference and verdict.
 2. If Unit failed, fix it or ask the human to accept the specific current failure. Never self-approve an exception.
+   Recorded completion evidence must enable installed tests; `--record --no-tests` is refused.
 3. Attach a completed Integration receipt, or explicitly record why skipped with
    `vqro run test.setup.skip '{"suite":"integration","reason":"<specific reason>"}'` on the selected setup.
    Pending, failed, skipped, unverified and can't-tell results must be prominent, not hidden in a green summary.

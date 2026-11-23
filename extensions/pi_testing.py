@@ -23,9 +23,14 @@ def testing_args(extensions_dir, ext=None):
         if plugin.is_file() and skill.is_file():
             return ["-e", str(plugin), "--skill", str(skill)]
     # Testing is cooperative: missing optional assets must not stop native Pi work.
+    testing_notice(ext, "testing plugin unavailable: Pi setup-testing plugin/skill is missing; launching without testing hooks (NOT VERIFIED)")
+    return []
+
+
+def testing_notice(ext, message):
+    """A per-extension-lifetime notice, never a native launch veto."""
     if ext is not None and not getattr(ext, "_testing_unavailable_notified", False):
         ext._testing_unavailable_notified = True
-        message = "testing plugin unavailable: Pi setup-testing plugin/skill is missing; launching without testing hooks (NOT VERIFIED)"
         try:
             ext.notify(message, "warn")
         except Exception:
@@ -37,4 +42,3 @@ def testing_args(extensions_dir, ext=None):
                 print(message, file=sys.stderr, flush=True)
             except OSError:
                 pass
-    return []

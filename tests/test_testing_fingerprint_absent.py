@@ -36,6 +36,30 @@ class DisabledFingerprintTests(unittest.TestCase):
                     self.assertEqual(first["executables"]["optional"]["resolution"], "absent")
                     self.assertIsNone(self.fingerprint({**declaration, "enabled": True})["setup_id"])
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission fixture; Windows ACL behavior needs native validation")
+    def test_inaccessible_path_directory_is_unknown_not_proved_bare_name_absence(self):
+        directory = self.base / "hidden-path"
+        directory.mkdir()
+        image = directory / "hidden-program"
+        image.write_text("#!/bin/sh\nexit 0\n")
+        image.chmod(0o700)
+        directory.chmod(0)
+        try:
+            try:
+                image.stat()
+            except PermissionError:
+                pass
+            else:
+                self.skipTest("current identity bypasses the private permission fixture")
+            with patch.dict(os.environ, {"PATH": str(directory)}):
+                self.assertIsNone(testing.shutil.which("hidden-program", mode=os.F_OK), "old fallback hides the inaccessible candidate")
+                result = self.fingerprint({"argv": ["hidden-program"], "enabled": False})
+            self.assertIsNone(result["setup_id"])
+            self.assertEqual(result["executables"]["optional"]["resolution"], "unknown")
+            self.assertTrue(result["unknown"])
+        finally:
+            directory.chmod(0o700)
+
     def test_disabled_missing_python_script_is_known_until_enabled(self):
         declaration = {"argv": [sys.executable, "-B", str(self.root / "missing.py")], "enabled": False}
         absent = self.fingerprint(declaration)

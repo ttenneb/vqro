@@ -144,8 +144,21 @@ def _literal_program(program, cwd, path, *, executable_only=True):
             except FileNotFoundError:
                 return None
             except OSError:
-                return candidate  # Inaccessible metadata must not be reported as known absence.
+                return candidate  # A known path with inaccessible metadata must not become "absent".
         return candidate if candidate.is_file() and (sys.platform == "win32" or not executable_only or os.access(candidate, os.X_OK)) else None
+    if not executable_only:
+        # which() swallows inaccessible search entries as missing. Preserve that
+        # candidate so fingerprinting reports unknown, not a proved absence.
+        for directory in os.get_exec_path({"PATH": path}):
+            candidate = Path(directory or os.curdir) / program
+            if not candidate.is_absolute():
+                candidate = Path(cwd) / candidate
+            try:
+                candidate.stat()
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError:
+                return candidate
     found = shutil.which(program, path=path, mode=os.X_OK if executable_only else os.F_OK)
     return Path(found).resolve() if found else None
 

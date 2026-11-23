@@ -71,10 +71,38 @@ class SetupTests(unittest.TestCase):
             rows.append(shared.row("check", "sample", "fail", "intentional failed check"))
         receipt = {"kind": "vqro.test-receipt", "version": 1, "suite": suite, "verdict": verdict,
                    "started_at": shared.utc_now(), "rows": rows, "counts": {s: sum(r["status"] == s for r in rows) for s in shared.STATUSES},
-                   "recorded": suite == "unit"}
+                   "recorded": suite == "unit", "tests_enabled": True}
         setup.stamp_receipt(receipt, context, context)
         shared.write_receipt(receipt, path)
         return path, receipt
+
+    def test_record_cli_refuses_no_tests_before_connecting_or_writing(self):
+        before = set(self.state.iterdir())
+        with patch("vqro_testing.PlainClient", side_effect=AssertionError("must not connect")), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                unit.main(["--record", "--no-tests", "--state-dir", str(self.state), "--extensions-dir", str(self.ext)])
+        self.assertEqual(error.exception.code, 2)
+        self.assertEqual(set(self.state.iterdir()), before)
+
+    def test_caller_disabled_tests_cannot_grant_finish_even_with_matching_pass_receipt(self):
+        self.coverage()
+        for enabled in (False, None):
+            path, result = self.record()
+            result["tests_enabled"] = enabled
+            shared.write_receipt(result, path)
+            self.store.skip(self.value(), self.snapshot, "integration", "unit-only fixture")
+            status = self.status()
+            self.assertEqual(status["unit"]["state"], "unverified")
+            self.assertFalse(status["finish_ok"])
+
+    def test_in_app_style_record_with_tests_disabled_is_unverified(self):
+        self.coverage()
+        result = unit.collect(self.state, self.ext, client=self.client, hello=self.hello, tests=False, record=True)
+        self.assertNotEqual(result["verdict"], "pass")
+        self.assertFalse(result["tests_enabled"])
+        shared.save_receipt(result, self.state, result.get("receipt"))
+        self.store.skip(self.value(), self.snapshot, "integration", "unit-only fixture")
+        self.assertFalse(self.status()["finish_ok"])
 
     def test_fingerprint_covers_recursive_packages_assets_tests_settings_and_images(self):
         baseline = self.value()

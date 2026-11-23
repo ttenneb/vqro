@@ -194,6 +194,9 @@ class SetupStore:
                     raise ValueError("invalid receipt verdict")
                 assessed = {"state": verdict, "receipt": str(path), "verdict": verdict,
                             "receipt_sha256": hashlib.sha256(data).hexdigest(), "why": None, "current": True}
+                if suite == "unit" and result.get("tests_enabled") is not True:
+                    assessed.update(state="unverified", why="installed tests were disabled or not attested; not completion evidence")
+                    return assessed
                 if suite == "unit" and verdict == "pass":
                     tests = {r.get("subject"): r for r in result.get("rows", []) if str(r.get("id", "")).startswith("tests/")}
                     gaps, unfinished = [], []

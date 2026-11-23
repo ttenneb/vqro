@@ -210,9 +210,15 @@ def collect(state_dir, extensions_dir, *, client=None, hello=None, offline=False
     except Exception as error:
         rows.append(row("error", "harness", "fail", f"{type(error).__name__}: {error}"))
         harness_error = True
+    if record and not tests:
+        rows.append(row("tests", "policy", "unverified", "installed tests were disabled by caller; not completion evidence"))
+        not_covered.append("recorded Unit verification requires installed tests to be enabled")
     result = receipt(rows, source=source, started_at=started_at, started=started, fingerprint_value=fp,
                      inputs=inputs, not_covered=not_covered, extension_count=len(declarations), strict=strict, error=harness_error)
     result["recorded"] = record
+    result["tests_enabled"] = bool(tests)
+    if record and not tests and result["verdict"] == "pass":
+        result["verdict"] = "unverified"
     if context is not None:
         try:
             after_snapshot, after_fp = setup_scan(client if source == "live" else None, hello, state_dir, extensions_dir, endpoint)
@@ -429,6 +435,8 @@ def extension_main():
 def main(argv=None):
     parser = cli_parser()
     args = parser.parse_args(argv)
+    if args.record and args.no_tests:
+        parser.error("--record requires installed tests; --no-tests is only for ad-hoc reports")
     if args.setup_status and (args.record or args.out):
         parser.error("--setup-status cannot be combined with --record or --out")
     socket, state_dir, extensions_dir = endpoints(args)
