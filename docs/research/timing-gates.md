@@ -1,0 +1,88 @@
+# Contention-aware timing grading
+
+`check.sh full` still runs its independent pool before the serial sensitive phase.
+Serial within a gate is not isolation from other gates. The sampler records facts
+for each of these steps, not a machine-wide load average from before/after the run:
+
+| Step | Timing breach distinguishable from correctness |
+| --- | --- |
+| `e2e-tui-scale-budgets` | Only a finite `key_p99_ms` breach, with valid workload, samples, extension state and cleanup. CPU, RSS and frame caps stay hard failures. |
+| `scale-harness` | Finite spawn, transaction, echo, event-lag, snapshot and slow-reader latency breaches. Missing/incomplete samples, RPC errors, lost echo, missed events, inadequate delivered share, restart failures, capacity bounds and leftovers stay hard failures. |
+| `pi-bridge-memory` | Sampled, but all its allocation, journal/identity cardinality and owned-child checks stay hard failures. They are capacity/correctness claims, not scheduler latency claims. |
+
+`latency_typing.py` is an opt-in telemetry harness, not registered in `check.sh`,
+and has no performance budget. No new budget or purported pass is invented for it.
+TUI key latency and the scale harness's RPC/echo latency are the latency gates.
+History CPU-work tests, sidebar wire/publication bounds, item-stream integrity,
+scale-herdr completeness and the remaining opt-in correctness suites retain their
+existing grading and registration. No budget, retry policy or production timer changes.
+
+## Exit and receipt contract
+
+- `0`: met the step's budgets, PASS even if contended/unavailable.
+- `78`: **only** a pure latency/throughput breach, correctness verified. The TUI
+  probe emits it directly. The scale harness writes `failure_class` in its receipt;
+  with `VQRO_SCALE_DEFER_TIMING_GRADE=1` only pure latency failures are deferred to
+  the gate. The gate requires test-process success as well as the receipt before
+  mapping that class to 78. Direct cargo runs remain strict.
+- `77`: SKIP, never a passed step. Existing optional-dependency skips stay unchanged.
+- Every other nonzero: FAIL, never downgraded for contention.
+
+In full mode, 78 plus observed contention is SKIP, reason `unverified (contended)`.
+With no contention it is FAIL. `check.sh timing`, or any gate admitted with
+`--exclusive`, is strict: 78 is always FAIL. Sampler facts and the original step
+exit, grading exit and reason are embedded in each sampled step's check receipt
+and retained in a `<step>-contention.json` log sibling. An unavailable sampler is
+explicitly contended, never quiet evidence and never a pass for a budget breach.
+
+## Sampling and admission
+
+Each second, including a start and final observation, `timing_contention.py` records:
+other held full/quick lock files, `/proc/stat` procs_running, and the step's observed
+process-tree **per-thread** schedstat runtime/runqueue wait. TID birth fences reuse;
+observed cumulative maxima retain tasks after exit. Tasks living entirely between
+samples are not claimed as measured. The JSON retains at most 600 sample rows.
+
+A window is contended if any other slot is held, median procs_running > cores/2,
+runqueue wait > runtime, or any required source is unavailable. Linux implements
+these facts; unsupported platforms report unavailable rather than guessing quiet.
+The wrapper exports `VQRO_GATE_SLOT_DIR`, `VQRO_GATE_SLOT_HELD` (comma-separated
+filenames) and `VQRO_GATE_EXCLUSIVE`; the repository never guesses a slot directory.
+The common first `env -i` and the gate's service supervisor preserve only these
+admission facts, not arbitrary caller variables or credentials. Direct gate calls
+without wrapper metadata correctly report slot facts unavailable.
+
+The external slot wrapper's `--exclusive` acquires all configured full **and** quick
+slots. A failed attempt releases its partial set before waiting. `--wait-seconds N`
+defaults to 1800; exhaustion prints `could not get exclusive slots` and exits **75**,
+not 0 or 77. Existing ordinary callers still acquire one slot. No fixture inherits
+lock descriptors. Pool sizes must agree across callers.
+
+## Strict proof before installation
+
+Prebuild from the revision being graded, outside the timing-only run:
+
+```sh
+cargo test --release --test scale --no-run
+cargo build --release --bin vqro
+# Run those builds through the normal slot wrapper too.
+"$GATE_SLOT" --exclusive --wait-seconds 1800 env -i HOME="$HOME" PATH="$PATH" \
+  CARGO_TARGET_DIR="$CARGO_TARGET_DIR" scripts/check.sh timing
+```
+
+Timing mode runs only the three sampled steps above plus the usual owned-leftover
+receipt/cleanup guard. It never builds or runs the unrelated quick/full suites.
+It requires a release vqro and exactly one executable release scale test artifact;
+missing/ambiguous artifacts fail, with no cold-build fallback. Build provenance is
+the caller's responsibility, as with the existing target-directory gate workflow.
+Archive its strict receipt beside the full receipt; a timed-out exclusive admission
+is not a grading run. Target duration is under about five minutes, excluding admission
+and prebuilds. Gate-script changes require secondary review before merge.
+
+Controls are `test_timing_contention.py`, `test_check.py` and
+`test_tui_scale_budgets.py`, plus scale's
+`timing_grade_never_excuses_correctness_or_missing_measurements`. External wrapper
+controls run when `VQRO_TEST_GATE_SLOT` names the wrapper, always with private lock
+directories. They need no real contention or backend and include partial-lock release,
+strict/full grading, unavailable facts, actual held locks, command status and descriptor
+non-inheritance. Existing budget constants are unchanged.

@@ -6,6 +6,8 @@ Intrinsic synchronous work must not be timed with the scheduler's stopwatch. Mea
 
 The coordinator explicitly confirmed on 2026-11-20: keep genuine end-to-end SLA probes and budgets unchanged; do not invent a separate performance-admission design here. They run in the full gate's final serial phase. Serial within one gate is not isolation from other gates or machine load.
 
+The 2026-11-22 approved contention-grading follow-up is documented in [timing-gates.md](timing-gates.md): unchanged latency budgets may be explicitly unverified under measured contention in full gates, while timing-only/exclusive runs remain strict and correctness/capacity failures always fail.
+
 ## Changed intrinsic-work assertions
 
 Baseline references:

@@ -4,6 +4,8 @@
 #   scripts/check.sh quick   licence policy/notices + cargo build (zero warnings) + cargo test + Python unittests
 #   scripts/check.sh full    quick + every opt-in private suite (tmux, providers, herdr-core), the e2e
 #                            scripts, TUI smoke/scale probe, the default scale profile, and a leftover check
+#   scripts/check.sh timing  only TUI scale, scale harness and bridge memory; strict budget grading,
+#                            using prebuilt release vqro and exactly one release scale test binary
 #
 # Every step runs under `env -i` with private paths: no live vqro, hc/herdr-core or tmux server is
 # touched (suites start their own private ones and stop only those). Prints a PASS/FAIL table and writes
@@ -21,7 +23,7 @@ if [ -r "/proc/$CHECK_OWNER_PID/stat" ] && IFS= read -r CHECK_OWNER_STAT < "/pro
 fi
 SKIP_EXIT=77
 MODE=${1:-quick}
-case "$MODE" in quick|full) ;; *) echo "usage: $0 quick|full" >&2; exit 2 ;; esac
+case "$MODE" in quick|full|timing) ;; *) echo "usage: $0 quick|full|timing" >&2; exit 2 ;; esac
 # Full gates share a bounded pool, then run latency/RSS/scale probes without sibling steps.
 CHECK_JOBS=${CHECK_JOBS:-6}
 if ! [[ "$CHECK_JOBS" =~ ^[1-9][0-9]?$ ]] || (( CHECK_JOBS > 64 )); then
@@ -109,11 +111,23 @@ step() {  # Capture argv as an array: paths/arguments never pass through eval or
   local -n command="CHECK_STEP_$index"
   command=("$@")
 }
+timed() {
+  case "$1" in e2e-tui-scale-budgets|scale-harness|pi-bridge-memory) return 0 ;; *) return 1 ;; esac
+}
 run_step() {
   local index=$1 name=${STEP_NAMES[$1]} start=$SECONDS rc
   local -n command="CHECK_STEP_$index"
   local log="$LOGS/$name.log" result=PASS
-  "${command[@]}" > "$log" 2>&1; rc=$?
+  if timed "$name"; then
+    local pid facts="$LOGS/$name-contention.json" strict=()
+    if [ "$MODE" = timing ] || [ "${VQRO_GATE_EXCLUSIVE:-0}" = 1 ]; then strict=(--strict); fi
+    ( "${command[@]}" ) > "$log" 2>&1 & pid=$!
+    python3 "$REPO/scripts/timing_contention.py" --pid "$pid" --output "$facts" >> "$log" 2>&1
+    wait "$pid"; rc=$?
+    python3 "$REPO/scripts/timing_contention.py" --output "$facts" --grade "$rc" "${strict[@]}" >> "$log" 2>&1; rc=$?
+  else
+    "${command[@]}" > "$log" 2>&1; rc=$?
+  fi
   case "$rc" in 0) result=PASS ;; "$SKIP_EXIT") result=SKIP ;; *) result=FAIL ;; esac
   # A separate atomic result per worker; only the parent appends the ordered receipt.
   printf '%s\t%s\t%s\t%s\n' "$name" "$result" "$((SECONDS-start))" "$log" > "$LOGS/step-$index.tmp"
@@ -138,6 +152,12 @@ sensitive() {
 BUILD_STEP=build-zero-warnings
 run_steps() {
   local index prefix=0
+  # Timing mode does not build or run unrelated suites. Missing prebuilt artifacts
+  # are explicit step failures; no cold build is hidden inside the timing window.
+  if [ "$MODE" = timing ]; then
+    for ((index=0; index<${#STEP_NAMES[@]}; index++)); do run_step "$index"; show_ready; done
+    return
+  fi
   # Build first: every step registered up to and including the build (found by name, never by position, so adding
   # a step before it can't move the build into the concurrent phase) runs serially, so every concurrent suite sees
   # complete binaries. --all-targets includes --bins.
@@ -215,8 +235,24 @@ sys.exit(0 if ok else 1)'
 }
 
 scale_harness() {
-  "${CARGO[@]}" VQRO_SCALE_RUN_DIR="$RUN" VQRO_SCALE_RECEIPT="$LOGS/scale-receipt.json" \
-    cargo test --release --test scale -- --ignored --exact scale_load --nocapture
+  local command=(cargo test --release --test scale -- --ignored --exact scale_load --nocapture)
+  if [ "$MODE" = timing ]; then
+    local binaries=() path
+    for path in "$TARGET"/release/deps/scale-*; do [ -f "$path" ] && [ -x "$path" ] && binaries+=("$path"); done
+    if [ "${#binaries[@]}" -ne 1 ]; then
+      echo "FAIL timing: prebuild exactly one release scale test binary (cargo test --release --test scale --no-run)"
+      return 1
+    fi
+    command=("${binaries[0]}" --ignored --exact scale_load --nocapture)
+  fi
+  "${CARGO[@]}" VQRO_SCALE_RUN_DIR="$RUN" VQRO_SCALE_RECEIPT="$LOGS/scale-receipt.json" VQRO_SCALE_DEFER_TIMING_GRADE=1 \
+    "${command[@]}" || return 1
+  # Cargo/test success is required too: a stale receipt can never excuse a panic.
+  python3 - "$LOGS/scale-receipt.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+sys.exit({"pass": 0, "budget": 78}.get(r.get("failure_class"), 1))
+PY
 }
 
 history_budget() {
@@ -229,7 +265,7 @@ item_streams() {  # agent-v0 §4 regression gate (P3): 200 agents x 3 viewers + 
 }
 
 tui_scale_probe() {
-  "${CARGO[@]}" cargo build --release --bin vqro || return 1
+  if [ "$MODE" != timing ]; then "${CARGO[@]}" cargo build --release --bin vqro || return 1; fi
   "${CLEAN[@]}" python3 tests/e2e_tui_scale.py "$TARGET" --receipt "$LOGS/tui-scale-receipt.json"
 }
 
@@ -277,6 +313,7 @@ if [ -n "${VQRO_CHECK_INJECT_LEAK:-}" ]; then
   ( setsid sleep 300 < /dev/null > /dev/null 2>&1 & )  # reparented once the subshell exits, like a real leak
 fi
 echo "vqro check ($MODE) at $(git describe --always --dirty 2>/dev/null); logs $LOGS"
+if [ "$MODE" != timing ]; then
 step licenses "${CARGO[@]}" python3 scripts/license_check.py --check
 step vendor-libghostty "${CARGO[@]}" python3 scripts/check_vendor.py
 step manifest-deps "${CLEAN[@]}" python3 scripts/check_manifest_deps.py
@@ -302,6 +339,7 @@ opentui_model() {  # the OpenTUI trial client's model against the shared fixture
   (cd extensions/clients/opentui && env -i HOME="$HOME" PATH="$(dirname "$bun"):/usr/bin:/bin" "$bun" test src/conformance.test.ts src/cardcolor.test.ts src/roles.test.ts)
 }
 step opentui-model opentui_model
+fi
 if [ "$MODE" = full ]; then
   for suite in tmux tmux_timeout tmux_provider herdr_provider provider_wire provider_errors undo_attribution core_storm fd_lifecycle accept_limits operational_crash; do
     step "opt-in:$suite" opt_in "$suite"
@@ -331,10 +369,14 @@ if [ "$MODE" = full ]; then
   step e2e-agent-stop "${CLEAN[@]}" python3 tests/e2e_agent_stop.py --run --vqro "$TARGET/debug/vqro" --hc "$HOME/.local/bin/herdr-core"
   step e2e-agent-origin "${CLEAN[@]}" python3 tests/e2e_agent_origin.py --vqro "$TARGET/debug/vqro"
   step e2e-claude-hook "${CLEAN[@]}" python3 tests/claude_hook_e2e.py --vqro "$TARGET/debug/vqro" --hook "$TARGET/debug/vqro-claude-hook"
+fi
+if [ "$MODE" = full ] || [ "$MODE" = timing ]; then
   step pi-bridge-memory "${CLEAN[@]}" python3 tests/pi_bridge_memory.py --report "$LOGS/pi-memory-receipt.json"
-  step e2e-sidebar-scale "${CLEAN[@]}" python3 tests/e2e_sidebar_scale.py "$TARGET/debug/vqro" --receipt "$LOGS/sidebar-scale-receipt.json"
+  if [ "$MODE" = full ]; then
+    step e2e-sidebar-scale "${CLEAN[@]}" python3 tests/e2e_sidebar_scale.py "$TARGET/debug/vqro" --receipt "$LOGS/sidebar-scale-receipt.json"
+  fi
   step e2e-tui-scale-budgets tui_scale_probe
-  step e2e-item-streams item_streams
+  if [ "$MODE" = full ]; then step e2e-item-streams item_streams; fi
   step scale-harness scale_harness
 fi
 run_steps
@@ -376,6 +418,10 @@ steps = [dict(zip(("name", "result", "seconds", "log"), l.split("\t"))) for l in
 for s in steps:
     s["seconds"] = int(s["seconds"])
     if s["result"] == "SKIP": s["result"] = "skip"
+    facts = Path(logs) / (s["name"] + "-contention.json")
+    if facts.exists():
+        s["contention"] = json.loads(facts.read_text())
+        s["reason"] = s["contention"].get("grading_reason")
 skipped = [s["name"] for s in steps if s["result"] == "skip"]
 failed = [s["name"] for s in steps if s["result"] not in ("PASS", "UNSCOPED", "skip")]
 r = {"kind": "vqro.check-receipt", "version": 1, "mode": mode, "commit": commit, "finished_unix": int(time.time()),

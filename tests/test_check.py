@@ -1,4 +1,5 @@
 """Gate outcome/receipt regressions: actual shell/Python blocks, private files, no backends."""
+import fcntl
 import json
 from pathlib import Path
 import shlex
@@ -25,6 +26,10 @@ class CheckTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="check-evidence-")
         self.root = Path(self.temporary.name)
         self.env = {"HOME": str(self.root), "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"}
+        self.env["VQRO_GATE_SLOT_DIR"] = str(self.root / "slots")
+        self.env["VQRO_GATE_SLOT_HELD"] = "slot-1.lock"
+        (self.root / "slots").mkdir()
+        (self.root / "slots/slot-1.lock").touch()
         self.latest = self.root / "check-receipt.json"
         self.steps = self.root / "steps.tsv"
 
@@ -44,7 +49,8 @@ class CheckTests(unittest.TestCase):
         Only the supplied private commands run; never source the real gate's backend/cgroup setup.
         """
         body = '\n'.join(['set -u', 'SKIP_EXIT=77', f'MODE={shlex.quote(mode)}',
-                          f'CHECK_JOBS={jobs}', 'LOGS=$1', 'STEPS=$LOGS/steps.tsv', ': > "$STEPS"',
+                          f'CHECK_JOBS={jobs}', f'REPO={shlex.quote(str(ROOT))}',
+                          'LOGS=$1', 'STEPS=$LOGS/steps.tsv', ': > "$STEPS"',
                           RUNNER, shell_function('no_warnings'), commands, 'run_steps', cleanup,
                           'python3 - "$STEPS" "$LOGS/check-receipt.json" "$MODE" fixture "$LOGS" "${LEFT:-}" "${SCOPE:-fixture}" stamp <<\'RECEIPT\'',
                           RECEIPT_PROGRAM, 'RECEIPT'])
@@ -54,6 +60,56 @@ class CheckTests(unittest.TestCase):
         latest = logs/'check-receipt.json'
         receipt = json.loads(latest.read_text()) if latest.exists() else None
         return result, receipt, logs
+
+    def test_timing_mode_registers_only_the_three_budget_probes(self):
+        registration = SOURCE[SOURCE.index('BEFORE=$(snapshot'):SOURCE.index('\nrun_steps\nsleep 2')]
+        body = '\n'.join(['set -u', 'MODE=timing', 'RUN=fixture', 'TARGET=fixture', 'LOGS=fixture',
+                          'CARGO=()', 'CLEAN=()', 'snapshot() { :; }',
+                          'step() { printf "%s\\n" "$1"; }', registration])
+        result = subprocess.run(['/bin/bash', '-c', body], env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([line for line in result.stdout.splitlines() if not line.startswith('vqro check')],
+                         ['pi-bridge-memory', 'e2e-tui-scale-budgets', 'scale-harness'])
+
+    def test_only_timing_budget_breaches_are_unverified_under_observed_contention(self):
+        # Deliberately exceed a stub's .001s budget. No real system load is needed.
+        stub = shlex.quote(sys.executable) + " -c " + shlex.quote(
+            "import sys,time; start=time.monotonic(); time.sleep(.03); "
+            "sys.exit(78 if time.monotonic()-start > .001 else 0)")
+        with (self.root/'slots/quick-slot-1.lock').open('w') as other:
+            fcntl.flock(other, fcntl.LOCK_EX)
+            for mode, exclusive, expected in [('full', False, 'skip'), ('timing', False, 'FAIL'), ('full', True, 'FAIL')]:
+                with self.subTest(mode=mode, exclusive=exclusive):
+                    self.env['VQRO_GATE_EXCLUSIVE'] = str(int(exclusive))
+                    prefix = '' if mode == 'timing' else 'step build-zero-warnings true\n'
+                    result, receipt, _ = self.gate(prefix + 'step scale-harness ' + stub, mode=mode)
+                    step = receipt['steps'][-1]
+                    self.assertEqual(step['result'], expected, result.stdout + result.stderr)
+                    self.assertEqual(result.returncode, 0 if expected == 'skip' else 1)
+                    self.assertIn('other_gate_slot_held', step['contention']['reasons'])
+                    if expected == 'skip': self.assertEqual(step['reason'], 'unverified (contended)')
+
+    def test_timing_passes_and_correctness_failures_are_not_downgraded(self):
+        with (self.root/'slots/quick-slot-1.lock').open('w') as other:
+            fcntl.flock(other, fcntl.LOCK_EX)
+            for mode in ('full', 'timing'):
+                for code, expected in [(0, 'PASS'), (1, 'FAIL')]:
+                    with self.subTest(mode=mode, code=code):
+                        prefix = '' if mode == 'timing' else 'step build-zero-warnings true\n'
+                        command = "step scale-harness /bin/bash -c 'sleep .03; exit " + str(code) + "'"
+                        result, receipt, _ = self.gate(prefix + command, mode=mode)
+                        self.assertEqual(receipt['steps'][-1]['result'], expected, result.stderr)
+                        self.assertEqual(result.returncode, int(code != 0))
+
+    def test_missing_sampler_facts_never_pass_a_budget_breach(self):
+        self.env.pop('VQRO_GATE_SLOT_DIR')
+        for mode, expected in [('full', 'skip'), ('timing', 'FAIL')]:
+            prefix = '' if mode == 'timing' else 'step build-zero-warnings true\n'
+            result, receipt, _ = self.gate(prefix + "step scale-harness /bin/bash -c 'sleep .03; exit 78'", mode=mode)
+            step = receipt['steps'][-1]
+            self.assertEqual(step['result'], expected, result.stderr)
+            self.assertEqual(step['contention']['status'], 'unavailable')
+            self.assertNotEqual(step['result'], 'PASS')
 
     def test_failed_build_with_no_binary_does_not_start_dependents(self):
         for mode in ('quick', 'full'):
