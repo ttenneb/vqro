@@ -4,7 +4,8 @@
 //! The library is built out of tree into a verified per-user content cache, shared by worktrees and profiles.
 //! `VQRO_LIBGHOSTTY_CACHE` overrides the cache root; `off` disables sharing and builds in `OUT_DIR` for audits.
 //! `VQRO_LIBGHOSTTY_CACHE_KEEP` sets retained shared keys (default 6). GC is off during the machine-wide
-//! pause; `VQRO_LIBGHOSTTY_CACHE_GC=1` explicitly enables stage cleanup and LRU once authorized.
+//! pause; `VQRO_LIBGHOSTTY_CACHE_GC` uses the standard case-insensitive boolean grammar
+//! (`1`/`true`/`yes`/`on` enables; `0`/`false`/`no`/`off` disables; absent is off; other values are refused).
 //! Verified link archives are copied into
 //! `OUT_DIR` under the key lock so eviction never races a later Cargo link.
 //! `OUT_DIR/libghostty-cache.json` records the key, reuse/build result, and elapsed time without Cargo warnings.
@@ -43,7 +44,7 @@ fn zig_target(target: &str) -> &str {
     }
 }
 
-fn env_bool(name: &str) -> Option<bool> {
+pub(crate) fn env_bool(name: &str) -> Option<bool> {
     match env::var(name) {
         Ok(value) => match value.to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => Some(true),

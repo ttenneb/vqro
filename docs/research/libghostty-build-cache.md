@@ -105,8 +105,11 @@ ordinary version/path changes; this is not compiler authentication or a host-SDK
 
 ## Disk usage and manual pruning
 
-**GC is off by default during vqro-lead's machine-wide pruning pause (2026-11-23).** Only
-`VQRO_LIBGHOSTTY_CACHE_GC=1` enables stale-stage reclamation and LRU eviction; do not enable it against
+**GC is off by default during vqro-lead's machine-wide pruning pause (2026-11-23).** The
+`VQRO_LIBGHOSTTY_CACHE_GC` switch uses the existing `env_bool` grammar:
+**grammar accepted by vqro-lead (Main)**. `1`, `true`, `yes`, or `on` (case-insensitive) enables stale-stage reclamation and LRU;
+`0`, `false`, `no`, or `off` (case-insensitive) disables it; an absent variable means off. Any other value,
+including an empty string, stops the build with a clear message. Do not enable GC against
 production until vqro-lead lifts the pause. Tests opt in only on disposable roots. With GC off, accesses do
 not reclaim abandoned stages or perform LRU eviction, so disk usage is not bounded by the retention setting.
 Ordinary per-build temporary cleanup and invalid-entry replacement remain build behavior.

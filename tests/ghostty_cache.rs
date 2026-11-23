@@ -3,6 +3,10 @@
 mod ghostty_cache;
 #[path = "../build/native_config.rs"]
 mod native_config;
+// Include the actual build-script parser; its other entrypoints are not test entrypoints.
+#[allow(dead_code)]
+#[path = "../build.rs"]
+mod build_script;
 
 use ghostty_cache::{Inputs, source_digest, verify};
 use std::fs;
@@ -55,6 +59,61 @@ fn ensure(
         build,
         |_| Ok(()),
     )
+}
+
+#[test]
+fn gc_activation_child() {
+    let _serial = serial_fixture();
+    let Ok(expected) = std::env::var("GHOSTTY_GC_EXPECTED") else {
+        return;
+    };
+    let outcome = std::panic::catch_unwind(|| {
+        build_script::env_bool("VQRO_LIBGHOSTTY_CACHE_GC").unwrap_or(false)
+    });
+    match expected.as_str() {
+        "on" | "off" => assert_eq!(outcome.unwrap(), expected == "on"),
+        "refuse" => {
+            let error = outcome.expect_err("unrecognised boolean must stop the build");
+            let text = error
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| error.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic");
+            assert!(
+                text.starts_with("invalid boolean value for VQRO_LIBGHOSTTY_CACHE_GC:"),
+                "{text}"
+            );
+        }
+        _ => panic!("unknown expected activation outcome"),
+    }
+}
+
+#[test]
+fn gc_activation_uses_the_main_accepted_env_bool_grammar() {
+    let _serial = serial_fixture();
+    for (value, expected) in [
+        (Some("1"), "on"),
+        (Some("true"), "on"),
+        (Some("YES"), "on"),
+        (Some("On"), "on"),
+        (Some("0"), "off"),
+        (Some("false"), "off"),
+        (Some("no"), "off"),
+        (Some("OFF"), "off"),
+        (None, "off"),
+        (Some(""), "refuse"),
+        (Some("maybe"), "refuse"),
+    ] {
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", "gc_activation_child"])
+            .env_clear()
+            .env("GHOSTTY_GC_EXPECTED", expected);
+        if let Some(value) = value {
+            child.env("VQRO_LIBGHOSTTY_CACHE_GC", value);
+        }
+        assert!(child.status().unwrap().success(), "GC value {value:?}");
+    }
 }
 
 #[cfg(target_os = "linux")]
