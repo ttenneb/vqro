@@ -108,8 +108,11 @@ python3 extensions/testing_unit.py --record --json --socket SOCKET --state-dir S
 `--record` owns the receipt filename under `<state>/test-unit/`, writes atomically at 0600 and retains 20 runs.
 JSON includes its path. `--out` is mutually exclusive, ad hoc and **never adopted** as Unit completion evidence.
 Status reads adopt only complete, supported, recorded receipts for this setup, generation and selected instance;
-wrong suites/instances, old generations, incomplete JSON and unfinished runs never count as a pass. Status-query
-exit 0 means an assessment was read, not that `finish_ok` is true; checker/read errors return exit 2 and NOT VERIFIED.
+wrong suites/instances, old generations, incomplete JSON and unfinished runs never count as a pass. Integration
+and Performance can report `stale`: that receipt is non-current and never grants finish. Integration still needs
+a current completed receipt or an explicit current skip reason; stale Performance evidence remains advisory and
+never blocks finish. Status-query exit 0 means an assessment was read, not that `finish_ok` is true; checker/read
+errors return exit 2 and NOT VERIFIED.
 
 Fingerprint version 2 covers `extension/*` declarations, `doc/settings/*` values, recursive installed packages,
 tests/scenarios and assets, and each declaration's resolved executable/script bytes. It excludes runtime
