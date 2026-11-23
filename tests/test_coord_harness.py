@@ -9,6 +9,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from unittest import mock
 import warnings
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -123,37 +124,59 @@ class SilentPeerTests(unittest.TestCase):
             server = socket.socket(socket.AF_UNIX)
             server.bind(path)
             server.listen(1)
-            received, done = [], threading.Event()
+            server.settimeout(30)
+            received, closed = [], threading.Event()
 
             def peer():  # accept, read what the client sends, never answer
-                conn, _ = server.accept()
+                try:
+                    conn, _ = server.accept()
+                except OSError:
+                    return
                 with conn:
-                    conn.settimeout(5)
+                    # A hang backstop, not a latency budget: the client's own
+                    # timeout must close the stream before the observer gives up.
+                    deadline = time.monotonic() + 30
                     try:
-                        while not done.is_set():
+                        while time.monotonic() < deadline:
+                            conn.settimeout(max(0.001, deadline - time.monotonic()))
                             data = conn.recv(65536)
                             if not data:
+                                closed.set()
                                 break
                             received.append(data)
                     except OSError:
                         pass
             thread = threading.Thread(target=peer, daemon=True)
             thread.start()
-            started = time.monotonic()
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always", ResourceWarning)
-                with self.assertRaises(TimeoutError) as error:
-                    Client(path, timeout=0.5)
-                gc.collect()
-            elapsed = time.monotonic() - started
-            done.set()
-            thread.join(6)
-            server.close()
-            self.assertLess(elapsed, 3, "the call waited past its deadline")
+            try:
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always", ResourceWarning)
+                    with self.assertRaises(TimeoutError) as error:
+                        Client(path, timeout=0.5)
+                    gc.collect()
+            finally:
+                thread.join(30)
+                server.close()
+            self.assertFalse(thread.is_alive(), "silent peer observer did not finish")
+            self.assertTrue(closed.is_set(), "client did not close before the peer's hang backstop")
             self.assertIn("hello: no reply within 0.5 s", str(error.exception))
             self.assertEqual(b"".join(received).count(b'"method": "hello"'), 1, "sent once, never retried")
             self.assertEqual([str(w.message) for w in caught if issubclass(w.category, ResourceWarning)], [])
 
+
+    def test_silent_peer_receive_uses_the_remaining_call_deadline(self):
+        # Deadline arithmetic is deterministic. CPU time would exclude the
+        # blocking receive, and wall time would charge descheduling/GC to it.
+        peer = mock.Mock()
+        peer.recv.side_effect = socket.timeout
+        with mock.patch("coord_harness.socket.socket", return_value=peer), \
+                mock.patch("coord_harness.time.monotonic", side_effect=[10, 10.125, 10.25]):
+            with self.assertRaisesRegex(TimeoutError, "hello: no reply within 0.5 s"):
+                Client("unused.sock", timeout=0.5)
+        self.assertEqual(peer.settimeout.call_args_list, [mock.call(0.5), mock.call(0.5), mock.call(0.25)])
+        peer.recv.assert_called_once_with(65536)
+        peer.sendall.assert_called_once()
+        self.assertTrue(peer.close.called, "a timed-out stream is unusable")
 
     def answering_peer(self, d, fragment_gap):
         """A peer that answers hello with one valid reply line, sent whole (fragment_gap None) or in 8-byte fragments
