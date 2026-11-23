@@ -14,8 +14,21 @@ class Budgets(unittest.TestCase):
               "background_fps_peak_complete_second": 55, "fps_peak_complete_second": 94}
 
     def valid_receipt(self, **changes):
+        key_changes = changes.pop('keys', {})
+        latency = key_changes.get('p99_ms', 81.8)
+        latency = latency if probe.finite_measure(latency) else 81.8
+        metrics = dict(started_unix_s=1000, stream_events_dropped=0, stream_events_cap=probe.STREAM_EVENT_CAP,
+                       stream_attachments=[], stream_errors=[], stream_closures=[])
+        ledger = probe.KeyLedger(1000)
+        for index in range(20):
+            token = f'K{index:05d}Z'
+            ledger.sent(token, index * 4)
+            ledger.observe(token, index * 4 + latency / 1000)
+            ledger.finish(token)
+        keys = ledger.summary(metrics, 'idle', 'flood', 80 + latency / 1000)
+        keys.update(key_changes)
         receipt = dict(result='pass', correctness_ok=True, workload_valid=True, leftover_processes=[],
-            tui=dict(self.within), keys=dict(samples=20, lost=[], p99_ms=81.8), events=dict(missed=0),
+            tui=dict(self.within), keys=keys, metrics=metrics, events=dict(missed=0),
             extensions=dict(sidebar=dict(status='running', crashes=0)), budgets_exceeded=[],
             cleanup=dict(ok=True, shutdown_requested=True, shutdown_error=None, client_close_error=None,
                          core_exit=0, forced_kill=False, wait_error=None))
@@ -270,6 +283,67 @@ class DeliveryEvidence(unittest.TestCase):
                 self.assertFalse(probe.stream_evidence_complete(bad))
         metrics["stream_attachments"][0]["resource"] = "r" * 129
         self.assertFalse(probe.stream_evidence_complete(metrics))
+
+
+class LedgerTimingGrading(unittest.TestCase):
+    def receipt(self):
+        return Budgets('test_measured_results_pass_with_margin').valid_receipt()
+
+    def test_observed_late_echo_is_timing_not_loss_even_with_historical_error(self):
+        receipt = self.receipt()
+        receipt['metrics']['stream_errors'] = [dict(at_s=1.5, method='stream.error', stream=7,
+                                                   connection=0, kind='invalid')]
+        ledger = probe.KeyLedger(1000)
+        ledger.sent('K00000Z', 1)
+        ledger.finish('K00000Z')
+        ledger.observe('K00000Z', 3.5)
+        receipt['keys'] = ledger.summary(receipt['metrics'], 'idle', 'flood', 5)
+        self.assertNotIn('lost', receipt['keys'])
+        row = receipt['keys']['ledger'][0]
+        self.assertEqual(row['classification'], 'observed')
+        self.assertEqual(row['associated_signals'][0]['classification'], 'unknown')
+        self.assertEqual(probe.timing_exit(receipt), 78)
+        receipt['cleanup']['forced_kill'] = True
+        self.assertEqual(probe.timing_exit(receipt), 1)
+
+    def test_unknown_or_explicitly_lost_key_is_never_only_a_budget_breach(self):
+        receipt = self.receipt()
+        ledger = probe.KeyLedger(1000)
+        ledger.sent('K00000Z', 1)
+        ledger.finish('K00000Z')
+        receipt['keys'] = ledger.summary(receipt['metrics'], 'idle', 'flood', 5)
+        self.assertEqual(receipt['keys']['ledger'][0]['classification'], 'unknown')
+        self.assertNotIn('lost', receipt['keys'])
+        self.assertEqual(probe.timing_exit(receipt), 1)  # Missing evidence, not inferred loss.
+        for classification in ('unknown', 'lost', 'rejected', 'not_sent'):
+            receipt = self.receipt()
+            receipt['keys']['p99_ms'] = 171
+            receipt['keys']['ledger'][0]['classification'] = classification
+            self.assertEqual(probe.timing_exit(receipt), 1, classification)
+        receipt = self.receipt()
+        receipt['keys']['lost'] = ['K00000Z']
+        self.assertEqual(probe.timing_exit(receipt), 1)
+
+    def test_incomplete_or_truncated_ledger_is_never_only_a_budget_breach(self):
+        for field, value in [('ledger_dropped', 1), ('stream_evidence_complete', False),
+                             ('evidence_status', 'evidence incomplete')]:
+            receipt = self.receipt()
+            receipt['keys']['p99_ms'] = 171
+            receipt['keys'][field] = value
+            self.assertEqual(probe.timing_exit(receipt), 1, field)
+
+    def test_observed_deadline_miss_outside_p99_still_fails_the_existing_timing_guard(self):
+        receipt = self.receipt()
+        ledger = probe.KeyLedger(1000)
+        for index in range(200):
+            token = f'K{index:05d}Z'
+            ledger.sent(token, index * 4)
+            ledger.observe(token, index * 4 + (2.5 if index == 0 else .05))
+            ledger.finish(token)
+        receipt['keys'] = ledger.summary(receipt['metrics'], 'idle', 'flood', 805)
+        self.assertLess(receipt['keys']['p99_ms'], probe.BUDGETS['key_p99_ms'][0])
+        self.assertEqual(receipt['keys']['missed_deadline'], ['K00000Z'])
+        self.assertEqual(probe.timing_exit(receipt), 78)
 
 
 if __name__ == "__main__":

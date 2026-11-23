@@ -142,6 +142,41 @@ class KeyLedger:
                 "evidence_status": "complete" if complete else "evidence incomplete"}
 
 
+def complete_key_observations(keys):
+    """Only complete positive screen evidence can qualify a timing-only breach.
+
+    Unknown/unseen or explicitly lost keys are correctness/evidence failures, not
+    inferred delivery from associated historical stream signals. Preserve the
+    ledger's original deadline misses even for an eventually observed token.
+    """
+    if (not isinstance(keys, dict) or keys.get("lost", []) != []
+        or keys.get("stream_evidence_complete") is not True or keys.get("evidence_status") != "complete"
+        or type(keys.get("ledger_dropped")) is not int or keys["ledger_dropped"] != 0
+        or type(keys.get("samples")) is not int or keys["samples"] <= 0):
+        return False
+    rows = keys.get("ledger")
+    if not isinstance(rows, list) or len(rows) != keys["samples"] or len(rows) > KEY_LEDGER_CAP:
+        return False
+    tokens, missed = set(), []
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        token, sent, seen = (row.get(name) for name in ("token", "sent_s", "seen_s"))
+        if (not isinstance(token, str) or TOKEN.fullmatch(token) is None or token in tokens
+            or row.get("classification") != "observed" or row.get("evidence_status") != "complete"
+            or type(row.get("missed_deadline")) is not bool
+            or any(type(value) not in (int, float) or not math.isfinite(value) or value < 0 for value in (sent, seen))
+            or seen < sent):
+            return False
+        tokens.add(token)
+        overdue = seen - sent > KEY_DEADLINE_SECONDS
+        if row["missed_deadline"] != overdue:
+            return False
+        if overdue:
+            missed.append(token)
+    return keys.get("missed_deadline") == missed
+
+
 def finite_measure(value):
     # Preserve the probe's existing zero-as-missing guard as well as finiteness.
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
@@ -154,7 +189,7 @@ def exceeded(measured):
 
 
 def timing_exit(receipt):
-    """78 is ONLY a finite key-latency breach after correctness/cleanup passed.
+    """78 is ONLY an observed finite key-latency breach after correctness/cleanup passed.
 
     Memory/CPU/frame caps, missing measurements, invalid workload, lost inputs,
     exceptions and leftovers remain hard failures, even on a contended machine.
@@ -168,7 +203,7 @@ def timing_exit(receipt):
         return 1
     if (receipt.get("error") is not None or receipt.get("leftover_processes") != []
         or receipt.get("correctness_ok") is not True or receipt.get("workload_valid") is not True
-        or type(keys.get("samples")) is not int or keys["samples"] <= 0 or keys.get("lost") != []
+        or not complete_key_observations(keys)
         or type(events.get("missed")) is not int or events["missed"] != 0
         or sidebar.get("status") != "running" or type(sidebar.get("crashes")) is not int or sidebar["crashes"] != 0
         or cleanup.get("ok") is not True or cleanup.get("shutdown_requested") is not True
@@ -181,7 +216,11 @@ def timing_exit(receipt):
     # Derive from actual evidence; neither a PASS tag nor a claimed breach list
     # can bypass validation, invent a breach or suppress a measured one.
     over = exceeded(measured)
-    return 0 if not over else 78 if over == ["key_p99_ms"] else 1
+    if over and over != ["key_p99_ms"]:
+        return 1
+    # The existing 2s screen-observation deadline remains enforced even when a
+    # rare late sample falls outside the p99 order statistic. It is not loss.
+    return 78 if over or keys["missed_deadline"] else 0
 
 
 def cleanup_core(receipt, client, core):
@@ -432,8 +471,8 @@ def main():
             "metrics": metrics})
         over = exceeded({**receipt["tui"], "key_p99_ms": receipt["keys"]["p99_ms"]})
         receipt["budgets_exceeded"] = over
-        receipt["correctness_ok"] = bool(workload_valid and not keys["missed_deadline"] and not keys["ledger_dropped"] and keys["stream_evidence_complete"] and not events["missed"] and keys["samples"] and end_snapshot["extensions"]["sidebar"]["status"] == "running" and end_snapshot["extensions"]["sidebar"]["crashes"] == 0)
-        receipt["result"] = "pass" if receipt["correctness_ok"] and not over else "fail"
+        receipt["correctness_ok"] = bool(workload_valid and complete_key_observations(keys) and not events["missed"] and end_snapshot["extensions"]["sidebar"]["status"] == "running" and end_snapshot["extensions"]["sidebar"]["crashes"] == 0)
+        receipt["result"] = "pass" if receipt["correctness_ok"] and not over and not keys["missed_deadline"] else "fail"
     except Exception as error:
         receipt.update(result="fail", error=f"{type(error).__name__}: {error}")
         try:

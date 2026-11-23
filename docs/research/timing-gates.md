@@ -6,7 +6,7 @@ for each of these steps, not a machine-wide load average from before/after the r
 
 | Step | Timing breach distinguishable from correctness |
 | --- | --- |
-| `e2e-tui-scale-budgets` | Only a finite `key_p99_ms` breach, with valid workload, samples, extension state, successful shutdown request and observed zero core exit. A shutdown error, forced kill or nonzero exit is hard failure. CPU, RSS and frame caps stay hard failures. |
+| `e2e-tui-scale-budgets` | Only positively observed finite key-latency breaches (the unchanged p99 budget or existing 2-second observation deadline), with complete ledger/workload evidence, healthy extension, successful shutdown request and observed zero core exit. Unknown/unseen, explicitly lost or incomplete keys, shutdown error, forced kill or nonzero exit are hard failures. CPU, RSS and frame caps stay hard failures. |
 | `scale-harness` | Finite spawn, transaction, echo, event-lag, snapshot and slow-reader latency breaches. Missing/incomplete samples (including required load-window and end RSS), RPC errors, lost echo, missed events, inadequate delivered share, restart failures, capacity bounds and leftovers stay hard failures. |
 | `pi-bridge-memory` | Sampled, but all its allocation, journal/identity cardinality and owned-child checks stay hard failures. They are capacity/correctness claims, not scheduler latency claims. |
 
@@ -30,7 +30,12 @@ existing grading and registration. No budget, retry policy or production timer c
 
 The TUI validates required finite metrics and explicit correctness/cleanup evidence
 before either 0 or 78, deriving breaches from measured values rather than trusting
-`result` or `budgets_exceeded` labels. A pass-only dict and NaN metrics are invalid.
+`result` or `budgets_exceeded` labels. Its bounded key ledger must contain complete
+positive observations for every sample. A late observed echo is a latency breach,
+not inferred loss; a missed deadline stays enforced even outside the p99 order
+statistic. Unknown/unseen or explicitly lost keys, truncated/incomplete evidence,
+a pass-only dict and NaN metrics are invalid. Historical stream signals are only
+associations and never forwarding/loss witnesses; their unknown labels stay intact.
 Scale requires nonempty, finite load-window RSS, no missing RSS attempts, and finite
 start/setup/end RSS; a genuinely not-applicable slow-reader phase remains allowed.
 
