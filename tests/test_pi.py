@@ -57,11 +57,15 @@ class PiTests(unittest.TestCase):
         self.assertNotIn("VQRO_SOCKET", env)
         self.assertNotIn("VQRO_EXTENSION_TOKEN", env)
 
-    def test_missing_testing_asset_refuses_before_spawn(self):
-        with patch("pi.testing_args", side_effect=VqroError("plugin missing", "unavailable")):
-            with self.assertRaisesRegex(VqroError, "missing"):
-                self.command("new")
-        self.assertEqual(self.native(), [])
+    def test_missing_testing_asset_does_not_stop_pi_launch_and_warns_once(self):
+        with tempfile.TemporaryDirectory(prefix="missing-pi-testing-") as directory, patch("pi.EXTENSIONS", directory):
+            self.command("new")
+            self.command("new")
+        self.assertEqual(len(self.native()), 2)
+        self.assertTrue(all("-e" not in params["argv"] and "--skill" not in params["argv"] for _, params in self.native()))
+        notices = [text for text, style in self.core.notices if "testing plugin unavailable" in text]
+        self.assertEqual(len(notices), 1)
+        self.assertIn("NOT VERIFIED", notices[0])
 
     def test_new_uses_only_scoped_reads_even_for_source_cwd(self):
         self.core.resources["r88"]={"id":"r88","cwd":"/private/source"}

@@ -123,7 +123,7 @@ class Tier1:
             if not PI_PLUGIN.is_file():
                 raise VqroError("the Pi plugin is not installed at " + str(PI_PLUGIN), "unavailable")
             declaration = pi_declaration()
-            argv = [*argv, "-e", str(PI_PLUGIN), *testing_args(HERE)]
+            argv = [*argv, "-e", str(PI_PLUGIN), *testing_args(HERE, self.ext)]
         params = {"argv": ["python3", str(RUN), "--", *argv], "name": runtime + "-" + nonce,
                   "env": account_environment(account, {"VQRO_PRINCIPAL": principal, "VQRO_TIER1_LAUNCH": nonce,
                                                        **(testing_environment(self.ext, HERE) if runtime == "pi" else {})})}

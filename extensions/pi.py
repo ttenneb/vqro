@@ -77,7 +77,7 @@ class Pi:
         if args.get('fresh') is True: require_fresh('pi', runtime['argv'])
         account, popup = choose_account(self.ext, dict(args, runtime=runtime['name'], **({'cwd':cwd} if cwd else {})), 'pi', 'pi.new')
         if popup: return popup
-        native_argv = [*provider_argv(runtime['argv'], account), *testing_args(EXTENSIONS)]
+        native_argv = [*provider_argv(runtime['argv'], account), *testing_args(EXTENSIONS, self.ext)]
         launcher = runtime.get("bridge_argv", default_bridge())
         # The local isolated launcher locates its installed package itself. Neither it nor
         # a configured host launcher injects a module path into the agent environment.

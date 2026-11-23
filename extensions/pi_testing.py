@@ -1,7 +1,6 @@
 """Explicit, per-launch Pi setup-testing assets; never edits the user's Pi profile."""
 from pathlib import Path
-
-from vqro_ext import VqroError
+import sys
 
 
 def testing_environment(ext, extensions_dir):
@@ -15,7 +14,7 @@ def testing_environment(ext, extensions_dir):
     return result
 
 
-def testing_args(extensions_dir):
+def testing_args(extensions_dir, ext=None):
     root = Path(extensions_dir)
     candidates = (root / "tier1", root.parent / "integrations/pi")
     for base in candidates:
@@ -23,4 +22,19 @@ def testing_args(extensions_dir):
         skill = base / "skills/vqro-setup-testing/SKILL.md"
         if plugin.is_file() and skill.is_file():
             return ["-e", str(plugin), "--skill", str(skill)]
-    raise VqroError("Pi setup-testing plugin/skill is missing; install matching assets (no automatic retry)", "unavailable")
+    # Testing is cooperative: missing optional assets must not stop native Pi work.
+    if ext is not None and not getattr(ext, "_testing_unavailable_notified", False):
+        ext._testing_unavailable_notified = True
+        message = "testing plugin unavailable: Pi setup-testing plugin/skill is missing; launching without testing hooks (NOT VERIFIED)"
+        try:
+            ext.notify(message, "warn")
+        except Exception:
+            pass  # A warning transport failure must not turn optional testing into a launch veto.
+        try:
+            ext.log(message)
+        except Exception:
+            try:
+                print(message, file=sys.stderr, flush=True)
+            except OSError:
+                pass
+    return []

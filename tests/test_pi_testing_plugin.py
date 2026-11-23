@@ -13,7 +13,6 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "extensions"))
 from pi_testing import testing_args, testing_environment
-from vqro_ext import VqroError
 
 
 class PiTestingPluginTests(unittest.TestCase):
@@ -23,6 +22,20 @@ class PiTestingPluginTests(unittest.TestCase):
         self.assertEqual(testing_environment(Ext(), "/private/ext"), {"VQRO_TESTING_SOCKET": "opaque:selected-endpoint",
                                                       "VQRO_TESTING_STATE_DIR": "/private/state", "VQRO_TESTING_EXTENSIONS_DIR": "/private/ext"})
         self.assertEqual(testing_environment(object(), "/private/ext"), {})
+
+    def test_unavailable_assets_warn_and_log_once_without_rejecting_launch(self):
+        class Ext:
+            def __init__(self): self.notices, self.logs = [], []
+            def notify(self, message, style): self.notices.append((message, style))
+            def log(self, message): self.logs.append(message)
+        ext = Ext()
+        with tempfile.TemporaryDirectory(prefix="pi-testing-unavailable-") as temporary:
+            self.assertEqual(testing_args(temporary, ext), [])
+            self.assertEqual(testing_args(temporary, ext), [])
+        self.assertEqual(len(ext.notices), 1)
+        self.assertEqual(len(ext.logs), 1)
+        self.assertIn("testing plugin unavailable", ext.logs[0])
+        self.assertEqual(ext.notices[0][1], "warn")
 
     def test_checkout_and_installed_asset_selection(self):
         args = testing_args(ROOT / "extensions")
@@ -37,8 +50,7 @@ class PiTestingPluginTests(unittest.TestCase):
             installed = testing_args(extensions)
             self.assertTrue(all(Path(path).is_relative_to(extensions) for path in installed[1::2]))
             Path(installed[-1]).unlink()
-            with self.assertRaisesRegex(VqroError, "missing"):
-                testing_args(extensions)
+            self.assertEqual(testing_args(extensions), [])
 
     @unittest.skipUnless(shutil.which("bun"), "Bun unavailable: combined CLI controls not executed")
     @unittest.skipUnless(hasattr(socketserver, "ThreadingUnixStreamServer"), "requires private Unix-stream fixture, not native Windows coverage")

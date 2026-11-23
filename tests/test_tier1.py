@@ -82,11 +82,16 @@ class Tier1Tests(unittest.TestCase):
         self.assertNotIn("VQRO_EXTENSION_TOKEN", env)
         self.assertFalse((self.home / ".pi").exists())
 
-    def test_pi_missing_testing_asset_refuses_before_spawn(self):
-        with patch("tier1.testing_args", side_effect=VqroError("plugin missing", "unavailable")):
-            with self.assertRaisesRegex(VqroError, "missing"):
-                self.launch("pi")
-        self.assertEqual(self.spawns(), [])
+    def test_pi_missing_testing_asset_does_not_stop_launch_and_warns_once(self):
+        with tempfile.TemporaryDirectory(prefix="missing-tier1-testing-") as directory, patch("tier1.HERE", Path(directory)):
+            self.launch("pi")
+            self.launch("pi")
+        self.assertEqual(len(self.spawns()), 2)
+        for spawn in self.spawns():
+            self.assertNotIn("--skill", spawn["argv"])
+            self.assertEqual(spawn["argv"].count("-e"), 1, "only the separate inbox plugin is loaded")
+        notices = [text for text, style in self.core.notices if "testing plugin unavailable" in text]
+        self.assertEqual(len(notices), 1)
 
     def test_claude_launch_wires_hooks_for_that_launch_only(self):
         self.configure(claude=["/opt/claude"], hook=str(self.hook))
