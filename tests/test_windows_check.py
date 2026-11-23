@@ -3,8 +3,12 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import sys
 
 SOURCE = (Path(__file__).resolve().parents[1] / "scripts/check.sh").read_text(encoding="utf-8")
+if sys.platform == "win32":
+    raise unittest.SkipTest("checks the Linux cross-target Bash gate with POSIX executable/symlink stubs")
+
 START = SOURCE.index("windows_check() {")
 FUNCTION = SOURCE[START:SOURCE.index("\n}", START) + 2]
 

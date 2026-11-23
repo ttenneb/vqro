@@ -14,6 +14,7 @@ selector = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(selector)
 
 
+@unittest.skipIf(sys.platform == "win32", "Linux timing-gate artifact controls require POSIX executable modes and shell fixtures")
 class ScaleArtifactTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='scale-selection-')
@@ -98,6 +99,7 @@ class ScaleArtifactTests(unittest.TestCase):
         self.assertIn('VQRO_SCALE_TEST_EXE', lifetime.FORWARDED)
 
 
+@unittest.skipIf(sys.platform == "win32", "Linux timing-gate prebuild recipe executes /bin/bash and shebang helpers")
 class PrebuildRecipeTests(unittest.TestCase):
     def test_failed_prebuild_never_reaches_exclusive_timing_even_with_old_files(self):
         doc = (ROOT/'docs/research/timing-gates.md').read_text()

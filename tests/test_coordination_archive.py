@@ -19,6 +19,7 @@ class ArchiveTests(unittest.TestCase):
                 export("C:\\archive", "abc", [])
             path.assert_not_called()
 
+    @unittest.skipIf(sys.platform == "win32", "durable archive export is explicitly unsupported on native Windows")
     def test_exact_export_and_reconcile_never_overwrite_a_different_set(self):
         with tempfile.TemporaryDirectory(prefix="coord-archive-") as directory:
             records = [{"delivery": "d:1", "version": 7, "record": {"state": "unknown", "content": "evidence"}}]
@@ -30,6 +31,7 @@ class ArchiveTests(unittest.TestCase):
                 export(directory, "abc123", [dict(records[0], version=8)])
             self.assertEqual(Path(first["locator"]).read_bytes(), before)
 
+    @unittest.skipIf(sys.platform == "win32", "Unix archive exporter validates existing file bytes; Windows refuses before access")
     def test_partial_existing_export_is_not_replayed_or_overwritten(self):
         with tempfile.TemporaryDirectory(prefix="coord-archive-") as directory:
             path = Path(directory) / "abc.json"
@@ -38,6 +40,7 @@ class ArchiveTests(unittest.TestCase):
                 export(directory, "abc", [])
             self.assertEqual(path.read_bytes(), b"partial")
 
+    @unittest.skipIf(sys.platform == "win32", "positive durable-export/free path requires the Unix directory publication barrier")
     def test_native_and_pull_scans_leave_frozen_pending_versions_unchanged(self):
         for pull in (False, True):
             with self.subTest(pull=pull), tempfile.TemporaryDirectory(prefix='coord-archive-scan-') as directory:
@@ -66,6 +69,7 @@ class ArchiveTests(unittest.TestCase):
                 self.assertEqual(freed['freed'], ['message/' + delivery])
                 self.assertEqual(f.ledger, [])
 
+    @unittest.skipIf(sys.platform == "win32", "Unix destination validation follows the explicit Windows unsupported guard")
     def test_destination_and_identifier_are_explicit(self):
         with self.assertRaises(ValueError):
             export("relative", "abc", [])

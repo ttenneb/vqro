@@ -10,6 +10,7 @@ LEGACY = LAUNCH.with_name('python_launch.py')
 
 
 class PiLauncherTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "Rust-bridge stand-in is an executable POSIX shell script, not a native exe")
     def test_exec_preserves_literal_argv_and_never_imports_project_code(self):
         with tempfile.TemporaryDirectory(prefix='pi-launch-') as name:
             root=Path(name);binary=root/'bin/vqro-bridge-pi';binary.parent.mkdir();capture=root/'argv'

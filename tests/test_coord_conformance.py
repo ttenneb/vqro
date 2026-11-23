@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
+import sys
 import unittest
 
 from agent_conformance.part_b.catalog import CASES, BY_ID, select_cases, cases_from_spec
@@ -276,6 +277,7 @@ class NativeOracle(unittest.IsolatedAsyncioTestCase):
             again=await native.control({"verb":"publish-receipt","ref":"a0","delivery":"d:repeat"})
             self.assertGreater(again["rev"],retained)
 
+    @unittest.skipIf(sys.platform == "win32", "native oracle control fixture listens with asyncio.start_unix_server")
     async def test_control_error_reply_keeps_the_request_id(self):
         from agent_conformance.core import Native as Client
         from agent_conformance.results import FixtureFailed

@@ -37,6 +37,7 @@ class HostHelpers(unittest.TestCase):
 
 
 class HostHandshake(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipIf(sys.platform == "win32", "registration fixture uses asyncio.start_unix_server, not a Windows pipe server")
     async def test_provider_opt_in_is_explicit_on_its_registration_only(self):
         requests = []
         async def core(reader, writer):
@@ -53,7 +54,7 @@ class HostHandshake(unittest.IsolatedAsyncioTestCase):
             finally:
                 writer.close()
                 await writer.wait_closed()
-        with tempfile.TemporaryDirectory(prefix='py-hctx', dir='/tmp') as root:
+        with tempfile.TemporaryDirectory(prefix='py-hctx') as root:
             path = str(Path(root) / 's')
             server = await asyncio.start_unix_server(core, path)
             provider = Provider('runtime', 'one', {}, role='runtime', token='bootstrap', host_context=True)

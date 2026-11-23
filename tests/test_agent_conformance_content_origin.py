@@ -648,6 +648,7 @@ class HandlerChecks(unittest.IsolatedAsyncioTestCase):
 
 
 class CallbackWireChecks(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipIf(sys.platform == "win32", "proof-forwarding fixture requires an asyncio Unix-domain server")
     async def test_exact_public_proof_forwarding_and_no_ambient_authority(self):
         """Exercise the actual callback script/SDK against a private fake wire.
 

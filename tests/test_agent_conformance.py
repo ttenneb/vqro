@@ -214,6 +214,7 @@ class TimelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(output[-1]["type"], "agent_settled")
 
 
+@unittest.skipIf(sys.platform == "win32", "conformance Peer fixture connects to an asyncio Unix-domain server")
 class PeerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.root = tempfile.TemporaryDirectory(prefix="vq-k1-")
@@ -899,6 +900,7 @@ class ClassificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.evidence[-1]["status"], "pass")
 
 
+@unittest.skipIf(sys.platform == "win32", "native conformance control fixture uses Unix-domain endpoints")
 class NativeFixtureTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="vq-k1-")

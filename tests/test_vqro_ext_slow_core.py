@@ -19,7 +19,7 @@ class ScriptedCore:
     """Answers like the core; `policy(method, msg)` may return "hold" to never answer that request."""
 
     def __init__(self, policy=None):
-        self.dir = tempfile.mkdtemp(prefix="pslow", dir="/tmp")
+        self.dir = tempfile.mkdtemp(prefix="pslow")
         self.path = os.path.join(self.dir, "s")
         self.srv = socket.socket(socket.AF_UNIX)
         self.srv.bind(self.path)
@@ -111,6 +111,7 @@ ext.run()
 '''
 
 
+@unittest.skipIf(sys.platform == "win32", "scripted core fixture uses a Unix socket; Windows transport has separate fake/native controls")
 class SlowCore(unittest.TestCase):
     def test_recovery_snapshot_timeouts_degrade_and_recover_instead_of_exiting(self):
         held = {"n": 0}

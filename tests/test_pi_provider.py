@@ -260,9 +260,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await bridge.pi.invoke("steer", {"message": "queued"})
         self.assertIn("Queued steering: 1", json.dumps(bridge.content()))
 
+    @unittest.skipIf(sys.platform == "win32", "CLI lifetime fixture exposes a Unix-domain core endpoint")
     async def test_cli_explicit_argv_and_managed_stdin_eof_are_clean(self):
         await self.cli_lifetime_case(native_exit=False)
 
+    @unittest.skipIf(sys.platform == "win32", "CLI lifetime fixture exposes a Unix-domain core endpoint")
     async def test_cli_native_exit_with_open_stdin_is_clean(self):
         await self.cli_lifetime_case(native_exit=True)
 

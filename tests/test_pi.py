@@ -93,6 +93,7 @@ class PiTests(unittest.TestCase):
         value = {"runtimes": [{"name": "windows host", "argv": ["pi1"], "bridge_argv": ["py", "-3", "-m", "pi_bridge"]}]}
         self.assertEqual(runtimes(value)[0]["bridge_argv"], ["py", "-3", "-m", "pi_bridge"])
 
+    @unittest.skipIf(sys.platform == "win32", "bridge stand-in uses a POSIX shebang; native exe launch has separate controls")
     def test_default_bridge_never_imports_project_or_pythonpath_shadow_modules(self):
         for shadow in ("uuid.py", "queue.py", "pi_bridge/__init__.py"):
             with self.subTest(shadow=shadow), tempfile.TemporaryDirectory(prefix="bridge-import-") as project:

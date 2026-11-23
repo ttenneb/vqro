@@ -20,6 +20,9 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+if sys.platform == "win32":
+    raise unittest.SkipTest("Linux check.sh lifetime controls require cgroups, /proc, pidfds and Unix signals")
+
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('check_lifetime', ROOT/'scripts/check_lifetime.py')
 lifetime = importlib.util.module_from_spec(spec)

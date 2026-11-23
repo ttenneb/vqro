@@ -539,6 +539,7 @@ class ListenerConflicts(unittest.TestCase):
         self.assertEqual(writes, ["entries"])
 
 
+@unittest.skipIf(sys.platform == "win32", "scripted child/core fixture uses AF_UNIX; thread/cache unit controls remain portable")
 class ListenerConflictsOverASocket(unittest.TestCase):
     """The same soak sequence with real Vqro threads and timers, against a scripted core: a slow
     listener lets 300 events overflow the queue (local gap), then the recovery's layout write
@@ -563,7 +564,7 @@ time.sleep(30)
 
     def test_recovery_conflicts_converge_without_disconnecting(self):
         import json, os, socket, subprocess, tempfile
-        d = tempfile.mkdtemp(prefix="pext", dir="/tmp")
+        d = tempfile.mkdtemp(prefix="pext")
         path = os.path.join(d, "s")
         srv = socket.socket(socket.AF_UNIX); srv.bind(path); srv.listen(1)
         ext_dir = str(pathlib.Path(__file__).resolve().parents[1] / "extensions")

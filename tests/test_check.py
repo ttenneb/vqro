@@ -1,4 +1,10 @@
 """Gate outcome/receipt regressions: actual shell/Python blocks, private files, no backends."""
+import sys
+import unittest
+
+if sys.platform == "win32":
+    raise unittest.SkipTest("check.sh controls require POSIX shell, flock and executable-bit fixtures; native gate is check.ps1")
+
 import fcntl
 import hashlib
 import json

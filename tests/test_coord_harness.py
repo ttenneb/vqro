@@ -66,6 +66,7 @@ def gone(pid, deadline):
     return not alive(pid)
 
 
+@unittest.skipIf(sys.platform == "win32", "private controller uses Unix socket, shebang and /proc process-lifetime fixtures")
 class StartupFailureTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="vq-harness-")
@@ -117,6 +118,7 @@ class StartupFailureTests(unittest.TestCase):
         self.assertTrue(child, "a process the core started outlived a failed start")
 
 
+@unittest.skipIf(sys.platform == "win32", "private coordination controller fixture listens on AF_UNIX")
 class SilentPeerTests(unittest.TestCase):
     def test_a_call_to_a_silent_peer_times_out_closes_and_is_not_retried(self):
         with tempfile.TemporaryDirectory(prefix="vq-silent-") as d:

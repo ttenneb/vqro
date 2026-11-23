@@ -2,6 +2,7 @@
 import asyncio
 from copy import deepcopy
 import time
+import sys
 import importlib
 from types import SimpleNamespace
 import unittest
@@ -314,6 +315,7 @@ def run_control(late_return, own_end=None, foreign=False, native_b_lives=False, 
     return ctx
 
 
+@unittest.skipIf(sys.platform == "win32", "replacement timeline controls exercise Unix SIGSTOP/SIGCONT freeze semantics")
 class WholeHandlerControls(unittest.TestCase):
     """The real L3 handler against the simulated core: only the correct late return is accepted."""
 

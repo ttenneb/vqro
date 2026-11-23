@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+import sys
 import unittest
 from unittest.mock import patch
 import test_coordination_engine as fixtures
@@ -35,6 +36,7 @@ class ArchiveRecoveryTests(unittest.TestCase):
         self.assertFalse(any(k.startswith('archive/') for k in f.store.snapshot()))
         self.assertEqual(f.ledger, [])
 
+    @unittest.skipIf(sys.platform == "win32", "scenario requires positive durable archive export, unsupported on native Windows")
     def test_legacy_archived_members_do_not_strand_multi_record_handover(self):
         for action in ('complete', 'abort'):
             for count in (1, 2):
@@ -61,6 +63,7 @@ class ArchiveRecoveryTests(unittest.TestCase):
                         self.assertEqual(remaining['to']['agent'], 'r2' if action == 'complete' else 'r1')
                     self.assertEqual(f.ledger, [])
 
+    @unittest.skipIf(sys.platform == "win32", "scenario requires positive durable archive export, unsupported on native Windows")
     def test_handover_cannot_rewrite_frozen_records(self):
         for action in ('create', 'complete', 'abort'):
             with self.subTest(action=action), tempfile.TemporaryDirectory(prefix='coord-frozen-handover-') as destination:
@@ -85,6 +88,7 @@ class ArchiveRecoveryTests(unittest.TestCase):
                 self.assertEqual(f.engine.archive({'op': f.op(), 'action': 'export', 'archive': archive}, fixtures.OWNER)['state'], 'accepted')
                 self.assertEqual(f.ledger, [])
 
+    @unittest.skipIf(sys.platform == "win32", "scenario requires positive durable archive export, unsupported on native Windows")
     def test_late_receipt_survives_abort_replan_export_and_plan_slot_reuse(self):
         f = fixtures.EngineTests(); f.setUp()
         f.resources['r1']['data']['agent']['caps']['agent.send']['correlation'] = 'insertion'
@@ -122,6 +126,7 @@ class ArchiveRecoveryTests(unittest.TestCase):
             self.assertEqual(freed['freed'], ['message/' + delivery])
             self.assertEqual(len(f.ledger), native_count)
 
+    @unittest.skipIf(sys.platform == "win32", "concurrent export/abort scenario requires the Unix archive exporter")
     def test_export_finishing_after_abort_cannot_resurrect_plan(self):
         f = fixtures.EngineTests(); f.setUp()
         delivery = f.send()['delivery']
