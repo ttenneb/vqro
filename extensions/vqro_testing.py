@@ -147,19 +147,24 @@ def _literal_program(program, cwd, path, *, executable_only=True):
                 return candidate  # A known path with inaccessible metadata must not become "absent".
         return candidate if candidate.is_file() and (sys.platform == "win32" or not executable_only or os.access(candidate, os.X_OK)) else None
     if not executable_only:
-        # which() swallows inaccessible search entries as missing. Preserve that
-        # candidate so fingerprinting reports unknown, not a proved absence.
+        # Preserve PATH order: uncertainty before a usable match is unknown, but
+        # an inaccessible later entry cannot override an earlier readable file.
         for directory in os.get_exec_path({"PATH": path}):
-            candidate = Path(directory or os.curdir) / program
-            if not candidate.is_absolute():
-                candidate = Path(cwd) / candidate
+            parent = Path(directory or os.curdir)
+            if not parent.is_absolute():
+                parent = Path(cwd) / parent
+            candidate = parent / program
             try:
                 candidate.stat()
             except (FileNotFoundError, NotADirectoryError):
-                continue
+                pass
             except OSError:
                 return candidate
-    found = shutil.which(program, path=path, mode=os.X_OK if executable_only else os.F_OK)
+            found = shutil.which(program, path=str(parent), mode=os.F_OK)
+            if found:
+                return Path(found).resolve()
+        return None
+    found = shutil.which(program, path=path)
     return Path(found).resolve() if found else None
 
 

@@ -92,7 +92,12 @@ plugins and explicit finish tools may use its deterministic assessment; this is 
 not a security boundary. The Pi plugin in this slice is supported only for terminal (tier1) Pi launches.
 Missing plugin/skill assets do not stop Pi launching: they produce one unavailable notice/log and no testing flags.
 RPC Pi launches remain unchanged at the bridge boundary and report testing-plugin support as unavailable;
-no extension injection or environment-filter exception is added to those bridges.
+no extension injection or environment-filter exception is added to those bridges. This is only the first slice:
+RPC coverage is a **required follow-up**, not dropped scope. While a declared RPC Pi launcher is enabled, the
+status segment, Settings page, status reasons and receipts show:
+**NOT VERIFIED: rule not active for vqro-launched Pi agents yet**.
+The injected prompt/skill requires the finish tool only for a fresh ON assessment; OFF, unknown, stale or
+unavailable assessments recommend evidence with honest wording instead of imposing an unconditional rule.
 
 `test.setup.status {}` returns the current `setup_id`, observed `generation`, `require_unit`, Unit/Integration/
 Performance evidence and `finish_ok`. Unit is required only when armed: a current recorded Unit pass or an
@@ -111,6 +116,11 @@ python3 extensions/testing_unit.py --record --json --socket SOCKET --state-dir S
 `--record` owns the receipt filename under `<state>/test-unit/`, writes atomically at 0600 and retains 20 runs.
 It cannot be combined with `--no-tests`: deliberately disabled installed tests cannot grant completion.
 Recorded in-app checks with `tests:false` remain unverified; adoption requires `tests_enabled:true`.
+In-app Unit uses recording only while policy is ON. OFF status reads/ordinary health checks do not import or
+lock the Unix recorder; an OFF health receipt is ad hoc, not finish evidence. Explicit CLI `--record` still
+requests recording. If its lock/observer is unavailable, ordinary checks still run: `health_verdict` reports
+their outcome, `recording.state` is `unsupported`, `recorded` is false, and finish evidence is NOT VERIFIED.
+No no-op lock is substituted and no unsupported recording is published as a current receipt.
 JSON includes its path. `--out` is mutually exclusive, ad hoc and **never adopted** as Unit completion evidence.
 Status reads adopt only complete, supported, recorded receipts for this setup, generation and selected instance;
 wrong suites/instances, old generations, incomplete JSON and unfinished runs never count as a pass. Integration
@@ -124,15 +134,18 @@ tests/scenarios and assets, and each declaration's resolved executable/script by
 receipts/logs/results and caches, including the checker's own state. Limits are 10,000 entries, 32 MiB per asset,
 256 MiB per executable, 512 MiB total and depth 64. A disabled declaration's missing or unresolvable
 program/script is deterministically fingerprinted with its declaration bytes and an `absent` marker; it does not
-make identity unknown. Appearance of that input changes identity, and enabling an unresolved declaration makes
+make identity unknown. Bare-program fallback preserves first-match PATH ordering: a readable earlier input
+wins, uncertainty before a usable match is unknown, and inaccessible later entries cannot override that match.
+Appearance of that input changes identity, and enabling an unresolved declaration makes
 identity unknown. Existing files that cannot be read (even for disabled declarations), oversized inputs and
 unresolved enabled inputs make identity unknown (`setup_id: null`), never a successful empty digest. External directory links and an overlapping
 state/extensions root are unsupported inputs. Hashes describe configured bytes, not verified loaded images or
 arbitrary unmanaged imports. Selected endpoint/state/extensions paths and the core epoch bind the evidence.
 
 Unit fingerprints before and after checking. Concurrent changes make closure unverified. Observed entry changes,
-including change/revert, increment the persisted generation; restart/missed events invalidate prior evidence and
-rescan. Filesystem changes are detected on explicit status checks and while armed evidence is pending. This does
+including change/revert, increment the persisted generation while armed or explicitly recording; armed
+restart/missed events invalidate prior evidence and rescan. OFF assessments use read-only previews, not a
+persisted observer. Filesystem changes are detected on explicit status checks and while armed evidence is pending. This does
 not claim perfect detection of unobserved transient external file edits. Live notices use only `view.publish`:
 `testing.status`, a status-menu item, and `settings.page.testing`. Missing, stale, failed, pending or unknown evidence
 is prominent; a coverage gap is a warning, not a failed or unverified Unit result.

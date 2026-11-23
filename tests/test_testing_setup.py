@@ -76,6 +76,74 @@ class SetupTests(unittest.TestCase):
         shared.write_receipt(receipt, path)
         return path, receipt
 
+    def test_policy_off_status_and_health_never_touch_recorder_lock(self):
+        self.snapshot["entries"][setup.POLICY_KEY]["value"] = False
+        with patch.dict(sys.modules, {"fcntl": None}), patch.object(setup.SetupStore, "locked", side_effect=AssertionError("OFF must not lock")), patch.object(unit, "tests_row", return_value=shared.row("tests", "sample", "pass", "portable mocked suite")):
+            status = self.status()
+            result = unit.collect(self.state, self.ext, client=self.client, hello=self.hello, record=False)
+        self.assertFalse(status["require_unit"])
+        self.assertEqual(result["health_verdict"], "pass")
+        self.assertEqual(result["recording"]["state"], "not-requested")
+        self.assertFalse(result["recorded"])
+        self.assertFalse((self.state / "test-unit/setup-state.lock").exists())
+
+    def test_rpc_followup_notice_is_in_status_page_segment_and_receipt(self):
+        self.snapshot["entries"]["extension/pi"] = {"version": 1, "value": {"enabled": True, "argv": [str(self.image), "pi.py"]}}
+        (self.ext / "pi.py").write_text("# declared RPC launcher fixture\n")
+        (self.ext / "manifests/pi.json").write_text('{"name":"pi"}')
+        self.facts["pi"] = {"enabled": True, "display_status": "running", "crashes": 0, "manifest": {"name": "pi"}, "dependencies": {"status": "ok"}}
+        with patch.object(unit, "tests_row", side_effect=lambda name, *args, **kwargs: shared.row("tests", name, "pass", "portable mocked suite")):
+            result = unit.collect(self.state, self.ext, client=self.client, hello=self.hello, record=True)
+        status = self.status()
+        self.assertIn(setup.RPC_RULE_NOTICE, status["not_verified_reasons"])
+        self.assertEqual(unit.notice(status)["label"], setup.RPC_RULE_NOTICE)
+        self.assertTrue(any(setup.RPC_RULE_NOTICE in row.get("text", "") for row in unit.setup_page(status)["items"]))
+        self.assertIn(setup.RPC_RULE_NOTICE, result["not_covered"])
+        for suite in ("integration", "perf"):
+            report = {"not_covered": []}
+            setup.bind_start(report, self.value(), self.snapshot, self.state, suite)
+            self.assertIn(setup.RPC_RULE_NOTICE, report["not_covered"])
+        self.snapshot["entries"]["extension/pi"]["value"]["enabled"] = False
+        self.assertIsNone(setup.rpc_rule_notice(self.snapshot))
+        self.snapshot["entries"]["extension/custom-pi-launcher"] = {"version": 1, "value": {"enabled": True, "argv": [str(self.image)],
+            "manifest": {"provides": ["command/pi.new"]}}}
+        self.assertEqual(setup.rpc_rule_notice(self.snapshot), setup.RPC_RULE_NOTICE)
+
+    def test_missing_fcntl_preserves_health_checks_without_completion_evidence(self):
+        self.coverage()
+        with patch.dict(sys.modules, {"fcntl": None}), patch.object(unit, "tests_row", return_value=shared.row("tests", "sample", "pass", "portable mocked suite")) as run:
+            result = unit.collect(self.state, self.ext, client=self.client, hello=self.hello, record=True)
+            status = unit.setup_status(self.state, self.ext, client=self.client, hello=self.hello)
+        run.assert_called_once()
+        self.assertEqual(result["health_verdict"], "pass")
+        self.assertEqual(result["verdict"], "unverified")
+        self.assertFalse(result["recorded"])
+        self.assertEqual(result["recording"]["state"], "unsupported")
+        self.assertIn("fcntl", result["recording"]["reason"])
+        self.assertTrue(any(row["id"] == "tests/sample" and row["status"] == "pass" for row in result["rows"]))
+        self.assertFalse(any(row["id"] == "error/harness" for row in result["rows"]))
+        self.assertFalse(status["finish_ok"])
+        self.assertFalse((self.state / "test-unit/setup-state.lock").exists())
+
+    def test_observer_error_does_not_skip_portable_health_checks(self):
+        with patch.object(setup.SetupStore, "observe", side_effect=RuntimeError("observer fixture failure")), patch.object(unit, "tests_row", return_value=shared.row("tests", "sample", "pass", "portable mocked suite")) as run:
+            result = unit.collect(self.state, self.ext, client=self.client, hello=self.hello, record=True)
+        run.assert_called_once()
+        self.assertEqual(result["health_verdict"], "pass")
+        self.assertEqual(result["recording"]["state"], "unsupported")
+        self.assertFalse(result["recorded"])
+        self.assertFalse(any(row["id"] == "error/harness" for row in result["rows"]))
+
+    def test_record_cli_with_unsupported_lock_prints_health_without_writing_a_record(self):
+        with patch.dict(sys.modules, {"fcntl": None}), patch("vqro_testing.PlainClient", return_value=self.client), patch.object(unit, "tests_row", return_value=shared.row("tests", "sample", "pass", "portable mocked suite")), patch.object(unit, "save_receipt", side_effect=AssertionError("must not publish unsupported recording")), contextlib.redirect_stdout(io.StringIO()) as stdout:
+            code = unit.main(["--json", "--record", "--socket", self.hello["socket"], "--state-dir", str(self.state), "--extensions-dir", str(self.ext)])
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(code, 77)
+        self.assertEqual(result["health_verdict"], "pass")
+        self.assertEqual(result["recording"]["state"], "unsupported")
+        self.assertFalse(result["recorded"])
+        self.assertNotIn("receipt", result)
+
     def test_record_cli_refuses_no_tests_before_connecting_or_writing(self):
         before = set(self.state.iterdir())
         with patch("vqro_testing.PlainClient", side_effect=AssertionError("must not connect")), contextlib.redirect_stderr(io.StringIO()):

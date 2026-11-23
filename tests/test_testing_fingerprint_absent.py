@@ -60,6 +60,38 @@ class DisabledFingerprintTests(unittest.TestCase):
         finally:
             directory.chmod(0o700)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission fixture; Windows ACL behavior needs native validation")
+    def test_readable_nonexec_first_match_wins_over_inaccessible_later_path(self):
+        first, hidden = self.base / "first", self.base / "hidden"
+        first.mkdir()
+        hidden.mkdir()
+        program = first / "optional-tool"
+        program.write_text("known first input")
+        program.chmod(0o600)
+        (hidden / "optional-tool").write_text("must not override the first input")
+        hidden.chmod(0)
+        try:
+            try:
+                (hidden / "optional-tool").stat()
+            except PermissionError:
+                pass
+            else:
+                self.skipTest("current identity bypasses the private permission fixture")
+            declaration = {"argv": ["optional-tool"], "enabled": False}
+            with patch.dict(os.environ, {"PATH": str(first)}):
+                expected = self.fingerprint(declaration)
+            with patch.dict(os.environ, {"PATH": os.pathsep.join((str(first), str(hidden)))}):
+                actual = self.fingerprint(declaration)
+            self.assertIsNotNone(actual["setup_id"])
+            self.assertEqual(actual["setup_id"], expected["setup_id"])
+            self.assertEqual(actual["executables"]["optional"]["path"], str(program))
+            self.assertTrue(actual["executables"]["optional"]["sha256"])
+            self.assertEqual(actual["unknown"], [])
+            with patch.dict(os.environ, {"PATH": os.pathsep.join((str(hidden), str(first)))}):
+                self.assertIsNone(self.fingerprint(declaration)["setup_id"])
+        finally:
+            hidden.chmod(0o700)
+
     def test_disabled_missing_python_script_is_known_until_enabled(self):
         declaration = {"argv": [sys.executable, "-B", str(self.root / "missing.py")], "enabled": False}
         absent = self.fingerprint(declaration)

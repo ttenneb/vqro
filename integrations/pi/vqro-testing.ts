@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const KEY = "vqro-testing";
-const RULE = "For a vqro setup change, use vqro_setup_finish before reporting completion. Attach the current Unit receipt (or ask the human to accept failure); attach Integration evidence or explicitly record why skipped. Missing/error/stale evidence is NOT VERIFIED. Performance is only recommended for hot paths and never blocks. This guard cannot prevent prose claims of done.";
+const GUIDANCE = "When providing evidence, include receipts with their actual verdicts and coverage gaps; never label missing, failed or stale evidence a pass. Performance is recommended only for hot paths and never blocks. This cooperative guard cannot prevent prose claims of done.";
 const UNIT_STATES = new Set(["pass", "fail", "error", "unverified", "missing", "stale", "pending"]);
 const INTEGRATION_STATES = new Set(["pass", "fail", "skipped", "unverified", "missing", "pending", "stale"]);
 
@@ -27,6 +27,15 @@ type Dependencies = {
   unit: () => Promise<void>;
   stderr?: (message: string) => void;
 };
+
+function policyRule(status?: Status): string {
+  const stale = status?.unit.state === "stale" || status?.integration.state === "stale";
+  if (status?.require_unit === true && !stale) {
+    return "Current setup policy ON: vqro_setup_finish is required before reporting a setup change finished. Attach current Unit evidence or request a human-accepted exception, plus Integration evidence or an explicit skip reason. " + GUIDANCE;
+  }
+  const state = !status ? "UNKNOWN/UNAVAILABLE" : stale ? "STALE assessment" : "OFF";
+  return `Current setup policy ${state}: Unit and Integration evidence are recommended, not unconditionally required by this instruction. You may use vqro_setup_finish to inspect evidence. Recommended reporting: attach available receipts or explain why checks were skipped/unavailable; refresh unknown or stale status before claiming verified completion. ` + GUIDANCE;
+}
 
 function parseStatus(value: any): Status {
   if (value?.setup_id === null) throw new Error("setup identity is unknown: NOT VERIFIED");
@@ -75,8 +84,9 @@ function summary(status?: Status, error?: string): string {
     (status.integration.state === "stale" ? ` (${older})` : "") +
     (status.integration.receipt ? ` (receipt ${status.integration.receipt})` : "") +
     (status.integration.skip_reason ? `: ${status.integration.skip_reason}` : "");
+  const scope = status.not_verified_reasons.find(reason => reason === "NOT VERIFIED: rule not active for vqro-launched Pi agents yet");
   const gaps = status.coverage_gaps.length ? ` [Coverage gaps: ${status.coverage_gaps.join("; ")}]` : "";
-  return `Setup change: Unit ${verdict}${gaps} (${receipt}); Integration ${integration}; ${status.finish_ok ? "finish evidence accepted" : "NOT VERIFIED: finish refused"}` +
+  return `Setup change: ${scope ? `[${scope}] · ` : ""}Unit ${verdict}${gaps} (${receipt}); Integration ${integration}; ${status.finish_ok ? "finish evidence accepted" : "NOT VERIFIED: finish refused"}` +
     (status.unit.exception ? `; human exception: ${status.unit.exception.reason}` : "") +
     (status.require_unit ? "" : "; Unit requirement OFF") +
     (["fail", "error", "unverified", "stale", "pending"].includes(status.performance.state) ?
@@ -146,7 +156,10 @@ export function installTesting(pi: any, deps: Dependencies) {
     current = undefined;
     await check(ctx, "baseline");
   });
-  pi.on("before_agent_start", async (event: any) => ({ systemPrompt: `${event.systemPrompt}\n\n${RULE}` }));
+  pi.on("before_agent_start", async (event: any, ctx: any) => {
+    await check(ctx, "prompt"); // Do not impose a cached or unavailable policy on the next run.
+    return { systemPrompt: `${event.systemPrompt}\n\n${policyRule(current)}` };
+  });
   pi.on("tool_result", async (event: any, ctx: any) => {
     // Shell parsing is not reliable: conservatively rescan after any bash/edit/write.
     // Other/custom tools are caught by the mandatory final-boundary rescan.
@@ -164,7 +177,7 @@ export function installTesting(pi: any, deps: Dependencies) {
   });
   pi.registerTool({
     name: "vqro_setup_finish", label: "Finish vqro setup change",
-    description: "Validate current Unit and Integration evidence before claiming a vqro setup change finished. Does not prevent prose claims; requirement defaults off until the human enables it.",
+    description: "Inspect setup evidence. A fresh ON policy requires the finish step; OFF or unknown/stale/unavailable assessments recommend evidence without an unconditional completion duty. Missing evidence is not a pass; no prose veto.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     async execute(_id: string, _args: unknown, _signal: unknown, _update: unknown, ctx: any) {
       await check(ctx, "finish");

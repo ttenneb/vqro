@@ -12,6 +12,25 @@ from vqro_testing import (canonical, digest, fingerprint, process_identity, rele
                           is_settings_key, text, utc_now, write_receipt)
 
 POLICY_KEY = "doc/settings/testing.require_unit"
+RPC_RULE_NOTICE = "NOT VERIFIED: rule not active for vqro-launched Pi agents yet"
+
+
+def rpc_rule_notice(snapshot):
+    """Declared RPC launchers only; no attempt to infer arbitrary executable behavior."""
+    for key, entry in snapshot.get("entries", {}).items():
+        if not key.startswith("extension/"):
+            continue
+        value = entry.get("value", {})
+        if value.get("enabled", True) is False:
+            continue
+        name = key.removeprefix("extension/")
+        fact = snapshot.get("extensions", {}).get(name, {})
+        manifest = fact.get("manifest") or value.get("manifest")
+        provides = manifest.get("provides", []) if isinstance(manifest, dict) else []
+        programs = {str(arg).replace("\\", "/").rsplit("/", 1)[-1].lower() for arg in value.get("argv", [])}
+        if name == "pi" or "command/pi.new" in provides or programs & {"pi.py", "vqro-bridge-pi", "vqro-bridge-pi.exe"}:
+            return RPC_RULE_NOTICE
+    return None
 STATE_VERSION = 1
 RECEIPT_LIMIT = 1024 * 1024
 _LOCAL_LOCK = threading.RLock()
@@ -45,7 +64,10 @@ class SetupStore:
     @contextmanager
     def locked(self):
         # A separate lock inode survives atomic replacement of the state/receipt files.
-        import fcntl
+        try:
+            import fcntl
+        except ImportError as failure:
+            raise RuntimeError("completion recording unsupported: fcntl is unavailable; ordinary health checks remain available") from failure
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         with _LOCAL_LOCK, (self.directory / "setup-state.lock").open("a+b") as lock:
             os.fchmod(lock.fileno(), 0o600)
@@ -78,26 +100,31 @@ class SetupStore:
             state["exception"] = state["skip"] = None
             write_receipt(state, self.path)
 
-    def observe(self, value, snapshot):
+    def preview(self, value, snapshot):
+        """Read-only assessment while policy is OFF: no recorder lock or state writes."""
         entries = relevant_entries(snapshot)
         versions = {key: entry.get("version") for key, entry in entries.items()}
         signature = digest([canonical({key: value.get(key) for key in ("setup_id", "declarations", "settings", "extensions", "executables", "instance", "unknown")})])
+        state = self.read()
+        changed = signature != state.get("signature") or versions != state.get("versions")
+        if changed and not state.get("dirty"):
+            state.update(generation=state["generation"] + 1, changed_at=utc_now())
+            state["exception"] = state["skip"] = None
+            old = state.get("fingerprint", {})
+            names = {key.removeprefix("extension/") for key, entry in entries.items()
+                     if key.startswith("extension/") and entry["value"].get("enabled", True)}
+            individual = {name for name in names if old.get("extensions", {}).get(name) != value.get("extensions", {}).get(name)}
+            state["changed_extensions"] = sorted(individual or names)
+        elif state.get("dirty") and not state.get("changed_extensions"):
+            state["changed_extensions"] = sorted(key.removeprefix("extension/") for key, entry in entries.items()
+                                                 if key.startswith("extension/") and entry["value"].get("enabled", True))
+        state.update(signature=signature, setup_id=value.get("setup_id"), fingerprint=value, versions=versions,
+                     instance=value["instance"], dirty=False)
+        return state
+
+    def observe(self, value, snapshot):
         with self.locked():
-            state = self.read()
-            changed = signature != state.get("signature") or versions != state.get("versions")
-            if changed and not state.get("dirty"):
-                state.update(generation=state["generation"] + 1, changed_at=utc_now())
-                state["exception"] = state["skip"] = None
-                old = state.get("fingerprint", {})
-                names = {key.removeprefix("extension/") for key, entry in entries.items()
-                         if key.startswith("extension/") and entry["value"].get("enabled", True)}
-                individual = {name for name in names if old.get("extensions", {}).get(name) != value.get("extensions", {}).get(name)}
-                state["changed_extensions"] = sorted(individual or names)
-            elif state.get("dirty") and not state.get("changed_extensions"):
-                state["changed_extensions"] = sorted(key.removeprefix("extension/") for key, entry in entries.items()
-                                                     if key.startswith("extension/") and entry["value"].get("enabled", True))
-            state.update(signature=signature, setup_id=value.get("setup_id"), fingerprint=value, versions=versions,
-                         instance=value["instance"], dirty=False)
+            state = self.preview(value, snapshot)
             write_receipt(state, self.path)
             return state
 
@@ -218,9 +245,13 @@ class SetupStore:
         return stale or {"state": "missing", "receipt": None, "verdict": None, "why": "no current recorded receipt"}
 
     def status(self, value, snapshot):
-        state = self.observe(value, snapshot)
+        required = snapshot.get("entries", {}).get(POLICY_KEY, {}).get("value", False) is True
+        state = self.observe(value, snapshot) if required else self.preview(value, snapshot)
         unit, integration, performance = (self.receipt(suite, state) for suite in ("unit", "integration", "perf"))
         reasons = list(value.get("unknown", []))
+        scope_notice = rpc_rule_notice(snapshot)
+        if scope_notice:
+            reasons.insert(0, scope_notice)
         policy = snapshot.get("entries", {}).get(POLICY_KEY, {}).get("value", False)
         required = policy is True
         invalid_policy = not isinstance(policy, bool)
@@ -305,6 +336,9 @@ class SetupStore:
 
 
 def bind_start(result, value, snapshot, state_dir, suite, destination=None):
+    scope_notice = rpc_rule_notice(snapshot)
+    if scope_notice:
+        result.setdefault("not_covered", []).append(scope_notice)
     store = SetupStore(state_dir)
     context = store.context(store.observe(value, snapshot))
     result["started_at"] = utc_now()
@@ -321,6 +355,9 @@ def bind_end(result, before, client, hello, state_dir, extensions_dir, endpoint=
         return
     try:
         snapshot, value = scan(client, hello, state_dir, extensions_dir, endpoint)
+        scope_notice = rpc_rule_notice(snapshot)
+        if scope_notice and scope_notice not in result.setdefault("not_covered", []):
+            result["not_covered"].append(scope_notice)
         after = SetupStore(state_dir).context(SetupStore(state_dir).observe(value, snapshot))
         if not stamp_receipt(result, before, after):
             result["not_covered"].append("setup changed during run or identity is unknown; this receipt cannot acknowledge completion")

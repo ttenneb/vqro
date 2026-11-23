@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_process import background_kwargs
 from vqro_testing import (EXIT_CODES, cli_parser, dependency_row, endpoints, fingerprint, is_settings_key, is_setup_key, print_result, receipt,
                           resolve_program, row, save_receipt, script_path, text, utc_now, write_receipt)
-from testing_setup import SetupStore, scan as setup_scan, stamp_receipt
+from testing_setup import SetupStore, POLICY_KEY, RPC_RULE_NOTICE, rpc_rule_notice, scan as setup_scan, stamp_receipt
 
 LOG_BYTES = 64 * 1024
 TEST_TIMEOUT = 120
@@ -145,8 +145,9 @@ def collect(state_dir, extensions_dir, *, client=None, hello=None, offline=False
     started, started_at = time.monotonic(), utc_now()
     rows, inputs, not_covered = [], [], [NOT_COVERED]
     tracker, context, harness_error = SetupStore(state_dir), None, False
+    recording_error, recording_active = None, False
     source = "live" if client is not None and not offline else "offline"
-    declarations, fp = {}, {}
+    declarations, fp, snapshot = {}, {}, {}
     rows.append(row("core", "reachable", "pass" if source == "live" else "warn",
                     "live" if source == "live" else "offline: " + (connection_error or "requested file report")))
     try:
@@ -164,16 +165,26 @@ def collect(state_dir, extensions_dir, *, client=None, hello=None, offline=False
             declarations = declarations_in(snapshot)
             facts = offline_facts(declarations, extensions_dir)
             hello = {}
+        scope_notice = rpc_rule_notice(snapshot)
+        if scope_notice:
+            rows.append(row("coverage", "rpc-pi-rule", "unverified", scope_notice))
+            not_covered.append(scope_notice)
         if hello.get("safe_mode") or snapshot.get("safe_mode") or any(f.get("safe_mode") for f in facts.values()):
             rows.append(row("core", "safe_mode", "warn", "core is in safe mode"))
         info = dict(hello or {}, epoch=snapshot.get("epoch", (hello or {}).get("epoch")))
         fp = fingerprint(extensions_dir, declarations, info,
                          settings={key: entry["value"] for key, entry in snapshot.get("entries", {}).items() if is_settings_key(key)},
                          state_dir=state_dir, endpoint=endpoint)
+        context = {"setup_id": fp.get("setup_id"), "generation": 0, "instance": fp["instance"], "setup_observer": None}
         if record:
-            context = tracker.begin(tracker.observe(fp, snapshot))
-        else:
-            context = {"setup_id": fp.get("setup_id"), "generation": 0, "instance": fp["instance"], "setup_observer": None}
+            try:
+                context = tracker.begin(tracker.observe(fp, snapshot))
+                recording_active = True
+            except Exception as failure:
+                # Recorder/observer portability is separate from ordinary health checks.
+                recording_error = text(f"recording unsupported or unavailable: {failure}")
+                rows.append(row("recording", "completion", "unverified", recording_error))
+                not_covered.append(recording_error + "; finish evidence NOT VERIFIED")
         started_at = utc_now()
         inputs.append(str(extensions_dir))
         for key, declaration in sorted(declarations.items()):
@@ -215,14 +226,17 @@ def collect(state_dir, extensions_dir, *, client=None, hello=None, offline=False
         not_covered.append("recorded Unit verification requires installed tests to be enabled")
     result = receipt(rows, source=source, started_at=started_at, started=started, fingerprint_value=fp,
                      inputs=inputs, not_covered=not_covered, extension_count=len(declarations), strict=strict, error=harness_error)
-    result["recorded"] = record
+    result["health_verdict"] = result["verdict"]
+    result["recorded"] = recording_active
+    result["record_requested"] = bool(record)
+    result["recording"] = {"state": "unsupported" if recording_error else "active" if recording_active else "not-requested", "reason": recording_error}
     result["tests_enabled"] = bool(tests)
-    if record and not tests and result["verdict"] == "pass":
+    if (recording_error or record and not tests) and result["verdict"] == "pass":
         result["verdict"] = "unverified"
     if context is not None:
         try:
             after_snapshot, after_fp = setup_scan(client if source == "live" else None, hello, state_dir, extensions_dir, endpoint)
-            after = tracker.context(tracker.observe(after_fp, after_snapshot)) if record else {
+            after = tracker.context(tracker.observe(after_fp, after_snapshot)) if recording_active else {
                 "setup_id": after_fp.get("setup_id"), "generation": 0, "instance": after_fp["instance"], "setup_observer": None}
             matched = stamp_receipt(result, context, after)
             if not matched:
@@ -230,14 +244,14 @@ def collect(state_dir, extensions_dir, *, client=None, hello=None, offline=False
                 result["counts"]["unverified"] += 1
                 if context.get("setup_id") != after.get("setup_id") or context["generation"] != after["generation"] or result["verdict"] == "pass":
                     result["verdict"] = "unverified"
-            if record:
+            if recording_active:
                 result["receipt"] = context["receipt"]
         except Exception as failure:
             result.update(setup_id=context.get("setup_id"), generation=context["generation"], instance=context.get("instance"), closure={"matched": False})
             result["rows"].append(row("setup", "closure", "unverified", f"could not close verification: {failure}"))
             result["counts"]["unverified"] += 1
             result["verdict"] = "unverified" if result["verdict"] == "pass" else result["verdict"]
-            if record:
+            if recording_active:
                 result["receipt"] = context["receipt"]
     else:
         result.update(setup_id=None, generation=0, instance=fp.get("instance"), closure={"matched": False})
@@ -268,11 +282,16 @@ def error_status(reason):
 
 
 def setup_status(state_dir, extensions_dir, *, client=None, hello=None, endpoint=None):
+    snapshot = {}
     try:
         snapshot, value = setup_scan(client, hello, state_dir, extensions_dir, endpoint)
         return SetupStore(state_dir).status(value, snapshot)
     except Exception as failure:
-        return error_status(f"setup status unavailable: {failure}")
+        status = error_status(f"setup status unavailable: {failure}")
+        scope_notice = rpc_rule_notice(snapshot)
+        if scope_notice:
+            status["not_verified_reasons"].insert(0, scope_notice)
+        return status
 
 
 def notice(status):
@@ -280,7 +299,9 @@ def notice(status):
     bad = any(state in ("fail", "error", "unverified", "missing", "stale", "pending") for state in states)
     bad = bad or bool(status["not_verified_reasons"]) or status["require_unit"] and not status["finish_ok"] or status["setup_id"] is None
     gaps = bool(status.get("coverage_gaps"))
-    if bad:
+    if RPC_RULE_NOTICE in status["not_verified_reasons"]:
+        label = RPC_RULE_NOTICE
+    elif bad:
         label = "NOT VERIFIED"
         if gaps and status["unit"]["state"] == "pass":
             label += " · Unit PASS · coverage gaps"
@@ -324,9 +345,12 @@ def extension_main():
     last = {"result": None, "receipt": None, "status": None, "observer_error": None}
     wake, stopping = threading.Event(), threading.Event()
 
+    def policy_on():
+        return ext.value(POLICY_KEY) is True
+
     def refresh():
         with lock:
-            if last["observer_error"]:
+            if last["observer_error"] and policy_on():
                 try:
                     tracker.invalidate("previous setup observation failed; evidence invalidated")
                     last["observer_error"] = None
@@ -335,7 +359,12 @@ def extension_main():
                 else:
                     status = setup_status(state_dir, extensions_dir, client=ext.vqro, hello=ext.info)
             else:
+                if not policy_on():
+                    last["observer_error"] = None
                 status = setup_status(state_dir, extensions_dir, client=ext.vqro, hello=ext.info)
+            entries = getattr(ext, "entries", {})
+            if isinstance(entries, dict) and rpc_rule_notice({"entries": entries}) and RPC_RULE_NOTICE not in status["not_verified_reasons"]:
+                status["not_verified_reasons"].insert(0, RPC_RULE_NOTICE)
             last["status"] = status
             ext.publish("testing.status", notice(status))
             ext.publish("settings.page.testing", setup_page(status))
@@ -370,13 +399,21 @@ def extension_main():
     def run(args):
         with lock:
             ext.publish("testing.status", {"label": "NOT VERIFIED · Unit checking", "style": "warn"})
+            snapshot = ext.vqro.call("workspace.snapshot")
+            recording_on = snapshot.get("entries", {}).get(POLICY_KEY, {}).get("value", False) is True
             result = collect(state_dir, extensions_dir, client=ext.vqro, hello=ext.info,
-                             tests=args.get("tests", True), strict=args.get("strict", False), tests_budget=20, record=True)
-            destination = save_receipt(result, state_dir, result.get("receipt"))
+                             tests=args.get("tests", True), strict=args.get("strict", False), tests_budget=20, record=recording_on)
+            destination = None
+            if result["recording"]["state"] != "unsupported":
+                try:
+                    destination = save_receipt(result, state_dir, result.get("receipt"))
+                except Exception as failure:
+                    result["not_covered"].append(text(f"health report was not saved: {failure}"))
             last.update(result=result, receipt=destination)
             ext.publish("test-unit.report", panel(result, destination))
         refresh()
-        return {"verdict": result["verdict"], "receipt": destination, "counts": result["counts"],
+        return {"verdict": result["verdict"], "health_verdict": result["health_verdict"], "recorded": result["recorded"],
+                "recording": result["recording"], "receipt": destination, "counts": result["counts"],
                 "client": {"popup": {"view": "test-unit.report", "width": 120}}}
 
     @ext.command("test.unit.show", "Show the last unit health report and current setup evidence")
@@ -394,10 +431,11 @@ def extension_main():
     def changed(kind, data):
         keys = [change["key"] for change in data.get("changes", []) if is_setup_key(change["key"])]
         if kind == "missed" or keys:
-            try:
-                tracker.invalidate("missed setup events" if kind == "missed" else "observed setup entries changed", keys)
-            except Exception as failure:
-                last["observer_error"] = str(failure)
+            if policy_on():
+                try:
+                    tracker.invalidate("missed setup events" if kind == "missed" else "observed setup entries changed", keys)
+                except Exception as failure:
+                    last["observer_error"] = str(failure)
             wake.set()
         elif kind == "view.content":
             wake.set()
@@ -417,10 +455,11 @@ def extension_main():
 
     ext.contribute({"view/test-unit.report": {"kind": "panel", "title": "Unit health report", "items": panel()["items"]},
                     "menu/testing.status": {"where": "status", "label": "Testing", "view": "testing.status", "command": "test.unit.show", "order": 6}})
-    try:
-        tracker.invalidate("testing observer restarted; current evidence requires reconciliation")
-    except Exception as failure:
-        last["observer_error"] = str(failure)
+    if policy_on():
+        try:
+            tracker.invalidate("testing observer restarted; current evidence requires reconciliation")
+        except Exception as failure:
+            last["observer_error"] = str(failure)
     refresh()
     thread = threading.Thread(target=worker, daemon=True, name="setup-evidence")
     thread.start()
@@ -469,8 +508,10 @@ def main(argv=None):
             client.close()
     if args.record or args.out:
         try:
-            if args.record:
+            if args.record and result.get("recorded"):
                 save_receipt(result, state_dir, result.get("receipt"))
+            elif args.record:
+                pass  # Health report remains available; unsupported recording grants no receipt.
             else:
                 write_receipt(result, args.out)
         except OSError as failure:

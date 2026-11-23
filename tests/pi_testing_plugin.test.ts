@@ -104,7 +104,7 @@ else:
     expect(rule.systemPrompt).toContain("vqro_setup_finish");
     f.set(status("b", 1));
     await f.emit("tool_result", { toolName: "write" });
-    expect(f.calls).toEqual(["status", "status", "unit", "status"]);
+    expect(f.calls).toEqual(["status", "status", "status", "unit", "status"]);
     const existing = { type: "custom", customType: "inbox-control", data: {} };
     const final = await f.emit("agent_before_settle", { entries: [existing], continue: true });
     expect(final.entries[0]).toBe(existing);
@@ -114,6 +114,42 @@ else:
     expect(f.units).toBe(1);
     expect(f.providerRequests).toBe(0);
     expect((await f.finish()).details.finish_ok).toBe(true);
+  });
+
+  test("before-agent prompt follows ON, OFF, unknown, unavailable and stale assessments", async () => {
+    const cases = [
+      { name: "ON", value: status(), required: true },
+      { name: "OFF", value: status("a", 0, { require_unit: false }), required: false },
+      { name: "UNKNOWN", value: status("a", 0, { setup_id: null }), required: false },
+      { name: "UNAVAILABLE", value: status(), unavailable: true, required: false },
+      { name: "STALE", value: status("a", 0, { finish_ok: false,
+        unit: { state: "stale", receipt: "/old.json", verdict: "pass", exception: null } }), required: false },
+    ];
+    for (const item of cases) {
+      const f = fixture(item.value);
+      if (item.unavailable) f.read(async () => { throw new Error("checker unavailable"); });
+      await f.emit("session_start");
+      const prompt = (await f.emit("before_agent_start", { systemPrompt: "base prompt" })).systemPrompt;
+      expect(prompt).toStartWith("base prompt");
+      if (item.required) {
+        expect(prompt).toContain("policy ON");
+        expect(prompt).toContain("vqro_setup_finish is required");
+      } else {
+        expect(prompt).not.toContain("vqro_setup_finish is required");
+        expect(prompt).toContain("Unit and Integration evidence are recommended");
+        expect(prompt).toContain(item.name === "STALE" ? "STALE assessment" : item.name === "OFF" ? "policy OFF" : "UNKNOWN/UNAVAILABLE");
+      }
+      expect(f.providerRequests).toBe(0);
+    }
+  });
+
+  test("policy is refreshed before prompting instead of reusing a formerly armed value", async () => {
+    const f = fixture();
+    await f.emit("session_start");
+    f.read(async () => { throw new Error("assessment went away"); });
+    const prompt = (await f.emit("before_agent_start", { systemPrompt: "base" })).systemPrompt;
+    expect(prompt).toContain("UNKNOWN/UNAVAILABLE");
+    expect(prompt).not.toContain("vqro_setup_finish is required");
   });
 
   test("unchanged conversations do not run Unit or announce a fabricated setup change", async () => {
@@ -140,6 +176,13 @@ else:
     const result = await f.finish();
     expect(result.details.finish_ok).toBe(true);
     expect(result.details.summary).toContain("Coverage gaps: no tests installed for sample");
+  });
+
+  test("RPC required-followup scope notice is not hidden by an accepted finish", async () => {
+    const reason = "NOT VERIFIED: rule not active for vqro-launched Pi agents yet";
+    const f = fixture(status("a", 0, { not_verified_reasons: [reason] }));
+    await f.emit("session_start");
+    expect((await f.finish()).details.summary).toContain(reason);
   });
 
   test("stale Performance is disclosed as NOT VERIFIED but never blocks finish", async () => {

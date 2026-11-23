@@ -472,6 +472,8 @@ class HealthChecks(unittest.TestCase):
         handlers = {}
         ext = Mock()
         ext.info = {"server": "vqro", "version": "fixture-v1", "state_dir": str(self.state)}
+        self.snapshot["entries"][unit.POLICY_KEY] = {"version": 1, "value": True}
+        ext.value.side_effect = lambda key, default=None: self.snapshot["entries"].get(key, {}).get("value", default)
         ext.vqro = self.client
 
         def command(name, title):
@@ -502,6 +504,19 @@ class HealthChecks(unittest.TestCase):
             handlers["test.unit.show"]({})
             self.assertEqual(self.client.call.call_count, calls + 1)  # current status rescan, not another Unit run.
             self.assertEqual(ext.publish.call_args.args[0], "test-unit.report")
+            with patch.object(unit.SetupStore, "observe", side_effect=RuntimeError("observer unavailable")), patch.object(unit, "save_receipt", side_effect=AssertionError("unsupported recording must not publish a receipt")):
+                portable = handlers["test.unit"]({})
+            self.assertEqual(portable["verdict"], "unverified")
+            self.assertIsNone(portable["receipt"])
+            self.assertGreater(portable["counts"]["pass"], 0, "ordinary in-app health checks still ran")
+            self.snapshot["entries"][unit.POLICY_KEY]["value"] = False
+            with patch.dict(sys.modules, {"fcntl": None}), patch.object(unit.SetupStore, "locked", side_effect=AssertionError("policy OFF must not use the recorder lock")), patch.object(unit, "save_receipt", return_value="/private/health-only.json"):
+                off = handlers["test.unit"]({})
+            self.assertEqual(off["health_verdict"], "pass")
+            self.assertEqual(off["verdict"], "pass")
+            self.assertFalse(off["recorded"])
+            self.assertEqual(off["recording"]["state"], "not-requested")
+            self.snapshot["entries"][unit.POLICY_KEY]["value"] = True
             self.facts["sample"]["manifest_error"] = "broken metadata"
             second = handlers["test.unit"]({"strict": True, "tests": False})
             self.assertEqual(second["verdict"], "fail")
