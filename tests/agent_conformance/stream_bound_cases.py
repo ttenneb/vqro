@@ -5,7 +5,7 @@ fed by a tiny scripted test provider over the public provider protocol. Nothing 
 incompatibility report; a product that lacks them fails. O12's producer half is inherited regression evidence and its
 adapter half observes a real bridge refusal; either missing is an honest harness gap, never a pass.
 """
-from python_interpreter import PYTHON
+from python_interpreter import python
 import asyncio
 from collections import deque
 from copy import deepcopy
@@ -288,7 +288,7 @@ async def start_item_provider(ctx, sdk_dir, name, scenarios, epoch=None):
     script.write_text(PROVIDER)
     spec.write_text(json.dumps({"provider": name, "epoch": epoch or name + "-e1", "scenarios": scenarios}))
     with open(root / (name + "_provider.log"), "ab") as output:  # the parent's handle is closed once the child has it
-        process = subprocess.Popen([PYTHON, str(script), str(sdk_dir), str(log), str(spec)],
+        process = subprocess.Popen([python(), str(script), str(sdk_dir), str(log), str(spec)],
                                    env=dict(ctx.backend.env), stdout=output, stderr=subprocess.STDOUT)
     ctx.evidence.append({"kind": "owned_provider", "name": name, "pid": process.pid, "birth": process_birth(process.pid)})
     return process, log
@@ -388,7 +388,7 @@ async def install_production_viewer(ctx):
                          "trusted_main": trusted_main, "sha256": hashes, "verified_against_revision": True,
                          "test_only_path": True})
     await ctx.peer.call("workspace.apply", {"ops": [{"op": "set", "key": "extension/agents",
-        "value": {"enabled": True, "argv": [PYTHON, str(ext / "agents.py")]}}]})
+        "value": {"enabled": True, "argv": [python(), str(ext / "agents.py")]}}]})
     return ext
 
 

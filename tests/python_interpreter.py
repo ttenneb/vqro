@@ -1,8 +1,13 @@
-"""Test-only interpreter selection, shared with Rust fixtures and check.sh."""
-from pathlib import Path
-import subprocess
+"""Import-safe test interpreter adapter. Selection happens only on an explicit call."""
+from functools import lru_cache
 
-PYTHON = subprocess.check_output(
-    ["/bin/sh", str(Path(__file__).resolve().parents[1] / "scripts/test-python.sh")],
-    text=True,
-).strip()
+
+@lru_cache(maxsize=1)
+def python():
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "scripts/test_python.py"
+    spec = importlib.util.spec_from_file_location("vqro_test_python", path)
+    resolver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(resolver)
+    return resolver.resolve()

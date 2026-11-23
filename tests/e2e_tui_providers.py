@@ -12,7 +12,7 @@ if sys.platform != "linux":
     print("SKIP e2e_tui_providers: requires Linux /proc and namespace/process probes")
     raise SystemExit(77)
 
-from python_interpreter import PYTHON
+from python_interpreter import python
 import json, os, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
@@ -29,7 +29,7 @@ for f in os.listdir(os.path.join(REPO, "extensions")):
     if f.endswith(".py") or f == "defaults.json":
         shutil.copy(os.path.join(REPO, "extensions", f), os.path.join(R, "ext", f))
 shutil.copytree(os.path.join(REPO, "extensions", "manifests"), os.path.join(R, "ext", "manifests"))
-os.symlink(PYTHON, os.path.join(R, "bin", "python3"))
+os.symlink(python(), os.path.join(R, "bin", "python3"))
 ENV = {"HOME": f"{R}/home", "PATH": f"{R}/bin", "TERM": "xterm-256color", "SHELL": "/bin/sh", "VQRO_STATE_DIR": f"{R}/st",
        "VQRO_SOCKET": f"{R}/p.sock", "VQRO_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
        "XDG_RUNTIME_DIR": f"{R}/run", "XDG_CONFIG_HOME": f"{R}/cfg", "HC_SOCKET": f"{R}/hc.sock", "HC_SESSION": "tui", "LANG": "C.UTF-8"}
@@ -306,7 +306,7 @@ try:
     # Restore only our private missing executable, without changing the failed declaration.
     wrapper=f"{R}/bin/vqro-extension-page-test-missing"
     with open(wrapper,"w") as output:
-        output.write(f"#!/bin/sh\nexec '{PYTHON}' '{R}/ext/icons.py'\n")
+        output.write(f"#!/bin/sh\nexec '{python()}' '{R}/ext/icons.py'\n")
     os.chmod(wrapper,0o700)
     keys("Escape")  # clear the list filter, then close the popup after its frame arrives
     check("recovery setup clears catalogue filter", bool(wait(lambda:not any(line.strip(" │")=="/icons" for line in screen().splitlines()))))

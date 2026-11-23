@@ -4,7 +4,7 @@ fake provider, no native runtime/model or live endpoint. Derived from the
 independent review driver. Usage: --binary PATH [--extensions PATH] [case ...].
 The core binary defaults to the repository debug build; roots are private.
 """
-from python_interpreter import PYTHON
+from python_interpreter import python
 import argparse, json, os, socket, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 
@@ -774,7 +774,7 @@ def case_request_routing():
     raw_set(grant, {'who': 'p:route-coordinator', 'on': 'agent:' + child, 'can': ['answer']})
     scope('resume')
     wait(lambda: len(delivered) == 1)
-    agents_decl = {'enabled': True, 'argv': [PYTHON, str(EXT / 'agents.py')], 'cwd': str(EXT),
+    agents_decl = {'enabled': True, 'argv': [python(), str(EXT / 'agents.py')], 'cwd': str(EXT),
                    'manifest': json.loads((EXT / 'manifests/agents.json').read_text())}
     raw_set('extension/agents', agents_decl)
     def show_agent():
@@ -1052,7 +1052,7 @@ try:
     ops = [{'op': 'set', 'key': k, 'expect': r['version'], 'value': dict(r['value'], enabled=False)}
            for k, r in snap['entries'].items() if k.startswith('extension/') and isinstance(r['value'], dict) and r['value'].get('enabled')]
     if ops: owner.call('workspace.apply', {'ops': ops})
-    decl = {'enabled': True, 'argv': [PYTHON, str(EXT / 'coordination.py')], 'cwd': str(EXT),
+    decl = {'enabled': True, 'argv': [python(), str(EXT / 'coordination.py')], 'cwd': str(EXT),
             'manifest': json.loads((EXT / 'manifests/coord.json').read_text())}
     owner.call('workspace.apply', {'ops': [{'op': 'set', 'key': 'extension/coord', 'expect': 0, 'value': decl}]})
     wait(lambda: cmd('status')['state'] == 'ready', 30)

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Bennett Garcia
 """Opt-in, network-isolated public-core Part B coordination conformance."""
-from python_interpreter import PYTHON
+from python_interpreter import python
 import argparse
 import asyncio
 import json
@@ -57,7 +57,7 @@ def main(argv=None):
         root = Path(tempfile.mkdtemp(prefix="b-", dir=args.scratch_parent))
         (root/".private-coord-conformance").touch(); (root/"home").mkdir()
         staged = root/"implementation.json"; staged.write_text(json.dumps(manifest, indent=2)+"\n")
-        command = ["/usr/bin/unshare", "-Urnpmf", "--kill-child=KILL", "--mount-proc", PYTHON, str(Path(__file__).resolve()), "--run",
+        command = ["/usr/bin/unshare", "-Urnpmf", "--kill-child=KILL", "--mount-proc", python(), str(Path(__file__).resolve()), "--run",
             "--implementation", str(staged), "--vqro", str(args.vqro), "--isolated-root", str(root),
             "--parent-net", os.readlink("/proc/self/ns/net"), "--selection-timeout", str(args.selection_timeout)]
         if args.cases: command += ["--cases", args.cases]

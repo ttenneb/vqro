@@ -6,7 +6,7 @@ Always re-execs in a new user/network namespace, empty PATH and private HOME,
 state/config/runtime/sockets. Never installs or contacts a live/default server.
 Retains receipt.json and logs in a unique scratch root. Linux test harness.
 """
-from python_interpreter import PYTHON
+from python_interpreter import python
 import argparse
 import hashlib
 import json
@@ -58,7 +58,7 @@ class E2E:
             (self.root / name).mkdir(exist_ok=True)
         r = self.root
         if args.agents_extension:
-            (r/'empty/python3').symlink_to(PYTHON)  # host-resolved, private allowlist only
+            (r/'empty/python3').symlink_to(python())  # host-resolved, private allowlist only
         if getattr(args, 'rust_bridge', False):
             (r/'empty/vqro-bridge-pi').symlink_to(args.vqro.parent/'vqro-bridge-pi')
         self.env = {'HOME': str(r/'home'), 'PATH': str(r/'empty'), 'LANG': 'C.UTF-8',
@@ -516,7 +516,7 @@ class E2E:
         self.call('command.invoke', {'name': 'vqro.extension.disable', 'args': {'name': 'pi'}})
         assert live(native_process) and self.resource(rid)['available']
         self.call('workspace.apply', {'ops': [{'op': 'set', 'key': 'extension/other-agent', 'value': {'enabled': True,
-            'argv': [PYTHON, str(REPO/'tests/fixtures/other_agent.py')]}}], 'note': 'Other native runtime fixture'})
+            'argv': [python(), str(REPO/'tests/fixtures/other_agent.py')]}}], 'note': 'Other native runtime fixture'})
         other = self.wait(lambda: next((r for r in self.snapshot()['resources'] if r.get('provider') == 'other-agent' and r.get('available')), None), 'non-Pi agent')
         self.wait(lambda: self.snapshot()['entries'].get('menu/agents.'+other['id']+'.pane'), 'declared other pane menu')
         abort_menu = self.snapshot()['entries']['menu/agents.'+other['id']+'.abort']['value']
@@ -712,16 +712,16 @@ class E2E:
                       '--session-dir', str(self.root/'sessions'), '--no-extensions', '--no-skills',
                       '--no-prompt-templates', '--no-themes', '--no-tools']
         else:
-            native = [PYTHON, str(REPO/'tests/fixtures/fake_pi.py'), '--bridge-e2e',
+            native = [python(), str(REPO/'tests/fixtures/fake_pi.py'), '--bridge-e2e',
                       '--trace-file', str(self.root/'native.jsonl'), '--timing-file', str(self.root/'timing.jsonl')]
         if self.args.agents_extension:
             assert not self.args.real_pi_metadata, 'extension E2E uses fake Pi only'
             runtime = {'name': 'fake', 'argv': native}
             if not args_rust(self.args):
-                runtime['bridge_argv'] = [PYTHON, '-I', str(self.root/'ext/pi_bridge/python_launch.py')]
+                runtime['bridge_argv'] = [python(), '-I', str(self.root/'ext/pi_bridge/python_launch.py')]
             ops = [{'op': 'set', 'key': 'doc/settings/agents', 'value': {'runtimes': [runtime]}}]
             ops += [{'op': 'set', 'key': 'extension/'+name, 'value': {'enabled': True,
-                    'argv': [PYTHON, str(self.root/'ext'/(name+'.py'))]}}
+                    'argv': [python(), str(self.root/'ext'/(name+'.py'))]}}
                     for name in ('tabs', 'panes', 'agents', 'pi', 'sidebar')]
             self.call('workspace.apply', {'ops': ops, 'note': 'Private agents extension conformance'})
             self.wait(self.extension_ready, 'agents/tabs/panes command registration')
@@ -735,7 +735,7 @@ class E2E:
             self.tracked.extend(identity(int(pid)) for pid in children)
         else:
             spawned = self.call('resource.spawn', {'bridge': True, 'name': 'isolated-pi-provider',
-                    'argv': [PYTHON, '-I', str(self.root/'ext/pi_bridge'/('launch.py' if args_rust(self.args) else 'python_launch.py')), '--', *native], 'cwd': str(self.root/'work'),
+                    'argv': [python(), '-I', str(self.root/'ext/pi_bridge'/('launch.py' if args_rust(self.args) else 'python_launch.py')), '--', *native], 'cwd': str(self.root/'work'),
                     'env': {'PI_CODING_AGENT_DIR': str(self.root/'agent'),
                             'PI_SKIP_VERSION_CHECK': '1'}})
         assert spawned['outcome'] == 'observed', spawned
@@ -907,7 +907,7 @@ def main():
         root = Path(tempfile.mkdtemp(prefix='ep-', dir=args.scratch_parent))
         (root/'.private-e2e').touch()
         (root/'home').mkdir()
-        command = ['/usr/bin/unshare', '-Urn', PYTHON, str(Path(__file__).resolve()), '--run',
+        command = ['/usr/bin/unshare', '-Urn', python(), str(Path(__file__).resolve()), '--run',
                    '--vqro', str(args.vqro), '--hc', str(args.hc), '--isolated-root', str(root),
                    '--parent-net', os.readlink('/proc/self/ns/net')]
         if args.real_pi_metadata:

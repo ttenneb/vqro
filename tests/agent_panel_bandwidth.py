@@ -4,7 +4,7 @@
 Control-style20attempts/s, prompt:abort:steer=2:1:1; rejected busy prompts do not publish. Native
 fixtures are modeled deterministically; no model, HC or inherited endpoint. All transcripts pre-warm128rows.
 """
-from python_interpreter import PYTHON
+from python_interpreter import python
 import argparse
 import importlib.util
 import json
@@ -39,7 +39,7 @@ def run(args, count, before):
         shutil.copy2(path, root/'ext'/path.name)
     if before:
         shutil.copy2(args.before_agents, root/'ext/agents.py')
-    (root/'ext/defaults.json').write_text(json.dumps({'version':1,'extensions':[{'name':'agents','argv':[PYTHON,str(root/'ext/agents.py')]}]}))
+    (root/'ext/defaults.json').write_text(json.dumps({'version':1,'extensions':[{'name':'agents','argv':[python(),str(root/'ext/agents.py')]}]}))
     env = {'HOME':str(root/'home'),'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','VQRO_SOCKET':str(root/'p.sock'),
            'VQRO_STATE_DIR':str(root/'state'),'VQRO_EXTENSIONS_DIR':str(root/'ext'),'VQRO_HERDR':'["/bin/false"]',
            'XDG_RUNTIME_DIR':str(root/'run'),'HC_SOCKET':str(root/'h.sock'),'HC_SESSION':'panel-bandwidth'}

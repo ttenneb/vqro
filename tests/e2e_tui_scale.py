@@ -9,7 +9,7 @@ Receipts record screen deadline misses and associated historical stream signals,
 A complete token is positive screen evidence even when late. Key/stream evidence is capped with explicit
 dropped counts; missing or truncated metadata is labelled incomplete and is not associated with keys.
 """
-from python_interpreter import PYTHON
+from python_interpreter import python
 import argparse
 from collections import deque
 import json
@@ -403,7 +403,7 @@ def main():
             if index == args.agents:
                 argv = ["flood", "--output-bytes-per-sec", "1000000"]
             resources.append(client.call("resource.spawn", {"argv": argv, "name": f"probe-{index}"})["resource"]["id"])
-        client.call("workspace.apply", {"ops": [{"op": "set", "key": "extension/sidebar", "value": {"argv": [PYTHON, str(root / "ext/sidebar.py")]}}]})
+        client.call("workspace.apply", {"ops": [{"op": "set", "key": "extension/sidebar", "value": {"argv": [python(), str(root / "ext/sidebar.py")]}}]})
         wait(lambda: client.call("workspace.snapshot")["live"].get("sidebar"))
         views = {"probe-input": resources[-1], "probe-flood": resources[args.agents], "probe-other": resources[-2]}
         ops = [{"op": "set", "key": f"view/{name}", "value": {"kind": "terminal", "resource": rid, "title": name}} for name, rid in views.items()]

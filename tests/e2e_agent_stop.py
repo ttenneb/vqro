@@ -6,7 +6,7 @@ Reuses tests/pi_provider_e2e.py isolation: new user/network namespace, empty PAT
 sockets and herdr-core. Fake Pi and a fake non-Pi provider only; no model calls. Retention runs with a
 short grace (GRACE seconds): a stopped agent must go well inside it, an unknown one must outlive it.
 """
-from python_interpreter import PYTHON
+from python_interpreter import python
 import argparse
 import json
 import os
@@ -56,13 +56,13 @@ class StopE2E(base.E2E):
             shutil.copy2(helper, self.root/'ext'/helper.name)
         shutil.copytree(REPO/'extensions/pi_bridge', self.root/'ext/pi_bridge', ignore=shutil.ignore_patterns('__pycache__'))
         self.start()
-        native = [PYTHON, str(REPO/'tests/fixtures/fake_pi.py'), '--bridge-e2e',
+        native = [python(), str(REPO/'tests/fixtures/fake_pi.py'), '--bridge-e2e',
                   '--trace-file', str(self.root/'native.jsonl'), '--timing-file', str(self.root/'timing.jsonl')]
         # Retention/confirmation coverage uses the explicit legacy fixture; the Rust-default
         # profile and v0 stop receipt are exercised separately by pi_provider_e2e.py --rust-bridge.
         ops = [{'op': 'set', 'key': 'doc/settings/pi', 'value': {'runtimes': [{'name': 'fake', 'argv': native,
-            'bridge_argv': [PYTHON, '-I', str(self.root/'ext/pi_bridge/python_launch.py')]}]}}]
-        argv = {name: [PYTHON, str(self.root/'ext'/(name+'.py'))] for name in ('tabs', 'panes', 'agents', 'pi', 'sidebar', 'retention')}
+            'bridge_argv': [python(), '-I', str(self.root/'ext/pi_bridge/python_launch.py')]}]}}]
+        argv = {name: [python(), str(self.root/'ext'/(name+'.py'))] for name in ('tabs', 'panes', 'agents', 'pi', 'sidebar', 'retention')}
         argv['retention'] += ['--grace', str(GRACE)]
         ops += [{'op': 'set', 'key': 'extension/'+name, 'value': {'enabled': True, 'argv': value}} for name, value in argv.items()]
         self.call('workspace.apply', {'ops': ops, 'note': 'Private stop/last-tab E2E'})
@@ -97,7 +97,7 @@ class StopE2E(base.E2E):
 
     def unexplained_disconnect(self):
         self.call('workspace.apply', {'ops': [{'op': 'set', 'key': 'extension/other-agent', 'value': {'enabled': True,
-            'argv': [PYTHON, str(REPO/'tests/fixtures/other_agent.py')]}}], 'note': 'Hostless provider fixture'})
+            'argv': [python(), str(REPO/'tests/fixtures/other_agent.py')]}}], 'note': 'Hostless provider fixture'})
         other = self.wait(lambda: next((r for r in self.snapshot()['resources'] if r.get('provider') == 'other-agent' and r.get('available')), None), 'other agent')
         rid = other['id']
         refused = self.call('command.invoke', {'name': 'agents.stop', 'args': {'resource': rid}}, allow_error=True)
@@ -188,7 +188,7 @@ def main():
         root = Path(tempfile.mkdtemp(prefix='es-', dir=args.scratch_parent))
         (root/'.private-e2e').touch()
         (root/'home').mkdir()
-        command = ['/usr/bin/unshare', '-Urn', PYTHON, str(Path(__file__).resolve()), '--run',
+        command = ['/usr/bin/unshare', '-Urn', python(), str(Path(__file__).resolve()), '--run',
                    '--vqro', str(args.vqro), '--hc', str(args.hc), '--isolated-root', str(root),
                    '--parent-net', os.readlink('/proc/self/ns/net')]
         result = subprocess.run(command, cwd=root, env={'HOME': str(root/'home'), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'})

@@ -18,7 +18,7 @@ if sys.platform != "linux":
     print("SKIP e2e_same_setup: requires Linux /proc and namespace/process probes")
     raise SystemExit(77)
 
-from python_interpreter import PYTHON
+from python_interpreter import python
 import json, os, re, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
@@ -56,7 +56,7 @@ class Root:
         os.chmod(os.path.join(self.r, "run"), 0o700)
         shutil.copytree(os.path.join(REPO, "extensions"), os.path.join(self.r, "ext"),
                         ignore=shutil.ignore_patterns("node_modules", "opentui", "__pycache__"))
-        os.symlink(PYTHON, os.path.join(self.r, "bin", "python3"))
+        os.symlink(python(), os.path.join(self.r, "bin", "python3"))
         os.symlink(os.path.join(TARGET, "debug", "vqro-bridge-pi"), os.path.join(self.r, "bin", "vqro-bridge-pi"))
         # The tmux-server extension's status helper, as an install provides it. Without it every status call failed
         # (ENOENT) once the owned server existed, and the extension, which declared its view only after a successful
@@ -216,7 +216,7 @@ def scenario(root):
     commands = ("tabs.open", "tabs.rename", "panes.split", "sidebar.toggle", "pi.new", "tabs.set")
     if not root.wait(lambda: set(commands) <= {x["name"] for x in c("command.list")["commands"] if x.get("available")}, 40):
         return "extension commands never became available"
-    native = [PYTHON, os.path.join(REPO, "tests/fixtures/fake_pi.py"), "--bridge-e2e"]
+    native = [python(), os.path.join(REPO, "tests/fixtures/fake_pi.py"), "--bridge-e2e"]
     # The production bridge (the default launcher, which execs vqro-bridge-pi): its PATH on the terminal host is
     # this root's bin (python3 and vqro-bridge-pi only), so the agent declares its real native capabilities.
     c("workspace.apply", {"note": "fake Pi runtime", "ops": [{"op": "set", "key": "doc/settings/pi", "value": {"runtimes": [

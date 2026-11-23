@@ -172,6 +172,7 @@ class LifetimeUnitTests(unittest.TestCase):
             prefix = source[:source.index('BEFORE=$(snapshot')]
             script = root/'scripts/check.sh'
             shutil.copy2(ROOT/'scripts/test-python.sh', root/'scripts/test-python.sh')
+            shutil.copy2(ROOT/'scripts/test_python.py', root/'scripts/test_python.py')
             script.write_text(prefix + '\ntest -z "$CGROUP" || exit 9\nrmdir "$RUN"\necho fixture-unscoped\n')
             script.chmod(0o755)
             env = {'HOME': str(root), 'PATH': str(root/'bin')+':/usr/bin:/bin', 'VQRO_CHECK_SCOPED': '1'}
@@ -271,6 +272,7 @@ exit "$code"
         script.write_text(prefix + body); script.chmod(0o755)
         shutil.copy2(ROOT/'scripts/check_lifetime.py', self.repo/'scripts/check_lifetime.py')
         shutil.copy2(ROOT/'scripts/test-python.sh', self.repo/'scripts/test-python.sh')
+        shutil.copy2(ROOT/'scripts/test_python.py', self.repo/'scripts/test_python.py')
         return script
 
     def ready(self):

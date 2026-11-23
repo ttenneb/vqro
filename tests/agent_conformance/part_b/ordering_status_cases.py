@@ -4,7 +4,7 @@
 
 Only public primitives and the owned native oracle; every pass names its observed witness.
 """
-from python_interpreter import PYTHON
+from python_interpreter import python
 import asyncio
 import hashlib
 import json
@@ -354,7 +354,7 @@ class LiveViews:
 async def start_extension(ctx, name, ready):
     """Enable one of the target's own extensions through ordinary workspace configuration and wait until ready."""
     await ctx.peer.call("workspace.apply", {"ops": [{"op": "set", "key": "extension/" + name,
-        "value": {"enabled": True, "argv": [PYTHON, str(ctx.root / "ext" / (name + ".py"))]}}]})
+        "value": {"enabled": True, "argv": [python(), str(ctx.root / "ext" / (name + ".py"))]}}]})
     await ctx.wait(ready, label="extension " + name + " ready", timeout=30)
     ctx.track_children()
 

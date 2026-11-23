@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Bennett Garcia
 """G11 shared-host branch: public two-endpoint SDK/CLI evidence, no endpoint inference."""
-from python_interpreter import PYTHON
+from python_interpreter import python
 import asyncio
 import hashlib
 import json
@@ -114,7 +114,7 @@ async def shared_host_route(ctx):
         ctx.check(process.returncode == 0, 'owned native G11 witness completed', witness=name, exit=process.returncode)
         return out
     # Positive K1 evidence is structured public RPC/SDK/CLI output, not test-exit inference.
-    output = await execute([PYTHON, str(probe), '--sdk', str(ctx.root / 'ext'), '--cli', str(cli)],
+    output = await execute([python(), str(probe), '--sdk', str(ctx.root / 'ext'), '--cli', str(cli)],
                            'g11-public', dict(ctx.backend.env))
     observed = json.loads(output)
     grade_host_route(ctx, observed)

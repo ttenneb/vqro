@@ -6,7 +6,7 @@ Reuses e2e_herdr_drift.py's public spawn/forget and private HC lifecycle pattern
 Never prestart HC: the adapter must scrub its environment before HC auto-starts.
 No real Herdr socket, credentials, model/runtime or target engine is accessed.
 """
-from python_interpreter import PYTHON
+from python_interpreter import python
 import asyncio
 import hashlib
 import json
@@ -135,7 +135,7 @@ async def backend_child_environment(parent):
         ctx.check(all(not any(row["present"].values()) for row in services),
             "actual backend-started HC service inherits no caller identity/token variables", component="core", services=services)
         explicit_principal = "worker:g14-explicit"
-        spawned = await ctx.peer.call("resource.spawn", {"provider": "herdr", "argv": [PYTHON, str(script)],
+        spawned = await ctx.peer.call("resource.spawn", {"provider": "herdr", "argv": [python(), str(script)],
             "env": {"VQRO_PRINCIPAL": explicit_principal}, "name": "owned-g14-environment", "cwd": str(ctx.root / "work")}, timeout=8)
         rid = spawned["resource"]["id"]
         await ctx.wait(lambda: artifact.is_file(), label="actual backend child's environment artifact")

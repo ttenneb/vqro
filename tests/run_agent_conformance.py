@@ -4,7 +4,7 @@
 Results always list the selected/omitted normative cases. A partial green run or
 an ACP/fake model is not adapter certification. See agent_conformance/README.md.
 """
-from python_interpreter import PYTHON
+from python_interpreter import python
 import argparse
 import asyncio
 import json
@@ -51,7 +51,7 @@ def main():
         copy = root / "implementation.json"
         copy.write_text(json.dumps(manifest, indent=2) + "\n")
         # A killed namespace init kills every descendant, including detached backends.
-        command = ["/usr/bin/unshare", "-Urnpmf", "--kill-child=KILL", "--mount-proc", PYTHON, str(Path(__file__).resolve()), "--run",
+        command = ["/usr/bin/unshare", "-Urnpmf", "--kill-child=KILL", "--mount-proc", python(), str(Path(__file__).resolve()), "--run",
                    "--implementation", str(copy), "--vqro", str(args.vqro), "--hc", str(args.hc),
                    "--isolated-root", str(root), "--parent-net", os.readlink("/proc/self/ns/net")]
         if args.cases:

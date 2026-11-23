@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Bennett Garcia
 """Native framing checker inversions, not public qualification."""
-from python_interpreter import PYTHON
+from python_interpreter import python
 import unittest
 import sys
 import tempfile
@@ -34,7 +34,7 @@ class NativeFrames(unittest.TestCase):
     def test_native_module_seal_rejects_symlinks(self):
         with tempfile.TemporaryDirectory() as root:
             try:
-                (Path(root) / "escape").symlink_to(PYTHON)
+                (Path(root) / "escape").symlink_to(python())
             except OSError as error:
                 if sys.platform == "win32" and getattr(error, "winerror", None) == 1314:
                     self.skipTest("Windows symlink fixture requires Developer Mode or symlink privilege")

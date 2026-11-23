@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Bennett Garcia
 """Private real-core fixture. Target coordination code is never imported in-process."""
-from python_interpreter import PYTHON
+from python_interpreter import python
 import asyncio
 from copy import deepcopy
 import hashlib
@@ -46,7 +46,7 @@ class PublicCoordination(PublicImplementation):
         shutil.copyfile(original, self.root / "ext/manifests/coord.json")
         (self.root / "ext/defaults.json").write_text(json.dumps({"version": 2, "extensions": [{
             "name": "coord", "since": 2, "default": True, "kind": "management",
-            "argv": [PYTHON, str(self.root / "ext/coordination.py")]}]}))
+            "argv": [python(), str(self.root / "ext/coordination.py")]}]}))
         self.metadata["core_sha256"] = hashlib.sha256(self.vqro.read_bytes()).hexdigest()
         self.fixture = Path(self.manifest.get("native_fixture", Path(__file__).parent / "native.py"))
         self.metadata["native_sha256"] = hashlib.sha256(self.fixture.read_bytes()).hexdigest()
@@ -109,7 +109,7 @@ class PublicCoordination(PublicImplementation):
         self.metadata["coordination_declaration"] = deepcopy(self.status)
         self.track_children()
         env = dict(self.backend.env)
-        argv = [PYTHON, str(self.fixture), "--root", str(self.root), "--sdk", str(self.root / "ext"),
+        argv = [python(), str(self.fixture), "--root", str(self.root), "--sdk", str(self.root / "ext"),
                 "--agents", str(self.manifest.get("agents", 2))]
         with (self.root / "native.log").open("ab") as log:
             self.native_process = subprocess.Popen(argv, cwd=self.root / "work", env=env,

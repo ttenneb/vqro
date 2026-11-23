@@ -9,7 +9,7 @@ No live vqro, hc/herdr-core or tmux is touched (private env, `VQRO_HERDR=/bin/fa
 
 usage: e2e_workspace_tabs.py <cargo target dir>   (uses <target>/debug/vqro)
 """
-from python_interpreter import PYTHON
+from python_interpreter import python
 import json
 import os
 from pathlib import Path
@@ -101,7 +101,7 @@ def main():
         for source in (REPO/"extensions").glob("*.py"):
             shutil.copy2(source, root/"ext"/source.name)
         (root/"ext/defaults.json").write_text(json.dumps({"version": 1, "extensions": [
-            {"name": n, "argv": [PYTHON, str(root/"ext"/(n+".py"))]} for n in EXTENSIONS]}))
+            {"name": n, "argv": [python(), str(root/"ext"/(n+".py"))]} for n in EXTENSIONS]}))
         env = {"HOME": str(root/"home"), "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
                "VQRO_STATE_DIR": str(root/"state"), "VQRO_SOCKET": str(root/"p.sock"), "VQRO_EXTENSIONS_DIR": str(root/"ext"),
                "XDG_RUNTIME_DIR": str(root/"run"), "XDG_STATE_HOME": str(root/"state"), "XDG_CONFIG_HOME": str(root/"home"),

@@ -4,7 +4,7 @@
 One synthetic backend publishes facts, not processes/models; this isolates extension bandwidth from backend
 execution and the separately tested runtime registry. No live vqro/hc/tmux or inherited HERDR environment.
 """
-from python_interpreter import PYTHON
+from python_interpreter import python
 import argparse
 from collections import Counter
 import json
@@ -152,7 +152,7 @@ def run(args, root):
         shutil.copy2(args.baseline_sidebar, root/'ext/sidebar.py')
     names = ('sidebar', 'agents', 'settings', 'tabs')
     (root/'ext/defaults.json').write_text(json.dumps({'version': 1, 'extensions': [
-        {'name': name, 'argv': [PYTHON, str(root/'ext'/(name+'.py'))]} for name in names]}))
+        {'name': name, 'argv': [python(), str(root/'ext'/(name+'.py'))]} for name in names]}))
     env = {'HOME': str(root/'home'), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8',
            'VQRO_STATE_DIR': str(root/'state'), 'VQRO_SOCKET': str(root/'p.sock'), 'VQRO_EXTENSIONS_DIR': str(root/'ext'),
            'XDG_CONFIG_HOME': str(root/'config'), 'XDG_STATE_HOME': str(root/'state'), 'XDG_RUNTIME_DIR': str(root/'run'),

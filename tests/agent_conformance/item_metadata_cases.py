@@ -5,7 +5,7 @@
 Pure checker results alone are not a conformance PASS. The handler must bind
 these inputs to actual native emitted-payload ledger and public item witnesses.
 """
-from python_interpreter import PYTHON
+from python_interpreter import python
 import asyncio
 import hashlib
 import importlib.util
@@ -474,7 +474,7 @@ async def observe_public_rendering(ctx):
     observer = None
     try:
         with (ctx.root / (name + '.log')).open('ab') as output:
-            process = subprocess.Popen([PYTHON, str(script), str(sdk), str(spec), str(log)],
+            process = subprocess.Popen([python(), str(script), str(sdk), str(spec), str(log)],
                 cwd=ctx.root / 'work', env=dict(ctx.backend.env), stdout=output, stderr=subprocess.STDOUT)
         owned = identity(process.pid)
         if owned: ctx.backend.tracked.append(owned)

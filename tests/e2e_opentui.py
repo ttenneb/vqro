@@ -23,14 +23,14 @@ BUN = shutil.which("bun") or os.path.expanduser("~/.local/bin/bun")
 if not os.path.isfile(BUN) or not os.path.isdir(os.path.join(CLIENT, "node_modules", "@opentui")):
     print("SKIP OpenTUI trial client: Bun or extensions/clients/opentui/node_modules missing (bun install)")
     sys.exit(77)
-from python_interpreter import PYTHON
+from python_interpreter import python
 R = tempfile.mkdtemp(prefix="pott", dir="/tmp")
 for d in ("home", "st", "run", "bin"):
     os.makedirs(os.path.join(R, d))
 os.chmod(os.path.join(R, "run"), 0o700)
 shutil.copytree(os.path.join(REPO, "extensions"), os.path.join(R, "ext"), ignore=shutil.ignore_patterns("__pycache__", "node_modules"))
 os.symlink(os.path.join(CLIENT, "node_modules"), os.path.join(R, "ext", "clients", "opentui", "node_modules"))  # 85 MB: share, don't copy
-for name, target in (("python3", PYTHON), ("bun", BUN)):
+for name, target in (("python3", python()), ("bun", BUN)):
     os.symlink(target, os.path.join(R, "bin", name))
 with open(f"{R}/mouse.py", "w") as f:  # asks for SGR mouse reports, prints the first one it gets
     f.write("import os, sys, termios, tty\nold = termios.tcgetattr(0)\nos.write(1, b'\\x1b[?1000h\\x1b[?1006hmouse-ready\\r\\n')\n"
@@ -121,7 +121,7 @@ try:
             break
     check("pane size follows the window (stream.resize: 88x22 inside the border)", bool(sized), screen())
     # Mouse: a program that asked for the mouse (SGR mode) receives a click in its own encoding.
-    keys("/usr/bin/clear; " + PYTHON + " " + f"{R}/mouse.py", literal=True); keys("Enter")
+    keys("/usr/bin/clear; " + python() + " " + f"{R}/mouse.py", literal=True); keys("Enter")
     wait(lambda: "mouse-ready" in screen(), 10)
     lines = screen().splitlines()
     y = next(i for i, l in enumerate(lines) if "mouse-ready" in l) + 1
