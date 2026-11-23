@@ -10,6 +10,7 @@ from collections import Counter
 import json
 import os
 from pathlib import Path
+import select
 import statistics
 import sys
 import time
@@ -95,6 +96,11 @@ def sample(pid, interval=1.0):
     held = set(filter(None, os.environ.get("VQRO_GATE_SLOT_HELD", "").split(",")))
     started = time.monotonic()
     cores = os.cpu_count() or 1
+    notification = None
+    try:
+        notification = os.pidfd_open(pid)
+    except (AttributeError, OSError):
+        unavailable.add("step exit notification unavailable")
     try:
         birth, _ = identity(pid)
     except (OSError, ValueError, IndexError):
@@ -127,7 +133,14 @@ def sample(pid, interval=1.0):
         samples.append(row)
         if not alive:
             break
-        time.sleep(interval)
+        if notification is not None:
+            # Wake at real exit, not up to a second later: a competing gate that
+            # starts after this step ended is not contention during its window.
+            select.select([notification], [], [], interval)
+        else:
+            time.sleep(interval)
+    if notification is not None:
+        os.close(notification)
     if not totals:
         unavailable.add("no process-tree schedstat samples")
     runtime_ns = sum(value[0] for value in totals.values())

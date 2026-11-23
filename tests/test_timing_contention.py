@@ -37,8 +37,12 @@ class TimingFacts(unittest.TestCase):
                 patch.object(sampler, 'tree_schedstat', return_value={(42, 42, 'birth'): (100, 20)}), \
                 patch.object(sampler, 'slot_sample', return_value=[]), \
                 patch.object(sampler.Path, 'read_text', return_value='procs_running 1\n'), \
-                patch.object(sampler.os, 'cpu_count', return_value=8), patch.object(sampler.time, 'sleep'):
+                patch.object(sampler.os, 'cpu_count', return_value=8), \
+                patch.object(sampler.os, 'pidfd_open', return_value=99, create=True), \
+                patch.object(sampler.select, 'select') as wait, patch.object(sampler.os, 'close') as close:
             facts = sampler.sample(42)
+        wait.assert_called_once_with([99], [], [], 1.0)
+        close.assert_called_once_with(99)
         self.assertEqual(facts['status'], 'available', facts)
         self.assertFalse(facts['contended'], facts)
         self.assertEqual(facts['runtime_ns'], 100)
