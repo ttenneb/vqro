@@ -68,13 +68,31 @@ class Client:
 
     def call(self, method, params=None, timeout=20):
         with self.cv: self.next += 1; ident = self.next
+        started = time.monotonic()
         self.send({'jsonrpc': '2.0', 'id': ident, 'method': method, 'params': params or {}})
         with self.cv:
-            if not self.cv.wait_for(lambda: ident in self.replies or self.closed, timeout): raise TimeoutError(method)
+            if not self.cv.wait_for(lambda: ident in self.replies or self.closed, timeout):
+                raise TimeoutError(describe_timeout(method, params, time.monotonic() - started))
             if ident not in self.replies: raise RuntimeError('core closed during ' + method)
             reply = self.replies.pop(ident)
         if 'error' in reply: raise RPCError(reply['error'])
         return reply['result']
+
+
+STEP = {'case': None}  # the running case, so a timeout says where it happened
+
+
+def describe_timeout(method, params, elapsed):
+    """Name the stalled call: its command (coord.<name>), the op/scope/action/agent args, elapsed time and case."""
+    params = params or {}
+    detail = {'method': method, 'elapsed_s': round(elapsed, 1), 'case': STEP['case']}
+    if method == 'command.invoke':
+        args = params.get('args') if isinstance(params.get('args'), dict) else {}
+        detail['command'] = params.get('name')
+        detail.update({key: args[key] for key in ('action', 'scope', 'op', 'agent', 'to', 'mode') if key in args})
+    elif isinstance(params.get('key'), str):
+        detail['key'] = params['key']
+    return json.dumps(detail, sort_keys=True)
 
 
 def wait(fn, seconds=15):
@@ -1040,6 +1058,7 @@ try:
     scope('resume')
     for name in (ARGS.cases or list(CASES)):
         try:
+            STEP['case'] = name
             result = CASES[name]()
             if name == 'idle':
                 assert not result['violation'], result
