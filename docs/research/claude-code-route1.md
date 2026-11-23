@@ -32,6 +32,9 @@ Each native assistant content record has its own UUID even when several share an
 not overwrite each other. Tool IDs correlate lifecycle and permission withdrawal. Full consent/form data is
 bounded and published before an answer is allowed; native interaction-only/unknown/oversize requests are
 cancelled where representable, never flattened or auto-approved. A failed answer write is not retried.
+A duplicate pending snapshot does not rearm an unknown/dispatched answer. Question-incarnation write tokens
+revoke queued human/automatic responses at the actual shared writer's QUEUED-to-WRITING commit boundary;
+a write already begun stays potentially acted, never relabelled no-effect. Unsettled claims survive view epochs.
 Auth-status login output and private native control errors are not published. Oversize fields/entities are
 omitted and marked incomplete, never shortened.
 
@@ -69,7 +72,9 @@ replay input. Common policy/claims and any new visible continuation remain outsi
 ## Item lifetime
 
 Items have bounded entities/retention and tail coverage, not a complete native transcript. Process exit and
-stdout-reader completion are distinct. Final frames drain before normal item close; the SDK reason field
+stdout-reader completion are distinct. The reader reports EOF, forced cutoff and protocol failure separately;
+cutoff is never called EOF. Public lifecycle remains `ending` until the final item cut, so the ordinary publisher
+cannot retire clients before late records. Final frames drain before normal item close; the SDK reason field
 carries `native_reader_closed`, not a generic provider-drop fallback. A bounded unconfirmed tail is labelled
 `native_tail_unconfirmed`/incomplete, not claimed EOF or complete history. The bridge stops only its owned child
 on shutdown; it adds no persistence or stronger descendant lifetime guarantee than the native/backend layer.

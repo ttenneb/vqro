@@ -212,6 +212,20 @@ fn only_complete_native_background_level_establishes_known_empty() {
     assert_eq!(s.background, Some(Vec::new()));
 }
 #[test]
+fn startup_catalog_does_not_advertise_an_unimplemented_customize_operation() {
+    let mut s = state();
+    observe(
+        &mut s,
+        json!({"type":"system","subtype":"init","session_id":"s1","plugins":[]}),
+    );
+    assert!(
+        s.facts("claude-test", "instance")["data"]["agent"]["caps"]
+            .get("agent.customize")
+            .is_none()
+    );
+    assert!(!s.provider_caps().contains_key("agent.customize"));
+}
+#[test]
 fn pending_snapshots_on_control_wrapper_are_not_lost_or_rendered_twice() {
     let mut s = state();
     let question = json!({"type":"control_request","request_id":"p1","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"tool1","input":{}}});

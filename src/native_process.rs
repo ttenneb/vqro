@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
@@ -48,6 +48,20 @@ pub struct Exit { pub code: Option<i32>, pub success: bool }
 pub enum Event { Record(Value), ProtocolError(String), Exited(Exit) }
 pub type Observe = Arc<dyn Fn(Event) + Send + Sync>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drain { Eof, Cutoff, Protocol }
+
+/// Revocable until the existing writer commits QUEUED -> WRITING. After that point a
+/// cancellation cannot promise no effect. The native adapter owns the token's scope.
+#[derive(Clone)]
+pub struct WriteToken { phase: Arc<AtomicU8>, enqueued: Arc<AtomicBool> }
+impl Default for WriteToken { fn default() -> Self { Self::new() } }
+impl WriteToken {
+    pub fn new() -> Self { Self { phase:Arc::new(AtomicU8::new(QUEUED)),enqueued:Arc::new(AtomicBool::new(false)) } }
+    pub fn cancel_before_write(&self) -> bool { self.phase.compare_exchange(QUEUED,CANCELLED,Ordering::SeqCst,Ordering::SeqCst).is_ok() }
+    pub fn write_begun(&self) -> bool { matches!(self.phase.load(Ordering::SeqCst),WRITING|WRITTEN|REPLIED) }
+}
+
 /// A native runtime's request/reply envelope, without process or admission policy.
 /// Unknown reply ids are still observed, never attached to a different request.
 pub trait Codec: Send + Sync {
@@ -79,7 +93,7 @@ struct Inner {
     stopping: AtomicBool,
     stop: watch::Sender<bool>,
     exit: watch::Sender<Option<Exit>>,
-    drained: watch::Sender<bool>,
+    drained: watch::Sender<Option<Drain>>,
     stderr: Mutex<VecDeque<u8>>,
     stderr_total: AtomicU64,
     observe: Observe,
@@ -165,7 +179,7 @@ impl Process {
         let (writes, receiver) = mpsc::channel(32);
         let (stop, mut stopping) = watch::channel(false);
         let (exit, _) = watch::channel(None);
-        let (drained, _) = watch::channel(false);
+        let (drained, _) = watch::channel(None);
         let inner = Arc::new(Inner { pending:Mutex::new(HashMap::new()), writes, budget:Arc::new(Semaphore::new(MAX_RECORD)),
             serial:AtomicU64::new(1),dead:AtomicBool::new(false),broken:AtomicBool::new(false),stopping:AtomicBool::new(false),
             stop,exit,drained,stderr:Mutex::new(VecDeque::new()),stderr_total:AtomicU64::new(0),observe,codec });
@@ -203,12 +217,14 @@ impl Process {
             if exit.changed().await.is_err() { return Exit { code:None,success:false }; }
         }
     }
-    /// All native stdout records before EOF/the bounded post-exit drain have been observed.
-    /// Distinct from process exit: an adapter can publish its final items before announcing gone.
-    pub async fn drained(&self) {
+    /// Reader termination, explicitly distinguishing observed EOF from cutoff/protocol failure.
+    /// Distinct from process exit: adapters must not call an unconfirmed tail complete.
+    pub async fn drained(&self) -> Drain {
         let mut drained = self.inner.drained.subscribe();
-        if *drained.borrow() { return; }
-        let _ = drained.wait_for(|done| *done).await;
+        loop {
+            if let Some(result)=*drained.borrow(){return result;}
+            if drained.changed().await.is_err(){return Drain::Protocol;}
+        }
     }
     pub fn submit(&self, command: &str, args: Value, deadline: Instant) -> Result<Ticket, Error> {
         if !self.alive() { return Err(Error::new("unavailable", format!("native {} is not available", self.inner.codec.name()))); }
@@ -247,6 +263,11 @@ impl Process {
     }
     /// Send an uncorrelated typed record. Success means the whole line was written, not acknowledged.
     pub async fn notify(&self, command: &str, args: Value, deadline: Instant) -> Result<(), Error> {
+        self.notify_guarded(command,args,deadline,WriteToken::new()).await
+    }
+    pub async fn notify_guarded(&self, command: &str, args: Value, deadline: Instant, token: WriteToken) -> Result<(), Error> {
+        if token.enqueued.swap(true,Ordering::SeqCst){return Err(Error::new("invalid","native write token already submitted"));}
+        if token.phase.load(Ordering::SeqCst)==CANCELLED{return Err(Error::new("stale","native notice withdrawn before dispatch"));}
         if !self.alive() { return Err(Error::new("unavailable",format!("native {} is not available",self.inner.codec.name()))); }
         let Some(mut params) = args.as_object().cloned() else { return Err(Error::new("invalid","native arguments must be an object")); };
         params.insert("type".into(),json!(command));
@@ -254,7 +275,7 @@ impl Process {
         line.push(b'\n');
         if line.len() > MAX_RECORD { return Err(Error::new("too_large","native record exceeds byte limit; not sent")); }
         let permit = self.inner.budget.clone().try_acquire_many_owned(line.len().max(64) as u32).map_err(|_|Error::new("overloaded","native output budget full; not sent"))?;
-        let phase = Arc::new(AtomicU8::new(QUEUED));
+        let phase=token.phase;
         self.inner.writes.try_send(Write { id:None,line,deadline,phase:phase.clone(),_permit:permit }).map_err(|_|Error::new("overloaded","native write queue full; not sent"))?;
         loop {
             match phase.load(Ordering::SeqCst) {
@@ -272,7 +293,7 @@ impl Process {
     }
 }
 
-async fn write_native(mut stdin: impl tokio::io::AsyncWrite + Unpin, mut writes: mpsc::Receiver<Write>, state: Arc<Inner>) {
+async fn write_native(mut stdin: impl AsyncWrite + Unpin, mut writes: mpsc::Receiver<Write>, state: Arc<Inner>) {
     let mut exit = state.exit.subscribe();
     loop {
         let write = tokio::select! { value = writes.recv() => value, _ = exit.wait_for(|value|value.is_some()) => None };
@@ -290,10 +311,11 @@ async fn write_native(mut stdin: impl tokio::io::AsyncWrite + Unpin, mut writes:
     }
 }
 
-async fn read_native(stdout: tokio::process::ChildStdout, state: Arc<Inner>) {
+async fn read_native(stdout: impl AsyncRead + Unpin, state: Arc<Inner>) {
     let mut stdout = BufReader::new(stdout);
     let mut exit = state.exit.subscribe();
     let mut drain_deadline = None;
+    let mut outcome=Drain::Eof;
     // Keep partial framing across cancellation by the child-exit arm below.
     let mut line = Vec::new();
     loop {
@@ -312,7 +334,7 @@ async fn read_native(stdout: tokio::process::ChildStdout, state: Arc<Inner>) {
         let result = tokio::select! {
             result = read => result,
             _ = exit.changed(), if drain_deadline.is_none() => { drain_deadline = Some(Instant::now()+Duration::from_secs(1)); continue; },
-            _ = async { if let Some(deadline) = drain_deadline { tokio::time::sleep_until(deadline).await; } else { std::future::pending::<()>().await; } } => break,
+            _ = async { if let Some(deadline) = drain_deadline { tokio::time::sleep_until(deadline).await; } else { std::future::pending::<()>().await; } } => {outcome=Drain::Cutoff;break;},
         };
         match result {
             Ok(false) => break,
@@ -352,7 +374,8 @@ async fn read_native(stdout: tokio::process::ChildStdout, state: Arc<Inner>) {
         let _ = tokio::time::timeout(Duration::from_millis(100),exit.wait_for(|value|value.is_some())).await;
         if !state.dead.load(Ordering::SeqCst) { state.protocol_error("native stdout closed while process remains alive"); }
     }
-    state.drained.send_replace(true);
+    if state.broken.load(Ordering::SeqCst){outcome=Drain::Protocol;}
+    state.drained.send_replace(Some(outcome));
 }
 
 #[cfg(test)]
@@ -372,3 +395,7 @@ async fn read_stderr(mut stderr: tokio::process::ChildStderr, state: Arc<Inner>)
         while tail.len() > 65_536 { tail.pop_front(); }
     }
 }
+
+#[cfg(test)]
+#[path="native_process_tests.rs"]
+mod tests;

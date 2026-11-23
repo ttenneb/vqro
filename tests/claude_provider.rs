@@ -221,6 +221,59 @@ async fn synthetic_process_provider_vertical_slice() {
         "startup must not write a prompt"
     );
     let (provider, mut requests, mut core) = registered(&shared).await;
+    // Compose the real request incarnation token with the actual native writer, not only a
+    // book-only assertion. A reused/withdrawn question must send ZERO old consent bytes.
+    let mut book = vqro::claude_code::requests::Requests::default();
+    let mut question = json!({"type":"control_request","request_id":"race-question","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"race-tool","input":{"command":"old"}}});
+    let id = book.observe(&question, None).changes.remove(0).id;
+    let old = book
+        .answer(
+            &id,
+            1,
+            &json!({"action":"accept","content":{"behavior":"allow"}}),
+        )
+        .unwrap();
+    let token = book.answer_token(&id).unwrap();
+    question["request"]["input"]["command"] = json!("replacement");
+    book.observe(&question, None);
+    let error = native
+        .notify_guarded(
+            "control_response",
+            old,
+            tokio::time::Instant::now() + Duration::from_secs(2),
+            token,
+        )
+        .await
+        .unwrap_err();
+    assert!(!error.may_have_acted);
+    let mut unsupported = question.clone();
+    unsupported["request_id"] = json!("race-auto");
+    unsupported["request"]["requires_user_interaction"] = json!(true);
+    let old = book.observe(&unsupported, None).outgoing.remove(0);
+    unsupported["request"]["requires_user_interaction"] = json!(false);
+    book.observe(&unsupported, None);
+    let error = native
+        .notify_guarded(
+            "control_response",
+            old.frame,
+            tokio::time::Instant::now() + Duration::from_secs(2),
+            old.token,
+        )
+        .await
+        .unwrap_err();
+    assert!(!error.may_have_acted);
+    native
+        .call(
+            "initialize",
+            json!({"supportedDialogKinds":[]}),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !inputs(&log).iter().any(|v| v["type"] == "control_response"),
+        "unwritten old approval/auto-cancellation leaked to reused native ID"
+    );
     let args = send_args(
         &shared,
         "delivery1",
@@ -469,5 +522,84 @@ async fn synthetic_process_provider_vertical_slice() {
         "last receipt must precede stream close"
     );
     outgoing.abort();
+    provider.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn normal_publisher_cannot_end_before_late_native_records_and_item_cut() {
+    let shared = Shared::new(
+        "publish-boot".into(),
+        "claude-fixture".into(),
+        "fixture-instance".into(),
+    );
+    shared
+        .state
+        .lock()
+        .unwrap()
+        .initialized(&json!({"claude_code_version":"2.1.329"}));
+    let (provider, mut requests, mut core) = registered(&shared).await;
+    core.open_items(&shared, &provider, &mut requests).await;
+    let publisher = tokio::spawn(shared.clone().publish(provider.clone()));
+    shared
+        .state
+        .lock()
+        .unwrap()
+        .observe(&vqro::native_process::Event::Exited(
+            vqro::native_process::Exit {
+                code: Some(0),
+                success: true,
+            },
+        ));
+    shared.wake();
+    loop {
+        let frame = core.recv().await;
+        if frame["method"] == "stream.data" {
+            core.item_data(&frame).await;
+            continue;
+        }
+        assert_eq!(frame["method"], "resource.upsert");
+        let lifecycle = &frame["params"]["facts"]["data"]["agent"]["lifecycle"];
+        assert_ne!(
+            lifecycle, "ended",
+            "normal publisher retired the endpoint before the final-read barrier"
+        );
+        if lifecycle == "ending" {
+            break;
+        }
+    }
+    // Deterministic exit-before-final-read schedule: only now release final native records.
+    {
+        let mut state = shared.state.lock().unwrap();
+        state.observe(&vqro::native_process::Event::Record(json!({"type":"assistant","uuid":"late-message","message":{"content":[{"type":"text","text":"late native tail"}]}})));
+        state.observe(&vqro::native_process::Event::Record(json!({"type":"result","uuid":"late-result","terminal_reason":"completed","is_error":false})));
+    }
+    shared.wake();
+    let final_shared = shared.clone();
+    let final_provider = provider.clone();
+    let finish = tokio::spawn(async move {
+        final_shared.finish(&final_provider).await;
+    });
+    let (mut closed, mut ended) = (false, false);
+    while !closed || !ended {
+        let frame = core.recv().await;
+        match frame["method"].as_str() {
+            Some("stream.data") => core.item_data(&frame).await,
+            Some("stream.closed") => closed = true,
+            Some("resource.upsert") => {
+                if frame["params"]["facts"]["data"]["agent"]["lifecycle"] == "ended" {
+                    assert!(closed, "ended preceded the item terminal cut");
+                    ended = true;
+                }
+            }
+            _ => panic!("unexpected lifecycle frame {frame}"),
+        }
+    }
+    finish.await.unwrap();
+    assert!(
+        String::from_utf8(core.items)
+            .unwrap()
+            .contains("late native tail")
+    );
+    publisher.abort();
     provider.close();
 }

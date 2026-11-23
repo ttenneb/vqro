@@ -125,6 +125,7 @@ def receive_response(frame):
 
 
 def main():
+    record("pid", os.getpid())
     # The bridge must not leak controller/bootstrap/mailbox environment to its native child.
     forbidden = sorted(key for key in os.environ if key.startswith("HERDR_") or key in {
         "VQRO_BRIDGE_TOKEN", "VQRO_EXTENSION_TOKEN", "VQRO_BOOTSTRAP_TOKEN", "VQRO_ACCOUNT",

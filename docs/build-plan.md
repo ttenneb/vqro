@@ -11,6 +11,17 @@ workspace-owner Unit exceptions; live Testing notices/settings pages disclose mi
 coverage gaps. No Pi runtime veto or universal prose enforcement is claimed. Integration/Performance receipts
 carry the same setup binding without changing their measurement rules. See `tests/test_testing_setup.py`.
 
+## Claude Code route-1 vertical slice (2026-11-23, qualification in progress)
+
+The backend-owned headless bridge and separate `claude-code` launcher use public stream/control and existing
+agent UI primitives. Conversation/tool projection, bounded consent forms, interrupt and final item-tail handling
+have synthetic wire coverage; `claude_launcher_e2e.py` also uses the existing private real-core/backend harness
+with a synthetic native peer. These are not real CLI/model/account qualifications. Native queue remains unknown;
+the vqro input ledger and complete per-process native background level are explicitly separate witnesses.
+See `research/claude-code-route1.md`. Account restart and child/task control remain subsequent slices; no capability
+is advertised for an unimplemented operation. Current final gate and protected source/secondary acceptance remain
+release requirements, not implied by the fixture evidence.
+
 ## Disposable setup performance checks (2026-11-22)
 
 `test-perf` measures repeated startup, idle events/content/CPU/RSS, scenario interactions and publication sizes

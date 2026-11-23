@@ -22,10 +22,11 @@ pub struct State {
     pub foreground: &'static str,
     pub run: Option<String>,
     pub exit: Option<Exit>,
+    pub end_ready: bool,
     pub incomplete: BTreeSet<String>,
     pub receipts: BTreeMap<String, Value>,
     pub inputs: BTreeMap<String, (String, String)>,
-    pub outgoing: VecDeque<Value>,
+    pub outgoing: VecDeque<super::requests::Outbound>,
     pub account: Option<Value>,
     pub principal: Option<String>,
     pub generation: u64,
@@ -72,6 +73,7 @@ impl State {
             foreground: "unknown",
             run: None,
             exit: None,
+            end_ready: false,
             incomplete: BTreeSet::new(),
             receipts: BTreeMap::new(),
             inputs: BTreeMap::new(),
@@ -141,9 +143,6 @@ impl State {
                 "literal":"always","origin":[{"as":"user","role":"user"},{"as":"attributed_user","role":"user","frame":"sender_header"}],
                 "correlation":"acceptance","handled":"none","keys":null,"guards":{"session":"adapter","run":"none"},"receipts":{"retain":256}});
         }
-        if upper || self.startup.plugins_observed {
-            caps["agent.customize"] = json!({"extension":{"ops":["list"],"effective":"now"}});
-        }
         caps
     }
     pub fn provider_caps(&self) -> Map<String, Value> {
@@ -170,10 +169,10 @@ impl State {
         let state = self.status();
         let mut caps = self.declarations(false);
         caps["rev"] = json!(self.caps_rev);
-        let mut facts = json!({"ref":"agent","incarnation":self.boot,"kind":"agent","state":if self.exit.is_some(){"finished"}else{"live"},"name":"Claude Code",
+        let mut facts = json!({"ref":"agent","incarnation":self.boot,"kind":"agent","state":if self.end_ready{"finished"}else{"live"},"name":"Claude Code",
             "status":{"state":match state {"idle"=>"idle","requires_action"=>"blocked",_=>"working"}},
-            "exit":self.exit.as_ref().map(|e|json!({"code":e.code,"success":e.success})),
-            "data":{"agent":{"v":0,"state":state,"lifecycle":if self.exit.is_some(){"ended"}else{"live"},
+            "exit":self.exit.as_ref().filter(|_|self.end_ready).map(|e|json!({"code":e.code,"success":e.success})),
+            "data":{"agent":{"v":0,"state":state,"lifecycle":if self.end_ready{"ended"}else if self.exit.is_some(){"ending"}else{"live"},
                 "host":{"id":format!("{}.native{}",self.boot,self.generation),"provider":provider,"instance":instance,
                     "incarnation":self.generation.to_string(),"kind":"process","owns_lifecycle":true},
                 "session":self.session.as_ref().map(|id|json!({"id":id})),"epoch":self.epoch(),"caps":caps,
@@ -351,9 +350,34 @@ impl State {
             } else {
                 self.background = None;
                 self.incomplete.insert("background".into());
-                self.availability.invalidate_episode();
+                // A level snapshot of existing work is not evidence of a NEW turn. Keep the
+                // limit episode while AUTO waits for that work to end, as common policy requires.
             }
             return;
+        }
+        // Operation-scoped native consent can settle after the foreground session changed.
+        // Retire that exact request before deciding whether to omit the old session's content.
+        let mut settled = Vec::new();
+        if kind == "tool_progress" {
+            if let Some(id) = frame["tool_use_id"].as_str() {
+                settled.push(id);
+            }
+        }
+        if kind == "user" {
+            if let Some(blocks) = frame["message"]["content"].as_array() {
+                for block in blocks {
+                    if block["type"] == "tool_result" {
+                        if let Some(id) = block["tool_use_id"].as_str() {
+                            settled.push(id);
+                        }
+                    }
+                }
+            }
+        }
+        for id in settled {
+            for change in self.requests.tool_started(id) {
+                self.put("request", &change.id, change.value);
+            }
         }
         let init = kind == "system" && frame["subtype"] == "init";
         let state = kind == "system" && frame["subtype"] == "session_state_changed";

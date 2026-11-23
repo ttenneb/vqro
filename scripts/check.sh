@@ -452,6 +452,7 @@ if [ "$MODE" = full ]; then
   step e2e-pi-rust-default "${CLEAN[@]}" python3 tests/pi_provider_e2e.py --run --rust-bridge --agents-extension --large-workspace --probe-terminal-invoke --vqro "$TARGET/debug/vqro" --hc "$HOME/.local/bin/herdr-core"
   step e2e-agents-ui "${CLEAN[@]}" python3 tests/pi_provider_e2e.py --run --agents-ui --large-workspace --probe-terminal-invoke --vqro "$TARGET/debug/vqro" --hc "$HOME/.local/bin/herdr-core"
   step e2e-codex-launcher "${CLEAN[@]}" python3 tests/codex_launcher_e2e.py --run --vqro "$TARGET/debug/vqro" --bridge "$TARGET/debug/vqro-bridge-codex" --hc "$HOME/.local/bin/herdr-core"
+  step e2e-claude-launcher "${CLEAN[@]}" python3 tests/claude_launcher_e2e.py --run --vqro "$TARGET/debug/vqro" --bridge "$TARGET/debug/vqro-bridge-claude" --hc "$HOME/.local/bin/herdr-core"
   step e2e-agent-stop "${CLEAN[@]}" python3 tests/e2e_agent_stop.py --run --vqro "$TARGET/debug/vqro" --hc "$HOME/.local/bin/herdr-core"
   step e2e-agent-origin "${CLEAN[@]}" python3 tests/e2e_agent_origin.py --vqro "$TARGET/debug/vqro"
   step e2e-claude-hook "${CLEAN[@]}" python3 tests/claude_hook_e2e.py --vqro "$TARGET/debug/vqro" --hook "$TARGET/debug/vqro-claude-hook"

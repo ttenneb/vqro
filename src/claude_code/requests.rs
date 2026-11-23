@@ -1,6 +1,18 @@
 //! Native permission requests. No automatic approval, persistent grants or guessed consent cards.
 //! Protocol: Claude Agent SDK 0.3.329 SDKControlPermissionRequest/PermissionResult.
+use crate::native_process::WriteToken;
 use serde_json::{Value, json};
+
+pub struct Outbound {
+    pub frame: Value,
+    pub token: WriteToken,
+}
+impl std::ops::Deref for Outbound {
+    type Target = Value;
+    fn deref(&self) -> &Value {
+        &self.frame
+    }
+}
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hasher};
 
@@ -15,7 +27,7 @@ pub struct Change {
 #[derive(Default)]
 pub struct Incoming {
     pub changes: Vec<Change>,
-    pub outgoing: Vec<Value>,
+    pub outgoing: Vec<Outbound>,
 }
 #[derive(Debug)]
 pub struct Refusal {
@@ -28,6 +40,7 @@ struct Pending {
     value: Value,
     claimed: bool,
     user_cancelled: bool,
+    token: WriteToken,
 }
 #[derive(Default)]
 pub struct Requests {
@@ -35,6 +48,8 @@ pub struct Requests {
     pending: BTreeMap<String, Pending>,
     native: HashMap<String, String>,
     recent: VecDeque<(String, u64)>,
+    unsupported_tokens: BTreeMap<String, WriteToken>,
+    unsupported_tools: BTreeMap<String, String>,
 }
 fn error_response(id: &str) -> Value {
     json!({"type":"control_response","response":{"subtype":"error","request_id":id,
@@ -43,7 +58,7 @@ fn error_response(id: &str) -> Value {
 fn refusal(kind: &'static str, message: &'static str) -> Refusal {
     Refusal { kind, message }
 }
-// This bounded cache only suppresses duplicate unrepresentable cancellations, never approves input.
+// Bounded unsettled tombstones suppress duplicate cancellation writes, never approve input.
 fn fingerprint(value: &Value) -> u64 {
     let mut hash = DefaultHasher::new();
     hash.write(&serde_json::to_vec(value).expect("JSON value serializes"));
@@ -61,9 +76,10 @@ impl Requests {
         self.len() == 0
     }
     pub fn has_unconfirmed(&self) -> bool {
-        self.pending.values().any(|p| {
-            p.value["status"] != "pending" && p.value["native"]["waiting"] != "not_waiting"
-        })
+        !self.recent.is_empty()
+            || self.pending.values().any(|p| {
+                p.value["status"] != "pending" && p.value["native"]["waiting"] != "not_waiting"
+            })
     }
     pub fn summaries(&self) -> Vec<Value> {
         self.pending
@@ -75,11 +91,21 @@ impl Requests {
             })
             .collect()
     }
-    fn remember(&mut self, native: &str, request: &Value) {
-        self.recent.push_back((native.into(), fingerprint(request)));
-        while self.recent.len() > RECENT {
-            self.recent.pop_front();
+    fn remember(&mut self, native: &str, request: &Value) -> bool {
+        // Never evict an unsettled tombstone and thereby replay an unknown cancellation.
+        if self.recent.len() >= RECENT && !self.recent.iter().any(|(id, _)| id == native) {
+            return false;
         }
+        self.recent.retain(|(id, _)| id != native);
+        self.recent.push_back((native.into(), fingerprint(request)));
+        self.unsupported_tools.remove(native);
+        if let Some(tool) = request["tool_use_id"].as_str().filter(|s| s.len() <= 4096) {
+            self.unsupported_tools.insert(native.into(), tool.into());
+        }
+        true
+    }
+    pub fn answer_token(&self, id: &str) -> Option<WriteToken> {
+        self.pending.get(id).map(|p| p.token.clone())
     }
     pub fn observe(&mut self, frame: &Value, child: Option<&str>) -> Incoming {
         let mut result = Incoming::default();
@@ -87,8 +113,14 @@ impl Requests {
             return result;
         };
         if frame["type"] == "control_cancel_request" {
+            if let Some(token) = self.unsupported_tokens.remove(native) {
+                token.cancel_before_write();
+            }
+            self.recent.retain(|(id, _)| id != native);
+            self.unsupported_tools.remove(native);
             if let Some(id) = self.native.remove(native) {
                 if let Some(mut pending) = self.pending.remove(&id) {
+                    pending.token.cancel_before_write();
                     if pending.value["status"] == "pending" {
                         pending.value["status"] = json!("cancelled");
                     }
@@ -104,15 +136,16 @@ impl Requests {
         if frame["type"] != "control_request" {
             return result;
         }
-        // A still-pending live question and its initialize snapshot are one request. A reused id
-        // after settlement gets a NEW standard id; never bind it to an old approved input.
+        // A live question and identical initialize snapshots are one incarnation even after a
+        // response write has an unknown outcome. Only independent settlement/reuse retires it.
         if let Some(old_id) = self.native.get(native).cloned() {
             if let Some(old) = self.pending.get(&old_id) {
-                if old.value["status"] == "pending" && old.request == frame["request"] {
+                if old.request == frame["request"] {
                     return result;
                 }
             }
             if let Some(mut old) = self.pending.remove(&old_id) {
+                old.token.cancel_before_write();
                 old.value["status"] = json!("expired");
                 result.changes.push(Change {
                     id: old_id,
@@ -128,6 +161,9 @@ impl Requests {
             .any(|(id, hash)| id == native && *hash == fingerprint)
         {
             return result;
+        }
+        if let Some(token) = self.unsupported_tokens.remove(native) {
+            token.cancel_before_write();
         }
         self.serial += 1;
         let id = format!("q{}", self.serial);
@@ -204,11 +240,16 @@ impl Requests {
             }
             if native.len() <= 4096 {
                 value["native"]["request_id"] = json!(native);
-                self.remember(native, request);
+                let remembered = self.remember(native, request);
                 // An undeclared user dialog MUST NOT be answered as a user dismissal. The native CLI
                 // discards error replies for it too; local cancellation is not native settlement.
-                if request["subtype"] != "request_user_dialog" {
-                    result.outgoing.push(error_response(native));
+                if remembered && request["subtype"] != "request_user_dialog" {
+                    let token = WriteToken::new();
+                    self.unsupported_tokens.insert(native.into(), token.clone());
+                    result.outgoing.push(Outbound {
+                        frame: error_response(native),
+                        token,
+                    });
                 }
             }
         } else {
@@ -221,6 +262,7 @@ impl Requests {
                     value: value.clone(),
                     claimed: false,
                     user_cancelled: false,
+                    token: WriteToken::new(),
                 },
             );
         }
@@ -307,7 +349,15 @@ impl Requests {
     /// Only a definite pre-write refusal may release the local claim; a withdrawal wins this race.
     pub fn not_written(&mut self, id: &str) {
         if let Some(pending) = self.pending.get_mut(id) {
-            pending.claimed = false;
+            if self
+                .native
+                .get(&pending.native)
+                .is_some_and(|current| current == id)
+                && pending.value["status"] == "pending"
+            {
+                pending.claimed = false;
+                pending.token = WriteToken::new();
+            }
         }
     }
     pub fn dispatched(&mut self, id: &str, known_written: bool) -> Option<Change> {
@@ -329,6 +379,19 @@ impl Requests {
         })
     }
     pub fn tool_started(&mut self, tool: &str) -> Vec<Change> {
+        let retired: Vec<_> = self
+            .unsupported_tools
+            .iter()
+            .filter(|(_, id)| *id == tool)
+            .map(|(native, _)| native.clone())
+            .collect();
+        for native in retired {
+            if let Some(token) = self.unsupported_tokens.remove(&native) {
+                token.cancel_before_write();
+            }
+            self.unsupported_tools.remove(&native);
+            self.recent.retain(|(id, _)| id != &native);
+        }
         let ids: Vec<_> = self
             .pending
             .iter()
@@ -338,6 +401,7 @@ impl Requests {
         ids.into_iter()
             .filter_map(|id| {
                 let mut pending = self.pending.remove(&id)?;
+                pending.token.cancel_before_write();
                 self.native.remove(&pending.native);
                 pending.value["status"] = json!("answered");
                 pending.value["native"]["waiting"] = json!("not_waiting");
@@ -349,27 +413,42 @@ impl Requests {
             .collect()
     }
     /// A full request that could not be published must not remain approvable through summaries.
-    pub fn unrepresentable(&mut self, id: &str) -> Option<Value> {
+    pub fn unrepresentable(&mut self, id: &str) -> Option<Outbound> {
         let pending = self.pending.remove(id)?;
         self.native.remove(&pending.native);
-        self.remember(&pending.native, &pending.request);
-        Some(error_response(&pending.native))
+        if !self.remember(&pending.native, &pending.request) {
+            pending.token.cancel_before_write();
+            return None;
+        }
+        let token = pending.token;
+        self.unsupported_tokens
+            .insert(pending.native.clone(), token.clone());
+        Some(Outbound {
+            frame: error_response(&pending.native),
+            token,
+        })
     }
     pub fn expire(&mut self) -> Vec<Change> {
-        self.native.clear();
-        self.recent.clear();
-        self.pending
-            .split_off("")
-            .into_iter()
-            .map(|(id, mut pending)| {
-                pending.value["status"] = json!("expired");
-                pending.value["native"]["waiting"] = json!("unknown");
-                Change {
-                    id,
-                    value: pending.value,
-                }
-            })
-            .collect()
+        for token in self.unsupported_tokens.values() {
+            token.cancel_before_write();
+        }
+        let mut changes = Vec::new();
+        for (id, mut pending) in std::mem::take(&mut self.pending) {
+            pending.token.cancel_before_write();
+            pending.value["status"] = json!("expired");
+            pending.value["native"]["waiting"] = json!("unknown");
+            changes.push(Change {
+                id: id.clone(),
+                value: pending.value.clone(),
+            });
+            // Unknown/dispatched consent does not become answerable again after a view epoch.
+            if pending.claimed {
+                self.pending.insert(id, pending);
+            } else {
+                self.native.remove(&pending.native);
+            }
+        }
+        changes
     }
 }
 
@@ -425,6 +504,61 @@ mod tests {
         assert_eq!(incoming.changes[0].value["incomplete"], true);
         assert_eq!(incoming.outgoing[0]["response"]["subtype"], "error");
         assert!(book.observe(&frame, None).outgoing.is_empty());
+    }
+    #[test]
+    fn unknown_claim_survives_same_snapshot_and_view_epoch_until_native_settlement() {
+        let mut book = Requests::default();
+        let frame = permission();
+        let id = book.observe(&frame, None).changes.remove(0).id;
+        book.answer(
+            &id,
+            1,
+            &json!({"action":"accept","content":{"behavior":"allow"}}),
+        )
+        .unwrap();
+        book.dispatched(&id, false).unwrap();
+        assert!(book.observe(&frame, None).changes.is_empty());
+        assert!(book.answer(&id, 1, &json!({"action":"decline"})).is_err());
+        book.expire();
+        assert!(book.observe(&frame, None).changes.is_empty());
+        assert!(book.answer(&id, 1, &json!({"action":"decline"})).is_err());
+        book.tool_started("tool1");
+        let next = book.observe(&frame, None).changes.remove(0).id;
+        assert_ne!(id, next);
+    }
+    #[test]
+    fn withdrawal_and_reused_payload_revoke_the_unwritten_answer_token() {
+        let mut book = Requests::default();
+        let frame = permission();
+        let id = book.observe(&frame, None).changes.remove(0).id;
+        book.answer(
+            &id,
+            1,
+            &json!({"action":"accept","content":{"behavior":"allow"}}),
+        )
+        .unwrap();
+        let token = book.answer_token(&id).unwrap();
+        let mut replacement = frame;
+        replacement["request"]["input"]["command"] = json!("changed native question");
+        let next = book.observe(&replacement, None).changes.remove(1).id;
+        assert_ne!(id, next);
+        assert!(!token.write_begun());
+        assert!(!token.cancel_before_write(), "already revoked by reuse");
+        assert!(book.answer(&id, 1, &json!({"action":"decline"})).is_err());
+    }
+    #[test]
+    fn unsupported_reply_token_is_revoked_by_id_reuse_not_replayed_from_outbox() {
+        let mut book = Requests::default();
+        let mut frame = permission();
+        frame["request"]["requires_user_interaction"] = json!(true);
+        let outgoing = book.observe(&frame, None).outgoing.remove(0);
+        frame["request"]["requires_user_interaction"] = json!(false);
+        assert_eq!(book.observe(&frame, None).changes.len(), 1);
+        assert!(
+            !outgoing.token.cancel_before_write(),
+            "old auto-reply already revoked"
+        );
+        assert!(!outgoing.token.write_begun());
     }
     #[test]
     fn snapshot_duplicate_withdrawal_and_id_reuse_do_not_reuse_standard_identity() {

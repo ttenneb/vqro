@@ -176,10 +176,11 @@ impl Shared {
                     break;
                 };
                 if native
-                    .notify(
+                    .notify_guarded(
                         "control_response",
-                        response,
+                        response.frame,
                         Instant::now() + Duration::from_secs(3),
+                        response.token,
                     )
                     .await
                     .is_err()
@@ -302,18 +303,24 @@ impl Shared {
                 let Some(revision) = effect.args["revision"].as_u64() else {
                     return rejected("invalid", "request revision is required");
                 };
-                let response = {
+                let (response, token) = {
                     let mut state = self.state.lock().unwrap();
-                    match state
+                    let response =
+                        match state
+                            .requests
+                            .answer(&request, revision, &effect.args["response"])
+                        {
+                            Ok(r) => r,
+                            Err(e) => return rejected(e.kind, e.message),
+                        };
+                    let token = state
                         .requests
-                        .answer(&request, revision, &effect.args["response"])
-                    {
-                        Ok(r) => r,
-                        Err(e) => return rejected(e.kind, e.message),
-                    }
+                        .answer_token(&request)
+                        .expect("claimed native request has token");
+                    (response, token)
                 };
                 let result = native
-                    .notify("control_response", response, effect.deadline)
+                    .notify_guarded("control_response", response, effect.deadline, token)
                     .await;
                 let mut state = self.state.lock().unwrap();
                 match &result {
@@ -457,10 +464,10 @@ impl Shared {
     }
     pub async fn finish(self: &Arc<Self>, provider: &Provider) {
         if let Some(native) = self.process() {
-            if tokio::time::timeout(Duration::from_secs(2), native.drained())
-                .await
-                .is_err()
-            {
+            if !matches!(
+                tokio::time::timeout(Duration::from_secs(2), native.drained()).await,
+                Ok(crate::native_process::Drain::Eof)
+            ) {
                 self.state
                     .lock()
                     .unwrap()
@@ -491,6 +498,17 @@ impl Shared {
                 .incomplete
                 .insert("item_stream_tail".into());
         }
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.exit.is_some() {
+                state.end_ready = true;
+            } else {
+                state.incomplete.insert("native_exit".into());
+            }
+            state.refresh();
+        }
+        self.wake();
+        // Only now may either publisher announce ended, after the native and item-stream tail cut.
         // The final upsert is queued after completed item-stream sends by the SDK writer.
         let _ = provider.upsert(self.facts()).await;
     }
