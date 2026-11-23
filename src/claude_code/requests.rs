@@ -145,8 +145,21 @@ impl Requests {
                 }
             }
             if let Some(mut old) = self.pending.remove(&old_id) {
+                let unsettled_claim =
+                    old.claimed && (old.value["status"] != "pending" || old.token.write_begun());
                 old.token.cancel_before_write();
                 old.value["status"] = json!("expired");
+                if unsettled_claim {
+                    // A changed snapshot/reused native ID is not an independent settlement of a
+                    // possibly-written consent. Do not mint another approvable incarnation.
+                    old.value["incomplete"] = json!(true);
+                    result.changes.push(Change {
+                        id: old_id.clone(),
+                        value: old.value.clone(),
+                    });
+                    self.pending.insert(old_id, old);
+                    return result;
+                }
                 result.changes.push(Change {
                     id: old_id,
                     value: old.value,
@@ -518,6 +531,13 @@ mod tests {
         .unwrap();
         book.dispatched(&id, false).unwrap();
         assert!(book.observe(&frame, None).changes.is_empty());
+        let mut changed = frame.clone();
+        changed["request"]["input"]["command"] = json!("changed after unknown write");
+        assert_eq!(book.observe(&changed, None).changes.len(), 1);
+        assert!(
+            book.is_empty(),
+            "changed snapshot cannot rearm unknown consent"
+        );
         assert!(book.answer(&id, 1, &json!({"action":"decline"})).is_err());
         book.expire();
         assert!(book.observe(&frame, None).changes.is_empty());
