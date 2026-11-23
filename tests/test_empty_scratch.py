@@ -5,7 +5,7 @@ import unittest
 from unittest import mock
 
 from test_workspace_tabs import Core, load, walk
-from vqro_ext import VqroError, views_in
+from vqro_ext import Extension, VqroError, views_in
 
 
 class EmptyScratch(unittest.TestCase):
@@ -140,6 +140,62 @@ class EmptyScratch(unittest.TestCase):
         deletes = [op for call in core.apply.call_args_list for op in call.args[0] if op["op"] == "delete" and op["key"] == "doc/workspaces/first-shell"]
         self.assertEqual(deletes, [{"op": "delete", "key": "doc/workspaces/first-shell", "expect": 1}])
 
+    def test_raw_layout_write_wins_inflight_bootstrap(self):
+        self.raw_layout_race(uncertain_kill=False)
+
+    def test_uncertain_stop_retains_claim_and_says_so(self):
+        self.raw_layout_race(uncertain_kill=True)
+
+    def raw_layout_race(self, uncertain_kill):
+        core = Core()
+        listeners = []
+        core.on_event = lambda fn: (listeners.append(fn), fn)[1]
+        core.apply([{"op": "set", "key": "view/sidebar", "value": {"kind": "panel"}}], "sidebar already available")
+        core.retrying = lambda fn, attempts=3: Extension.retrying(core, fn, attempts)
+        entered, release = threading.Event(), threading.Event()
+        original = core.call
+        def paused(method, params=None):
+            if method == "resource.spawn":
+                entered.set()
+                self.assertTrue(release.wait(3))
+            if method == "resource.kill" and uncertain_kill:
+                core.calls.append((method, copy.deepcopy(params)))
+                raise VqroError("kill reply lost", "timeout", data={"outcome": "indeterminate"})
+            return original(method, params)
+        core.call = paused
+        errors, modules = [], {}
+        def boot():
+            try: modules.update(load(core, "workspaces"))
+            except Exception as error: errors.append(error)
+        worker = threading.Thread(target=boot)
+        worker.start()
+        self.assertTrue(entered.wait(3))
+        user_layout = {"tabs": [{"title": "mine", "node": {"view": "user"}}], "active": 0}
+        try:
+            core.apply([{"op": "set", "key": "view/user", "value": {"kind": "panel"}},
+                        {"op": "set", "key": "layout/main", "value": user_layout},
+                        {"op": "set", "key": "workspace/active", "value": {"layout": "main"}}], "user layout during spawn")
+            listeners[0]("entries", {"changes": [{"key": "layout/main"}]})
+        finally:
+            release.set()
+            worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(core.value("layout/main"), user_layout)
+        self.assertEqual([p for m, p in core.calls if m == "resource.kill"], [{"resource": "r1"}])
+        self.assertEqual(len(self.shells(core)), 1)
+        if uncertain_kill:
+            self.assertIsNotNone(core.value("doc/workspaces/first-shell"))
+            self.assertIn("stopping it was not confirmed", modules["workspaces"]["startup_notice"][0])
+            self.assertIn("press Ctrl-g n", modules["workspaces"]["startup_notice"][0])
+            modules["workspaces"]["bootstrap"]()
+            self.assertEqual(core.value("doc/workspaces/first-shell")["stopping"], "r1")
+            self.assertIn("stopping it was not confirmed", modules["workspaces"]["startup_notice"][0])
+            self.assertEqual(len([m for m, _ in core.calls if m == "resource.kill"]), 1)
+        else:
+            self.assertIsNone(core.value("doc/workspaces/first-shell"))
+            self.assertEqual(core.resources["r1"]["state"], "finished")
+
     def test_backend_availability_retries_only_definite_rejection(self):
         core = Core()
         call = core.call
@@ -195,6 +251,7 @@ class EmptyScratch(unittest.TestCase):
 
     def test_explicit_prefix_n_is_not_blocked_by_inflight_bootstrap(self):
         core = Core()
+        core.retrying = lambda fn, attempts=3: Extension.retrying(core, fn, attempts)
         mods = load(core, "tabs")
         entered, release = threading.Event(), threading.Event()
         original = core.call
@@ -219,6 +276,8 @@ class EmptyScratch(unittest.TestCase):
             worker.join(3)
         self.assertFalse(worker.is_alive())
         self.assertEqual(errors, [])
-        self.assertEqual(len(self.shells(core)), 2)  # the accepted rare race: one extra shell, never blocked n
-        self.assertEqual(len(next(n for n in walk(core.value("layout/main")) if "tabs" in n)["tabs"]), 2)
+        self.assertEqual(len(self.shells(core)), 2)  # both native spawns happened, but only the user's is shown
+        self.assertEqual(len(next(n for n in walk(core.value("layout/main")) if "tabs" in n)["tabs"]), 1)
+        self.assertEqual([p for m, p in core.calls if m == "resource.kill"], [{"resource": "r2"}])
+        self.assertEqual(core.resources["r2"]["state"], "finished")
         self.assertIsNone(core.value("doc/workspaces/first-shell"))

@@ -107,9 +107,12 @@ def main():
                "XDG_RUNTIME_DIR": str(root/"run"), "XDG_STATE_HOME": str(root/"state"), "XDG_CONFIG_HOME": str(root/"home"),
                "HC_SOCKET": str(root/"h.sock"), "HC_SESSION": "e2e-workspace-tabs", "VQRO_HERDR": '["/bin/false"]'}
         with (root/"serve.log").open("w") as log:
-            core = subprocess.Popen([str(vqro), "serve", "--fake"], env=env, cwd=root, stdout=log, stderr=subprocess.STDOUT)
+            core = subprocess.Popen([str(vqro), "serve", "--fake", "--safe"], env=env, cwd=root, stdout=log, stderr=subprocess.STDOUT)
         wait(lambda: (root/"p.sock").exists(), "core socket")
         client = Client(env["VQRO_SOCKET"])
+        # This fixture supplies its own layouts; disable bootstrap before enabling extensions.
+        client.call("workspace.apply", {"ops": [{"op": "set", "key": "doc/settings/workspaces", "value": {"open_shell_when_empty": False}}]})
+        client.call("command.invoke", {"name": "vqro.safe_mode", "args": {"on": False}})
         snap = lambda: client.call("workspace.snapshot")
         wait(lambda: {"tabs.open", "workspaces.open", "workspaces.switch", "sidebar.tab"} <= {c["name"] for c in client.call("command.list")["commands"]},
              "extension commands")

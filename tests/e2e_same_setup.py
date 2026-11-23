@@ -112,14 +112,17 @@ class Root:
 
     def start(self):
         with open(f"{self.r}/serve.log", "w") as log:
-            self.core = subprocess.Popen([VQRO, "serve", "--fake"], env=self.env, stdout=log, stderr=subprocess.STDOUT)
+            self.core = subprocess.Popen([VQRO, "serve", "--fake", "--safe"], env=self.env, stdout=log, stderr=subprocess.STDOUT)
         self.wait(lambda: os.path.exists(self.env["VQRO_SOCKET"]), 15)
         herdr = self.backend == "herdr"
+        # Start extensions only after opting out: both backends run the same explicit layout script.
         self.call("workspace.apply", {"note": "providers", "ops": [
+            {"op": "set", "key": "doc/settings/workspaces", "value": {"open_shell_when_empty": False}},
             {"op": "set", "key": "extension/herdr", "value": {"argv": ["/usr/bin/env", "PATH=", PHERDR, "--hc", HC, "--name", "herdr"],
                                                               "kind": "provider", "default": herdr}},
             {"op": "set", "key": "extension/tmux", "value": {"argv": ["/usr/bin/env", "PATH=", PTMUX, "--tmux", "/usr/bin/tmux", "--name", "tmux"],
                                                              "kind": "provider", "enabled": True, "default": not herdr}}]})
+        self.call("command.invoke", {"name": "vqro.safe_mode", "args": {"on": False}})
         return self.wait(lambda: all(self.call("workspace.snapshot")["providers"].get(n, {}).get("state") == "connected"
                                      for n in ("herdr", "tmux")), 40)
 

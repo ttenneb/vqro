@@ -105,8 +105,11 @@ def active():
 
 core = None
 try:
-    core = subprocess.Popen([VQRO, "serve", "--fake"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
+    core = subprocess.Popen([VQRO, "serve", "--fake", "--safe"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
     wait(lambda: os.path.exists(ENV["VQRO_SOCKET"]), 10)
+    # These windows use explicitly scripted tabs; seed policy before extensions start.
+    call("workspace.apply", {"ops": [{"op": "set", "key": "doc/settings/workspaces", "value": {"open_shell_when_empty": False}}]})
+    call("command.invoke", {"name": "vqro.safe_mode", "args": {"on": False}})
     ready = wait(lambda: {"tabs.open", "workspaces.open", "workspaces.switch"} <= {c["name"] for c in call("command.list")["commands"]}, 30)
     check("extensions ready", bool(ready))
     a, b = f"{R}/a", f"{R}/b"

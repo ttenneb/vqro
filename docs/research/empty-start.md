@@ -29,8 +29,12 @@ extension/core restart; it never expires and replays. The actionable warning dir
 prefix n for a new shell. Explicit `tabs.open` and `workspaces.main` never take or wait on this claim:
 user actions must not be suppressed by an automatic-start recovery marker. Once Scratch has a tab,
 bootstrap CAS-deletes any moot claim, including after a layout event from a successful user action.
-If n finishes first, bootstrap does nothing; a genuine overlap can yield an extra shell, which is
-preferable to blocking n. This deliberately replaces the initial shared-claim coalescing approach.
+Automatic placement uses the exact version of the empty layout observed before spawn. On conflict,
+a now-nonempty Scratch wins; bootstrap stops its own never-shown shell rather than appending it to the
+user's layout, and releases the claim after a definite native kill result. The stop intent is recorded
+before kill. If stopping is uncertain, the claim and explicit notice survive even with nonempty Scratch;
+no automatic replay or moot-spawn cleanup discards that unfinished cleanup record. This replaces both
+the initial shared-claim coalescing approach and the briefly accepted extra-tab race.
 
 Availability reactions run off the SDK listener, queue behind an in-flight bootstrap, and refresh
 state before deciding. This avoids dropping the sole backend-ready event and allows layout-only
@@ -40,8 +44,9 @@ CAS retries without rerunning spawn or blocking the cache event listener.
 
 - `tests/test_empty_scratch.py`: activation, setting off/invalid, nonempty restart, selected workspace,
   exact placeholder versus user panels, no backend followed by availability, explicit n during
-  an in-flight/uncertain automatic start, stale-claim cleanup on activation/layout events,
-  queued availability, and indeterminate automatic spawn retained across restart.
+  an in-flight/uncertain automatic start, raw user-layout writes during spawn, never-shown shell cleanup,
+  uncertain kill retention, stale-claim cleanup on activation/layout events, queued availability,
+  and indeterminate automatic spawn retained across restart.
 - `tests/test_sidebar_empty.py`: RED with no-layout refusal, GREEN with main/reset recovery,
   without workspaces or any spawn; already-visible sidebar remains visible on recovery.
 - `tests/fixtures/client/window.json`: missing/dangling defaults, absent main, valid default
@@ -50,3 +55,7 @@ CAS retries without rerunning spawn or blocking the cache event listener.
   prefix s hides/shows it. With workspaces disabled and no configured backend ready, prefix s
   creates the neutral placeholder and sidebar with zero terminals. Badge/prefix recovery remains
   available. UI captures wait for the committed layout event, not a fixed early screenshot delay.
+- Custom-layout UI e2es explicitly seed `open_shell_when_empty: false` before starting extensions.
+  Fixtures with bundled defaults first start in safe mode, write that setting through initial public
+  workspace operations, then leave safe mode. A preference written after normal startup is too late:
+  bootstrap may already have spawned. Fresh default-on TUI coverage remains separate.

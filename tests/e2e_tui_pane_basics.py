@@ -165,10 +165,13 @@ def side_of(text):
 
 core = None
 try:
-    core = subprocess.Popen([VQRO, "serve", "--fake"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
+    core = subprocess.Popen([VQRO, "serve", "--fake", "--safe"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
     wait(lambda: os.path.exists(ENV["VQRO_SOCKET"]), 10)
+    # This fixture owns its tab numbering; opt out before any extension can bootstrap.
     call("workspace.apply", {"note": "provider", "ops": [
+        {"op": "set", "key": "doc/settings/workspaces", "value": {"open_shell_when_empty": False}},
         {"op": "set", "key": "extension/herdr", "value": {"argv": ["/usr/bin/env", "PATH=", PHERDR, "--hc", HC, "--name", "herdr"], "kind": "provider", "default": True}}]})
+    call("command.invoke", {"name": "vqro.safe_mode", "args": {"on": False}})
     check("herdr provider connected", wait(lambda: call("workspace.snapshot")["providers"].get("herdr", {}).get("state") == "connected", 30))
     # Every command the test drives, not one of them: extensions register independently (a gate's load showed
     # panes ready before tabs).

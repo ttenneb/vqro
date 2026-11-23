@@ -127,7 +127,10 @@ try:
     setup_repo()
     core = subprocess.Popen([VQRO, "serve", "--fake"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
     wait(lambda: os.path.exists(ENV["VQRO_SOCKET"]), 10)
+    # No extensions start from this fixture's empty defaults; seed policy atomically with enabling them.
     call("workspace.apply", {"note": "e2e extensions", "ops": [
+        {"op": "set", "key": "doc/settings/workspaces", "value": {"open_shell_when_empty": False}},
+    ] + [
         {"op": "set", "key": f"extension/{name}", "value": {"enabled": True, "argv": [f"{R}/bin/python3", f"{R}/ext/{name}.py"]}}
         for name in ("tabs", "sidebar", "workspaces", "settings")]})
     ready = wait(lambda: {"workspaces.add", "sidebar.preset", "settings.open", "tabs.open"} <= {c["name"] for c in call("command.list")["commands"] if c.get("available")}, 20)

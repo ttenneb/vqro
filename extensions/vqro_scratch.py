@@ -1,7 +1,8 @@
 """Automatic first-shell policy for Scratch; explicit user commands never take its claim.
 
 The claim is not a lease: an uncertain automatic effect is never silently repeated after restart.
-A user can always open a new shell; once Scratch has a tab the old claim is moot and removed.
+A user can always open a new shell; a tab makes old spawn claims moot. An unconfirmed stop
+of a never-shown shell is different: its cleanup record and notice must survive.
 """
 import copy
 import uuid
@@ -60,13 +61,17 @@ def new_shell_hint(ext):
 
 
 def unconfirmed_notice(ext):
+    claim = ext.value(CLAIM)
+    if isinstance(claim, dict) and claim.get("stopping"):
+        return f"Automatic Scratch shell {claim['stopping']} was never shown; stopping it was not confirmed; " + new_shell_hint(ext)
     return "An earlier automatic Scratch shell was not confirmed; " + new_shell_hint(ext)
 
 
 def clear_moot_claim(ext):
     def attempt():
         ext.fresh()
-        if not empty(ext) and ext.value(CLAIM) is not None:
+        claim = ext.value(CLAIM)
+        if not empty(ext) and claim is not None and not (isinstance(claim, dict) and claim.get("stopping")):
             ext.apply([{"op": "delete", "key": CLAIM, "expect": ext.version(CLAIM)}], "Scratch: clear moot automatic claim")
     ext.retrying(attempt, attempts=8)
 
@@ -74,8 +79,9 @@ def clear_moot_claim(ext):
 class FirstShell:
     """Claim before spawn; delete in the same transaction that places its observed terminal."""
     def __init__(self, ext):
-        self.ext, self.claimed, self.dispatched = ext, False, False
+        self.ext, self.claimed, self.dispatched, self.observed = ext, False, False, False
         self.token = uuid.uuid4().hex
+        self.layout_version = 0
 
     def __enter__(self):
         def claim():
@@ -86,6 +92,7 @@ class FirstShell:
             if self.ext.value(CLAIM) is not None:
                 self.ext.notify(unconfirmed_notice(self.ext), "warn")
                 return False
+            self.layout_version = self.ext.version("layout/main")
             self.ext.apply([{"op": "set", "key": CLAIM, "value": {"attempt": self.token}, "expect": 0}], "Scratch: claim first shell")
             self.ext.fresh()
             return True
@@ -94,19 +101,49 @@ class FirstShell:
 
     def spawn(self, params):
         self.dispatched = True
-        return self.ext.vqro.call("resource.spawn", params)["resource"]
+        resource = self.ext.vqro.call("resource.spawn", params)["resource"]
+        self.observed = True
+        return resource
+
+    def stop_unplaced(self, resource):
+        """A later user layout wins. Stop our never-shown shell once; never replay an uncertain kill."""
+        def remember_stop():
+            self.ext.fresh()
+            if not self.ours():
+                raise VqroError("Scratch claim changed before stopping its never-shown shell", "conflict")
+            self.ext.apply([{"op": "set", "key": CLAIM, "value": {"attempt": self.token, "stopping": resource["id"]},
+                            "expect": self.ext.version(CLAIM)}], "Scratch: stop never-shown automatic shell")
+        self.ext.retrying(remember_stop, attempts=8)
+        try:
+            result = self.ext.vqro.call("resource.kill", {"resource": resource["id"]})
+        except VqroError as error:
+            raise VqroError(f"Automatic Scratch shell {resource['id']} was never shown; stopping it was not confirmed: {error}",
+                            error.kind, data=error.data) from error
+        if result.get("outcome") not in ("accepted", "dispatched", "observed"):
+            raise VqroError(f"Automatic Scratch shell {resource['id']} was never shown; stopping it was not confirmed",
+                            "indeterminate", data={"outcome": "indeterminate"})
+        def release():
+            self.ext.fresh()
+            if self.ours():
+                self.ext.apply(self.finish_ops(), "Scratch: user layout won; shell stopped")
+        self.ext.retrying(release, attempts=8)
+        return {"automatic_cancelled": True, "stop": result}
+
+    def ours(self):
+        claim = self.ext.value(CLAIM)
+        return isinstance(claim, dict) and claim.get("attempt") == self.token
 
     def finish_ops(self):
         # Read our exact claim, not a newer caller's generation.
-        if self.ext.value(CLAIM) != {"attempt": self.token}:
+        if not self.ours():
             raise VqroError("Scratch first-shell claim changed; inspect the observed terminal", "conflict")
         return [{"op": "delete", "key": CLAIM, "expect": self.ext.version(CLAIM)}]
 
     def __exit__(self, kind, error, tb):
         rejected = isinstance(error, VqroError) and isinstance(error.data, dict) and error.data.get("outcome") == "rejected"
-        if self.claimed and (not self.dispatched or rejected):
+        if self.claimed and (not self.dispatched or rejected and not self.observed):
             self.ext.fresh()
-            if self.ext.value(CLAIM) == {"attempt": self.token}:
+            if self.ours():
                 self.ext.apply(self.finish_ops(), "Scratch: release unused first-shell claim")
         # An observed-but-unplaced terminal, timeout or lost acknowledgement keeps its claim. No replay.
         return False

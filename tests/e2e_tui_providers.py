@@ -97,11 +97,14 @@ def open_settings():
 
 core = None
 try:
-    core = subprocess.Popen([VQRO, "serve", "--fake"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
+    core = subprocess.Popen([VQRO, "serve", "--fake", "--safe"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
     wait(lambda: os.path.exists(ENV["VQRO_SOCKET"]), 10)
+    # Configure the fixture before starting extensions: it supplies its own tabs/layouts.
     call("workspace.apply", {"note": "providers", "ops": [
+        {"op": "set", "key": "doc/settings/workspaces", "value": {"open_shell_when_empty": False}},
         {"op": "set", "key": "extension/herdr", "value": {"argv": ["/usr/bin/env", "PATH=", PHERDR, "--hc", HC, "--name", "herdr"]}},
         {"op": "set", "key": "extension/tmux", "value": {"argv": ["/usr/bin/env", "PATH=", PTMUX, "--tmux", "/usr/bin/tmux", "--name", "tmux"]}}]})
+    call("command.invoke", {"name": "vqro.safe_mode", "args": {"on": False}})
     ok = wait(lambda: all(call("workspace.snapshot")["providers"].get(n, {}).get("state") == "connected" for n in ("herdr", "tmux")), 30)
     check("providers connected (with default extensions running)", bool(ok))
     with open(f"{R}/effects.sh", "w") as f:

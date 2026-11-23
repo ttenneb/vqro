@@ -240,8 +240,15 @@ def open_layout(name, cwd, label, args=None, first_shell=None):
         return shown_in_window(ext.retrying(switch, attempts=8), name), False
     spawn = {"cwd": cwd} if cwd else {}
     resource = first_shell.spawn(spawn) if first_shell is not None else ext.vqro.call("resource.spawn", spawn)["resource"]
+    placement_attempted = [False]
 
     def attempt():
+        if first_shell is not None:
+            if placement_attempted[0]:  # retrying() refreshed the cache after a placement conflict
+                if not scratch_empty(ext):
+                    return first_shell.stop_unplaced(resource)
+                first_shell.layout_version = ext.version(f"layout/{name}")
+            placement_attempted[0] = True
         if ext.value(f"layout/{name}") is None:
             ops = create(name, cwd, label, resource, args)
         elif first_shell is not None:
@@ -252,6 +259,10 @@ def open_layout(name, cwd, label, args=None, first_shell=None):
         else:
             ops = add_tab(name, resource)
         if first_shell is not None:
+            # Fence the exact empty layout we decided to populate, not a later user's layout.
+            for op in ops:
+                if op["key"] == f"layout/{name}":
+                    op["expect"] = first_shell.layout_version
             ops += first_shell.finish_ops()
         return ext.apply(ops, f"workspaces: open {label}")
     return shown_in_window(ext.retrying(attempt, attempts=8), name), True
@@ -305,7 +316,9 @@ def bootstrap():
         ext.fresh()
         if not scratch_empty(ext):
             clear_moot_claim(ext)
-            startup_notice[0] = ""
+            startup_notice[0] = unconfirmed_notice(ext) if ext.value(CLAIM) is not None else ""
+            if startup_notice[0]:
+                ext.notify(startup_notice[0], "warn")
             return
         if ext.value(CLAIM) is not None:
             startup_notice[0] = unconfirmed_notice(ext)
@@ -315,17 +328,22 @@ def bootstrap():
         if not open_when_empty() or selected not in (None, MAIN) and ext.value(f"layout/{selected}") is not None:
             decorate_pending[0] = False
             return
-        decorate_pending[0] = True
         try:
             with FirstShell(ext) as first:
                 if first is None:
                     startup_notice[0] = unconfirmed_notice(ext) if ext.value(CLAIM) is not None else ""
                     return
-                open_layout(MAIN, None, "Scratch", first_shell=first)
+                result, _ = open_layout(MAIN, None, "Scratch", first_shell=first)
+                if result.get("automatic_cancelled"):
+                    decorate_pending[0] = False
+                    startup_notice[0] = ""
+                    return
+            decorate_pending[0] = True  # only our successfully placed shell gets the initial sidebar
             startup_notice[0] = ""
             ext.fresh()
             decorate_scratch()
         except VqroError as error:
+            decorate_pending[0] = False
             startup_notice[0] = f"No Scratch shell opened: {error}; {new_shell_hint(ext)}"
             ext.notify(startup_notice[0], "warn")
     finally:

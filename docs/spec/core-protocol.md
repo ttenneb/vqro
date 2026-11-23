@@ -1664,8 +1664,11 @@ uses the extension-owned CAS claim `doc/workspaces/first-shell`, removed atomica
 A definitely rejected automatic spawn releases the claim; an uncertain or observed-but-unplaced spawn
 keeps it across restart and warns instead of replaying. The notice directs the user to prefix n for a new
 shell. Explicit `tabs.open` (prefix n) and `workspaces.main` never take or wait on this automatic claim.
-When Scratch has a tab the bootstrap clears any moot claim with CAS. If a user's n finishes first, bootstrap
-adds nothing; genuinely overlapping automatic/manual spawns may produce one extra shell, never suppress n.
+When Scratch has a tab the bootstrap clears any moot spawn claim with CAS. Automatic placement is fenced
+by the version of the empty layout read before spawn. On conflict, a now-nonempty Scratch wins: the extension
+stops its own never-shown shell and releases the claim, never adding an extra tab to the user's layout.
+A stop intent is recorded before kill; an uncertain stop retains the claim and a visible notice across restart,
+even with nonempty Scratch, and is never replayed. Prefix n is never suppressed by this automatic policy.
 No backend means no shell, with a visible notice; recovery remains usable without this policy.
 
 Extensions may add a page to Settings by publishing live content `settings.page.<name>` = `{title, items}` (ordinary

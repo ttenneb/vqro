@@ -12,7 +12,7 @@ if sys.platform != "linux":
     print("SKIP OpenTUI trial client: requires Linux /proc and namespace/process probes")
     raise SystemExit(77)
 
-import json, os, re, shlex, shutil, socket, subprocess, sys, tempfile, time
+import json, os, re, shlex, shutil, signal, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
 VQRO, PHERDR = (os.path.join(TARGET, "debug", b) for b in ("vqro", "vqro-herdr"))
@@ -88,14 +88,46 @@ def keys(*k, literal=False):
     subprocess.run([*HARNESS, "send-keys", *(["-l"] if literal else []), *k])
 
 
+def stop_bun_clients():
+    """A failing assertion can leave Bun alive after tmux exits. Kill only this private fixture's clients."""
+    def ours(pid):
+        try:
+            if os.path.realpath(os.readlink(f"/proc/{pid}/exe")) != os.path.realpath(BUN):
+                return False
+            with open(f"/proc/{pid}/environ", "rb") as stream:
+                values = dict(item.split(b"=", 1) for item in stream.read().split(b"\0") if b"=" in item)
+            return values.get(b"HOME") == ENV["HOME"].encode() and values.get(b"VQRO_SOCKET") == ENV["VQRO_SOCKET"].encode()
+        except OSError:
+            return False
+    pids = [int(pid) for pid in os.listdir("/proc") if pid.isdigit() and ours(pid)]
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for pid in pids:
+            if ours(pid):
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    pass
+        end = time.monotonic() + 1
+        while time.monotonic() < end:
+            pids = [pid for pid in pids if ours(pid)]
+            if not pids:
+                return
+            time.sleep(.05)
+
+
 core = None
 try:
-    core = subprocess.Popen([VQRO, "serve"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
+    core = subprocess.Popen([VQRO, "serve", "--safe"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
     wait(lambda: os.path.exists(ENV["VQRO_SOCKET"]), 10)
     herdr = call("workspace.snapshot")["entries"]["extension/herdr"]["value"]
-    call("workspace.apply", {"note": "private herdr", "ops": [{"op": "set", "key": "extension/herdr",
+    # Own the tab numbering, including reconnect: opt out before any extension starts.
+    call("workspace.apply", {"note": "private herdr", "ops": [
+        {"op": "set", "key": "doc/settings/workspaces", "value": {"open_shell_when_empty": False}},
+        {"op": "set", "key": "extension/herdr",
         "value": dict(herdr, argv=["/usr/bin/env", "PATH=", PHERDR, "--hc", HC, "--name", "herdr"])}]})
+    call("command.invoke", {"name": "vqro.safe_mode", "args": {"on": False}})
     check("private herdr-core backend connected", wait(lambda: call("workspace.snapshot")["providers"].get("herdr", {}).get("state") == "connected", 30))
+    check("tabs command ready", bool(wait(lambda: any(c.get("name") == "tabs.open" and c.get("available") for c in call("command.list")["commands"]), 30)))
     call("command.invoke", {"name": "tabs.open"})
     with open(f"{R}/client.sh", "w") as f:
         f.write("".join(f"export {k}='{v}'\n" for k, v in ENV.items()) + f"{VQRO} ui opentui 2>{R}/client.err; echo CLIENT-EXIT $?; /usr/bin/sleep 30\n")
@@ -237,6 +269,7 @@ try:
     check("client quits cleanly", bool(wait(lambda: "CLIENT-EXIT 0" in screen(), 10)), screen() + open(f"{R}/client.err").read()[-500:])
 finally:
     subprocess.run([*HARNESS, "kill-server"], capture_output=True)
+    stop_bun_clients()
     if core:
         core.terminate()
         try:

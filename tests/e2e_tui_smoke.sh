@@ -62,6 +62,14 @@ for pid in filter(str.isdigit, os.listdir("/proc")):
 PY
 }
 
+# This smoke supplies its own tab. Seed policy through public primitives before extensions start;
+# a post-start preference alone races automatic bootstrap and leaves an extra terminal behind.
+env -i /bin/bash -c ". $R/env.sh; exec $P serve --safe" > "$R/serve.log" 2>&1 &
+for _ in {1..100}; do [ -S "$R/p.sock" ] && break; sleep 0.1; done
+env -i /bin/bash -c '. "$1/env.sh"; exec "$2" call workspace.apply "$3"' _ "$R" "$P" \
+  '{"ops":[{"op":"set","key":"doc/settings/workspaces","value":{"open_shell_when_empty":false}}]}' >/dev/null
+env -i /bin/bash -c '. "$1/env.sh"; exec "$2" run vqro.safe_mode "$3"' _ "$R" "$P" '{"on":false}' >/dev/null
+
 env -i /usr/bin/tmux -S "$R/t.sock" -f /dev/null new-session -d -x 120 -y 30 "/bin/bash $R/tui.sh"; sleep 4
 $T send-keys C-g; sleep 0.4; $T send-keys n; sleep 2
 $T send-keys -l 'echo smoke-A'; $T send-keys Enter; sleep 1
