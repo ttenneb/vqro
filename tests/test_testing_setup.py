@@ -164,6 +164,11 @@ class SetupTests(unittest.TestCase):
                 self.assertIn(setup.RPC_RULE_NOTICE, details)
                 self.assertIn("full evidence detail", details)
             status["finish_ok"] = True
+            self.assertEqual(unit.status_segment(status)["label"], "not verified" if required else "")
+            if required:
+                self.assertEqual(unit.status_segment(status)["style"], "warn")
+                self.assertLessEqual(len(unit.status_segment(status)["label"]), 12)
+            status["not_verified_reasons"].remove(setup.RPC_RULE_NOTICE)
             self.assertEqual(unit.status_segment(status)["label"], "")
 
         for suite in ("unit", "integration"):
@@ -180,6 +185,23 @@ class SetupTests(unittest.TestCase):
         status["setup_id"] = "a" * 64
         status["performance"].update(state="fail", current=True)
         self.assertEqual(unit.status_segment(status)["label"], "")
+
+    @unittest.skipUnless(os.name == "posix", "requires the supported recorder for a real accepted-finish fixture")
+    def test_on_rpc_accepted_finish_still_shows_compact_warning(self):
+        self.coverage()
+        self.snapshot["entries"]["extension/pi"] = {"version": 1, "value": {
+            "argv": [str(self.image), "sample.py"], "enabled": True}}
+        self.record()
+        self.store.skip(self.value(), self.snapshot, "integration", "private fixture")
+        status = self.status()
+        self.assertTrue(status["finish_ok"], status)
+        self.assertIn(setup.RPC_RULE_NOTICE, status["not_verified_reasons"])
+        self.assertEqual(unit.status_segment(status), {"label": "not verified", "style": "warn"})
+        self.snapshot["entries"][setup.POLICY_KEY]["value"] = False
+        off = self.status()
+        self.assertFalse(off["require_unit"])
+        self.assertIn(setup.RPC_RULE_NOTICE, off["not_verified_reasons"])
+        self.assertEqual(unit.status_segment(off)["label"], "")
 
     def test_malformed_policy_has_explicit_unknown_state(self):
         self.snapshot["entries"][setup.POLICY_KEY]["value"] = "not-a-boolean"

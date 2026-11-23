@@ -96,8 +96,9 @@ no extension injection or environment-filter exception is added to those bridges
 RPC coverage is a **required follow-up**, not dropped scope. While a declared RPC Pi launcher is enabled,
 the status menu's full report, Settings page, setup-status reasons and receipts retain:
 **NOT VERIFIED: rule not active for vqro-launched Pi agents yet**.
-The bottom-bar segment is deliberately compact (`tests !`, warn style): while policy is ON it appears only
-when finish is not ok, including RPC caveats. With policy OFF it is hidden for missing/unverified/stale evidence
+The bottom-bar segment is deliberately compact (warn style): while policy is ON it shows `tests !` when
+finish is not ok. With ON and an enabled RPC Pi launcher, an accepted finish still shows `not verified`:
+accepted test evidence does not imply that the RPC rule is active. With policy OFF it is hidden for missing/unverified/stale evidence
 and RPC caveats; only an actual current Unit/Integration FAIL may show it. Performance never shows a segment
 by itself. Clicking the segment opens the full setup/health report; full diagnostics are not crowded into the bar.
 The injected prompt/skill requires the finish tool while the current authoritative policy is ON, even when

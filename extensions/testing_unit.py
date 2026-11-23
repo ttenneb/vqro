@@ -331,8 +331,13 @@ def status_segment(status):
     """An empty live label clears the segment; full diagnostics remain in the menu/page."""
     current_failure = status.get("setup_id") is not None and any(
         status[suite].get("current") is True and status[suite]["state"] == "fail" for suite in ("unit", "integration"))
-    visible = not status["finish_ok"] if status["require_unit"] else current_failure
-    return {"label": "tests !", "style": "warn"} if visible else {"label": ""}
+    if status["require_unit"]:
+        if not status["finish_ok"]:
+            return {"label": "tests !", "style": "warn"}
+        if RPC_RULE_NOTICE in status["not_verified_reasons"]:
+            return {"label": "not verified", "style": "warn"}
+        return {"label": ""}
+    return {"label": "tests !", "style": "warn"} if current_failure else {"label": ""}
 
 
 def setup_page(status):
