@@ -45,7 +45,7 @@ def eligible_episode(row, automatic=True):
                 'availability.native.subscription_limit', 'availability.native.episode',
                 'availability.native.session_id', 'availability.native.terminal_reason')
     if automatic:
-        required += ('background',)
+        required += ('background', '_claude.background_level', 'host.incarnation')
     if not evidence_complete(facts, required) or facts.get('state') != 'idle':
         return None
     private = facts.get('_claude')
@@ -54,8 +54,16 @@ def eligible_episode(row, automatic=True):
             or ledger.get('source') != 'vqro-ledger' or ledger.get('epoch') != facts.get('epoch')
             or ledger.get('complete') is not True or type(ledger.get('pending')) is not int or ledger['pending'] != 0):
         return None
-    if automatic and (not isinstance(facts.get('background'), list) or facts['background']):
-        return None
+    if automatic:
+        level = private.get('background_level')
+        host = facts.get('host')
+        if (not isinstance(facts.get('background'), list) or facts['background']
+                or not isinstance(level, dict) or type(level.get('v')) is not int or level['v'] != 0
+                or level.get('source') != 'native:background_tasks_changed' or level.get('complete') is not True
+                or type(level.get('revision')) is not int or level['revision'] <= 0
+                or not isinstance(host, dict) or not text(host.get('incarnation'))
+                or level.get('process_incarnation') != host['incarnation']):
+            return None
     session = facts.get('session')
     caps = facts.get('caps')
     if (not isinstance(session, dict) or not text(session.get('id')) or not text(row.get('incarnation'))
@@ -125,12 +133,15 @@ class ClaudeCutover:
                 or any(claim.get(key) != value for key, value in expected.items())):
             raise VqroError('matching protected account cutover claim is required; no switch', 'conflict')
         authority = claim.get('authorization')
+        disclosed = authority.get('background_loss_disclosed') if isinstance(authority, dict) else None
+        if type(disclosed) is not bool or disclosed != (not args['automatic']):
+            raise VqroError('protected background-loss disclosure does not match the cutover mode; no switch', 'forbidden')
         if args['automatic']:
-            if authority != {'mode': 'auto', 'principal': None, 'owner_revision': None}:
+            if authority != {'mode': 'auto', 'principal': None, 'owner_revision': None, 'background_loss_disclosed': False}:
                 raise VqroError('protected automatic cutover authority is missing; no switch', 'forbidden')
         else:
             if (not isinstance(authority, dict) or set(authority) != {'mode', 'principal', 'owner_revision', 'background_loss_disclosed'}
-                    or authority.get('mode') != 'offer' or authority.get('background_loss_disclosed') is not True
+                    or authority.get('mode') != 'offer'
                     or not text(authority.get('principal'))
                     or type(authority.get('owner_revision')) is not int or authority['owner_revision'] <= 0):
                 raise VqroError('protected human offer authority is missing; no switch', 'forbidden')

@@ -722,8 +722,10 @@ with `claude --resume <exact session>`. Unknown effects never authorize retry, f
 `background_work` if the complete fresh native background level is unknown/incomplete or contains
 running tasks/subagents. True permits restarting despite that background work. The adapter interprets
 only this execution flag, never account policy or protected claims. The accounts callback passes true
-ONLY for an explicitly clicked OFFER with protected current-owner authority and proof that the pane
-showed **background work may be lost**; AUTO always passes false. NOTIFY never restarts.
+ONLY for an explicitly clicked OFFER with protected current-owner authority and
+`claim.authorization.background_loss_disclosed:true` proving that the pane showed
+**background work may be lost**. AUTO requires the same protected field false and always passes the
+execution flag false; no duplicate root/caller flag supplies authority. NOTIFY never restarts.
 
 AUTO additionally requires native turn-over/idle with a retained positive latest subscription-limit
 episode, an empty **vqro-owned input ledger**, and a complete fresh native background level with no
@@ -731,8 +733,11 @@ running work. The vqro witness is `data.agent._claude.input_ledger
 {v:0,source:"vqro-ledger",epoch,complete:true,pending:0}` with an epoch matching the agent;
 `pending` includes own input reservations not yet terminally correlated, including unresolved old epochs.
 OFFER also requires this complete empty ledger: there is no accepted-input-loss override. Native
-`background:[]` is published only after a complete actual native background level (`tasks:[]`); missing,
-nonempty or malformed levels stay unknown. Required `incomplete` cuts/malformed evidence cannot be treated
+`background:[]` is published only after a complete actual native background level (`tasks:[]`), bound by
+`_claude.background_level {v:0,source:"native:background_tasks_changed",process_incarnation,revision,complete:true}`
+with positive revision and the current `data.agent.host.incarnation`. The producer generation-fences its
+continuous observer and invalidates the process-scoped level on loss or replacement; missing, nonempty or
+malformed levels stay unknown. Required `incomplete` cuts/malformed evidence cannot be treated
 as complete. The native queue stays unknown when native APIs do not establish completeness; neither
 idle, a user-send count nor a partial interrupt receipt is represented as native `queue:[]`. Unknown,
 cut or malformed required evidence means no AUTO yet; coordination may reconsider the retained episode

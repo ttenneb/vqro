@@ -57,8 +57,11 @@ revision, matching claimed source/target and declared native restart support. BO
 claim reads must bind `source_incarnation`, `source_epoch`, `source_account`, native
 `session` and `native_episode` to the source actually dispatched. Common's episode
 hash alone does not distinguish two native limit results within the same epoch.
-AUTO requires protected authorization `{mode:auto,principal:null,owner_revision:null}`.
-OFFER requires protected `{mode:offer,principal:<core-authenticated owner>,owner_revision,background_loss_disclosed:true}`;
+AUTO requires protected `claim.authorization`
+`{mode:auto,principal:null,owner_revision:null,background_loss_disclosed:false}`.
+OFFER requires protected `claim.authorization`
+`{mode:offer,principal:<core-authenticated owner>,owner_revision,background_loss_disclosed:true}`;
+there is no duplicate root disclosure flag and a caller flag supplies no authority;
 the callback re-reads `doc/principals/owner` and compares its exact value/version at
 both checks. The protected disclosure means the pane showed **background work may be lost**
 before that human click; no caller-supplied boolean supplies authority. No NOTIFY restart is accepted. Common policy
@@ -108,7 +111,12 @@ It requires explicit `state:idle` plus `data.agent._claude.input_ledger`
 vqro's own input reservations not terminally correlated, including unresolved old epochs;
 unknown completeness/pending or an epoch mismatch refuses. It is not a native queue snapshot.
 AUTO additionally requires `background:[]`, published ONLY after a complete actual native
-`background_tasks_changed tasks:[]` level. Missing/nonempty/malformed background is unknown
+`background_tasks_changed tasks:[]` level. Its provenance is bound by
+`_claude.background_level {v:0,source:"native:background_tasks_changed",process_incarnation,revision,complete:true}`:
+positive integer revision, exact current `data.agent.host.incarnation`, native source and complete flag are required.
+This native level is process-scoped across conversation epochs; the producer generation-fences its continuous
+observer and invalidates completeness on observer loss or process replacement. Before a level is known, source
+is null/revision0; unknown/nonempty/unprojected levels remain incomplete. Missing/nonempty/malformed background is unknown
 and refuses AUTO. Required cut/malformed `incomplete` evidence also refuses; unrelated cut
 fields do not disable the operation. Native `queue:null` remains unchanged and is not read
 as empty. With protected OFFER disclosure the callback passes `allow_background_loss:true`
