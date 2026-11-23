@@ -214,7 +214,6 @@ class TimelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(output[-1]["type"], "agent_settled")
 
 
-@unittest.skipIf(sys.platform == "win32", "conformance Peer fixture connects to an asyncio Unix-domain server")
 class PeerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.root = tempfile.TemporaryDirectory(prefix="vq-k1-")
@@ -240,6 +239,7 @@ class PeerTests(unittest.IsolatedAsyncioTestCase):
         self.peers.append(peer)
         return peer
 
+    @unittest.skipIf(sys.platform == "win32", "fixture connects to an asyncio Unix-domain server")
     async def test_stalled_socket_close_is_bounded_and_joins_reader(self):
         async def hold(reader, writer):
             pass  # Deliberately never consume this owned socket's input.
@@ -269,6 +269,7 @@ class PeerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(aborted, [True])
         self.assertTrue(peer.task.done())
 
+    @unittest.skipIf(sys.platform == "win32", "fixture connects to an asyncio Unix-domain server")
     async def test_response_error_and_unknown_late_id(self):
         async def server(reader, writer):
             row = json.loads(await reader.readline())
@@ -282,6 +283,7 @@ class PeerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(peer.serial, 1)
         self.assertFalse(peer.pending)
 
+    @unittest.skipIf(sys.platform == "win32", "fixture connects to an asyncio Unix-domain server")
     async def test_out_of_order_concurrent_replies(self):
         async def server(reader, writer):
             a, b = json.loads(await reader.readline()), json.loads(await reader.readline())
@@ -291,6 +293,7 @@ class PeerTests(unittest.IsolatedAsyncioTestCase):
         peer = await self.connect(server)
         self.assertEqual(await asyncio.gather(peer.call("a"), peer.call("b")), ["a", "b"])
 
+    @unittest.skipIf(sys.platform == "win32", "fixture connects to an asyncio Unix-domain server")
     async def test_disconnect_fails_pending_without_retry(self):
         seen = []
         async def server(reader, writer):
@@ -302,6 +305,7 @@ class PeerTests(unittest.IsolatedAsyncioTestCase):
             await peer.call("resource.invoke")
         self.assertEqual(len(seen), 1)
 
+    @unittest.skipIf(sys.platform == "win32", "fixture connects to an asyncio Unix-domain server")
     async def test_callbacks_consume_streams_without_queued_copies(self):
         reducer = ItemReducer()
         async def server(reader, writer):

@@ -134,20 +134,63 @@ def digest(parts):
     return result.hexdigest()
 
 
+def _literal_program(program, cwd, path):
+    if "/" in program or "\\" in program:
+        candidate = Path(program)
+        candidate = candidate if candidate.is_absolute() else Path(cwd) / candidate
+        return candidate if candidate.is_file() and (sys.platform == "win32" or os.access(candidate, os.X_OK)) else None
+    found = shutil.which(program, path=path)
+    return Path(found).resolve() if found else None
+
+
+def _windows_path_dirs(path, separator=os.pathsep):
+    # Windows split_paths removes quotes and does not split separators inside quoted entries.
+    entries, current, quoted = [], [], False
+    for character in path:
+        if character == '"':
+            quoted = not quoted
+        elif character == separator and not quoted:
+            entries.append(Path("".join(current)))
+            current = []
+        else:
+            current.append(character)
+    entries.append(Path("".join(current)))
+    return entries
+
+
+def _windows_python_program(dirs, exists):
+    # Match src/program.rs: PATH directory order first, then py -3/python/python3 within each.
+    # This checker never executes it; -3 is an argument to the app's selected py.exe, not a path.
+    for directory in dirs:
+        if directory.name.casefold() == "windowsapps":
+            continue
+        for name in ("py.exe", "python.exe", "python3.exe"):
+            candidate = directory / name
+            try:
+                available = exists(candidate)
+            except OSError:
+                available = False  # Core metadata-query failures are unavailable candidates, not probes/retries.
+            if available:
+                return candidate
+    return None
+
+
 def resolve_program(program, cwd, *, binary=None, path=None):
     path = os.environ.get("PATH", os.defpath) if path is None else path
+    if program == "python3":
+        override = os.environ.get("VQRO_PYTHON")
+        if override:
+            return _literal_program(override, cwd, path)
+        if sys.platform == "win32":
+            return _windows_python_program(_windows_path_dirs(path),
+                                           lambda candidate: candidate.is_file())
     if program.startswith("vqro-") and "/" not in program and "\\" not in program:
         binary = binary or shutil.which("vqro", path=path)
         if binary:
             sibling = Path(binary).resolve().parent / program
             if sibling.is_file() and os.access(sibling, os.X_OK):
                 return sibling
-    if "/" in program or "\\" in program:
-        candidate = Path(program)
-        candidate = candidate if candidate.is_absolute() else Path(cwd) / candidate
-        return candidate if candidate.is_file() and os.access(candidate, os.X_OK) else None
-    found = shutil.which(program, path=path)
-    return Path(found).resolve() if found else None
+    return _literal_program(program, cwd, path)
 
 
 def script_path(declaration, extensions_dir):

@@ -24,15 +24,15 @@ Paths are relative to `tests/`; names identify the source tests, not inferred en
 | `test_check_lifetime.py` | cgroups, pidfds, /proc, fork/session groups and Unix signals, including module-time signal constants | Module SkipTest before loading Linux lifetime implementation on win32. These are not Windows lifetime passes. |
 | `test_windows_check.py` | Tests the Linux-to-Windows cross-check Bash function with POSIX executable/symlink stubs | Module SkipTest on win32; it is not the native Windows gate. |
 | `test_scale_artifact.py::{ScaleArtifactTests,PrebuildRecipeTests}` | Linux timing-gate executable-bit, shebang and Bash recipe fixtures | Class skips on win32. |
-| `test_coord_harness.py::{StartupFailureTests,SilentPeerTests}` | /proc process identity, executable shebang helpers, real AF_UNIX controller peers | Class skips on win32; no attempt to emulate that lifetime mechanism. |
-| `test_agent_conformance.py::{PeerTests,NativeFixtureTests}` | asyncio Unix servers/connections for the conformance controller | Class skips on win32; other oracle/content/declaration classes remain enabled. |
+| `test_coord_harness.py::{StartupFailureTests,SilentPeerTests}` | Startup uses /proc/shebang/lifetime fixtures; three silent-peer methods use real AF_UNIX peers | Startup class and only three real-server methods skip on win32. Mocked receive-deadline arithmetic/timeout/cleanup stays enabled, with a local fake AF_UNIX constant. |
+| `test_agent_conformance.py::{PeerTests,NativeFixtureTests}` | Five Peer methods and the NativeFixture setup use real asyncio Unix endpoints | Only five connecting Peer methods skip; portable cancelled-close/abort/join remains enabled. NativeFixture retains its Unix-only class fixture skip; other oracle/content/declaration classes remain enabled. |
 | `test_agent_conformance_content_origin.py::CallbackWireChecks.test_exact_public_proof_forwarding_and_no_ambient_authority` | Actual asyncio Unix server for callback proof forwarding | Method skip on win32; other content-origin checks remain enabled. |
 | `test_coord_conformance.py::NativeOracle.test_control_error_reply_keeps_the_request_id` | Actual asyncio Unix server for a control-error roundtrip | Method skip on win32; other native-oracle and checker tests stay enabled. |
 | `test_host_context.py::HostHandshake.test_provider_opt_in_is_explicit_on_its_registration_only` | Actual asyncio Unix server; hard-coded /tmp fixture root | Method skip for Unix transport fixture; use tempfile's default root. Pure host-context helper tests remain enabled. |
 | `test_vqro_ext.py::ListenerConflictsOverASocket` | Child extension connects to a scripted AF_UNIX core | Class skip on win32; tempfile default root replaces /tmp. In-memory/thread/cache unit tests remain enabled. |
-| `test_vqro_ext_slow_core.py::SlowCore` | Scripted AF_UNIX server | Class skip on win32; tempfile default root replaces /tmp. |
+| `test_vqro_ext_slow_core.py::SlowCore` | Four methods use ScriptedCore's AF_UNIX server | Only those four methods skip on win32; the current-interpreter/open-stdin lifetime shutdown regression stays enabled. Tempfile default root replaces /tmp. |
 | `test_pi_provider.py::BridgeTests.test_cli_explicit_argv_and_managed_stdin_eof_are_clean`, `test_cli_native_exit_with_open_stdin_is_clean` | CLI lifetime helper specifically creates a Unix-domain core server | Only these two methods skipped on win32; the other socketpair/subprocess bridge controls remain enabled. |
-| `test_agent_conformance_codex_l3.py::WholeHandlerControls` | Replacement protocol explicitly freezes/resumes processes with SIGSTOP/SIGCONT constants | Class skip on win32; pure replacement grading/helper tests remain enabled. |
+| `test_agent_conformance_codex_l3.py::WholeHandlerControls` | Fully simulated process/core model; signal names are only transition labels | All seven original controls remain enabled on Windows, using a fixture-local symbolic signal facade. Added a regression removing native SIGSTOP/SIGCONT constants. This is a model control, not native freeze/resume capability emulation. |
 | `test_pi.py::PiTests.test_default_bridge_never_imports_project_or_pythonpath_shadow_modules` | Fake bridge binary is an executable POSIX shell script | Method skip on win32; literal argv/policy tests remain enabled. |
 | `test_pi_launcher.py::PiLauncherTests.test_exec_preserves_literal_argv_and_never_imports_project_code` | Fake Rust bridge is a shebang executable, not a native exe | Method skip on win32; explicit missing-binary/legacy-entry tests remain enabled. |
 | `test_vqro_transport.py::{UnixTransportTests,AsyncTransportTests.test_unix_calls_existing_asyncio_api}` | These are mocked Unix branches, but Windows lacks AF_UNIX/open_unix_connection names | Supply a fake AF_UNIX constant and create the mocked asyncio attribute. Keep them enabled; no native socket API is called. |
@@ -44,7 +44,7 @@ Paths are relative to `tests/`; names identify the source tests, not inferred en
 | `test_install_extension_tests.py` | Symlink fixtures may lack Windows privilege; captured offline CLI output can be UTF-8 | Skip only actual 1314 at symlink creation, with a control proving unrelated permission errors still fail. Offline CLI capture explicitly decodes UTF-8 and requests UTF-8 child diagnostics. Copy/publication/rollback tests are not broadly skipped. |
 | `test_coordination_archive.py` positive export/verify/free methods | Product deliberately refuses durable archive export on Windows | Explicit skips for four Unix exporter paths; the Windows no-filesystem-effect refusal test remains enabled. This is an existing product gap, not a newly certified exporter. |
 | `test_coordination_archive_recovery.py` four positive export scenarios | Depend on the Unix exporter/directory publication barrier | Explicit positive-path skips; the export-independent open-handover refusal remains enabled. |
-| `test_testing_integration.py::{SandboxTests,IntegrationModesTests}` | Positive scenarios depend on a sandbox with Unix endpoint containment/select/process-lifetime assumptions | Product unsupported decision below; positive sandbox scenarios explicitly skipped on win32. SourceMark/Scenario pure controls remain enabled, and new constructor no-effect negatives remain enabled. |
+| `test_testing_integration.py::{SandboxTests,IntegrationModesTests}` | Seventeen Sandbox methods and two CLI methods actually construct the unsupported sandbox or test Unix containment | Method-specific skips only for those cases. Mock-only apply/CAS and process-output parsing, dependency-gap reporting, restart-readiness failure and asynchronous extension publication remain enabled, as do SourceMark/Scenario and constructor no-effect negatives. |
 | `test_testing_unit.py::{HealthChecks,PlainClientTests}` | Fixed product issues below; AF_UNIX server fixture for read-client framing | Use mocked shared connector and portable socketpair fixture, preserving notification/EOF/deadline/close assertions. Keep tests enabled; mode-bit assertions are Unix-only. |
 | `test_testing_perf.py::CollectorTests.test_settings_override_receipt_and_busy_machine_warnings_do_not_fail` | POSIX receipt mode assertion on a Windows file | Keep receipt/content/verdict checks enabled; assert owner-only mode only on Unix. No Windows ACL certification. |
 
@@ -67,14 +67,16 @@ The Windows lead explicitly approved these corrections/restrictions during triag
 | --- | --- | --- |
 | `extensions/vqro_testing.py::PlainClient` opened AF_UNIX directly | Connect through existing `vqro_transport.connect_endpoint(path, timeout=...)`; no SDK transport/authentication API changed. Stream creation failure closes the connected transport, connect failure propagates without fallback. | `PlainClientTests`; opaque pipe pass-through in `test_python_windows_fixtures.py`. |
 | `extensions/testing_unit.py::tests_row` ran literal python3; diagnostics were decoded as UTF-8 without ensuring the child emitted UTF-8 | Use sys.executable (the running interpreter) and PYTHONIOENCODING=utf-8 in the explicit sanitized child environment. | Current-interpreter/environment assertion and actual café/λ diagnostic roundtrip; live-environment scrub control retained. |
+| `testing_unit.argv_row` checked literal python3 although core startup may select VQRO_PYTHON or py/python | The checker now applies the core's selection: explicit one-program VQRO_PYTHON override; otherwise Windows PATH directory order, then py.exe (-3 at execution), python.exe, python3.exe within each directory, skipping WindowsApps without inspection. Unix default remains literal python3. No interpreter probes or fallback after a missing explicit override. | Pure candidate-order/stub/quoted-PATH controls plus a private py-only and override-with-spaces argv-row check; missing override stays a failure. This is path selection, not interpreter identity/version certification. |
 | Fake sandbox backend command assumed /bin/false | Portable literal argv `[sys.executable, '-c', 'raise SystemExit(1)']`. | Inspect exact argv in both sandbox fixture and powerless control. |
-| `write_receipt` used os.fchmod (absent on Windows) and locale text mode | Explicit UTF-8; fchmod only on Unix. Windows files inherit their directory ACLs; no owner-only Windows claim. | Fake win32 receipt writes exact UTF-8 bytes and never calls fchmod; Unix retention/mode tests retained. |
+| `write_receipt` applied a POSIX 0600 guarantee through fchmod and used locale text mode | Explicit UTF-8; fchmod only on Unix. Windows fchmod exists in CPython 3.13+ (including the reported 3.14.2), but permission bits do not establish an owner-only ACL; older Windows Python versions lack this API. Windows files inherit directory ACLs. | Fake win32 receipt writes exact UTF-8 bytes and never calls fchmod; Unix retention/mode tests retained. The CLI receipt/content comparison also runs on Windows, with only its 0600 assertion guarded. |
 | Integration/performance Sandbox and SandboxClient depend on Unix endpoint paths, select-on-socket and process-group isolation/lifetime | **Not supported on native Windows yet.** Both constructors refuse clearly before filesystem/process effects. Manifests and Windows guide disclose the gap. A real endpoint/isolation/lifetime port is a separate slice, not a partial transport substitution. | Fake win32 constructors forbid Path and Popen access. |
 
 ### Remaining risks / native follow-up
 
 - The unit-health diagnostic's standalone no-argument endpoint/state/extensions defaults are still Unix-shaped.
-  On Windows select `--socket`, `--state-dir`, `--extensions-dir` explicitly (or use the configured in-app launch).
+  On Windows select `--socket`, `--state-dir`, `--extensions-dir` explicitly; an in-app launch also needs explicit
+  extension-directory configuration rather than relying on the inherited socket alone.
 - Copy/publication/rollback, executable discovery, symlink-capability negatives and actual provider cancellation
   tests remain meaningful native rerun targets. Do not label further native failures fixture-only without traces.
 - Conformance's real Unix controller/PTY launchers are not native Windows qualification. Their import no longer
@@ -84,9 +86,26 @@ The Windows lead explicitly approved these corrections/restrictions during triag
 - Windows API/console suppression, persistence/open-reader and log-rotation issues are other slices; this work
   neither skips nor fixes those Rust/runtime defects.
 
+## Pin-6 HOLD corrections
+
+The initial class-wide Peer/SlowCore/SilentPeer/Sandbox/Integration/L3 skips were too broad: they included
+portable cancellation, lifetime, deadline and fully simulated controls. They are now method-specific (or removed
+for the L3 model); no assertions were weakened and the native sandbox was not ported. A selection regression
+checks that these portable methods inherit no platform skip and that actual Unix methods remain explicitly marked.
+The missed offline-CLI 0600 assertion is now Unix-only, while its content/verdict checks remain selected on Windows.
+The fchmod rationale above corrects the prior inaccurate availability statement. Interpreter checking was aligned
+with the app's resolver per the lead's disposition, rather than leaving a named false-FAIL gap.
+
+API references: [CPython os.fchmod](https://docs.python.org/3.14/library/os.html#os.fchmod) records Windows support
+added in 3.13; [Rust env::split_paths](https://doc.rust-lang.org/std/env/fn.split_paths.html) specifies Windows
+separator/unquoting. Interpreter candidate order and metadata-only selection follow `src/program.rs`.
+
 ## Verification
 
-- Linux Python discovery: **1778 tests, OK, 4 skips** (`python-tests-final.log`). The first run exposed a new
+- Pin-6 HOLD follow-up: Linux discovery **1789 tests, OK, 4 skips** (`python-tests-hold.log`), including restored
+  portable selection, CLI mode/content and resolver controls. After adding the metadata-error candidate control,
+  the focused Windows-selection/resolution, L3 and diagnostic suites were rerun; no native Windows run is claimed.
+- Earlier Linux Python discovery: **1778 tests, OK, 4 skips** (`python-tests-final.log`). The first run exposed a new
   class-level fixture patch leaking through manual fixture reuse; changed it to an instance-local adapter, then
   reran the complete Python suite successfully. No pre-existing/new failure was waived.
 - After the final SandboxClient early-refusal addition: 8 new diagnostic/fixture controls, 104 diagnostic

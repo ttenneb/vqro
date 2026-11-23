@@ -455,8 +455,9 @@ class HealthChecks(unittest.TestCase):
             code = unit.main(["--offline", "--json", "--state-dir", str(self.state), "--extensions-dir",
                               str(self.extensions), "--out", str(out)])
         self.assertEqual(code, 77)
-        self.assertEqual(json.loads(stdout.getvalue()), json.loads(out.read_text()))
-        self.assertEqual(stat.S_IMODE(out.stat().st_mode), 0o600)
+        self.assertEqual(json.loads(stdout.getvalue()), json.loads(out.read_text(encoding="utf-8")))
+        if sys.platform != "win32":  # Windows file modes do not prove an owner-only ACL.
+            self.assertEqual(stat.S_IMODE(out.stat().st_mode), 0o600)
 
     def test_cli_connection_failure_falls_back(self):
         self.write_workspace()

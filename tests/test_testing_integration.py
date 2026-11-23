@@ -13,7 +13,6 @@ import vqro_testing as harness
 import testing_integration as integration
 
 
-@unittest.skipIf(sys.platform == "win32", "positive integration sandbox fixtures are explicitly unsupported on native Windows")
 class SandboxTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="vqi-")
@@ -30,6 +29,7 @@ class SandboxTests(unittest.TestCase):
         self.addCleanup(sandbox.cleanup)
         return sandbox
 
+    @unittest.skipIf(sys.platform == "win32", "constructs the explicitly unsupported native Windows sandbox")
     def test_copy_rebases_launch_paths_and_scrubs_environment(self):
         with patch.dict(os.environ, {"VQRO_SOCKET": "/live/socket", "HC_SOCKET": "/live/hc", "HERDR_PANE_ID": "real", "TMUX": "real"}):
             sandbox = self.sandbox().prepare()
@@ -42,6 +42,7 @@ class SandboxTests(unittest.TestCase):
         self.assertFalse(sandbox.info["started"])
         self.assertEqual((self.source / "example.py").read_text(), "# fixture\n")
 
+    @unittest.skipIf(sys.platform == "win32", "constructs the explicitly unsupported native Windows sandbox")
     def test_credential_entries_contributions_and_resources_are_excluded(self):
         for key, value in {"doc/settings/x": {"token": "sensitive"}, "doc/auth": {},
                            "doc/owned": {"owner": "example"}, "view/x": {"kind": "panel"},
@@ -52,6 +53,7 @@ class SandboxTests(unittest.TestCase):
         self.assertIn("doc/settings/x", sandbox.info["excluded"])
         self.assertIn("doc/owned", sandbox.info["excluded"])
 
+    @unittest.skipIf(sys.platform == "win32", "constructs the explicitly unsupported native Windows sandbox")
     def test_whole_tree_preserves_scenario_names_and_links_without_dereferencing(self):
         external = self.root / "outside"
         external.write_text("private")
@@ -67,6 +69,7 @@ class SandboxTests(unittest.TestCase):
         self.assertFalse((sandbox.ext / "link").is_symlink())
         self.assertEqual(external.read_text(), "private")
 
+    @unittest.skipIf(sys.platform == "win32", "constructs the explicitly unsupported native Windows sandbox")
     def test_fake_backend_deps_are_unverified_only_when_audit_caused_the_outage(self):
         for name, enabled in (("herdr", True), ("tmux", False)):
             self.snapshot["entries"]["extension/" + name] = {"value": {"argv": ["vqro-" + name], "kind": "provider", "enabled": enabled}}
@@ -93,6 +96,7 @@ class SandboxTests(unittest.TestCase):
             self.assertEqual(compared[0]["status"], "unverified")
             self.assertIn(harness.FAKE_BACKEND_COVERAGE, compared[0]["evidence"])
 
+    @unittest.skipIf(sys.platform == "win32", "constructs the explicitly unsupported native Windows sandbox")
     def test_fake_disables_providers(self):
         self.snapshot["entries"]["extension/example"]["value"].update(kind="provider")
         sandbox = self.sandbox().prepare()
@@ -100,6 +104,7 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(json.loads(sandbox.env["VQRO_HERDR"]), [sys.executable, "-c", "raise SystemExit(1)"])
         self.assertEqual(sandbox.enabled(), [])
 
+    @unittest.skipIf(sys.platform == "win32", "constructs the explicitly unsupported native Windows sandbox")
     def test_external_path_kept_off_unless_explicitly_allowed(self):
         self.snapshot["entries"]["extension/example"]["value"]["argv"][1] = str(self.root / "external.py")
         sandbox = self.sandbox().prepare()
@@ -109,6 +114,7 @@ class SandboxTests(unittest.TestCase):
         allowed = self.sandbox(allow_external=True).prepare()
         self.assertTrue(allowed.declarations["extension/example"]["enabled"])
 
+    @unittest.skipIf(sys.platform == "win32", "constructs the explicitly unsupported native Windows sandbox")
     def test_socket_bound_fails_before_core_start(self):
         sandbox = harness.Sandbox(self.source, self.snapshot, root=self.root / ("deep" * 30))
         self.addCleanup(sandbox.cleanup)
@@ -119,6 +125,7 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(sandbox.info["canary"]["status"], "fail")
         self.assertFalse(sandbox.info["started"])
 
+    @unittest.skipIf(sys.platform == "win32", "constructs the explicitly unsupported native Windows sandbox")
     def test_existing_nonempty_root_is_never_removed(self):
         root = self.root / "run"
         root.mkdir()
@@ -130,6 +137,7 @@ class SandboxTests(unittest.TestCase):
         sandbox.cleanup()
         self.assertTrue(marker.exists())
 
+    @unittest.skipIf(sys.platform == "win32", "constructs the explicitly unsupported native Windows sandbox")
     def test_candidate_overlay_and_ops_are_audited(self):
         candidate = self.root / "candidate"
         candidate.mkdir()
@@ -140,11 +148,13 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(sandbox.values["doc/test"], {"candidate": True})
         self.assertEqual((self.source / "example.py").read_text(), "# fixture\n")
 
+    @unittest.skipIf(sys.platform == "win32", "constructs the explicitly unsupported native Windows sandbox")
     def test_candidate_cannot_seed_credentials_or_resources(self):
         sandbox = self.sandbox(candidate_ops=[{"op": "set", "key": "doc/x", "value": {"password": "private"}}])
         with self.assertRaisesRegex(ValueError, "credential-free"):
             sandbox.prepare()
 
+    @unittest.skipIf(sys.platform == "win32", "tests Unix endpoint containment, after the explicit native Windows refusal")
     def test_sandbox_client_rejects_external_socket_before_connect(self):
         with patch.object(harness.socket, "socket") as factory:
             with self.assertRaisesRegex(ValueError, "outside root"):
@@ -158,6 +168,7 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(result, {"txn": 9})
         self.assertEqual([op["expect"] for op in client.call.call_args.args[1]["ops"]], [8, 0])
 
+    @unittest.skipIf(sys.platform == "win32", "constructs the explicitly unsupported native Windows sandbox")
     def test_lifetime_survivors_reported_then_only_owned_group_signalled(self):
         sandbox = self.sandbox().prepare()
         sandbox.groups = [54321]
@@ -168,6 +179,7 @@ class SandboxTests(unittest.TestCase):
         self.assertTrue(sandbox.leftovers)
         self.assertEqual([call.args[0] for call in kill.call_args_list], [54321, 54321])
 
+    @unittest.skipIf(sys.platform == "win32", "constructs the explicitly unsupported native Windows sandbox")
     def test_refused_optional_document_is_reported_after_atomic_seed_fallback(self):
         self.snapshot["entries"]["doc/protected"] = {"value": {"example": True}}
         sandbox = self.sandbox().prepare()
@@ -183,6 +195,7 @@ class SandboxTests(unittest.TestCase):
         sandbox.client = sandbox.process = None
         sandbox.groups.clear()
 
+    @unittest.skipIf(sys.platform == "win32", "constructs the explicitly unsupported native Windows sandbox")
     def test_leftovers_are_attributed_only_when_the_script_is_identified(self):
         self.snapshot["entries"]["extension/other"] = {"value": {"argv": ["python3", "other.py"]}}
         sandbox = self.sandbox().prepare()
@@ -199,9 +212,11 @@ class SandboxTests(unittest.TestCase):
 
     def test_process_facts_exclude_other_groups_and_zombies(self):
         output = "12 12 S core\n13 12 S extension\n14 12 Z zombie\n21 21 S unrelated\n"
-        with patch.object(harness.subprocess, "run", return_value=Mock(stdout=output)):
+        with patch.object(harness.os, "name", "posix"), \
+                patch.object(harness.subprocess, "run", return_value=Mock(stdout=output)):
             self.assertEqual([p["pid"] for p in harness.process_group_members(12, {})], [12, 13])
 
+    @unittest.skipIf(sys.platform == "win32", "constructs the explicitly unsupported native Windows sandbox")
     def test_smoke_checks_registration_views_recovery_without_extension_commands(self):
         sandbox = self.sandbox().prepare()
         fact = {"display_status": "running", "crashes": 0, "generation": 1,
@@ -236,6 +251,7 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(indexed["views/example"]["status"], "fail")
         sandbox.stop = Mock()
 
+    @unittest.skipIf(sys.platform == "win32", "constructs the explicitly unsupported native Windows sandbox")
     def test_readiness_waits_for_delayed_manifest_command_registration(self):
         sandbox = self.sandbox().prepare()
         client = object.__new__(harness.SandboxClient)
@@ -250,13 +266,13 @@ class SandboxTests(unittest.TestCase):
                          ["extension.list", "command.list", "extension.list", "command.list"])
         sandbox.client = None
 
+    @unittest.skipIf(sys.platform == "win32", "constructs the explicitly unsupported native Windows sandbox")
     def test_smoke_zero_enabled_is_failure(self):
         sandbox = self.sandbox().prepare()
         sandbox.declarations["extension/example"]["enabled"] = False
         self.assertEqual(harness.smoke(sandbox)[0]["status"], "fail")
 
 
-@unittest.skipIf(sys.platform == "win32", "positive integration sandbox CLI scenarios are explicitly unsupported on native Windows")
 class IntegrationModesTests(unittest.TestCase):
     setUp = SandboxTests.setUp
 
@@ -266,6 +282,7 @@ class IntegrationModesTests(unittest.TestCase):
         (state / "workspace.json").write_text(json.dumps(self.snapshot))
         return state
 
+    @unittest.skipIf(sys.platform == "win32", "CLI scenario constructs the explicitly unsupported native Windows sandbox")
     def test_cli_offline_candidate_new_scenario_uses_top_level_comparisons(self):
         state = self.write_source()
         scenario_dir = self.source / "tests/example/scenarios"
@@ -294,6 +311,7 @@ class IntegrationModesTests(unittest.TestCase):
             result = integration.run_copy(sandbox, {})
         self.assertTrue(any(harness.FAKE_BACKEND_COVERAGE in gap and "ability/vqro.terminals" in gap for gap in result["not_covered"]))
 
+    @unittest.skipIf(sys.platform == "win32", "CLI scenario constructs the explicitly unsupported native Windows sandbox")
     def test_cli_canary_error_has_no_spawn_and_existing_root_is_untouched(self):
         state = self.write_source()
         root = self.root / ("deep" * 30)

@@ -118,8 +118,8 @@ class StartupFailureTests(unittest.TestCase):
         self.assertTrue(child, "a process the core started outlived a failed start")
 
 
-@unittest.skipIf(sys.platform == "win32", "private coordination controller fixture listens on AF_UNIX")
 class SilentPeerTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "private controller fixture listens on AF_UNIX")
     def test_a_call_to_a_silent_peer_times_out_closes_and_is_not_retried(self):
         with tempfile.TemporaryDirectory(prefix="vq-silent-") as d:
             path = os.path.join(d, "s.sock")
@@ -171,7 +171,8 @@ class SilentPeerTests(unittest.TestCase):
         # blocking receive, and wall time would charge descheduling/GC to it.
         peer = mock.Mock()
         peer.recv.side_effect = socket.timeout
-        with mock.patch("coord_harness.socket.socket", return_value=peer), \
+        with mock.patch.object(socket, "AF_UNIX", 12345, create=True), \
+                mock.patch("coord_harness.socket.socket", return_value=peer), \
                 mock.patch("coord_harness.time.monotonic", side_effect=[10, 10.125, 10.25]):
             with self.assertRaisesRegex(TimeoutError, "hello: no reply within 0.5 s"):
                 Client("unused.sock", timeout=0.5)
@@ -216,6 +217,7 @@ class SilentPeerTests(unittest.TestCase):
         thread.start()
         return path, thread, received
 
+    @unittest.skipIf(sys.platform == "win32", "private controller fixture listens on AF_UNIX")
     def test_an_immediate_reply_is_accepted(self):
         with tempfile.TemporaryDirectory(prefix="vq-silent-") as d:
             path, thread, received = self.answering_peer(d, None)
@@ -224,6 +226,7 @@ class SilentPeerTests(unittest.TestCase):
             thread.join(6)
             self.assertEqual(client.me, "p:peer")
 
+    @unittest.skipIf(sys.platform == "win32", "private controller fixture listens on AF_UNIX")
     def test_a_reply_dripped_past_the_deadline_times_out(self):
         """Review of 04148cc5: fragments each within any per-receive timeout kept readline alive; a valid reply that
         finished after the total deadline was accepted (0.601 s for a 0.25 s deadline). The total deadline holds."""

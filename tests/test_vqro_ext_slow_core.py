@@ -111,8 +111,8 @@ ext.run()
 '''
 
 
-@unittest.skipIf(sys.platform == "win32", "scripted core fixture uses a Unix socket; Windows transport has separate fake/native controls")
 class SlowCore(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "ScriptedCore fixture uses an AF_UNIX server")
     def test_recovery_snapshot_timeouts_degrade_and_recover_instead_of_exiting(self):
         held = {"n": 0}
         def policy(method, msg):
@@ -148,6 +148,7 @@ class SlowCore(unittest.TestCase):
         self.assertIn("missed", last, "listeners recompute once the cache is current again:\n" + out)
         self.assertIn(f"'n': {core.version}", last, out)
 
+    @unittest.skipIf(sys.platform == "win32", "ScriptedCore fixture uses an AF_UNIX server")
     def test_startup_waits_out_a_slow_core(self):
         held = {"n": 0}
         def policy(method, msg):
@@ -167,6 +168,7 @@ class SlowCore(unittest.TestCase):
         self.assertIn("READY", out)
         self.assertNotIn("Traceback", out)
 
+    @unittest.skipIf(sys.platform == "win32", "ScriptedCore fixture uses an AF_UNIX server")
     def test_startup_contributions_wait_out_a_slow_core_but_unsafe_calls_do_not_resend(self):
         held = {"apply": 0, "notify": 0}
         def policy(method, msg):
@@ -201,6 +203,7 @@ ext.run()
         self.assertIn("NOTIFY timeout", out)
         self.assertEqual(core.calls.count("ui.notify"), 1)
 
+    @unittest.skipIf(sys.platform == "win32", "ScriptedCore fixture uses an AF_UNIX server")
     def test_a_dead_core_connection_still_exits_for_supervision(self):
         core = ScriptedCore()
         try:

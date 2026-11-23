@@ -2,7 +2,6 @@
 import asyncio
 from copy import deepcopy
 import time
-import sys
 import importlib
 from types import SimpleNamespace
 import unittest
@@ -235,7 +234,8 @@ def run_control(late_return, own_end=None, foreign=False, native_b_lives=False, 
         async def call(self, method, params=None):
             return {"epoch": "e", "seq": core.seq} if method == "workspace.snapshot" else {}
     async def viewer(): return Observer()
-    import signal as _signal
+    # Symbolic model labels only: no native process is stopped/resumed by this control.
+    _signal = SimpleNamespace(SIGSTOP=object(), SIGCONT=object())
     def signal_owned(process, sig):  # bridge B (pid 98) frozen: nothing it publishes until SIGCONT
         if process and process.get("pid") == 98 and sig == _signal.SIGCONT and getattr(core, "own_end_pending", False):
             core.own_end_pending = False
@@ -302,7 +302,7 @@ def run_control(late_return, own_end=None, foreign=False, native_b_lives=False, 
         viewer=viewer)
     async def cache_then(ctx_, predicate, description):
         await listing(); return await lifecycle_wait(ctx_, predicate, description)
-    with patch.object(m, "Native", NativeB), patch.object(m, "signal_owned", signal_owned), \
+    with patch.object(m, "signal", _signal), patch.object(m, "Native", NativeB), patch.object(m, "signal_owned", signal_owned), \
          patch.object(m, "SETUP_S", 0.2), \
          patch.object(m, "executable", lambda process: {"sha256": "img"}), patch.object(m, "ledger_summary", lambda n: {}), \
          patch.object(cases, "lifecycle_wait", cache_then), patch.object(m.asyncio, "sleep", AsyncMock()), \
@@ -315,7 +315,6 @@ def run_control(late_return, own_end=None, foreign=False, native_b_lives=False, 
     return ctx
 
 
-@unittest.skipIf(sys.platform == "win32", "replacement timeline controls exercise Unix SIGSTOP/SIGCONT freeze semantics")
 class WholeHandlerControls(unittest.TestCase):
     """The real L3 handler against the simulated core: only the correct late return is accepted."""
 
@@ -324,6 +323,13 @@ class WholeHandlerControls(unittest.TestCase):
             run_control(late_return, own_end, **kw); return True
         except CheckFailed:
             return False
+
+    def test_model_needs_no_native_stop_or_continue_signal_constants(self):
+        import signal
+        with patch.dict(signal.__dict__):
+            signal.__dict__.pop("SIGSTOP", None)
+            signal.__dict__.pop("SIGCONT", None)
+            run_control(lambda core: None)
 
     def test_controls(self):
         def fenced(core):
