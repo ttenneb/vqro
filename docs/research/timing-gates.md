@@ -40,8 +40,10 @@ explicitly contended, never quiet evidence and never a pass for a budget breach.
 Each second, including a start and final observation, `timing_contention.py` records:
 other held full/quick lock files, `/proc/stat` procs_running, and the step's observed
 process-tree **per-thread** schedstat runtime/runqueue wait. TID birth fences reuse;
-observed cumulative maxima retain tasks after exit. Tasks living entirely between
-samples are not claimed as measured. The JSON retains at most 600 sample rows.
+observed cumulative maxima retain tasks after exit. A pidfd wakes the final sample
+at actual process exit rather than charging another gate's later start to this
+window. Missing exit notification is explicitly unavailable. Tasks living entirely
+between samples are not claimed as measured. The JSON retains at most 600 sample rows.
 
 A window is contended if any other slot is held, median procs_running > cores/2,
 runqueue wait > runtime, or any required source is unavailable. Linux implements
@@ -73,8 +75,11 @@ cargo build --release --bin vqro
 Timing mode runs only the three sampled steps above plus the usual owned-leftover
 receipt/cleanup guard. It never builds or runs the unrelated quick/full suites.
 It requires a release vqro and exactly one executable release scale test artifact;
-missing/ambiguous artifacts fail, with no cold-build fallback. Build provenance is
-the caller's responsibility, as with the existing target-directory gate workflow.
+missing/ambiguous artifacts fail, with no cold-build fallback. Receipts label build
+provenance **caller-attested, not revision-bound**, name the checkout path and full
+checkout commit, and record SHA256 plus nanosecond Unix mtime of the release vqro
+and executable scale-test artifacts. This identifies what was graded; it does not
+claim that a hash or mtime binds a prebuilt artifact to the checkout revision.
 Archive its strict receipt beside the full receipt; a timed-out exclusive admission
 is not a grading run. Target duration is under about five minutes, excluding admission
 and prebuilds. Gate-script changes require secondary review before merge.

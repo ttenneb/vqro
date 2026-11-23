@@ -410,8 +410,8 @@ else
 fi
 rm -rf "$RUN"
 
-python3 - "$STEPS" "$RECEIPT" "$MODE" "$(git describe --always --dirty 2>/dev/null)" "$LOGS" "$LEFT" "$SCOPE" "$STAMP" <<'PY'
-import json, sys, time
+python3 - "$STEPS" "$RECEIPT" "$MODE" "$(git describe --always --dirty 2>/dev/null)" "$LOGS" "$LEFT" "$SCOPE" "$STAMP" "$REPO" "$TARGET" "$(git rev-parse HEAD 2>/dev/null)" <<'PY'
+import hashlib, json, os, sys, time
 from pathlib import Path
 steps_file, receipt, mode, commit, logs, left, scope, stamp = sys.argv[1:9]
 steps = [dict(zip(("name", "result", "seconds", "log"), l.split("\t"))) for l in open(steps_file).read().splitlines() if l]
@@ -426,6 +426,26 @@ skipped = [s["name"] for s in steps if s["result"] == "skip"]
 failed = [s["name"] for s in steps if s["result"] not in ("PASS", "UNSCOPED", "skip")]
 r = {"kind": "vqro.check-receipt", "version": 1, "mode": mode, "commit": commit, "finished_unix": int(time.time()),
      "result": "fail" if failed else "pass", "failed": failed, "skipped": skipped, "steps": steps, "leftover_pids": left.split(), "leftover_scope": scope, "logs": logs}
+# This identifies what the caller graded, not which revision produced a binary.
+# No new build/cache framework: names, hashes and mtimes make the attestation auditable.
+checkout = Path(sys.argv[9]).resolve() if len(sys.argv) > 9 else Path.cwd().resolve()
+target = Path(sys.argv[10]).resolve() if len(sys.argv) > 10 else Path(logs).parent.parent.resolve()
+checkout_commit = sys.argv[11] if len(sys.argv) > 11 else None
+def artifact(path):
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+            stat = os.fstat(source.fileno())
+        return {"path": str(path), "sha256": digest.hexdigest(), "mtime_unix_ns": stat.st_mtime_ns}
+    except OSError as error:
+        return {"path": str(path), "unavailable": str(error)}
+r["build_provenance"] = {"assurance": "caller-attested, not revision-bound",
+    "checkout": str(checkout), "checkout_commit": checkout_commit,
+    "release_vqro": artifact(target / "release/vqro"),
+    "scale_test_artifacts": [artifact(path) for path in sorted((target / "release/deps").glob("scale-*"))
+                             if path.is_file() and path.stat().st_mode & 0o111]}
 scale = logs + "/scale-receipt.json"
 try:
     sr = json.load(open(scale))

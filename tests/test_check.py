@@ -1,5 +1,6 @@
 """Gate outcome/receipt regressions: actual shell/Python blocks, private files, no backends."""
 import fcntl
+import hashlib
 import json
 from pathlib import Path
 import shlex
@@ -36,11 +37,11 @@ class CheckTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def receipt(self, statuses, stamp="20261120-000000-1", latest=None):
+    def receipt(self, statuses, stamp="20261120-000000-1", latest=None, provenance=()):
         self.steps.write_text("".join(f"step-{i}\t{status}\t0\t{self.root}/step-{i}.log\n"
                                       for i, status in enumerate(statuses)))
         return subprocess.run([sys.executable, "-", str(self.steps), str(latest or self.latest),
-                               "quick", "fixture", str(self.root), "", "private fixture", stamp],
+                               "quick", "fixture", str(self.root), "", "private fixture", stamp, *map(str, provenance)],
                               input=RECEIPT_PROGRAM, text=True, capture_output=True, env=self.env, umask=0o077)
 
     def gate(self, commands, mode="full", jobs=2, cleanup=""):
@@ -60,6 +61,27 @@ class CheckTests(unittest.TestCase):
         latest = logs/'check-receipt.json'
         receipt = json.loads(latest.read_text()) if latest.exists() else None
         return result, receipt, logs
+
+    def test_receipt_names_caller_attested_checkout_and_hashes_exact_artifacts(self):
+        target = self.root/'build'
+        release = target/'release'
+        (release/'deps').mkdir(parents=True)
+        binary, scale = release/'vqro', release/'deps/scale-fixture'
+        binary.write_bytes(b'fake vqro artifact')
+        scale.write_bytes(b'fake scale test artifact')
+        scale.chmod(0o700)
+        (release/'deps/scale-fixture.d').write_text('not an executable artifact')
+        result = self.receipt(['PASS'], provenance=(ROOT, target, 'a'*40))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        attestation = json.loads(self.latest.read_text())['build_provenance']
+        self.assertEqual(attestation['assurance'], 'caller-attested, not revision-bound')
+        self.assertEqual(attestation['checkout'], str(ROOT.resolve()))
+        self.assertEqual(attestation['checkout_commit'], 'a'*40)
+        self.assertEqual(len(attestation['scale_test_artifacts']), 1)
+        for row, path in [(attestation['release_vqro'], binary), (attestation['scale_test_artifacts'][0], scale)]:
+            self.assertEqual(row['path'], str(path))
+            self.assertEqual(row['sha256'], hashlib.sha256(path.read_bytes()).hexdigest())
+            self.assertEqual(row['mtime_unix_ns'], path.stat().st_mtime_ns)
 
     def test_timing_mode_registers_only_the_three_budget_probes(self):
         registration = SOURCE[SOURCE.index('BEFORE=$(snapshot'):SOURCE.index('\nrun_steps\nsleep 2')]
