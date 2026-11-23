@@ -94,8 +94,12 @@ via Limits. Python object/asyncio/kernel buffers add bounded overhead beyond enc
 
 The socket writer is serialized and byte-accounted; per-stream wire locks preserve data-before-final-marker order.
 Slow streams wait for their own credit without blocking others. Queue exhaustion is explicit overloaded/error/gap,
-not silent input loss. A write timeout/cancellation after transmission starts closes the connection rather than
-letting abandoned transport buffers grow. Close cancels local pending work; it never resends anything.
+not silent input loss. Two deadlines apply. A call's deadline (`timeout`, default `Limits.deadline`) bounds only
+that caller's wait for its write and answer: when it runs out or the caller is cancelled, the caller gets `timeout`
+(or its cancellation) and the connection stays up; a line not yet queued is never written, and a whole line already
+queued still flushes, owned by the provider. The writer's own deadline (`Limits.deadline`) bounds the writer lock
+and that flush: a real writer stall or transport error closes the connection rather than letting abandoned
+transport buffers grow. Close cancels local pending work; it never resends anything.
 
 ## Fake provider / tests
 
