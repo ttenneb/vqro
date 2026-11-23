@@ -16,6 +16,7 @@ import tempfile
 import time
 from collections import deque
 from fnmatch import fnmatchcase
+from vqro_process import background_kwargs
 
 sys.dont_write_bytecode = True
 
@@ -375,7 +376,7 @@ def process_group_members(group, env):
     if os.name != "posix":
         return None
     result = subprocess.run(["ps", "-eo", "pid=,pgid=,stat=,args="], env=env,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=True, text=True)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=True, text=True, **background_kwargs())
     found = []
     for line in result.stdout.splitlines():
         fields = line.split(None, 3)
@@ -532,7 +533,7 @@ class Sandbox:
             "assert pathlib.Path(os.environ['VQRO_STATE_DIR']).parent==r"
         )
         probe = subprocess.run([sys.executable, "-B", "-c", code], env=self.env,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False)
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False, **background_kwargs())
         self.info["canary"].update(status="pass" if probe.returncode == 0 else "fail")
         if probe.returncode:
             evidence = probe.stderr.decode("utf-8", "replace")[-300:]
@@ -545,7 +546,7 @@ class Sandbox:
         self.log = (self.root / "core.log").open("ab")
         argv = [self.binary, "serve", "--safe"] + (["--fake"] if self.backend == "fake" else [])
         self.process = subprocess.Popen(argv, cwd=self.root, env=self.env, stdout=self.log,
-                                        stderr=subprocess.STDOUT, start_new_session=True)
+                                        stderr=subprocess.STDOUT, start_new_session=True, **background_kwargs())
         self.groups.append(self.process.pid)
         self.info["started"] = True
         deadline, error = time.monotonic() + 60, None
@@ -657,7 +658,7 @@ class Sandbox:
                                       and v.get("enabled", True) for v in self.declarations.values())
                 if endpoint.exists():
                     try:
-                        subprocess.run(argv, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False)
+                        subprocess.run(argv, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False, **background_kwargs())
                     except (OSError, subprocess.TimeoutExpired) as error:
                         self.lifetime_rows.append(row("lifetime", "backend", "fail", str(error)))
                 elif enabled_backend:
