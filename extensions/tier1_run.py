@@ -74,6 +74,7 @@ def main(argv):
         return 2
     command = argv[argv.index("--") + 1:]
     env = dict(os.environ)
+    env.pop("VQRO_ACCOUNT", None)  # internal nonsecret launch fact is already recorded in the declaration
     nonce, path = env.pop("VQRO_TIER1_LAUNCH", None), env.get("VQRO_SOCKET")
     why = None
     if not nonce or not path:

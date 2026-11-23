@@ -8,7 +8,8 @@
 ```
 
 `runtime` is `pi`, `codex` or `claude`. IDs are unique safe identifiers (up to64 characters), labels are printable
-(up to128 characters), and optional `provider` is the configured provider identifier. `profile` must be an absolute
+(up to128 characters), and optional `provider` is the configured provider identifier. Omit it when unspecified;
+explicit JSON null is rejected consistently before registry/UI/bridge projection. `profile` must be an absolute
 literal **terminal-host** path: POSIX or Windows syntax is accepted, but `~`, environment and shell expansion are
 not performed. The native runtime creates/manages the profile when you sign in; vqro never creates, scans, reads,
 copies, migrates or deletes profile contents. Never put a token/API key/credential in registry fields or argv.
@@ -36,6 +37,9 @@ owns browser/device flow, token storage and refresh. For multiple configured exe
 intend that executable before signing in. The normal-login action shares the launcher's profile mapping, including explicit HOME/Windows-home/XDG selectors.
 Sign-in accepts only recognized inert native options (and a recognized Node/Bun script prefix); prompt-bearing,
 noninteractive, resume or unknown argv shapes refuse before spawn rather than risk running a model request.
+Codex validates its full argv: only an empty suffix, `--stdio`, or `--listen stdio://` after `app-server` is removed.
+Recognized global selectors must precede `app-server`; unproved suffix placements, missing values, `--`, repeated
+subcommands and unknown remainders refuse rather than silently opening a differently configured login.
 
 `kind` is declared metadata (`subscription | api_key`), not observed auth. Profile-backed API-key entries can select
 an already configured native login, but importing/storing keys and API-key sign-in are explicitly unsupported in
@@ -46,7 +50,8 @@ their kind.
 Rust Pi/Codex bridges publish the bounded non-secret configured `data.agent.account` with `sources: "vqro:launcher"`
 per field. It contains no profile path; internal `VQRO_ACCOUNT` metadata is removed from native child environments.
 Tier-1 terminals retain equivalent configured metadata in their launcher declaration, not a fabricated structured
-agent endpoint. Unknown/malformed metadata is rejected before a native child is started.
+agent endpoint. The tier1 wrapper strips internal `VQRO_ACCOUNT` before native exec while retaining the selected
+native profile selector, so nested normal launches cannot inherit stale configured-account facts. Unknown/malformed metadata is rejected before a native child is started.
 
 No account switching of an existing conversation, automatic capacity balancing, overflow/replay, usage fetching,
 provider-specific OAuth implementation, credential storage or authenticated verification is added. Disable the

@@ -6,11 +6,14 @@ use serde_json::json;
 #[test]
 fn account_metadata_is_bounded_sourced_and_absent_without_opt_in() {
     assert_eq!(launcher_account::parse(None).unwrap(), None);
+    // Shared with Python registry/UI/choice control: omission is valid, explicit null is not.
+    let omitted: serde_json::Value = serde_json::from_str(include_str!("fixtures/configured_account_omitted_provider.json")).unwrap();
+    assert_eq!(launcher_account::parse(Some(&omitted.to_string())).unwrap(), Some(omitted));
     let row = json!({"id":"work","label":"Work","provider":"openai-codex","kind":"subscription",
         "sources":{"id":"vqro:launcher","label":"vqro:launcher","provider":"vqro:launcher","kind":"vqro:launcher"}});
     assert_eq!(launcher_account::parse(Some(&row.to_string())).unwrap(), Some(row.clone()));
     for (key,value) in [("profile",json!("/never/read")),("token",json!("opaque-secret")),("kind",json!("unknown")),
-                        ("label",json!("x".repeat(129))),("id",json!("bad id")),("sources",json!({}))] {
+                        ("label",json!("x".repeat(129))),("id",json!("bad id")),("provider",json!(null)),("sources",json!({}))] {
         let mut invalid=row.clone(); invalid[key]=value;
         let error=launcher_account::parse(Some(&invalid.to_string())).unwrap_err();
         assert!(!error.contains("opaque-secret"));

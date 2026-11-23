@@ -22,7 +22,7 @@ def validate(row):
     if row.get('runtime') not in SELECTORS or row.get('kind') not in ('subscription','api_key'):
         raise VqroError('account runtime or billing kind is unsupported', 'invalid')
     provider = row.get('provider')
-    if provider is not None and (not isinstance(provider,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}',provider)):
+    if 'provider' in row and (not isinstance(provider,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}',provider)):
         raise VqroError('provider must be a short provider identifier', 'invalid')
     path = row.get('profile')
     if not isinstance(path,str) or not path.strip() or len(path.encode()) > 4096 or '\0' in path or not path.isprintable() \
@@ -81,7 +81,12 @@ def native_login_argv(runtime, argv):
     if runtime == 'codex':
         if 'app-server' not in rest:
             raise VqroError('Codex sign-in needs a runtime argv containing app-server','unsupported')
-        rest = rest[:rest.index('app-server')]
+        at = rest.index('app-server')
+        # Validate the ENTIRE argv before converting it: only proved transport-only suffixes may disappear.
+        # Global selector placement after the subcommand is not supported here; refuse rather than drop it.
+        if rest[at+1:] not in ([], ['--stdio'], ['--listen','stdio://']):
+            raise VqroError('Codex sign-in refuses unknown app-server suffixes; put profile selectors before app-server','unsupported')
+        rest = rest[:at]
     values = {'pi': {'--provider','--model','--thinking'},
               'codex': {'-c','--config','-p','--profile','--enable','--disable'},
               'claude': {'--model','--effort','--settings','--setting-sources'}}[runtime]
