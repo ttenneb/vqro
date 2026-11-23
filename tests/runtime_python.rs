@@ -1,10 +1,23 @@
 //! A private core must skip an old python3 without inheriting a live backend endpoint.
 #![cfg(unix)]
 use serde_json::{json, Value};
-use std::{os::unix::fs::{symlink, PermissionsExt}, process::{Child, Command, Stdio}, time::Duration};
+use std::{os::unix::fs::symlink, process::{Child, Command, Stdio}, time::Duration};
 use vqro::client;
 struct Owned(Child);
 impl Drop for Owned { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
+
+fn write_executable(path: &std::path::Path, script: &str) {
+    // Only a short-lived child opens the executable for writing, so parallel test
+    // forks from this process cannot inherit that fd and cause ETXTBSY on exec.
+    let mut writer = Command::new("/bin/sh")
+        .args(["-c", "cat > \"$1\" && chmod 700 \"$1\"", "sh"]).arg(path)
+        .stdin(Stdio::piped()).spawn().unwrap();
+    {
+        use std::io::Write;
+        writer.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+    }
+    assert!(writer.wait().unwrap().success());
+}
 
 #[tokio::test]
 async fn private_core_skips_old_python_and_starts_extension() {
@@ -19,8 +32,7 @@ async fn private_core_skips_old_python_and_starts_extension() {
     let real = if real.components().count() == 1 {
         std::env::split_paths(&std::env::var_os("PATH").unwrap()).map(|d| d.join(&real)).find(|p| p.is_file()).unwrap()
     } else { real };
-    std::fs::write(old.join("python3"), "#!/bin/sh\necho '(3, 9)'\n").unwrap();
-    std::fs::set_permissions(old.join("python3"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&old.join("python3"), "#!/bin/sh\necho '(3, 9)'\n");
     symlink(real, good.join("python3")).unwrap();
     let path = std::env::join_paths([old, good]).unwrap();
     let socket = root.path().join("p");
@@ -58,8 +70,7 @@ async fn slow_discovery_keeps_core_responsive_and_launches_only_current_generati
     for dir in [&slow, &good, &other, &root.path().join("extensions")] { std::fs::create_dir_all(dir).unwrap(); }
     let real = vqro::program::python().unwrap().0;
     let probe_started = root.path().join("probing");
-    std::fs::write(slow.join("python3"), format!("#!/bin/sh\necho started > '{}'\n/bin/sleep 1.5\necho '(3, 9)'\n", probe_started.display())).unwrap();
-    std::fs::set_permissions(slow.join("python3"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&slow.join("python3"), &format!("#!/bin/sh\necho started > '{}'\n/bin/sleep 1.5\necho '(3, 9)'\n", probe_started.display()));
     symlink(real, good.join("python3")).unwrap();
     let socket = root.path().join("p");
     // Both PATH entries are relative to the core cwd; the extension has a different cwd.

@@ -212,11 +212,18 @@ pub fn resolve_provider(name:&str) -> Result<PathBuf,String> {
     }
     #[cfg(unix)]
     fn fake_python(dir: &Path, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(dir).unwrap();
         let path = dir.join("python3");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A child writes the executable: parallel test forks cannot inherit a writer fd
+        // from this process and make a later exec fail with ETXTBSY.
+        let mut writer = std::process::Command::new("/bin/sh")
+            .args(["-c", "cat > \"$1\" && chmod 700 \"$1\"", "sh"]).arg(&path)
+            .stdin(std::process::Stdio::piped()).spawn().unwrap();
+        {
+            use std::io::Write;
+            writer.stdin.take().unwrap().write_all(format!("#!/bin/sh\n{body}\n").as_bytes()).unwrap();
+        }
+        assert!(writer.wait().unwrap().success());
         path
     }
     #[cfg(unix)]
