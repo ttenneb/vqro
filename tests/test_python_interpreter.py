@@ -160,12 +160,20 @@ class InterpreterTests(unittest.TestCase):
 
     def test_hung_probe_is_killed_and_reaped(self):
         shim = self.root / 'hung-python'
-        pidfile = self.root / 'pid'
-        shim.write_text('#!/bin/sh\nprintf "%s" "$$" > "' + str(pidfile) + '"\nexec /bin/sleep 60\n')
+        shim.write_text('#!/bin/sh\nexec /bin/sleep 60\n')
         shim.chmod(0o700)
+        children = []
+        real_popen = subprocess.Popen
+        def owned_child(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            children.append(child)
+            return child
         with patch.dict(os.environ, {'VQRO_PYTHON': str(shim)}, clear=True), \
-                patch.object(resolver, 'PROBE_SECONDS', .05):
+                patch.object(resolver, 'PROBE_SECONDS', .05), \
+                patch.object(resolver.subprocess, 'Popen', side_effect=owned_child):
             with self.assertRaisesRegex(RuntimeError, 'VQRO_PYTHON'):
                 resolver.resolve()
-        with self.assertRaises(ProcessLookupError):
-            os.kill(int(pidfile.read_text()), 0)
+        self.assertEqual(len(children), 1)
+        self.assertIsNotNone(children[0].returncode)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(children[0].pid, os.WNOHANG)
