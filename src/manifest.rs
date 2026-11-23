@@ -105,7 +105,8 @@ pub fn parse_cap(text:&str)->Option<(String,u64)> {
 }
 /// Built-in capabilities: core commands and the spec-defined shared settings, whose readers always have a fallback.
 fn core_provides(cap:&str,major:u64)->bool {
-    if cap=="ability/vqro.operational-domains" {return major==1;}
+    // Abilities the core itself implements unconditionally (core-protocol.md): only their known major is claimed.
+    if matches!(cap,"ability/vqro.operational-domains"|"ability/vqro.principals") {return major==1;}
     cap.starts_with("command/vqro.") || matches!(cap,"doc/settings/tui"|"doc/settings/theme"|"doc/settings/icons")
 }
 /// Declared entries of `needs`/`works_with` as objects; `requires.client_features` are UI needs (`ui/vqro.<feature>`).
@@ -134,6 +135,9 @@ fn ui_status(row:&mut Value,want:&(String,u64),clients:&[Value]) {
     fn operational_core_ability_does_not_claim_unknown_major_versions() {
         assert!(super::core_provides("ability/vqro.operational-domains",1));
         assert!(!super::core_provides("ability/vqro.operational-domains",2));
+        // Connection-known principals (AS6): core-resolved callback attribution on every command.invoke.
+        assert!(super::core_provides("ability/vqro.principals",1));
+        assert!(!super::core_provides("ability/vqro.principals",2));
     }
     use super::*;
     #[test]fn dependencies_report_satisfied_off_missing_version_and_reverse_users(){
@@ -162,6 +166,21 @@ fn ui_status(row:&mut Value,want:&(String,u64),clients:&[Value]) {
         // A running alternative satisfies; UI needs never decide the overall status.
         let mut status=status;status.insert("tabs".into(),"running".into());
         assert_eq!(catalog.dependencies(&status,&clients)["agents"]["status"],"degraded");
+    }
+    /// testing-lead's Unit report: the bundled coord manifest needs ability/vqro.principals, which only the core
+    /// provides; with coord alone every need is satisfied (only optional works_with may be absent).
+    #[test]fn bundled_coord_needs_are_satisfied_by_the_core(){
+        let root=tempfile::tempdir().unwrap();
+        let coord=std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"),"/extensions/manifests/coord.json")).unwrap();
+        std::fs::write(root.path().join("coord.json"),coord).unwrap();
+        let mut catalog=Catalog::new(root.path().into());catalog.refresh(&[("coord".to_string(),0,json!({"manifest":"coord.json"}))]);
+        let status:BTreeMap<String,String>=[("coord".to_string(),"running".to_string())].into_iter().collect();
+        let deps=catalog.dependencies(&status,&[]);
+        let needs=deps["coord"]["needs"].as_array().unwrap();
+        let principals=needs.iter().find(|n|n["cap"]=="ability/vqro.principals").unwrap();
+        assert_eq!(principals["status"],"satisfied","{principals}");assert_eq!(principals["providers"][0]["name"],"vqro");
+        assert!(needs.iter().all(|n|n["status"]=="satisfied"),"{}",deps["coord"]);
+        assert_ne!(deps["coord"]["status"],"missing","only optional works_with may be absent: {}",deps["coord"]);
     }
     #[test]fn capability_names_parse_with_majors(){
         assert_eq!(parse_cap("command/tabs.show"),Some(("command/tabs.show".into(),1)));

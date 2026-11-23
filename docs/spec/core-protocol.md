@@ -77,6 +77,8 @@ or the same pinned Unicode16 Cf format characters refused in labels. Ordinary co
 are not stripped or normalized. Invalid legacy owner names remain unresolved and require explicit recovery.
 `undeclared` is reserved for unknown identity. Display/client names never resolve identity. See also
 [coordination-v0 §3](coordination-v0.md#3-principals), which uses this generic seam but owns its own rights policy.
+The core declares this seam as `ability/vqro.principals@1` in hello `provides` and manifest dependency facts: every
+`command.invoke` callback carries the core-resolved `principal` (or `undeclared`), `actor`, `initiator` and `caller`.
 
 A launcher configures identity once in `hello.identity`: `{kind:"principal", principal:"…"}`; the TUI uses
 `{kind:"owner"}` to resolve `doc/principals/owner` (fresh stores receive audited startup initialization to `"owner"`).
