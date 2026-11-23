@@ -2,6 +2,9 @@ use super::*;
 use crate::codex::Endpoint;
 use crate::provider_client::items::ItemView;
 
+#[path = "refusal_tests.rs"]
+mod refusals;
+
 fn drain(cursor: &mut ItemCursor, projection: &mut Projection, view: &mut ItemView) {
     loop {
         match cursor.next(&mut projection.journal, ENTITY_BYTES) {

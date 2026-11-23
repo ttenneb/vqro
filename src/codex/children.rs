@@ -115,6 +115,23 @@ fn child_status(native: &str) -> &'static str {
     }
 }
 
+fn merge_child_status(row: &mut Value, native: &str, is_waiting: bool) {
+    // Loading an idle thread is not evidence that its terminal collab run restarted.
+    let terminal = matches!(
+        row["status"].as_str(),
+        Some("completed" | "failed" | "cancelled")
+    );
+    if native == "idle" && terminal {
+        return;
+    }
+    row["status"] = json!(if is_waiting {
+        "waiting"
+    } else {
+        child_status(native)
+    });
+    row["native"]["status"] = json!(native);
+}
+
 impl Endpoint {
     pub(super) fn observes_thread(&self, thread: &str) -> bool {
         self.lifecycle != "ended"
@@ -183,12 +200,7 @@ impl Endpoint {
             row["depth"] = json!(depth);
         }
         if let Some(status) = reported_string(&thread["status"]["type"], 128) {
-            row["status"] = json!(if waiting(&thread["status"]) {
-                "waiting"
-            } else {
-                child_status(&status)
-            });
-            row["native"]["status"] = json!(status);
+            merge_child_status(row, &status, waiting(&thread["status"]));
         }
         self.children.change(&native).into_iter().collect()
     }
@@ -267,20 +279,28 @@ impl Endpoint {
     }
 
     pub(super) fn whole_plan(&mut self, params: &Value, child: Option<Value>) -> Vec<Change> {
-        let (Some(thread), Some(turn), Some(plan)) = (
-            params["threadId"].as_str(),
-            params["turnId"].as_str(),
-            params["plan"].as_array(),
-        ) else {
+        let (Some(thread), Some(turn)) = (params["threadId"].as_str(), params["turnId"].as_str())
+        else {
             return vec![];
         };
-        if plan.len() > 256 {
+        let Some(id) = self.children.identity(thread, "plan", turn) else {
             return vec![];
+        };
+        let mut refused = json!({"incomplete":true,"items":[],"update":"whole","source":"native",
+            "native":{"thread_id":thread,"turn_id":turn}});
+        if let Some(owner) = &child {
+            refused["owner"] = owner.clone();
         }
+        // The existing projection retains a known entity's old contents and marks both
+        // it and the stream incomplete. Never bypass that witness with a silent drop.
+        let refusal = || vec![Change::new("plan", id.clone(), refused.clone())];
+        let Some(plan) = params["plan"].as_array().filter(|plan| plan.len() <= 256) else {
+            return refusal();
+        };
         let mut items = vec![];
         for step in plan {
             let Some(text) = reported_string(&step["step"], 8192) else {
-                return vec![];
+                return refusal();
             };
             let status = match step["status"].as_str() {
                 Some("pending") => "pending",
@@ -300,15 +320,18 @@ impl Endpoint {
         if let Some(child) = child {
             value["owner"] = child;
         }
+        if params["explanation"]
+            .as_str()
+            .is_some_and(|text| text.len() > 8192)
+        {
+            return refusal();
+        }
         if let Some(text) = reported_string(&params["explanation"], 8192) {
             value["explanation"] = json!(text);
         }
         if !small(&value, ENTITY_BYTES - 1024) {
-            return vec![];
+            return refusal();
         }
-        let Some(id) = self.children.identity(thread, "plan", turn) else {
-            return vec![];
-        };
         vec![Change::new("plan", id, value)]
     }
 
@@ -393,9 +416,6 @@ impl Endpoint {
         let (Ok(native), Some(text)) = (id(params, "itemId"), params["delta"].as_str()) else {
             return vec![];
         };
-        if text.len() > ENTITY_BYTES {
-            return vec![];
-        }
         let (kind, mut base, field) = if method == "item/agentMessage/delta" {
             (
                 "message",
@@ -417,6 +437,10 @@ impl Endpoint {
         let Some(id) = self.children.identity(thread, kind, &native) else {
             return vec![];
         };
+        if text.len() > ENTITY_BYTES {
+            base["incomplete"] = json!(true);
+            return vec![Change::new(kind, id, base)];
+        }
         vec![Change::append(kind, id, base, field, text.into())]
     }
 
@@ -439,20 +463,7 @@ impl Endpoint {
                 };
                 if let Some(status) = status.filter(|s| s.len() <= 128) {
                     let row = self.children.rows.get_mut(thread).unwrap();
-                    // A completed collab child does not become unfinished merely because its
-                    // loaded thread reports idle. A new turn/activity can explicitly reactivate it.
-                    let terminal = matches!(
-                        row["status"].as_str(),
-                        Some("completed" | "failed" | "cancelled")
-                    );
-                    if status != "idle" || !terminal {
-                        row["status"] = json!(if waiting(&params["status"]) {
-                            "waiting"
-                        } else {
-                            child_status(status)
-                        });
-                        row["native"]["status"] = json!(status);
-                    }
+                    merge_child_status(row, status, waiting(&params["status"]));
                 }
                 self.children.change(thread).into_iter().collect()
             }

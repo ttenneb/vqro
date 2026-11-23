@@ -365,6 +365,34 @@ fn child_resolution_cannot_cancel_main_request_with_same_native_id() {
 }
 
 #[test]
+fn late_idle_thread_started_does_not_revive_terminal_collab_children() {
+    for (native, status) in [
+        ("completed", "completed"),
+        ("errored", "failed"),
+        ("shutdown", "cancelled"),
+    ] {
+        let mut e = endpoint();
+        let terminal=e.notification("item/completed",&json!({"threadId":"main","item":{
+            "id":"spawn","type":"collabAgentToolCall","tool":"spawnAgent","status":"completed",
+            "senderThreadId":"main","receiverThreadIds":["worker"],"agentsStates":{"worker":{"status":native}}}}));
+        assert_eq!(find(&terminal, "child").value["status"], status);
+        let late = child(&mut e, "worker", "main");
+        assert_eq!(find(&late, "child").value["status"], status);
+        assert_eq!(find(&late, "child").value["native"]["status"], native);
+        let changed = e.notification(
+            "thread/status/changed",
+            &json!({"threadId":"worker","status":{"type":"idle"}}),
+        );
+        assert_eq!(find(&changed, "child").value["status"], status);
+        let fresh = e.notification(
+            "turn/started",
+            &json!({"threadId":"worker","turn":{"id":"fresh"}}),
+        );
+        assert_eq!(find(&fresh, "child").value["status"], "running");
+    }
+}
+
+#[test]
 fn oversized_child_or_plan_inputs_are_bounded() {
     let mut e = endpoint();
     assert!(child(&mut e, &"x".repeat(129), "main").is_empty());

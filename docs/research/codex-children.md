@@ -20,7 +20,9 @@ Child data never grants coordination authority. No model call was used in tests.
   given; it is not fabricated into a background task. Activity without lineage leaves
   the child `parent` field absent. Unknown native states map to `unknown` and retain
   `native.status`. Idle loaded threads are waiting, not finished. Turn completion does
-  not prove child-thread termination; a completed collab child is not undone by idle.
+  not prove child-thread termination. Both thread/started and thread-status updates
+  share the same lifecycle merge: idle cannot undo a completed/failed/cancelled child;
+  an explicit new turn can reactivate it.
 - All main and child items/deltas use a shared injective namespace: `n:` followed
   by URL-safe base64 of a JSON pair `[native_thread_id,native_item_id]`. Pairs too
   long for the 128-byte entity-ID bound use compact epoch-local `l:` IDs instead.
@@ -52,8 +54,12 @@ Associations live inside the parent's native-session epoch: at most 256 children
 4096 compact mappings for unusually long native-ID pairs, reset on session replacement.
 Ordinary reversible IDs do not consume that map. IDs/threads are at most
 128 bytes; native child payload fields are bounded. Whole plans accept at most 256
-steps, bounded text and total entity bytes. Excess/unrepresentable observations are
-omitted, not claims that native children are absent. The ordinary tail-coverage item
+steps, bounded text and total entity bytes. Over-bound deltas and whole plans emit a
+bounded refusal witness through the existing projection: a known entity retains its
+old contents but is marked incomplete, as is the item stream. They never silently
+leave an old prefix or list looking complete, and no bound is raised. Other
+unrepresentable/unattributable observations are omitted, not claims that native
+children are absent. The ordinary tail-coverage item
 journal can evict old entities; active child facts are protected like active tools.
 No history/session scan, credential inspection, synthetic child process or new
 background polling exists here. Restart recovery never resends work.
