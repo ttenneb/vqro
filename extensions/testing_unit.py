@@ -18,7 +18,7 @@ from vqro_testing import (EXIT_CODES, cli_parser, endpoints, fingerprint, print_
 LOG_BYTES = 64 * 1024
 TEST_TIMEOUT = 120
 OUTPUT_BYTES = 4096
-NOT_COVERED = "behaviour: unit report reads status only; see test-integration (not built yet)"
+NOT_COVERED = "behaviour: unit report reads status only; see test-integration (behaviour) and test-perf (performance)"
 
 
 def declarations_in(snapshot):

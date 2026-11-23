@@ -1,7 +1,7 @@
 {
   "name":"test-integration", "title":"Integration report", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"management",
   "summary":"Test a disposable copy of your setup, not your live workspace.",
-  "description":"Audits and copies declarations, settings and extension files into a private core, then checks startup, registrations, recovery, cleanup and change scenarios. Runs asynchronously only when asked. Turning it off removes the in-app commands; the CLI remains available. Real agent profiles, rendering and performance are not covered.",
+  "description":"Audits and copies declarations, settings and extension files into a private core, then checks startup, registrations, recovery, cleanup and change scenarios. Runs asynchronously only when asked. Turning it off removes the in-app commands; the CLI remains available. Real agent profiles and rendering are not covered; performance is measured by test-perf.",
   "requires":{"protocol":1,"client_features":["items"]},
   "provides":["command/test.integration","command/test.integration.show","view/test-integration.report","doc/test-integration/probe"],
   "contributes":{"commands":["test.integration","test.integration.show"],"panels":["Integration report"]}

@@ -91,7 +91,7 @@ def run(args):
     sandboxes, rows, root, owned, error = [], [], None, False, False
     result = {"kind": "vqro.test-receipt", "version": 1, "suite": "integration", "source": "offline",
               "started_at": stamp, "fingerprint": {}, "inputs": [], "not_covered": [
-                  "rendering and performance", "agent profiles and real runtimes: offline follow-up not built"],
+                  "rendering", "performance: see test-perf", "agent profiles and real runtimes: offline follow-up not built"],
               "sandbox": {"started": False, "canary": {"status": "not run", "checked": {"env": [], "paths": {}}, "violations": []}}}
     try:
         if not args.offline:
