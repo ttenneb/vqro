@@ -516,7 +516,7 @@ pub async fn run(socket: &Path) -> Result<()> {
             let echo = matches!(&input, UiInput::Incoming(Some(m)) if app.echo(m));
             dirty |= match input {
                 UiInput::Incoming(m) => match m {
-                    Some(m) => { probe.incoming(&m); app.on_incoming(m); true }
+                    Some(m) => { probe.incoming(&m, app.connection); app.on_incoming(m); true }
                     None => {
                         // The core went away (restart, reinstall): bring it back and reconnect.
                         app.disconnected();
@@ -535,7 +535,7 @@ pub async fn run(socket: &Path) -> Result<()> {
                     }
                     true
                 },
-                UiInput::Message(m) => { app.on_msg(m); true }
+                UiInput::Message(m) => { probe.message(&m, app.connection, app.connected); app.on_msg(m); true }
                 UiInput::Key(ev) => app.on_event(ev),
                 UiInput::Tick => { app.retry_snapshot_if_due(); true },
                 UiInput::Frame => false,
@@ -546,7 +546,7 @@ pub async fn run(socket: &Path) -> Result<()> {
             for _ in 0..if key_input { 0 } else { 64 } {
                 if !keys.is_empty() { break; }
                 let Ok(m) = incoming.try_recv() else { break };
-                probe.incoming(&m);
+                probe.incoming(&m, app.connection);
                 app.on_incoming(m);
                 dirty = true;
             }
