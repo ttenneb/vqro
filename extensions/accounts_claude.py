@@ -8,7 +8,7 @@ import copy
 import re
 
 import accounts_policy as policy
-from account_credentials import snapshot as account_snapshot
+from account_credentials import credential_identity, selection_problem, snapshot as account_snapshot
 from vqro_display import label
 from vqro_ext import VqroError
 
@@ -17,6 +17,34 @@ OP = 'claude.restart'
 
 def text(value, maximum=256):
     return isinstance(value, str) and 0 < len(value.encode('utf-8', errors='replace')) <= maximum and '\0' not in value
+
+
+def eligible_episode(row):
+    """Pure scheduler predicate: return the current native limit UUID or None.
+
+    Producer contract: the retained witness is invalidated on ANY newer native
+    turn start/terminal result, allowed-rate observation, epoch or incarnation.
+    Presence is not reconstructed from cached timers, blocked state or old input.
+    Native restart admission independently fences latest work and quiescence.
+    """
+    if not isinstance(row, dict) or row.get('kind') != 'agent' or not policy.live(row):
+        return None
+    facts = policy.facts(row)
+    if facts.get('state') != 'idle' or not isinstance(facts.get('queue'), list) or facts['queue']:
+        return None
+    session = facts.get('session')
+    caps = facts.get('caps')
+    if (not isinstance(session, dict) or not text(session.get('id')) or not text(row.get('incarnation'))
+            or not text(facts.get('epoch')) or not text(policy.configured_id(row), 64)
+            or not isinstance(caps, dict) or not isinstance(caps.get(OP), dict)):
+        return None
+    availability = facts.get('availability')
+    native = availability.get('native') if isinstance(availability, dict) else None
+    if (not isinstance(native, dict) or native.get('subscription_limit') is not True
+            or native.get('session_id') != session['id'] or not text(native.get('episode'))
+            or native.get('terminal_reason') != 'blocking_limit'):
+        return None
+    return native['episode']
 
 
 class ClaudeCutover:
@@ -30,21 +58,9 @@ class ClaudeCutover:
         if not isinstance(rows, list) or len(rows) != 1:
             raise VqroError('Claude source is unavailable; no switch', 'stale')
         row = rows[0]
-        if row.get('id') != resource or row.get('kind') != 'agent' or not policy.blocked(row, limit_only=True):
-            raise VqroError('Claude source is no longer quota/rate limited; no switch', 'stale')
-        facts = policy.facts(row)
-        session = facts.get('session')
-        account = policy.configured_id(row)
-        caps = facts.get('caps')
-        if (policy.episode(row) != episode or not isinstance(session, dict) or not text(session.get('id'))
-                or not text(account, 64) or not isinstance(caps, dict) or not isinstance(caps.get(OP), dict)):
-            raise VqroError('Claude session/source/restart declaration changed; no switch', 'stale')
-        availability = facts.get('availability') or {}
-        native = availability.get('native')
-        if (not isinstance(native, dict) or native.get('subscription_limit') is not True
-                or native.get('session_id') != session['id'] or not text(native.get('episode'))
-                or native.get('terminal_reason') != 'blocking_limit'):
-            raise VqroError('native ended subscription-limit evidence is missing; no switch', 'unsupported')
+        if (not isinstance(row, dict) or row.get('id') != resource or eligible_episode(row) is None
+                or policy.episode(row) != episode):
+            raise VqroError('Claude needs a current native limit episode, explicit idle and empty queue; no switch', 'stale')
         provider = self.ext.providers.get(row.get('provider')) or {}
         declarations = provider.get('capabilities')
         host = provider.get('host')
@@ -61,6 +77,11 @@ class ClaudeCutover:
         if len(selected) != 1:
             raise VqroError('Claude target account is missing or ambiguous; no switch', 'invalid')
         row = selected[0]
+        if selection_problem(row):
+            raise VqroError('Claude target credential route is incomplete or conflicting; no switch', 'unsupported')
+        source_row = next((entry for entry in rows if entry['id'] == source_account), None)
+        if source_row is not None and credential_identity(row) == credential_identity(source_row):
+            raise VqroError('Claude target is a known alias of the source credential; no switch', 'invalid')
         if (not text(row.get('id'), 64) or row['id'] == source_account or row.get('runtime') != 'claude'
                 or row.get('provider', 'anthropic') != 'anthropic' or row.get('kind') != 'subscription'
                 or row.get('host') != host or not isinstance(row.get('secret_ref'), str)

@@ -13,6 +13,11 @@ This slice implements the callback, host-helper credential mode and fake boundar
 regressions. Native `claude.restart` is a required separate route-1 adapter seam.
 The callback fails closed when the agent/provider do not declare it; fake tests do
 not certify native process restart, subscription acceptance or session readback.
+The pinned Claude SDK has not established a complete known-empty input queue witness:
+route-1 currently reports `queue:null`, which this callback refuses. User-only queued
+counts, main-thread interrupt receipts and idle alone are not substituted for `[]`.
+This is an unresolved native-evidence blocker for actual automatic cutover, not a
+manual-only replacement for the required feature.
 No real keychain, Claude login, transcript or model request is used by the tests.
 
 ## Credential boundary
@@ -89,10 +94,22 @@ Required result data:
  "account":"b","epoch":"e2"}
 ```
 
-The adapter must also require positive native subscription-limit evidence associated
-with an ended `blocking_limit` result and the same native session. The native limit
-result UUID is distinct from common policy's source-episode hash. Generic auth errors,
-overload or an availability label alone do not qualify.
+The adapter and callback require positive retained native subscription-limit evidence
+associated with an ended `blocking_limit` result and the same native session. Claude's
+availability `blocked` state is turn-scoped and clears on the terminal result; an idle
+agent with that retained episode still qualifies. The callback does not require
+`availability.state == blocked`, and an idle agent with no positive episode never
+qualifies. `eligible_episode(row)` is a pure shared scheduling predicate returning the
+native episode UUID or null: it requires explicit `state:idle` and an observed empty
+`queue:[]`, never an absent/unknown queue. Both callback source/claim boundaries use it.
+The producer MUST invalidate the retained `availability.native` episode on ANY newer
+native turn start or terminal result, an allowed-rate observation, or epoch/incarnation
+change. Thus presence denotes the latest qualifying terminal result, not a historical
+limit. A start/cancel/idle sequence must not resurrect an earlier episode. This is a
+required producer guarantee, not a new inferred field; native restart admission also
+fences latest work. Native producer qualification is separate from these fake tests.
+The native limit result UUID is distinct from common policy's source-episode hash.
+Generic auth errors, overload or an availability label alone do not qualify.
 
 An accepted/observed generic outcome alone is not evidence of process start: the
 explicit `started` boolean means successful control initialization, not merely an
@@ -101,7 +118,9 @@ ONLY for native observation and must match that request. Account is configured B
 selection, not invented authenticated readback.
 A new epoch is required. A mismatch/malformed/uncertain result raises with the
 original effect evidence and never returns fabricated success. Native RPC errors
-retain their original data and wire evidence.
+retain their original data and wire evidence. Target selection also uses the shared
+registry route validator and rejects known equal credential references under different
+public account IDs; labels or distinct IDs are not evidence of independent quota.
 
 The callback normalizes an `affected` member with `resource`, authenticated `host`,
 `requested_session`, configured `account`, new `epoch`, `process_started`,

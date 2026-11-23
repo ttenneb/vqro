@@ -7,7 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'extensions'))
 from vqro_ext import VqroError
 import accounts_policy as policy
-from accounts_claude import ClaudeCutover
+from accounts_claude import ClaudeCutover, eligible_episode
+from account_credentials import snapshot as registry_snapshot
 
 
 class Fake:
@@ -17,7 +18,7 @@ class Fake:
         self.providers = {'runtime': {'role': 'runtime', 'host': 'r1', 'capabilities': {'claude.restart': {}}}}
         self.source = {'id': 'r2', 'kind': 'agent', 'incarnation': 'birth', 'provider': 'runtime',
                        'host': 'r1', 'available': True, 'data': {'agent': {
-                           'v': 0, 'lifecycle': 'live', 'state': 'idle', 'epoch': 'e1',
+                           'v': 0, 'lifecycle': 'live', 'state': 'idle', 'queue': [], 'epoch': 'e1',
                            'session': {'id': 'native-session'}, 'account': {'id': 'a'},
                            'caps': {'claude.restart': {}, 'agent.availability': {'reasons': ['quota']}},
                            'availability': {'state': 'blocked', 'reason': 'quota', 'native': {
@@ -143,6 +144,51 @@ class CutoverTests(unittest.TestCase):
         self.assertEqual(caught.exception.wire_error, wire)
         self.assertEqual(len(self.ext.native()), 1)
 
+    def test_pure_eligibility_has_no_rpc_and_newer_work_clears_native_witness(self):
+        row = copy.deepcopy(self.ext.source)
+        self.assertEqual(eligible_episode(row), 'native-result-uuid')
+        row['data']['agent']['state'] = 'running'
+        self.assertIsNone(eligible_episode(row))
+        # Producer contract invalidates the retained witness on a newer turn start/result.
+        row['data']['agent']['availability'].pop('native')
+        row['data']['agent']['state'] = 'idle'
+        self.assertIsNone(eligible_episode(row))
+        self.assertEqual(self.ext.calls, [])
+        self.assertIsNone(eligible_episode(None))
+        self.assertIsNone(eligible_episode({}))
+
+    def test_idle_episode_qualifies_after_turn_scoped_blocked_is_cleared(self):
+        availability = self.ext.source['data']['agent']['availability']
+        availability['state'] = 'available'
+        availability.pop('reason')
+        result = self.run_cutover()
+        self.assertTrue(result['process_started'])
+        self.assertEqual(len(self.ext.native()), 1)
+
+    def test_running_or_unknown_nonempty_queue_never_dispatches_episode(self):
+        facts = self.ext.source['data']['agent']
+        facts['state'] = 'running'
+        self.refused()
+        facts['state'] = 'idle'
+        for queued in (None, [{'message': 'pending'}], 'unknown'):
+            facts['queue'] = queued
+            self.refused()
+
+    def test_new_running_turn_before_second_source_check_prevents_dispatch(self):
+        reads = []
+        def changed(method, args):
+            if method == 'resource.list':
+                reads.append(method)
+                if len(reads) == 2:
+                    self.ext.source['data']['agent']['state'] = 'running'
+        self.ext.mutate = changed
+        self.refused()
+        self.assertEqual(len(reads), 2)
+
+    def test_idle_without_native_episode_does_not_restart(self):
+        self.ext.source['data']['agent']['availability'] = {'state': 'available'}
+        self.refused()
+
     def test_availability_label_without_ended_native_subscription_proof_refuses(self):
         native = self.ext.source['data']['agent']['availability']['native']
         for field, value in (('subscription_limit', False), ('terminal_reason', 'auth_error'),
@@ -243,6 +289,25 @@ class CutoverTests(unittest.TestCase):
             self.refused()
             facts.clear()
             facts.update(original)
+
+    def test_visible_conflicting_or_incomplete_route_never_invokes_actual_callback(self):
+        original = copy.deepcopy(self.ext.target)
+        for patch, remove in (({'native_provider': 'another-provider'}, None),
+                              ({'login_ref': {'sessionId': 'saved', 'accountId': 'workspace'}}, None),
+                              ({}, 'secret_ref'), ({}, 'host')):
+            self.ext.target.clear()
+            self.ext.target.update(original)
+            self.ext.target.update(patch)
+            if remove:
+                self.ext.target.pop(remove)
+            rows, _ = registry_snapshot(self.ext)
+            self.assertEqual(rows[0], self.ext.target, 'safe metadata remains displayable')
+            self.refused()
+
+    def test_known_source_credential_alias_is_not_another_account(self):
+        alias = dict(self.ext.target, id='a', label='Same token under another label')
+        self.ext.registry['value']['accounts'].append(alias)
+        self.refused()
 
     def test_api_billing_and_nonopaque_refs_refused(self):
         self.ext.target['kind'] = 'api_key'
