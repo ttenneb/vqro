@@ -27,23 +27,28 @@ fn native_first_delta_creates_a_typed_base_and_final_put_keeps_position() {
         )
         .unwrap();
     let mut p = Projection::new("e2".into());
-    p.apply(endpoint.notification(
+    let delta = endpoint.notification(
         "item/agentMessage/delta",
         &json!({"threadId":"native","itemId":"m","delta":"héllo"}),
-    ));
-    let (rev, value) = p.journal.entity("message", "m").unwrap();
+    );
+    let mapped_id = delta[0].id.clone();
+    assert_ne!(mapped_id, "m"); // native IDs cannot impersonate scoped child IDs
+    p.apply(delta);
+    let (rev, value) = p.journal.entity("message", &mapped_id).unwrap();
     assert_eq!(rev, 2);
     assert_eq!(value["content"][0]["text"], "héllo");
     let position = value["position"].clone();
-    p.apply(endpoint.notification("item/completed",&json!({"threadId":"native","item":{"type":"agentMessage","id":"m","text":"authoritative"}})));
-    let (_, value) = p.journal.entity("message", "m").unwrap();
+    let completed = endpoint.notification("item/completed",&json!({"threadId":"native","item":{"type":"agentMessage","id":"m","text":"authoritative"}}));
+    assert_eq!(completed[0].id, mapped_id);
+    p.apply(completed);
+    let (_, value) = p.journal.entity("message", &mapped_id).unwrap();
     assert_eq!(value["position"], position);
     assert_eq!(value["content"][0]["text"], "authoritative");
     assert_eq!(value["final"], true);
     let mut view = ItemView::new();
     let mut cursor = p.journal.open(None);
     drain(&mut cursor, &mut p, &mut view);
-    assert_eq!(view.entity("message", "m").unwrap().1["position"], position);
+    assert_eq!(view.entity("message", &mapped_id).unwrap().1["position"], position);
 }
 
 #[test]
