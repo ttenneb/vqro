@@ -263,10 +263,29 @@ async fn clean_failure_is_invisible_but_post_rename_failure_is_adopted_once() {
 
 #[tokio::test]
 async fn commit_admission_counts_escaped_note_bytes_not_only_raw_text() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    async fn reply(wire: &mut BufReader<tokio::net::UnixStream>, id: u64) -> Value {
+        loop {
+            let mut line = String::new();
+            assert!(wire.read_line(&mut line).await.unwrap() > 0, "core closed before its admission reply");
+            let response: Value = serde_json::from_str(&line).unwrap();
+            if response["id"] == id { return response; }
+        }
+    }
+
     let f = Fixture::new().await;
-    let (a, _) = f.peer().await; let (b, _) = f.peer().await; let (c, _) = f.peer().await;
+    let (a, _) = f.peer().await; let (b, _) = f.peer().await;
+    // Read the core's actual reply without the SDK's per-call latency deadline.
+    // The byte budget stays held until rejection (or forbidden admission) is observed.
+    let mut c = BufReader::new(tokio::net::UnixStream::connect(&f.socket).await.unwrap());
+    let hello = json!({"jsonrpc":"2.0","id":1,"method":"hello","params":{
+        "client":"commit-budget","identity":{"kind":"principal","principal":"owner"}}});
+    c.get_mut().write_all(format!("{hello}\n").as_bytes()).await.unwrap();
     let mut authors=Vec::new();
-    for peer in [&a,&b,&c] {authors.push(peer.call("hello",json!({"client":"commit-budget"})).await.unwrap()["actual_author"].as_str().unwrap().to_owned());}
+    for peer in [&a,&b] {authors.push(peer.call("hello",json!({"client":"commit-budget"})).await.unwrap()["actual_author"].as_str().unwrap().to_owned());}
+    let hello = tokio::time::timeout(Duration::from_secs(30), reply(&mut c, 1)).await.expect("hello setup hang backstop exceeded");
+    authors.push(hello["result"]["actual_author"].as_str().unwrap().to_owned());
     // Use real retained metadata, within the note cap. Three operation payloads leave room for
     // raw notes, but not their six-byte JSON escapes. Descriptive client labels are not authors.
     let budget=8*1024*1024;
@@ -277,16 +296,33 @@ async fn commit_admission_counts_escaped_note_bytes_not_only_raw_text() {
     let raw=3*payload+authors.iter().map(|author|author.len()+note.len()).sum::<usize>();
     let encoded=3*payload+authors.iter().map(|author|vqro::limits::encoded_bytes(&(author,None::<&str>,Some(&note)))).sum::<usize>();
     assert!(raw<budget && encoded>budget,"raw {raw}, encoded {encoded}, budget {budget}");
+    let mut packet = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":2,"method":"workspace.apply","params":input()})).unwrap();
+    packet.push(b'\n');
     let first_input = input(); let second_input = input();
     let first = tokio::spawn(async move { a.call("workspace.apply", first_input).await });
     tokio::time::timeout(Duration::from_secs(2), f.gate.entered.notified()).await.unwrap();
     let second = tokio::spawn(async move { b.call("workspace.apply", second_input).await });
     f.pending(2).await;
-    let rejected = c.call_with_timeout("workspace.apply", input(), Duration::from_secs(2)).await;
+    // No rejection-latency claim: race the real reply against observed forbidden
+    // admission. The 30s arm is only a hang backstop, not a larger RPC deadline.
+    let rejected = tokio::select! {
+        response = async {
+            c.get_mut().write_all(&packet).await.unwrap();
+            reply(&mut c, 2).await
+        } => response,
+        _ = async {
+            loop {
+                if f.core.lock().unwrap().workspace_pending_commits() > 2 { break; }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        } => panic!("overflow request was admitted while the byte budget was held"),
+        _ = tokio::time::sleep(Duration::from_secs(30)) => panic!("admission response hang backstop exceeded"),
+    };
+    assert!(!*f.gate.released.lock().unwrap(), "capacity must remain held through the actual rejection");
+    assert_eq!(f.core.lock().unwrap().workspace_pending_commits(), 2);
     f.gate.release();
-    let err = rejected.unwrap_err();
-    assert_eq!(err.kind(), "overloaded");
-    assert_eq!(err.data.unwrap()["outcome"], "rejected");
+    assert_eq!(rejected["error"]["data"]["kind"], "overloaded");
+    assert_eq!(rejected["error"]["data"]["outcome"], "rejected");
     assert_eq!(first.await.unwrap().unwrap()["txn"], f.base+1);
     assert_eq!(second.await.unwrap().unwrap_err().kind(), "conflict");
     f.pending(0).await;
