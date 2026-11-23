@@ -7,7 +7,11 @@ use vqro::rpc::{Incoming, Peer};
 async fn shared_native_dto_marks_positive_subset_unknown_for_capacity() {
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/usage_limits_incomplete.json")).unwrap();
-    for (dto, expected) in [("dto", "expected"), ("complete_dto", "complete_expected")] {
+    for (dto, expected) in [
+        ("dto", "expected"),
+        ("complete_dto", "complete_expected"),
+        ("transition_dtos", "transition_expected"),
+    ] {
         let (io, _other) = tokio::io::duplex(1024);
         let (read, write) = tokio::io::split(io);
         let (peer, _) = Peer::spawn(read, write);
@@ -21,10 +25,16 @@ async fn shared_native_dto_marks_positive_subset_unknown_for_capacity() {
             None,
             Some(fixture[expected]["account"].clone()),
         );
-        runtime.incoming(Incoming::Notification {
-            method: "account/rateLimits/updated".into(),
-            params: fixture[dto].clone(),
-        });
+        let observations = fixture[dto]
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| vec![fixture[dto].clone()]);
+        for params in observations {
+            runtime.incoming(Incoming::Notification {
+                method: "account/rateLimits/updated".into(),
+                params,
+            });
+        }
         let facts = runtime.fact("endpoint-1").unwrap();
         let agent = &facts["data"]["agent"];
         let mut actual = json!({"account":agent["account"],"usage_limits":agent["usage_limits"],"incomplete":agent["incomplete"]});
