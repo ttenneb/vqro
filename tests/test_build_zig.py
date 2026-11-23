@@ -9,6 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@unittest.skipUnless(os.name == "posix", "Zig selection fixture requires Unix /bin/sh executables")
 @unittest.skipUnless(shutil.which("rustc"), "rustc required")
 class ZigSelection(unittest.TestCase):
     def test_wrong_path_version_and_local_fallback(self):

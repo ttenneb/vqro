@@ -30,7 +30,7 @@ class WindowsCheckTests(unittest.TestCase):
             cargo = tools / "cargo"
             cargo.write_text("#!/bin/bash\n" + clean + 'echo fake-cargo-invoked\n' + f"exit {cargo_exit}\n", encoding="utf-8")
             cargo.chmod(0o700)
-            return subprocess.run(["/bin/bash", "-c", 'set -o pipefail\nSKIP_EXIT=77\nTARGET=$HOME/target\n' + FUNCTION + "\nwindows_check"],
+            return subprocess.run(["/bin/bash", "-c", 'set -o pipefail\nSKIP_EXIT=77\nTARGET=$HOME/target\nCARGO=(env -i HOME="$HOME" PATH="$PATH" CARGO_TARGET_DIR="$TARGET")\n' + FUNCTION + "\nwindows_check"],
                                   env={"HOME": directory, "PATH": str(tools), "HERDR_TEST": "forbidden", "POISON": "forbidden"},
                                   text=True, capture_output=True, timeout=5)
 
