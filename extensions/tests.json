@@ -7,6 +7,7 @@
   "suites": {
     "agents": ["tests/test_agents.py", "tests/agent_fixture.py"],
     "pi": ["tests/test_pi.py", "tests/agent_fixture.py"],
+    "claude-code": ["tests/test_claude_code_launcher.py"],
     "sidebar": ["tests/test_sidebar.py"],
     "settings": ["tests/test_settings.py"],
     "themes": ["tests/test_themes.py"],

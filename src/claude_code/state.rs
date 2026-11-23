@@ -644,7 +644,7 @@ impl State {
             }
         }
         if frame["isReplay"] == true {
-            self.correlate(&[uuid], "admitted", None);
+            self.correlate(&[uuid], "admitted", None, None);
         }
     }
     fn result(&mut self, frame: &Value) {
@@ -692,7 +692,7 @@ impl State {
         {
             self.incomplete.insert("receipt_correlations".into());
         }
-        self.correlate(&uuids, "completed", native_uuid);
+        self.correlate(&uuids, "completed", Some(&run), native_uuid);
         // Result is not an invented idle signal; session_state_changed:idle is authoritative.
     }
     /// vqro reservations, NOT a native queue. Count unresolved old epochs too: changing the
@@ -762,7 +762,13 @@ impl State {
         }
         self.changed += 1;
     }
-    fn correlate(&mut self, uuids: &[String], stage: &str, run: Option<&str>) {
+    fn correlate(
+        &mut self,
+        uuids: &[String],
+        stage: &str,
+        run: Option<&str>,
+        native_result: Option<&str>,
+    ) {
         for uuid in uuids {
             let Some((delivery, epoch)) = self.inputs.get(uuid).cloned() else {
                 continue;
@@ -777,6 +783,9 @@ impl State {
                 value["stage"] = json!(stage);
                 if let Some(run) = run {
                     value["run"] = json!(run);
+                }
+                if let Some(uuid) = native_result {
+                    value["native"]["result_uuid"] = json!(uuid);
                 }
                 self.save_receipt(&delivery, value);
             }

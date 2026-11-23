@@ -26,6 +26,7 @@ pub struct Shared {
     viewers_changed: Notify,
     stdout_done: std::sync::atomic::AtomicBool,
     background_probe: std::sync::atomic::AtomicBool,
+    spawned: std::sync::atomic::AtomicBool,
     pub name: String,
     pub instance: String,
 }
@@ -71,6 +72,7 @@ impl Shared {
             viewers_changed: Notify::new(),
             stdout_done: std::sync::atomic::AtomicBool::new(false),
             background_probe: std::sync::atomic::AtomicBool::new(false),
+            spawned: std::sync::atomic::AtomicBool::new(false),
             name,
             instance,
         })
@@ -91,6 +93,13 @@ impl Shared {
         cwd: &std::path::Path,
         env: &HashMap<String, String>,
     ) -> Result<Process, NativeError> {
+        if self.spawned.swap(true, Ordering::SeqCst) {
+            return Err(NativeError {
+                kind: "conflict",
+                message: "one owned native slot is already reserved".into(),
+                may_have_acted: false,
+            });
+        }
         let weak = Arc::downgrade(self);
         let generation = self.generation.load(Ordering::SeqCst);
         let mut env = env.clone();

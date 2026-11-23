@@ -66,6 +66,27 @@ copy or write credentials or native profile files; Codex owns its own authentica
 in workspace settings. Disabling the launcher does not stop existing agents. Failed UI/routing/session setup
 leaves the already-observed host visible for recovery and never replays a launch or native session creation.
 
+### New Claude Code agent (headless route 1)
+
+`claude-code.new` starts `vqro-bridge-claude` and the explicit native Claude executable on the execution
+host, using the existing agent UI and request-routing primitives. The separate native-TUI Claude route is
+unchanged. No prompt is sent on startup, no bare mode is selected, and vqro does not read/copy native
+credentials, profiles or transcripts. Claude owns its own login/settings. Each launch gets a fresh explicit
+endpoint principal, not a claim about native tool-process identity.
+
+`claude-code.settings` / `doc/settings/claude-code` configure `{name, argv, bridge_argv?, bridge_env?}`
+runtimes. The bridge owns stream formats/permission transport and refuses positional startup prompts,
+conflicting transport flags and unsupported launch options. Never put credentials in workspace settings.
+Only text admission is declared, not strict-start placement; receipt admission and native completion remain
+separate. Literal `client_composed` input is currently source-qualified for CLI **2.1.329**; an unknown
+version remains observable without a guessed literal-send capability. Native hooks can still transform input:
+receipts retain `may_transform:"unknown"` rather than claiming no transformation.
+
+This first vertical slice projects conversation/tools, bounded consent forms, interrupt, startup metadata and
+turn-scoped availability. It does not claim native-TUI parity, complete native queues, transcript history,
+child/task control, account restart or settings mutation. Native queue stays unknown; the separately named
+vqro input ledger is not native evidence. See `docs/research/claude-code-route1.md` for boundaries and evidence.
+
 Development: `cargo test`; `.run/harness.py` (ignored) drives `vqro tui` in a pty for UI checks against a scratch
 core (`VQRO_STATE_DIR`, `VQRO_SOCKET`, `VQRO_EXTENSIONS_DIR`, `vqro serve --fake`).
 

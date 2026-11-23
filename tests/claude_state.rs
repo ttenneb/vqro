@@ -112,9 +112,9 @@ fn native_multi_input_completion_binds_each_member_but_does_not_invent_idle() {
     assert_eq!(s.status(), "running");
     assert_eq!(s.completion.as_ref().unwrap()["reason"], "end_turn");
     assert_eq!(
-        s.receipt("input1")["native"]["run"],
+        s.receipt("input1")["native"]["result_uuid"],
         "result1",
-        "native run identifiers must not be adapter-generated turn IDs"
+        "native result UUID must remain distinct from the adapter's run entity ID"
     );
     observe(
         &mut s,

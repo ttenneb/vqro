@@ -201,6 +201,13 @@ async fn synthetic_process_provider_vertical_slice() {
     let native = shared.spawn_native(&argv, root.path(), &env).await.unwrap();
     let outgoing = tokio::spawn(shared.clone().drain_outgoing());
     shared.clone().initialize().await;
+    match shared.spawn_native(&argv, root.path(), &env).await {
+        Err(error) => assert_eq!(error.kind, "conflict"),
+        Ok(extra) => {
+            extra.stop();
+            panic!("a second native child replaced the owned slot");
+        }
+    }
     until(&shared, |s| {
         s.ready && s.background.as_ref().is_some_and(Vec::is_empty)
     })

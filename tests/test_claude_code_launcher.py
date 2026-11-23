@@ -1,13 +1,14 @@
 """Headless launcher policy with fake public primitives only; no backend/CLI/auth/profile IO."""
 import importlib.util
+import os
 from pathlib import Path
 import sys
 import unittest
 from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'extensions'))
-SPEC = importlib.util.spec_from_file_location('claude_code_launcher', ROOT / 'extensions' / 'claude_code.py')
+EXT = Path(os.environ.get('VQRO_TEST_EXTENSIONS_DIR', Path(__file__).resolve().parents[1] / 'extensions'))
+sys.path.insert(0, str(EXT))
+SPEC = importlib.util.spec_from_file_location('claude_code_launcher', EXT / 'claude_code.py')
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
