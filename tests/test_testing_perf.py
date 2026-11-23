@@ -266,7 +266,9 @@ class CollectorTests(unittest.TestCase):
             ext.info = {"state_dir": directory, "socket": str(Path(directory) / "source.sock")}
             ext.command.side_effect = lambda name, title: lambda fn: handlers.setdefault(name, fn)
             child.poll.return_value = None
-            with patch("vqro_ext.Extension", return_value=ext), patch.object(perf.subprocess, "Popen", return_value=child) as launch, patch.object(perf.threading, "Thread") as thread, patch.dict(os.environ, {"HERDR_PANE_ID": "canary"}):
+            child.pid = os.getpid()
+            ext.vqro.call.return_value = {"entries": {}, "epoch": "fixture"}
+            with patch("vqro_ext.Extension", return_value=ext), patch.object(perf.subprocess, "Popen", return_value=child) as launch, patch.object(perf.threading, "Thread") as thread, patch.dict(os.environ, {"HERDR_PANE_ID": "canary", "VQRO_EXTENSIONS_DIR": directory}):
                 perf.extension_main()
                 first = handlers["test.perf"]({"repeats": 2})
                 self.assertTrue(first["started"])

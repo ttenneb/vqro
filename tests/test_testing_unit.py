@@ -53,7 +53,7 @@ class HealthChecks(unittest.TestCase):
         self.assertEqual(result["verdict"], "pass")
         self.assertEqual(result["source"], "live")
         self.assertEqual([c.args[0] for c in self.client.call.call_args_list],
-                         ["hello", "extension.list", "workspace.snapshot"])
+                         ["hello", "extension.list", "workspace.snapshot", "workspace.snapshot"])
         self.assertEqual(result["fingerprint"]["vqro"], {"server": "vqro", "version": "fixture-v1"})
         self.assertEqual(result["not_covered"][1], "sample: no tests installed: no coverage")
         self.assertEqual(self.rows(result)["tests/sample"]["status"], "skip")
@@ -402,8 +402,8 @@ class HealthChecks(unittest.TestCase):
         (self.extensions / "manifests/sample.json").write_text('{"name":"sample","summary":"changed"}')
         self.assertNotEqual(fp()["extensions"], changed["extensions"])
         changed = fp()
-        (self.extensions / "unrelated.txt").write_text("ignored")
-        self.assertEqual(fp(), changed)
+        (self.extensions / "unrelated.txt").write_text("installed asset")
+        self.assertNotEqual(fp(), changed)
         self.assertEqual(fp(), shared.fingerprint(self.extensions, dict(reversed(list(self.declarations.items()))), {}))
 
     def test_receipt_permissions_and_retention(self):
@@ -483,13 +483,13 @@ class HealthChecks(unittest.TestCase):
         ext.command.side_effect = command
         with patch("vqro_ext.Extension", return_value=ext), patch.dict(os.environ, {"VQRO_EXTENSIONS_DIR": str(self.extensions)}):
             unit.extension_main()
-            self.client.call.assert_not_called()
-            ext.publish.assert_not_called()
+            self.assertEqual([call.args[0] for call in self.client.call.call_args_list], ["workspace.snapshot"])
+            self.assertEqual([call.args[0] for call in ext.publish.call_args_list], ["testing.status", "settings.page.testing"])
             ext.contribute.assert_called_once()
             self.assertEqual(ext.contribute.call_args.args[0]["view/test-unit.report"]["kind"], "panel")
             empty = handlers["test.unit.show"]({})
             self.assertEqual(empty["client"]["popup"]["view"], "test-unit.report")
-            self.assertFalse((self.state / "test-unit").exists())
+            self.assertEqual(list((self.state / "test-unit").glob("receipt-*.json")), [])
             with patch.object(unit, "collect", wraps=unit.collect) as collect:
                 first = handlers["test.unit"]({"tests": False})
                 self.assertEqual(collect.call_args.kwargs["tests_budget"], 20)
@@ -499,7 +499,7 @@ class HealthChecks(unittest.TestCase):
             self.assertIn("sample: tests disabled by caller", saved["not_covered"])
             calls = self.client.call.call_count
             handlers["test.unit.show"]({})
-            self.assertEqual(self.client.call.call_count, calls)
+            self.assertEqual(self.client.call.call_count, calls + 1)  # current status rescan, not another Unit run.
             self.assertEqual(ext.publish.call_args.args[0], "test-unit.report")
             self.facts["sample"]["manifest_error"] = "broken metadata"
             second = handlers["test.unit"]({"strict": True, "tests": False})

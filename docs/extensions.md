@@ -82,6 +82,57 @@ The workspace/pane suites exercise several cooperating bundled extensions agains
 A healthy status does not prove behaviour, rendering or performance; use the separate disposable integration
 checks for behaviour. Use the separate performance report for repeated timing and size measurements. `--no-tests` skips even installed tests and records that coverage gap.
 
+### Current setup evidence and the optional finish rule
+
+The completion rule is **off by default**: `doc/settings/testing.require_unit` is an optional boolean workspace
+entry, treated as false when absent. Only arm it deliberately after a clean setup check. Arming is itself a setup
+change: record fresh Unit evidence and attach Integration or explain its omission afterwards. This extension does
+not prevent prose such as “done”, add a Pi runtime veto, or enforce policy for every runtime. Participating
+plugins and explicit finish tools may use its deterministic assessment; this is cooperative workflow policy,
+not a security boundary.
+
+`test.setup.status {}` returns the current `setup_id`, observed `generation`, `require_unit`, Unit/Integration/
+Performance evidence and `finish_ok`. Unit is required only when armed: a current recorded Unit pass or an
+explicit current owner exception is then necessary, plus an Integration receipt or a nonempty skip explanation.
+When required, an off/missing/failed testing extension also blocks finish unless a current owner exception applies:
+changes are not tracked while it is off. The built-in recovery surface can make the extension accessible for an
+explicit owner action; stale exceptions are never carried across setup changes. Performance recommendations
+and results never gate finish. A Unit pass with no installed tests remains a pass;
+`coverage_gaps` and the Testing page make that missing coverage visible without silently claiming it was tested.
+
+```sh
+python3 extensions/testing_unit.py --setup-status --json --socket SOCKET --state-dir STATE --extensions-dir EXTENSIONS
+python3 extensions/testing_unit.py --record --json --socket SOCKET --state-dir STATE --extensions-dir EXTENSIONS
+```
+
+`--record` owns the receipt filename under `<state>/test-unit/`, writes atomically at 0600 and retains 20 runs.
+JSON includes its path. `--out` is mutually exclusive, ad hoc and **never adopted** as Unit completion evidence.
+Status reads adopt only complete, supported, recorded receipts for this setup, generation and selected instance;
+wrong suites/instances, old generations, incomplete JSON and unfinished runs never count as a pass. Status-query
+exit 0 means an assessment was read, not that `finish_ok` is true; checker/read errors return exit 2 and NOT VERIFIED.
+
+Fingerprint version 2 covers `extension/*` declarations, `doc/settings/*` values, recursive installed packages,
+tests/scenarios and assets, and each declaration's resolved executable/script bytes. It excludes runtime
+receipts/logs/results and caches, including the checker's own state. Limits are 10,000 entries, 32 MiB per asset,
+256 MiB per executable, 512 MiB total and depth 64. Unreadable, unresolved or oversized inputs make identity
+unknown (`setup_id: null`), never a successful empty digest. External directory links and an overlapping
+state/extensions root are unsupported inputs. Hashes describe configured bytes, not verified loaded images or
+arbitrary unmanaged imports. Selected endpoint/state/extensions paths and the core epoch bind the evidence.
+
+Unit fingerprints before and after checking. Concurrent changes make closure unverified. Observed entry changes,
+including change/revert, increment the persisted generation; restart/missed events invalidate prior evidence and
+rescan. Filesystem changes are detected on explicit status checks and while armed evidence is pending. This does
+not claim perfect detection of unobserved transient external file edits. Live notices use only `view.publish`:
+`testing.status`, a status-menu item, and `settings.page.testing`. Missing, stale, failed, pending or unknown evidence
+is prominent; a coverage gap is a warning, not a failed or unverified Unit result.
+
+`test.setup.skip {"suite":"integration","reason":"..."}` records an explicit current skip explanation; it cannot
+hide a completed/pending Integration result. `test.setup.accept {"reason":"..."}` accepts a current Unit receipt
+only when the core-recorded actor and effective principal both equal the current workspace owner. Acceptance
+records its reason, Unit receipt digest, setup identity and generation, and expires on the next observed change.
+Failures remain displayed as failures even when accepted. Integration/Performance receipts are likewise stamped
+with identity/generation/instance and closure; their measurement/verdict semantics are unchanged.
+
 ### Disposable integration checks
 
 `vqro run test.integration` starts a subprocess and immediately returns its future receipt path;

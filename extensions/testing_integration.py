@@ -15,9 +15,10 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_process import background_kwargs
 from vqro_testing import (EXIT_CODES, RECEIPT_BYTES, STATUSES, PlainClient, Sandbox, canonical,
-                          compare_runs, discover_scenarios, endpoints, fingerprint, print_result,
+                          compare_runs, discover_scenarios, endpoints, fingerprint, is_settings_key, print_result,
                           row, run_scenarios, smoke, source_mark, source_untouched, text, utc_now, write_receipt,
                           FAKE_BACKEND_COVERAGE)
+from testing_setup import SetupStore, bind_start, bind_end, scan as setup_scan
 
 
 STATUSES = STATUSES + ("weak",)
@@ -84,6 +85,7 @@ def run(args):
     socket, state, extensions = endpoints(args)
     live, hello, before = None, {}, None
     baseline = candidate = None
+    context = None
     sandboxes, rows, root, owned, error = [], [], None, False, False
     result = {"kind": "vqro.test-receipt", "version": 1, "suite": "integration", "source": "offline",
               "started_at": stamp, "fingerprint": {}, "inputs": [], "not_covered": [
@@ -105,7 +107,11 @@ def run(args):
                 snapshot = json.load(stream)
             result["inputs"].append(str(state / "workspace.json"))
         declarations = {key: entry["value"] for key, entry in snapshot["entries"].items() if key.startswith("extension/")}
-        result["fingerprint"] = fingerprint(extensions, declarations, hello)
+        info = dict(hello, epoch=snapshot.get("epoch", hello.get("epoch")))
+        result["fingerprint"] = fingerprint(extensions, declarations, info,
+                                            settings={key: entry["value"] for key, entry in snapshot["entries"].items() if is_settings_key(key)},
+                                            state_dir=state, endpoint=socket)
+        context = bind_start(result, result["fingerprint"], snapshot, state, "integration", args.out)
         result["inputs"].append(str(extensions))
         scenarios = discover_scenarios(extensions)
         if args.candidate_ext:
@@ -168,6 +174,7 @@ def run(args):
             rows.append(row("canary", "sandbox", "fail", str(failure)))
         rows.append(row("harness", "integration", "fail", f"{type(failure).__name__}: {failure}"))
     finally:
+        bind_end(result, context, live, hello, state, extensions, socket)
         if live:
             try:
                 _, after = source_mark(live)
@@ -239,8 +246,12 @@ def extension_main():
                 if args.get(name):
                     command.extend(["--" + name.replace("_", "-"), str(args[name])])
             environment = {"HOME": os.environ.get("HOME", str(Path.home())), "PATH": os.environ.get("PATH", os.defpath)}
+            snapshot, value = setup_scan(ext.vqro, ext.info, state, extensions)
+            store = SetupStore(state)
+            context = store.context(store.observe(value, snapshot))
             child = subprocess.Popen(command, env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL, start_new_session=True, **background_kwargs())
+            store.pending("integration", destination, child.pid, context)
             last.update(process=child, receipt=str(destination))
 
             def finish():

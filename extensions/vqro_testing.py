@@ -206,27 +206,163 @@ def script_path(declaration, extensions_dir):
     return None
 
 
-def fingerprint(extensions_dir, declarations, hello):
-    root = Path(extensions_dir)
-    files = sorted(set(root.glob("*.py")) | set(root.glob("manifests/*.json")) |
-                   ({root / "defaults.json"} if (root / "defaults.json").is_file() else set()))
-    parts = []
-    for path in files:
-        parts.extend((path.relative_to(root).as_posix().encode(), path.read_bytes()))
-    individual = {}
+FINGERPRINT_VERSION = 2
+ASSET_FILE_BYTES = 32 * 1024 * 1024
+IMAGE_FILE_BYTES = 256 * 1024 * 1024
+HASH_TOTAL_BYTES = 512 * 1024 * 1024
+HASH_FILES = 10000
+CACHE_DIRS = frozenset((".git", ".run", ".cache", "__pycache__", ".pytest_cache", ".mypy_cache"))
+RESULT_DIRS = frozenset(("test-unit", "test-integration", "test-perf", "test-results", "results", "logs", "receipts"))
+
+
+def setup_instance(extensions_dir, state_dir=None, hello=None, endpoint=None):
+    hello = hello or {}
+    return {"socket": str(Path(endpoint or hello.get("socket")).absolute()) if endpoint or hello.get("socket") else None,
+            "state_dir": str(Path(state_dir or hello.get("state_dir")).absolute()) if state_dir or hello.get("state_dir") else None,
+            "extensions_dir": str(Path(extensions_dir).resolve()), "epoch": hello.get("epoch")}
+
+
+def is_settings_key(key):
+    return key.split("/")[:2] == ["doc", "settings"] and len(key.split("/")) > 2
+
+
+def is_setup_key(key):
+    return key.startswith("extension/") or is_settings_key(key)
+
+
+def relevant_entries(snapshot):
+    return {key: entry for key, entry in snapshot.get("entries", {}).items() if is_setup_key(key)}
+
+
+def fingerprint(extensions_dir, declarations, hello, *, settings=None, state_dir=None, endpoint=None):
+    root = Path(extensions_dir).resolve()
+    runtime = Path(state_dir).resolve() if state_dir is not None else None
+    unknown, files, cache, total, entries_seen = [], {}, {}, [0], [0]
+    if runtime == root:
+        unknown.append("extensions and state share one directory; installed assets cannot be separated from live state")
+    programs = {key: resolve_program(value["argv"][0], value.get("cwd") or root) if value.get("argv") else None
+                for key, value in declarations.items()}
+    images = {path.resolve() for path in programs.values() if path is not None}
+
+    def file_hash(path, limit):
+        path = Path(path)
+        try:
+            resolved = path.resolve(strict=True)
+            if resolved in cache:
+                return cache[resolved]
+            before = resolved.stat()
+            if not resolved.is_file():
+                raise ValueError("not a regular file")
+            if before.st_size > limit:
+                raise ValueError("input exceeds fingerprint file bound")
+            if len(cache) >= HASH_FILES or total[0] + before.st_size > HASH_TOTAL_BYTES:
+                raise ValueError("fingerprint input budget exceeded")
+            value = hashlib.sha256()
+            count = 0
+            with resolved.open("rb") as stream:
+                while True:
+                    chunk = stream.read(64 * 1024)
+                    if not chunk:
+                        break
+                    count += len(chunk)
+                    if count > limit or total[0] + count > HASH_TOTAL_BYTES:
+                        raise ValueError("fingerprint input grew beyond bound")
+                    value.update(chunk)
+            after = resolved.stat()
+            if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
+                raise ValueError("input changed while hashing")
+            total[0] += count
+            cache[resolved] = value.hexdigest()
+            return cache[resolved]
+        except (OSError, ValueError, RuntimeError) as error:
+            unknown.append(text(f"{path}: {error}"))
+            return None
+
+    def walk(directory, depth=0):
+        if depth > 64:
+            unknown.append(text(f"{directory}: fingerprint directory depth exceeded"))
+            return
+        try:
+            paths = []
+            for path in directory.iterdir():
+                entries_seen[0] += 1
+                if entries_seen[0] > HASH_FILES:
+                    unknown.append("installed inputs exceed fingerprint entry-count bound")
+                    return
+                paths.append(path)
+            paths.sort()
+        except OSError as error:
+            unknown.append(text(f"{directory}: {error}"))
+            return
+        for path in paths:
+            relative = path.relative_to(root)
+            if path.name in CACHE_DIRS or len(relative.parts) == 1 and path.name in RESULT_DIRS or path == runtime:
+                continue
+            managed_test_asset = relative.parts[0] in ("tests", "assets")
+            receipt_or_log = (path.name.startswith("receipt-") and path.suffix == ".json") or path.name.endswith((".log", ".log.1"))
+            if path.name.endswith((".pyc", ".pyo")) or receipt_or_log and not managed_test_asset:
+                continue
+            if len(files) >= HASH_FILES:
+                unknown.append("installed assets exceed fingerprint file-count bound")
+                return
+            if path.is_symlink():
+                try:
+                    target = path.resolve(strict=True)
+                    link = os.readlink(path)
+                    if target.is_dir():
+                        if not target.is_relative_to(root):
+                            raise ValueError("external directory link is not a bounded installed input")
+                        target_parts = target.relative_to(root).parts
+                        if any(part in CACHE_DIRS for part in target_parts) or target_parts and target_parts[0] in RESULT_DIRS:
+                            raise ValueError("directory link targets excluded runtime/cache inputs")
+                        files[relative.as_posix()] = {"link": link}
+                    else:
+                        files[relative.as_posix()] = {"link": link, "sha256": file_hash(path, IMAGE_FILE_BYTES if target in images else ASSET_FILE_BYTES)}
+                except (OSError, ValueError, RuntimeError) as error:
+                    unknown.append(text(f"{path}: {error}"))
+                    files[relative.as_posix()] = None
+            elif path.is_dir():
+                walk(path, depth + 1)
+            else:
+                files[relative.as_posix()] = file_hash(path, IMAGE_FILE_BYTES if path in images else ASSET_FILE_BYTES)
+
+    if root.is_dir():
+        walk(root)
+    else:
+        unknown.append(text(f"{root}: installed extensions directory is unavailable"))
+    assets_complete = not unknown
+    individual, executables = {}, {}
     for key, declaration in sorted(declarations.items()):
         name = key.removeprefix("extension/")
-        chunks = [canonical(declaration)]
+        program = programs[key]
+        executable = file_hash(program, IMAGE_FILE_BYTES) if program else None
+        if program is None:
+            unknown.append(text(f"{key}: unresolved argv[0]"))
+        executables[name] = {"path": str(program) if program else None, "sha256": executable}
         script = script_path(declaration, root)
+        script_hash = file_hash(script, ASSET_FILE_BYTES) if script is not None else None
         manifest = Path(declaration.get("manifest") or f"manifests/{name}.json")
         if not manifest.is_absolute():
             manifest = root / manifest
-        for path in (script, manifest):
-            if path is not None:
-                chunks.extend((str(path).encode(), path.read_bytes() if path.is_file() else b"<missing>"))
-        individual[name] = digest(chunks)
-    return {"vqro": {"server": hello.get("server"), "version": hello.get("version")}, "extensions_dir": digest(parts),
-            "declarations": digest([canonical(declarations)]), "extensions": individual}
+        manifest_hash = file_hash(manifest, ASSET_FILE_BYTES) if manifest.exists() or declaration.get("manifest") else None
+        tests = {path: value for path, value in files.items() if path.startswith(f"tests/{name}/")}
+        pieces = {"declaration": declaration, "program": executables[name], "script": script_hash,
+                  "manifest": manifest_hash, "tests": tests}
+        individual[name] = digest([canonical(pieces)]) if executable is not None and (script is None or script_hash is not None) else None
+    selected_settings = settings or {}
+    assets_hash = digest([canonical(files)]) if assets_complete else None
+    instance = setup_instance(root, state_dir, hello, endpoint)
+    identity = {"version": FINGERPRINT_VERSION, "assets": assets_hash, "declarations": declarations,
+                "settings": selected_settings, "executables": executables, "extensions": individual,
+                "vqro": {"server": hello.get("server"), "version": hello.get("version")}, "instance": instance}
+    return {"version": FINGERPRINT_VERSION, "setup_id": digest([canonical(identity)]) if not unknown else None,
+            "vqro": identity["vqro"], "extensions_dir": assets_hash,
+            "declarations": digest([canonical(declarations)]), "settings": digest([canonical(selected_settings)]),
+            "extensions": individual, "executables": executables, "instance": instance,
+            "unknown": list(dict.fromkeys(unknown)),
+            "scope": {"installed_assets": "recursive, including packages/tests/scenarios", "asset_count": len(files),
+                      "bytes_hashed": total[0], "excluded": sorted(CACHE_DIRS | RESULT_DIRS),
+                      "limit": "configured executable bytes, not loaded images or unmanaged external imports"}}
 
 
 def receipt(rows, *, source, started_at, started, fingerprint_value, inputs, not_covered,
@@ -259,21 +395,30 @@ def utc_now():
 
 def write_receipt(result, destination):
     destination = Path(destination)
-    fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        # Windows inherits directory ACLs; POSIX mode bits cannot establish owner-only access there.
-        if sys.platform != "win32":
-            os.fchmod(stream.fileno(), 0o600)
-        json.dump(result, stream, ensure_ascii=False, indent=2)
-        stream.write("\n")
+    fd, temporary = tempfile.mkstemp(prefix=".receipt-", dir=destination.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            # Windows inherits directory ACLs; POSIX mode bits cannot establish owner-only access there.
+            if sys.platform != "win32":
+                os.fchmod(stream.fileno(), 0o600)
+            json.dump(result, stream, ensure_ascii=False, indent=2, allow_nan=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     return str(destination)
 
 
-def save_receipt(result, state_dir):
+def save_receipt(result, state_dir, destination=None):
     directory = Path(state_dir) / "test-unit"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    destination = write_receipt(result, directory / f"receipt-{stamp}.json")
+    destination = str(destination or directory / f"receipt-{stamp}.json")
+    result["receipt"] = destination
+    write_receipt(result, destination)
     for path in sorted(directory.glob("receipt-*.json"), reverse=True)[20:]:
         path.unlink()
     return destination
@@ -326,8 +471,12 @@ def cli_parser():
     parser = argparse.ArgumentParser(description="Read-only health report for installed vqro extensions")
     for flag in ("json", "offline", "no-tests", "strict"):
         parser.add_argument("--" + flag, action="store_true")
-    for flag in ("socket", "state-dir", "extensions-dir", "out"):
+    for flag in ("socket", "state-dir", "extensions-dir"):
         parser.add_argument("--" + flag)
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--out")
+    output.add_argument("--record", action="store_true")
+    parser.add_argument("--setup-status", action="store_true")
     return parser
 
 

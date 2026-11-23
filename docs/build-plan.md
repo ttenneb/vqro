@@ -3,6 +3,14 @@
 D16: build vqro itself, smallest complete and usable first. The north star: an agent can substantially modify its own
 workspace through reliable public primitives, without changing the host or endangering underlying processes.
 
+## Opt-in setup completion evidence (2026-11-23)
+
+Versioned recursive setup identity and observed generations bind recorded Unit evidence before/after a run.
+The default-off `doc/settings/testing.require_unit` policy exposes status, explicit Integration skips and current
+workspace-owner Unit exceptions; live Testing notices/settings pages disclose missing/stale/failed evidence and
+coverage gaps. No Pi runtime veto or universal prose enforcement is claimed. Integration/Performance receipts
+carry the same setup binding without changing their measurement rules. See `tests/test_testing_setup.py`.
+
 ## Disposable setup performance checks (2026-11-22)
 
 `test-perf` measures repeated startup, idle events/content/CPU/RSS, scenario interactions and publication sizes

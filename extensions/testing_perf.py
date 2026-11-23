@@ -19,10 +19,11 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_process import background_kwargs
 from vqro_testing import (EXIT_CODES, RECEIPT_BYTES, STATUSES, PlainClient, Sandbox, canonical,
-                          discover_scenarios, endpoints, fingerprint, private_processes,
+                          discover_scenarios, endpoints, fingerprint, is_settings_key, private_processes,
                           row, script_path, text, utc_now, write_receipt,
                           scenario_matches, run_scenarios, source_mark, source_untouched)
 from testing_unit import offline_facts
+from testing_setup import SetupStore, bind_start, bind_end, scan as setup_scan
 
 DEFAULTS = {"relative_slowdown": 0.25, "noise_ms": 5, "rss_relative": 0.25, "noise_rss_mb": 10,
             "idle_new_activity": True, "size_relative": 2.0,
@@ -457,12 +458,13 @@ def run(args):
               "thresholds": thresholds({})[0], "not_covered": ["functional correctness: use test-integration", "rendering and real agent profiles"],
               "sandbox": {"started": False, "canary": {"status": "not run", "checked": {"env": [], "paths": {}}, "violations": []}}}
     rows, sandboxes, root, owned, live, before, error = [], [], None, False, None, None, False
+    context, hello = None, {}
+    endpoint, state, extensions = endpoints(args)
     try:
         args.repeats = int(args.repeats)
         args.window = float(args.window)
         if not 1 <= args.repeats <= 50 or not math.isfinite(args.window) or not 1 <= args.window <= 120:
             raise ValueError("repeats must be 1..50 and window must be 1..120 seconds")
-        endpoint, state, extensions = endpoints(args)
         if not args.offline:
             try:
                 live = PlainClient(endpoint)
@@ -484,7 +486,11 @@ def run(args):
         limits = config["values"]
         result["inputs"].append(str(extensions))
         declarations = {key: entry["value"] for key, entry in snapshot["entries"].items() if key.startswith("extension/")}
-        result["fingerprint"] = fingerprint(extensions, declarations, hello)
+        info = dict(hello, epoch=snapshot.get("epoch", hello.get("epoch")))
+        result["fingerprint"] = fingerprint(extensions, declarations, info,
+                                            settings={key: entry["value"] for key, entry in snapshot["entries"].items() if is_settings_key(key)},
+                                            state_dir=state, endpoint=endpoint)
+        context = bind_start(result, result["fingerprint"], snapshot, state, "perf", args.out)
         scenarios = discover_scenarios(extensions)
         if args.candidate_ext:
             scenarios.update(discover_scenarios(args.candidate_ext))
@@ -531,6 +537,7 @@ def run(args):
             rows.append(row("canary", "sandbox", "fail", str(failure)))
         rows.append(row("harness", "perf", "fail", f"{type(failure).__name__}: {failure}"))
     finally:
+        bind_end(result, context, live, hello, state, extensions, endpoint)
         if live:
             try:
                 _, after = source_mark(live)
@@ -599,8 +606,12 @@ def extension_main():
                 if name in args:
                     command.extend(["--" + name.replace("_", "-"), str(args[name])])
             environment = {"HOME": os.environ.get("HOME", str(Path.home())), "PATH": os.environ.get("PATH", os.defpath)}
+            snapshot, value = setup_scan(ext.vqro, ext.info, state, extensions)
+            store = SetupStore(state)
+            context = store.context(store.observe(value, snapshot))
             child = subprocess.Popen(command, env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL, start_new_session=True, **background_kwargs())
+            store.pending("perf", destination, child.pid, context)
             last.update(process=child, receipt=str(destination))
 
             def finish():

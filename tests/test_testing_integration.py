@@ -346,8 +346,9 @@ class IntegrationModesTests(unittest.TestCase):
         state.mkdir()
         ext.info = {"state_dir": str(state), "socket": str(self.root / "source.sock")}
         ext.command.side_effect = lambda name, title: lambda fn: handlers.setdefault(name, fn)
-        child = Mock()
+        child = Mock(pid=os.getpid())
         child.poll.return_value = None
+        ext.vqro.call.return_value = {"entries": {}, "epoch": "fixture"}
         with patch("vqro_ext.Extension", return_value=ext), patch.object(integration.subprocess, "Popen", return_value=child) as launch, patch.object(integration.threading, "Thread") as thread, patch.dict(os.environ, {"VQRO_EXTENSIONS_DIR": str(self.source), "HERDR_PANE_ID": "canary"}):
             integration.extension_main()
             first = handlers["test.integration"]({"backend": "fake"})

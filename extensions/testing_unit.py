@@ -13,8 +13,9 @@ import time
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_process import background_kwargs
-from vqro_testing import (EXIT_CODES, cli_parser, dependency_row, endpoints, fingerprint, print_result, receipt,
+from vqro_testing import (EXIT_CODES, cli_parser, dependency_row, endpoints, fingerprint, is_settings_key, is_setup_key, print_result, receipt,
                           resolve_program, row, save_receipt, script_path, text, utc_now, write_receipt)
+from testing_setup import SetupStore, scan as setup_scan, stamp_receipt
 
 LOG_BYTES = 64 * 1024
 TEST_TIMEOUT = 120
@@ -140,9 +141,10 @@ def tests_row(name, extensions_dir, *, enabled=True, timeout=TEST_TIMEOUT):
 
 
 def collect(state_dir, extensions_dir, *, client=None, hello=None, offline=False, tests=True,
-            strict=False, timeout=TEST_TIMEOUT, connection_error=None, tests_budget=None):
+            strict=False, timeout=TEST_TIMEOUT, connection_error=None, tests_budget=None, record=False, endpoint=None):
     started, started_at = time.monotonic(), utc_now()
     rows, inputs, not_covered = [], [], [NOT_COVERED]
+    tracker, context, harness_error = SetupStore(state_dir), None, False
     source = "live" if client is not None and not offline else "offline"
     declarations, fp = {}, {}
     rows.append(row("core", "reachable", "pass" if source == "live" else "warn",
@@ -164,7 +166,15 @@ def collect(state_dir, extensions_dir, *, client=None, hello=None, offline=False
             hello = {}
         if hello.get("safe_mode") or snapshot.get("safe_mode") or any(f.get("safe_mode") for f in facts.values()):
             rows.append(row("core", "safe_mode", "warn", "core is in safe mode"))
-        fp = fingerprint(extensions_dir, declarations, hello)
+        info = dict(hello or {}, epoch=snapshot.get("epoch", (hello or {}).get("epoch")))
+        fp = fingerprint(extensions_dir, declarations, info,
+                         settings={key: entry["value"] for key, entry in snapshot.get("entries", {}).items() if is_settings_key(key)},
+                         state_dir=state_dir, endpoint=endpoint)
+        if record:
+            context = tracker.begin(tracker.observe(fp, snapshot))
+        else:
+            context = {"setup_id": fp.get("setup_id"), "generation": 0, "instance": fp["instance"], "setup_observer": None}
+        started_at = utc_now()
         inputs.append(str(extensions_dir))
         for key, declaration in sorted(declarations.items()):
             name = key.removeprefix("extension/")
@@ -197,12 +207,35 @@ def collect(state_dir, extensions_dir, *, client=None, hello=None, offline=False
             inputs.append(str(Path(extensions_dir) / "tests" / name))
             if test["status"] in ("skip", "unverified"):
                 not_covered.append(f"{name}: {test['evidence']}")
-        return receipt(rows, source=source, started_at=started_at, started=started, fingerprint_value=fp,
-                       inputs=inputs, not_covered=not_covered, extension_count=len(declarations), strict=strict)
     except Exception as error:
         rows.append(row("error", "harness", "fail", f"{type(error).__name__}: {error}"))
-        return receipt(rows, source=source, started_at=started_at, started=started, fingerprint_value=fp,
-                       inputs=inputs, not_covered=not_covered, extension_count=len(declarations), error=True)
+        harness_error = True
+    result = receipt(rows, source=source, started_at=started_at, started=started, fingerprint_value=fp,
+                     inputs=inputs, not_covered=not_covered, extension_count=len(declarations), strict=strict, error=harness_error)
+    result["recorded"] = record
+    if context is not None:
+        try:
+            after_snapshot, after_fp = setup_scan(client if source == "live" else None, hello, state_dir, extensions_dir, endpoint)
+            after = tracker.context(tracker.observe(after_fp, after_snapshot)) if record else {
+                "setup_id": after_fp.get("setup_id"), "generation": 0, "instance": after_fp["instance"], "setup_observer": None}
+            matched = stamp_receipt(result, context, after)
+            if not matched:
+                result["rows"].append(row("setup", "closure", "unverified", "setup changed during the run or an input is unknown; no current verification"))
+                result["counts"]["unverified"] += 1
+                if context.get("setup_id") != after.get("setup_id") or context["generation"] != after["generation"] or result["verdict"] == "pass":
+                    result["verdict"] = "unverified"
+            if record:
+                result["receipt"] = context["receipt"]
+        except Exception as failure:
+            result.update(setup_id=context.get("setup_id"), generation=context["generation"], instance=context.get("instance"), closure={"matched": False})
+            result["rows"].append(row("setup", "closure", "unverified", f"could not close verification: {failure}"))
+            result["counts"]["unverified"] += 1
+            result["verdict"] = "unverified" if result["verdict"] == "pass" else result["verdict"]
+            if record:
+                result["receipt"] = context["receipt"]
+    else:
+        result.update(setup_id=None, generation=0, instance=fp.get("instance"), closure={"matched": False})
+    return result
 
 
 def panel(result=None, destination=None):
@@ -220,38 +253,184 @@ def panel(result=None, destination=None):
     return {"title": "Unit health report", "items": items}
 
 
+def error_status(reason):
+    return {"setup_id": None, "generation": 0, "require_unit": False,
+            "unit": {"state": "error", "receipt": None, "verdict": None, "exception": None},
+            "integration": {"state": "unverified", "receipt": None, "skip_reason": None},
+            "performance": {"state": "unverified", "recommended": True, "why": "checker unavailable"},
+            "finish_ok": False, "not_verified_reasons": [text(reason)], "coverage_gaps": [], "instance": None, "error": text(reason)}
+
+
+def setup_status(state_dir, extensions_dir, *, client=None, hello=None, endpoint=None):
+    try:
+        snapshot, value = setup_scan(client, hello, state_dir, extensions_dir, endpoint)
+        return SetupStore(state_dir).status(value, snapshot)
+    except Exception as failure:
+        return error_status(f"setup status unavailable: {failure}")
+
+
+def notice(status):
+    states = [status[suite]["state"] for suite in ("unit", "integration", "performance")]
+    bad = any(state in ("fail", "error", "unverified", "missing", "stale", "pending") for state in states)
+    bad = bad or bool(status["not_verified_reasons"]) or status["require_unit"] and not status["finish_ok"] or status["setup_id"] is None
+    gaps = bool(status.get("coverage_gaps"))
+    if bad:
+        label = "NOT VERIFIED"
+        if gaps and status["unit"]["state"] == "pass":
+            label += " · Unit PASS · coverage gaps"
+    else:
+        label = "Unit PASS · coverage gaps" if gaps else "Testing verified"
+    style = "error" if any(state in ("fail", "error") for state in states) else "warn" if bad or gaps else "ok"
+    return {"label": label, "style": style}
+
+
+def setup_page(status):
+    segment = notice(status)
+    items = [{"type": "text", "text": segment["label"], "style": segment["style"]},
+             {"type": "text", "text": f"Unit required: {'on' if status['require_unit'] else 'off'} · finish evidence: {'accepted' if status['finish_ok'] else 'not verified'}"},
+             {"type": "text", "text": f"Generation {status['generation']} · setup {status['setup_id'] or 'unknown'}", "style": "dim"}]
+    for suite in ("unit", "integration", "performance"):
+        result = status[suite]
+        items.append({"type": "text", "text": f"{suite.title()}: {result['state']} · {result.get('receipt') or 'no receipt'}",
+                      "style": "ok" if result["state"] == "pass" else "warn"})
+        if result.get("skip_reason"):
+            items.append({"type": "text", "text": "Integration skipped: " + result["skip_reason"], "style": "warn"})
+    exception = status["unit"].get("exception")
+    if exception:
+        items.append({"type": "text", "text": f"Unit exception accepted by {exception['accepted_by']}: {exception['reason']}", "style": "warn"})
+    items += [{"type": "text", "text": "Coverage gap: " + text(gap), "style": "warn"} for gap in status.get("coverage_gaps", [])[:20]]
+    items += [{"type": "text", "text": text(reason), "style": "warn"} for reason in status["not_verified_reasons"][:20]]
+    items += [{"type": "text", "text": "Performance is recommended, never a finish gate. No prose veto or universal runtime enforcement.", "style": "dim"},
+              {"type": "chips", "chips": [{"text": "Run Unit", "command": "test.unit"},
+                                               {"text": "Integration", "command": "test.integration"},
+                                               {"text": "Performance", "command": "test.perf"}]}]
+    return {"title": "Testing", "items": items}
+
+
 def extension_main():
-    from vqro_ext import Extension
-    ext = Extension("test-unit", event_types=[])
-    lock = threading.Lock()
-    last = {"result": None, "receipt": None}
+    from vqro_ext import Extension, VqroError
+    ext = Extension("test-unit", event_types=["entries", "view.content"],
+                    view_content={"names": ["test-integration.report", "test-perf.report"]})
+    lock = threading.RLock()
+    _, state_dir, extensions_dir = endpoints(cli_parser().parse_args([]))
+    state_dir = ext.info.get("state_dir") or state_dir
+    tracker = SetupStore(state_dir)
+    last = {"result": None, "receipt": None, "status": None, "observer_error": None}
+    wake, stopping = threading.Event(), threading.Event()
+
+    def refresh():
+        with lock:
+            if last["observer_error"]:
+                try:
+                    tracker.invalidate("previous setup observation failed; evidence invalidated")
+                    last["observer_error"] = None
+                except Exception as failure:
+                    status = error_status(f"setup observation could not be persisted: {failure}")
+                else:
+                    status = setup_status(state_dir, extensions_dir, client=ext.vqro, hello=ext.info)
+            else:
+                status = setup_status(state_dir, extensions_dir, client=ext.vqro, hello=ext.info)
+            last["status"] = status
+            ext.publish("testing.status", notice(status))
+            ext.publish("settings.page.testing", setup_page(status))
+            return status
+
+    @ext.command("test.setup.status", "Inspect current setup identity, generation and finish evidence")
+    def status_command(args):
+        return refresh()
+
+    @ext.command("test.setup.skip", "Explain omitted integration evidence (args: suite, reason)")
+    def skip(args):
+        try:
+            snapshot, value = setup_scan(ext.vqro, ext.info, state_dir, extensions_dir)
+            tracker.skip(value, snapshot, args.get("suite"), args.get("reason"))
+        except ValueError as failure:
+            raise VqroError(str(failure), "invalid") from failure
+        return refresh()
+
+    @ext.command("test.setup.accept", "Workspace owner accepts a current Unit exception (args: reason)")
+    def accept(args):
+        try:
+            snapshot, value = setup_scan(ext.vqro, ext.info, state_dir, extensions_dir)
+            owner = ext.owner()
+            if snapshot.get("entries", {}).get("doc/principals/owner", {}).get("value") != owner:
+                raise PermissionError("workspace owner changed; inspect setup status before accepting")
+            tracker.accept(value, snapshot, args.get("reason"), ext.caller(), owner)
+        except (ValueError, PermissionError) as failure:
+            raise VqroError(str(failure), "forbidden" if isinstance(failure, PermissionError) else "invalid") from failure
+        return refresh()
 
     @ext.command("test.unit", "Check installed extension health (args: tests, strict)")
     def run(args):
         with lock:
-            _, state_dir, extensions_dir = endpoints(cli_parser().parse_args([]))
-            state_dir = ext.info.get("state_dir") or state_dir
+            ext.publish("testing.status", {"label": "NOT VERIFIED · Unit checking", "style": "warn"})
             result = collect(state_dir, extensions_dir, client=ext.vqro, hello=ext.info,
-                             tests=args.get("tests", True), strict=args.get("strict", False), tests_budget=20)
-            destination = save_receipt(result, state_dir)
+                             tests=args.get("tests", True), strict=args.get("strict", False), tests_budget=20, record=True)
+            destination = save_receipt(result, state_dir, result.get("receipt"))
             last.update(result=result, receipt=destination)
             ext.publish("test-unit.report", panel(result, destination))
-            return {"verdict": result["verdict"], "receipt": destination, "counts": result["counts"],
-                    "client": {"popup": {"view": "test-unit.report", "width": 120}}}
+        refresh()
+        return {"verdict": result["verdict"], "receipt": destination, "counts": result["counts"],
+                "client": {"popup": {"view": "test-unit.report", "width": 120}}}
 
-    @ext.command("test.unit.show", "Show the last unit health report")
+    @ext.command("test.unit.show", "Show the last unit health report and current setup evidence")
     def show(args):
+        status = refresh()
         with lock:
-            ext.publish("test-unit.report", panel(last["result"], last["receipt"]))
+            content = panel(last["result"], last["receipt"])
+            content["items"] = setup_page(status)["items"] + content["items"]
+            if len(content["items"]) > 400:
+                content["items"] = content["items"][:399] + [{"type": "text", "style": "dim", "text": "More rows and coverage details in the receipt."}]
+            ext.publish("test-unit.report", content)
         return {"client": {"popup": {"view": "test-unit.report", "width": 120}}}
 
-    ext.contribute({"view/test-unit.report": {"kind": "panel", "title": "Unit health report",
-                                              "items": panel()["items"]}})
-    ext.run()
+    @ext.on_event
+    def changed(kind, data):
+        keys = [change["key"] for change in data.get("changes", []) if is_setup_key(change["key"])]
+        if kind == "missed" or keys:
+            try:
+                tracker.invalidate("missed setup events" if kind == "missed" else "observed setup entries changed", keys)
+            except Exception as failure:
+                last["observer_error"] = str(failure)
+            wake.set()
+        elif kind == "view.content":
+            wake.set()
+
+    def worker():
+        while not stopping.is_set():
+            status = last["status"] or {}
+            pending = status.get("unit", {}).get("state") == "pending" or status.get("require_unit") and not status.get("finish_ok")
+            wake.wait(timeout=5 if pending else None)
+            wake.clear()
+            if stopping.is_set():
+                break
+            try:
+                refresh()
+            except Exception:
+                pass  # broken transport cannot establish verified evidence; SDK exits on disconnect.
+
+    ext.contribute({"view/test-unit.report": {"kind": "panel", "title": "Unit health report", "items": panel()["items"]},
+                    "menu/testing.status": {"where": "status", "label": "Testing", "view": "testing.status", "command": "test.unit.show", "order": 6}})
+    try:
+        tracker.invalidate("testing observer restarted; current evidence requires reconciliation")
+    except Exception as failure:
+        last["observer_error"] = str(failure)
+    refresh()
+    thread = threading.Thread(target=worker, daemon=True, name="setup-evidence")
+    thread.start()
+    try:
+        ext.run()
+    finally:
+        stopping.set()
+        wake.set()
+        thread.join(timeout=1)
 
 
 def main(argv=None):
-    args = cli_parser().parse_args(argv)
+    parser = cli_parser()
+    args = parser.parse_args(argv)
+    if args.setup_status and (args.record or args.out):
+        parser.error("--setup-status cannot be combined with --record or --out")
     socket, state_dir, extensions_dir = endpoints(args)
     client, hello, error = None, None, None
     if not args.offline:
@@ -265,14 +444,27 @@ def main(argv=None):
                 client.close()
             client = None
     try:
+        if args.setup_status:
+            status = (error_status("live setup is unavailable: " + str(error)) if client is None and not args.offline else
+                      setup_status(state_dir, extensions_dir, client=client, hello=hello, endpoint=socket))
+            if args.json:
+                print(json.dumps(status, ensure_ascii=False))
+            else:
+                print(notice(status)["label"])
+                for reason in status["not_verified_reasons"]:
+                    print(reason)
+            return 2 if status.get("error") else 0
         result = collect(state_dir, extensions_dir, client=client, hello=hello, offline=args.offline,
-                         tests=not args.no_tests, strict=args.strict, connection_error=error)
+                         tests=not args.no_tests, strict=args.strict, connection_error=error, record=args.record, endpoint=socket)
     finally:
         if client is not None:
             client.close()
-    if args.out:
+    if args.record or args.out:
         try:
-            write_receipt(result, args.out)
+            if args.record:
+                save_receipt(result, state_dir, result.get("receipt"))
+            else:
+                write_receipt(result, args.out)
         except OSError as failure:
             result["verdict"] = "error"
             result["rows"].append(row("output", "harness", "fail", str(failure)))
