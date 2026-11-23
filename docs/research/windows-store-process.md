@@ -24,9 +24,10 @@ about newly-created ancestor directory entries on Windows.
 - [MoveFileExW flags and return value](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw)
 - tempfile 3.27.0 source: `src/file/imp/windows.rs`, `create_named`, `persist`, `keep`.
 
-Windows-only store tests cover replacement while a default Rust reader is open (including a Unicode
-filename and removal of the temporary attribute), and failure with a reader denying delete sharing
-(original preserved, temporary file removed, subsequent replacement succeeds). The existing
+Native follow-up W03 disproved the original open-reader success assumption. Windows-only store tests
+now require clean refusal while a default Rust reader remains open (including unchanged transaction
+state and a Unicode filename), and failure with a reader denying delete sharing. Original bytes are
+preserved and the temporary file removed; a fresh explicit write after closing the reader succeeds. The existing
 failed-directory-destination cleanup test runs on both platforms. The injected directory-sync
 failure test is Unix-only, because Windows has no such post-rename operation.
 
@@ -42,9 +43,12 @@ All production destinations of `write_atomic`/the default `DurableWriter` were c
 | `runtime-tokens.json` | `Tokens::open`, `src/bridge_tokens.rs` | `std::fs::read`, closed before parsing/return |
 | `operational/<domain>.json` | `Domain::load`, `src/operational.rs` | temporary `File::take` consumed by `read_to_end`, dropped at the end of that statement |
 
-No Rust destination reader is retained across a replace; no fix is needed. In addition Rust's default
-OpenOptions sharing includes READ, WRITE and DELETE, so an overlapping ordinary Rust read does not
-block replacement: [Rust OpenOptionsExt::share_mode](https://doc.rust-lang.org/std/os/windows/fs/trait.OpenOptionsExt.html#tymethod.share_mode).
+No Rust destination reader is intentionally retained across a replace. Rust's default OpenOptions
+sharing includes READ, WRITE and DELETE, but the original conclusion that this ensured open-reader
+replacement was wrong: native W03 reports MoveFileExW ACCESS_DENIED despite delete sharing. See
+`windows-persistence-native-followup.md` for the bounded-refusal ruling and controls. The share-mode
+documentation establishes access permissions, not this rename operation's compatibility:
+[Rust OpenOptionsExt::share_mode](https://doc.rust-lang.org/std/os/windows/fs/trait.OpenOptionsExt.html#tymethod.share_mode).
 
 No bundled Python extension directly reads any of these authoritative state files. Python-related
 cases for slice D: `extensions/logs.py` reads extension logs with a short `with open`; those logs are

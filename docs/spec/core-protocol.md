@@ -243,6 +243,13 @@ to entries, versions, history, transaction numbering or events. Failed writes cl
 other writers' files and legacy `.tmp` paths are not swept or overwritten. Process crashes can leave harmless
 orphaned temporary files, which are never loaded as workspace state.
 
+On Windows, another process holding `workspace.json` open can block replacement even with delete sharing.
+The same write-through rename is retried only for `ACCESS_DENIED` or `SHARING_VIOLATION`, with bounded
+backoff totaling about one second of scheduled waits. If still refused, the write returns `io` before
+adoption: original bytes, entries, versions, history and transaction numbering remain unchanged, and
+its temporary file is removed. This retries the refused rename only, never a transaction, input or an
+uncertain successful effect. Close the reader before explicitly issuing a new write.
+
 If replacement succeeds but the final directory sync fails, the core **adopts and publishes** the new transaction
 and returns `durability_unconfirmed` with `data.txn`. The entries event and history reflect this adopted state;
 extension changes are reconciled too. The file now names the candidate, but a crash may recover the old or new

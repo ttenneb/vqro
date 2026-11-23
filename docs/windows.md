@@ -75,6 +75,15 @@ Things to report: does `vqro serve` start, does `vqro tui` connect and draw, do 
 Remove the two smoke variables (`Remove-Item Env:VQRO_STATE_DIR, Env:VQRO_HERDR`), make sure `hc --version` works,
 then `vqro tui`. New terminals start herdr-core's shell for your machine (PowerShell or cmd).
 
+## State-file readers and writes
+
+A process holding `workspace.json` open can block writes on Windows, even if that reader allows delete
+sharing. vqro keeps its write-through replacement barrier and retries a refused rename with bounded
+backoff (about one second of scheduled waits). If the reader stays open, the write fails with `io`:
+the original file and committed workspace state remain unchanged, and the candidate temporary file
+is cleaned up. Close the reader before explicitly trying a new write. No transaction or agent input
+is replayed automatically; POSIX-semantics replacement is not used as a durability fallback.
+
 ## Known gaps
 
 - No installer script and no `vqro` auto-update on Windows yet.

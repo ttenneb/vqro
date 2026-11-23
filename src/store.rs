@@ -651,11 +651,31 @@ fn move_file_write_through(source: &Path, destination: &Path) -> std::io::Result
     use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
     let source = windows_file_path(source)?;
     let destination = windows_file_path(destination)?;
-    // SAFETY: both buffers are live, NUL-terminated UTF-16 paths. No delayed or cross-volume move.
-    // WRITE_THROUGH does not return until the file is moved on disk (Microsoft MoveFileExW docs).
-    let moved = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
-    if moved == 0 { return Err(std::io::Error::last_os_error()); }
-    Ok(())
+    retry_windows_replace(|| {
+        // SAFETY: both buffers are live, NUL-terminated UTF-16 paths. No delayed or cross-volume move.
+        // WRITE_THROUGH does not return until the file is moved on disk (Microsoft MoveFileExW docs).
+        let moved = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
+        if moved == 0 { return Err(std::io::Error::last_os_error()); }
+        Ok(())
+    }, std::thread::sleep)
+}
+
+// Private syscall/wait seam: retry only a refused namespace operation, not a transaction or input.
+#[cfg(any(windows,test))]
+fn retry_windows_replace(mut replace: impl FnMut() -> std::io::Result<()>, mut pause: impl FnMut(std::time::Duration)) -> std::io::Result<()> {
+    // Win32 system error codes: ERROR_ACCESS_DENIED=5, ERROR_SHARING_VIOLATION=32.
+    // https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-
+    let mut backoff = [10, 20, 40, 80, 160, 320, 370].into_iter(); // 1 s total scheduled sleep
+    loop {
+        match replace() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                if !matches!(error.raw_os_error(), Some(5 | 32)) { return Err(error); }
+                let Some(delay) = backoff.next() else { return Err(error); };
+                pause(std::time::Duration::from_millis(delay));
+            }
+        }
+    }
 }
 
 pub fn now_ms() -> u64 {
@@ -1023,23 +1043,85 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
+    #[test]
+    fn windows_replace_retry_is_bounded_and_retains_original_on_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        std::fs::write(&path, b"original").unwrap();
+        for code in [5, 32] {
+            let mut attempts = 0;
+            let mut waits = Vec::new();
+            let error = retry_windows_replace(|| {
+                attempts += 1;
+                assert_eq!(std::fs::read(&path).unwrap(), b"original");
+                Err(std::io::Error::from_raw_os_error(code)) // fake refused MoveFileExW
+            }, |delay| waits.push(delay)).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(code));
+            assert_eq!(attempts, 8);
+            assert_eq!(waits.iter().sum::<std::time::Duration>(), std::time::Duration::from_secs(1));
+            assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        }
+    }
+
+    #[test]
+    fn refused_windows_replace_does_not_adopt_a_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let mut store = Store::open(path.clone()).unwrap();
+        store.apply("user", None, vec![set("doc/value", json!(1))]).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let before = (store.rev, store.next_txn, store.history(10).len());
+        store.set_writer(std::sync::Arc::new(|_, _| {
+            retry_windows_replace(|| Err(std::io::Error::from_raw_os_error(32)), |_| {}).map_err(AtomicWriteError::from)
+        }));
+        let error = store.apply("user", None, vec![set("doc/value", json!(2))]).unwrap_err();
+        assert_eq!(error.kind(), "io");
+        assert_eq!((store.rev, store.next_txn, store.history(10).len()), before);
+        assert_eq!(store.get("doc/value").unwrap().value, json!(1));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn windows_replace_retry_stops_after_success_and_does_not_retry_other_errors() {
+        let mut attempts = 0;
+        let mut waits = Vec::new();
+        retry_windows_replace(|| {
+            attempts += 1;
+            if attempts == 1 { Err(std::io::Error::from_raw_os_error(32)) } else { Ok(()) }
+        }, |delay| waits.push(delay)).unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(waits, [std::time::Duration::from_millis(10)]);
+        let mut attempts = 0;
+        let error = retry_windows_replace(|| {
+            attempts += 1;
+            Err(std::io::Error::from_raw_os_error(87)) // ERROR_INVALID_PARAMETER is not transient
+        }, |_| panic!("non-sharing error must not wait")).unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(error.raw_os_error(), Some(87));
+    }
+
     #[cfg(windows)]
     #[test]
-    fn windows_replace_with_open_delete_shared_reader() {
-        use std::io::Read;
+    fn windows_open_reader_blocks_replace_without_adopting_transaction() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("工作.json");
-        write_atomic(&path, b"original").unwrap();
-        // Rust's default share mode includes FILE_SHARE_DELETE.
-        let mut reader = std::fs::File::open(&path).unwrap();
-        write_atomic(&path, b"replacement").unwrap();
-        let mut original = Vec::new();
-        reader.read_to_end(&mut original).unwrap();
-        assert_eq!(original, b"original");
-        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        let mut store = Store::open(path.clone()).unwrap();
+        store.apply("user", None, vec![set("doc/value", json!(1))]).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let (rev, next_txn, history) = (store.rev, store.next_txn, store.history(10).len());
+        // DELETE sharing alone does not make MoveFileExW replace an open destination.
+        let reader = std::fs::File::open(&path).unwrap();
+        let error = store.apply("user", None, vec![set("doc/value", json!(2))]).unwrap_err();
+        assert_eq!(error.kind(), "io");
+        assert_eq!((store.rev, store.next_txn, store.history(10).len()), (rev, next_txn, history));
+        assert_eq!(store.get("doc/value").unwrap().value, json!(1));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "failed temp cleaned");
+        drop(reader);
+        let transaction = store.apply("user", None, vec![set("doc/value", json!(2))]).unwrap();
+        assert_eq!(transaction.id, next_txn);
         use std::os::windows::fs::MetadataExt;
         assert_eq!(std::fs::metadata(&path).unwrap().file_attributes() & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_TEMPORARY, 0);
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[cfg(windows)]
