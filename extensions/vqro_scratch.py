@@ -1,12 +1,13 @@
-"""Shared first-shell policy for Scratch. A CAS claim coalesces bootstrap with prefix n.
+"""Automatic first-shell policy for Scratch; explicit user commands never take its claim.
 
-The claim is not a lease: an uncertain effect leaves it visible for explicit recovery,
-never a timed-out claim that silently repeats spawn after an extension restart.
+The claim is not a lease: an uncertain automatic effect is never silently repeated after restart.
+A user can always open a new shell; once Scratch has a tab the old claim is moot and removed.
 """
 import copy
 import uuid
 
 from vqro_ext import VqroError, first_tabs
+from vqro_display import key_labels, label
 
 CLAIM = "doc/workspaces/first-shell"
 PLACEHOLDER = {"kind": "panel", "title": "vqro", "items": [
@@ -50,6 +51,26 @@ def shell_tree(ext, root, tab):
     return root
 
 
+def new_shell_hint(ext):
+    prefs = ext.value("doc/settings/tui")
+    prefs = prefs if isinstance(prefs, dict) else {}
+    prefix = prefs.get("prefix")
+    prefix = prefix if isinstance(prefix, str) and prefix else "C-g"
+    return f"press {key_labels(label(prefix, 64), prefs.get('key_labels'))} n for a new one."
+
+
+def unconfirmed_notice(ext):
+    return "An earlier automatic Scratch shell was not confirmed; " + new_shell_hint(ext)
+
+
+def clear_moot_claim(ext):
+    def attempt():
+        ext.fresh()
+        if not empty(ext) and ext.value(CLAIM) is not None:
+            ext.apply([{"op": "delete", "key": CLAIM, "expect": ext.version(CLAIM)}], "Scratch: clear moot automatic claim")
+    ext.retrying(attempt, attempts=8)
+
+
 class FirstShell:
     """Claim before spawn; delete in the same transaction that places its observed terminal."""
     def __init__(self, ext):
@@ -60,9 +81,10 @@ class FirstShell:
         def claim():
             self.ext.fresh()
             if not empty(self.ext):
-                return False  # another first-shell caller already completed
+                clear_moot_claim(self.ext)
+                return False  # a user action or previous automatic attempt already populated Scratch
             if self.ext.value(CLAIM) is not None:
-                self.ext.notify("Scratch shell is opening or unconfirmed; inspect terminals before retrying", "warn")
+                self.ext.notify(unconfirmed_notice(self.ext), "warn")
                 return False
             self.ext.apply([{"op": "set", "key": CLAIM, "value": {"attempt": self.token}, "expect": 0}], "Scratch: claim first shell")
             self.ext.fresh()

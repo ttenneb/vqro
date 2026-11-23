@@ -22,12 +22,15 @@ A legacy zero-tab main rendered a blank body; normal transactions already reject
 ## Effect safety
 
 `vqro_scratch.FirstShell` is narrow extension policy, not a new core lock or spawn guarantee.
-A public transaction claims `doc/workspaces/first-shell` before either bootstrap or a first
-`tabs.open` spawns. The winner deletes that claim atomically with placing the observed terminal;
-a concurrent first-shell caller coalesces instead of spawning again. Only a definite rejected
-spawn releases an unused claim. An uncertain effect or observed-but-unplaced terminal keeps the
-claim across extension/core restart, with an inspection warning. It never expires and replays.
-After inspecting terminals, explicit workspace transactions can repair the layout/claim.
+Only the automatic bootstrap claims `doc/workspaces/first-shell` before spawning. It deletes that
+claim atomically with placing the observed terminal. A definitely rejected automatic spawn releases
+its unused claim. An uncertain effect or observed-but-unplaced terminal keeps the claim across
+extension/core restart; it never expires and replays. The actionable warning directs the user to
+prefix n for a new shell. Explicit `tabs.open` and `workspaces.main` never take or wait on this claim:
+user actions must not be suppressed by an automatic-start recovery marker. Once Scratch has a tab,
+bootstrap CAS-deletes any moot claim, including after a layout event from a successful user action.
+If n finishes first, bootstrap does nothing; a genuine overlap can yield an extra shell, which is
+preferable to blocking n. This deliberately replaces the initial shared-claim coalescing approach.
 
 Availability reactions run off the SDK listener, queue behind an in-flight bootstrap, and refresh
 state before deciding. This avoids dropping the sole backend-ready event and allows layout-only
@@ -36,8 +39,9 @@ CAS retries without rerunning spawn or blocking the cache event listener.
 ## Evidence
 
 - `tests/test_empty_scratch.py`: activation, setting off/invalid, nonempty restart, selected workspace,
-  exact placeholder versus user panels, no backend followed by availability, both orderings of
-  prefix-n/bootstrap, queued availability, and indeterminate spawn retained across restart.
+  exact placeholder versus user panels, no backend followed by availability, explicit n during
+  an in-flight/uncertain automatic start, stale-claim cleanup on activation/layout events,
+  queued availability, and indeterminate automatic spawn retained across restart.
 - `tests/test_sidebar_empty.py`: RED with no-layout refusal, GREEN with main/reset recovery,
   without workspaces or any spawn; already-visible sidebar remains visible on recovery.
 - `tests/fixtures/client/window.json`: missing/dangling defaults, absent main, valid default

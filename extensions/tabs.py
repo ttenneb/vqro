@@ -10,7 +10,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vqro_ext import Extension, VqroError, first_tabs, node_at, views_in  # noqa: E402
 from vqro_views import busy, confirm_popup, ended, stop, terminal_target, title, view_resource
-from vqro_scratch import FirstShell, empty as scratch_empty, shell_tree
 
 ext = Extension("tabs", event_types=["entries", "resource", "resource.removed"])
 
@@ -25,7 +24,7 @@ def focus_view(node, view):
     return any(focus_view(child, view) for child in node.get("children", []))
 
 
-def show(view, title, view_value=None, args=None, first_shell=None):
+def show(view, title, view_value=None, args=None):
     """Activate the tab showing `view`, or add one, in the invoking window's layout (`args.context`)."""
     def attempt():
         ops = []
@@ -34,19 +33,15 @@ def show(view, title, view_value=None, args=None, first_shell=None):
         tab = {"title": title, "node": {"view": view}}
         mark_ended({"tabs": [tab]})
         lay = ext.context_layout(args)  # the invoking window's layout (or the shared one)
-        if lay is None and first_shell is not None and ext.value("layout/main") is not None:
-            lay = ("layout/main", ext.version("layout/main"), copy.deepcopy(ext.value("layout/main")))
         if lay is None:
             ops += [
                 {"op": "set", "key": "layout/main", "value": {"tabs": [tab], "active": 0}, "expect": ext.version("layout/main")},
-                {"op": "set", "key": "workspace/active", "value": {"layout": "main"}, "expect": ext.version("workspace/active")},
+                {"op": "set", "key": "workspace/active", "value": {"layout": "main"}, "expect": 0},
             ]
         else:
             key, ver, root = lay
             t = first_tabs(root)
-            if first_shell is not None:
-                root = shell_tree(ext, root, tab)
-            elif focus_view(root, view):
+            if focus_view(root, view):
                 pass
             elif t is None:
                 root = {"tabs": [{"title": "main", "node": root}, tab], "active": 1}
@@ -54,8 +49,6 @@ def show(view, title, view_value=None, args=None, first_shell=None):
                 t["tabs"].append(tab)
                 t["active"] = len(t["tabs"]) - 1
             ops.append({"op": "set", "key": key, "value": root, "expect": ver})
-        if first_shell is not None:
-            ops += first_shell.finish_ops()
         return ext.apply(ops, f"tabs: show {view}")
     # Navigation only: bounded CAS retries recompute from fresh state, never repeat spawn/input.
     # Three attempts proved too little during concurrent layout churn (soak-4).
@@ -72,13 +65,6 @@ def open_tab(args):
     spawn = {k: args[k] for k in ("argv", "cwd", "name") if k in args}
     if "cwd" not in spawn and ext.layout_folder(args):
         spawn["cwd"] = ext.layout_folder(args)
-    lay = ext.context_layout(args)
-    if (lay is None or lay[0] == "layout/main") and scratch_empty(ext):
-        with FirstShell(ext) as first:
-            if first is None:
-                return {}  # coalesce with bootstrap or another first prefix n, never repeat spawn
-            r = first.spawn(spawn)
-            return show(f"term-{r['id']}", title_of(r), {"kind": "terminal", "resource": r["id"]}, args, first)
     r = ext.vqro.call("resource.spawn", spawn)["resource"]
     return show(f"term-{r['id']}", title_of(r), {"kind": "terminal", "resource": r["id"]}, args)
 

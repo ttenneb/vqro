@@ -1659,11 +1659,13 @@ The bundled workspaces extension also exposes `doc/settings/workspaces.open_shel
 (default true), **Open a shell in an empty Scratch**, through `settings.page.workspaces`.
 On activation and backend availability it starts one shell in empty `main` (Scratch), including headless
 core starts. It leaves a nonempty Scratch or a valid selected workspace alone. Only the unchanged built-in
-recovery placeholder counts as an empty tab; arbitrary user panels are retained. Startup and a concurrent
-first `tabs.open` coalesce through the extension-owned CAS claim `doc/workspaces/first-shell`, removed
-atomically with placing the terminal. A definitely rejected spawn releases the claim; an uncertain or
-observed-but-unplaced spawn keeps it across restart and warns instead of replaying. Inspect terminals and
-explicitly repair/delete the claim through workspace transactions before requesting another automatic attempt.
+recovery placeholder counts as an empty tab; arbitrary user panels are retained. Only automatic startup
+uses the extension-owned CAS claim `doc/workspaces/first-shell`, removed atomically with placing its terminal.
+A definitely rejected automatic spawn releases the claim; an uncertain or observed-but-unplaced spawn
+keeps it across restart and warns instead of replaying. The notice directs the user to prefix n for a new
+shell. Explicit `tabs.open` (prefix n) and `workspaces.main` never take or wait on this automatic claim.
+When Scratch has a tab the bootstrap clears any moot claim with CAS. If a user's n finishes first, bootstrap
+adds nothing; genuinely overlapping automatic/manual spawns may produce one extra shell, never suppress n.
 No backend means no shell, with a visible notice; recovery remains usable without this policy.
 
 Extensions may add a page to Settings by publishing live content `settings.page.<name>` = `{title, items}` (ordinary

@@ -90,27 +90,55 @@ class EmptyScratch(unittest.TestCase):
         self.assertEqual(self.shells(core), [])
         self.assertEqual(core.value("view/vqro-empty")["items"], [{"text": "user content"}])
 
-    def test_prefix_n_wins_concurrent_bootstrap(self):
+    def test_prefix_n_completes_before_bootstrap(self):
         core = Core()
         mods = load(core, "tabs")
-        entered, release = threading.Event(), threading.Event()
-        call = core.call
-        def paused(method, params=None):
-            if method == "resource.spawn":
-                entered.set()
-                self.assertTrue(release.wait(3))
-            return call(method, params)
-        core.call = paused
-        worker = threading.Thread(target=lambda: mods["tabs"]["open_tab"]({}))
-        worker.start()
-        self.assertTrue(entered.wait(3))
-        try:
-            load(core, "workspaces")
-        finally:
-            release.set()
-            worker.join(3)
-        self.assertFalse(worker.is_alive())
+        mods["tabs"]["open_tab"]({})
+        load(core, "workspaces")
         self.assertEqual(len(self.shells(core)), 1)
+
+    def test_prefix_n_works_with_a_retained_automatic_claim(self):
+        core = Core()
+        core.apply([{"op": "set", "key": "doc/workspaces/first-shell", "value": {"attempt": "uncertain"}}], "old automatic attempt")
+        core.notify = mock.Mock()
+        modules = load(core, "tabs", "workspaces")
+        self.assertEqual(self.shells(core), [])
+        self.assertIn("An earlier automatic Scratch shell was not confirmed; press Ctrl-g n for a new one.", str(core.notify.call_args))
+        modules["tabs"]["open_tab"]({})
+        self.assertEqual(len(self.shells(core)), 1)
+        # A layout event queues cleanup of the now-moot automatic claim.
+        with mock.patch.object(threading, "Thread") as queued:
+            modules["workspaces"]["on_event"]("entries", {"changes": [{"key": "layout/main"}]})
+        queued.call_args.kwargs["target"]()
+        self.assertIsNone(core.value("doc/workspaces/first-shell"))
+        self.assertEqual(modules["workspaces"]["startup_notice"][0], "")
+
+    def test_stale_claim_notice_names_the_configured_prefix(self):
+        core = Core()
+        core.apply([{"op": "set", "key": "doc/workspaces/first-shell", "value": {"attempt": "uncertain"}},
+                    {"op": "set", "key": "doc/settings/tui", "value": {"prefix": "C-a", "key_labels": "short"}}], "old automatic attempt")
+        module = load(core, "workspaces")["workspaces"]
+        self.assertEqual(module["startup_notice"][0], "An earlier automatic Scratch shell was not confirmed; press C-a n for a new one.")
+        self.assertEqual(self.shells(core), [])
+
+    def test_explicit_main_is_not_blocked_by_a_retained_automatic_claim(self):
+        core = Core()
+        core.apply([{"op": "set", "key": "doc/workspaces/first-shell", "value": {"attempt": "uncertain"}}], "old automatic attempt")
+        load(core, "workspaces")
+        core.handlers["workspaces.main"]({})
+        self.assertEqual(len(self.shells(core)), 1)
+
+    def test_nonempty_scratch_clears_stale_claim_on_activation(self):
+        core = Core()
+        load(core, "tabs")["tabs"]["open_tab"]({})
+        core.apply([{"op": "set", "key": "doc/workspaces/first-shell", "value": {"attempt": "uncertain"}}], "old automatic attempt")
+        original = core.apply
+        core.apply = mock.Mock(wraps=original)
+        load(core, "workspaces")
+        self.assertEqual(len(self.shells(core)), 1)
+        self.assertIsNone(core.value("doc/workspaces/first-shell"))
+        deletes = [op for call in core.apply.call_args_list for op in call.args[0] if op["op"] == "delete" and op["key"] == "doc/workspaces/first-shell"]
+        self.assertEqual(deletes, [{"op": "delete", "key": "doc/workspaces/first-shell", "expect": 1}])
 
     def test_backend_availability_retries_only_definite_rejection(self):
         core = Core()
@@ -165,13 +193,13 @@ class EmptyScratch(unittest.TestCase):
         self.assertEqual(len(self.shells(core)), 1)
         self.assertIsNotNone(core.value("doc/workspaces/first-shell"))
 
-    def test_concurrent_prefix_n_and_bootstrap_spawn_once(self):
+    def test_explicit_prefix_n_is_not_blocked_by_inflight_bootstrap(self):
         core = Core()
         mods = load(core, "tabs")
         entered, release = threading.Event(), threading.Event()
         original = core.call
         def paused(m, p=None):
-            if m == "resource.spawn":
+            if m == "resource.spawn" and threading.current_thread() is worker:
                 entered.set()
                 self.assertTrue(release.wait(3))
             return original(m, p)
@@ -185,10 +213,12 @@ class EmptyScratch(unittest.TestCase):
         self.assertTrue(entered.wait(3))
         try:
             mods["tabs"]["open_tab"]({})
+            self.assertEqual(len(self.shells(core)), 1)  # n already worked, before releasing bootstrap
         finally:
             release.set()
             worker.join(3)
         self.assertFalse(worker.is_alive())
         self.assertEqual(errors, [])
-        self.assertEqual(len(self.shells(core)), 1)
-        self.assertEqual(len(next(n for n in walk(core.value("layout/main")) if "tabs" in n)["tabs"]), 1)
+        self.assertEqual(len(self.shells(core)), 2)  # the accepted rare race: one extra shell, never blocked n
+        self.assertEqual(len(next(n for n in walk(core.value("layout/main")) if "tabs" in n)["tabs"]), 2)
+        self.assertIsNone(core.value("doc/workspaces/first-shell"))

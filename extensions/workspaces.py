@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vqro_ext import Extension, VqroError, views_in  # noqa: E402
 from vqro_views import title  # noqa: E402
 from vqro_process import background_kwargs  # noqa: E402
-from vqro_scratch import FirstShell, empty as scratch_empty, shell_tree
+from vqro_scratch import CLAIM, FirstShell, clear_moot_claim, empty as scratch_empty, new_shell_hint, shell_tree, unconfirmed_notice
 
 ext = Extension("workspaces", event_types=["entries", "provider"])  # no resource events: not used here
 LIST = "doc/workspaces/list"
@@ -129,7 +129,7 @@ def scan():
 def on_event(t, d):
     if t == "missed" or t == "entries" and any(c["key"] == LIST for c in d["changes"]):
         threading.Thread(target=scan, daemon=True).start()
-    if t in ("provider", "missed") or t == "entries" and any(c["key"] == PREFS for c in d["changes"]):
+    if t in ("provider", "missed") or t == "entries" and any(c["key"] in (PREFS, "layout/main") for c in d["changes"]):
         # Do not perform effects on the SDK listener: it must keep caches moving, and layout-only
         # CAS retries after an observed spawn must not be reduced to a deferred listener replay.
         threading.Thread(target=refresh_startup, daemon=True).start()
@@ -303,23 +303,30 @@ def bootstrap():
     bootstrap_lock.acquire()
     try:
         ext.fresh()
+        if not scratch_empty(ext):
+            clear_moot_claim(ext)
+            startup_notice[0] = ""
+            return
+        if ext.value(CLAIM) is not None:
+            startup_notice[0] = unconfirmed_notice(ext)
+            ext.notify(startup_notice[0], "warn")
+            return
         selected = (ext.value("workspace/active") or {}).get("layout")
         if not open_when_empty() or selected not in (None, MAIN) and ext.value(f"layout/{selected}") is not None:
             decorate_pending[0] = False
-            return
-        if not scratch_empty(ext):
             return
         decorate_pending[0] = True
         try:
             with FirstShell(ext) as first:
                 if first is None:
+                    startup_notice[0] = unconfirmed_notice(ext) if ext.value(CLAIM) is not None else ""
                     return
                 open_layout(MAIN, None, "Scratch", first_shell=first)
             startup_notice[0] = ""
             ext.fresh()
             decorate_scratch()
         except VqroError as error:
-            startup_notice[0] = f"No Scratch shell opened: {error}. Inspect terminals before retrying an unconfirmed start."
+            startup_notice[0] = f"No Scratch shell opened: {error}; {new_shell_hint(ext)}"
             ext.notify(startup_notice[0], "warn")
     finally:
         bootstrap_lock.release()
@@ -421,12 +428,6 @@ def shell(args):
 
 @ext.command("workspaces.main", "Switch to the main tabs (terminals not in a workspace)")
 def main_layout(args):
-    if scratch_empty(ext):
-        with FirstShell(ext) as first:
-            if first is None:
-                return {}
-            result, _ = open_layout(MAIN, None, None, args, first_shell=first)
-            return result
     result, _ = open_layout(MAIN, None, None, args)
     return result
 
