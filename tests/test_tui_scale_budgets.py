@@ -2,6 +2,7 @@
 import copy
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -11,6 +12,15 @@ import e2e_tui_scale as probe  # noqa: E402
 class Budgets(unittest.TestCase):
     within = {"cpu_pct_one_core": 18, "rss_peak_mib": 38.6, "key_p99_ms": 81.8,
               "background_fps_peak_complete_second": 55, "fps_peak_complete_second": 94}
+
+    def valid_receipt(self, **changes):
+        receipt = dict(result='pass', correctness_ok=True, workload_valid=True, leftover_processes=[],
+            tui=dict(self.within), keys=dict(samples=20, lost=[], p99_ms=81.8), events=dict(missed=0),
+            extensions=dict(sidebar=dict(status='running', crashes=0)), budgets_exceeded=[],
+            cleanup=dict(ok=True, shutdown_requested=True, shutdown_error=None, client_close_error=None,
+                         core_exit=0, forced_kill=False, wait_error=None))
+        receipt.update(changes)
+        return receipt
 
     def test_measured_results_pass_with_margin(self):
         self.assertEqual(probe.exceeded(self.within), [])
@@ -22,15 +32,64 @@ class Budgets(unittest.TestCase):
             self.assertEqual(probe.exceeded({**self.within, name: limit + 1}), [name])
 
     def test_only_pure_key_latency_breach_has_budget_exit(self):
-        receipt = dict(result='fail', correctness_ok=True, leftover_processes=[],
-                       tui=dict(self.within), keys={'p99_ms': 171}, budgets_exceeded=['key_p99_ms'])
+        receipt = self.valid_receipt(result='fail', keys=dict(samples=20, lost=[], p99_ms=171),
+                                     budgets_exceeded=['key_p99_ms'])
         self.assertEqual(probe.timing_exit(receipt), 78)
         for change in [dict(correctness_ok=False), dict(leftover_processes=[123]), dict(error='bad workload'),
-                       dict(budgets_exceeded=['key_p99_ms', 'rss_peak_mib']), dict(keys={'p99_ms': None}),
+                       dict(tui={**self.within, 'rss_peak_mib': 81}), dict(keys={'p99_ms': None}),
                        dict(keys={'p99_ms': float('nan')})]:
             with self.subTest(change=change):
                 self.assertEqual(probe.timing_exit({**receipt, **change}), 1)
-        self.assertEqual(probe.timing_exit(dict(result='pass')), 0)
+        self.assertEqual(probe.timing_exit(dict(result='pass')), 1)
+
+    def test_pass_tag_or_claimed_breach_list_cannot_bypass_required_evidence(self):
+        for receipt in [dict(result='pass'), self.valid_receipt(correctness_ok=False),
+                        self.valid_receipt(cleanup={}), self.valid_receipt(workload_valid=False),
+                        self.valid_receipt(tui={**self.within, 'rss_peak_mib': float('nan')}),
+                        self.valid_receipt(keys=dict(samples=20, lost=[], p99_ms=float('nan'))),
+                        self.valid_receipt(cleanup={**self.valid_receipt()['cleanup'], 'core_exit': 7}),
+                        self.valid_receipt(cleanup={**self.valid_receipt()['cleanup'], 'forced_kill': True}),
+                        self.valid_receipt(tui={**self.within, 'cpu_pct_one_core': 41}),
+                        self.valid_receipt(keys=dict(samples=0, lost=[], p99_ms=1))]:
+            with self.subTest(receipt=receipt):
+                self.assertEqual(probe.timing_exit(receipt), 1)
+        # The actual values, not result/breach tags, decide finite latency failures.
+        receipt = self.valid_receipt(keys=dict(samples=20, lost=[], p99_ms=171), budgets_exceeded=[])
+        self.assertEqual(probe.timing_exit(receipt), 78)
+        receipt['result'] = 'fail'
+        self.assertEqual(probe.timing_exit(receipt), 78)
+        self.assertIn('key_p99_ms', probe.exceeded({**self.within, 'key_p99_ms': float('nan')}))
+        self.assertEqual(probe.timing_exit(self.valid_receipt(budgets_exceeded=['rss_peak_mib'])), 0)
+
+    def test_teardown_failures_are_hard_before_pass_or_latency_breach(self):
+        for kind in ('shutdown-error', 'nonzero-exit', 'forced-kill'):
+            for result in ('pass', 'fail'):
+                with self.subTest(kind=kind, result=result):
+                    receipt = self.valid_receipt(result=result,
+                        keys=dict(samples=20, lost=[], p99_ms=171 if result == 'fail' else 81.8))
+                    client = mock.Mock()
+                    core = mock.Mock()
+                    core.wait.return_value = 0
+                    if kind == 'shutdown-error': client.call.side_effect = RuntimeError('lost shutdown reply')
+                    if kind == 'nonzero-exit': core.wait.return_value = 7
+                    if kind == 'forced-kill':
+                        core.wait.side_effect = [probe.subprocess.TimeoutExpired('private core', 5), -9]
+                    probe.cleanup_core(receipt, client, core)
+                    self.assertEqual(receipt['result'], 'fail', receipt)
+                    self.assertFalse(receipt['correctness_ok'], receipt)
+                    self.assertFalse(receipt['cleanup']['ok'], receipt)
+                    self.assertEqual(probe.timing_exit(receipt), 1)
+
+    def test_clean_shutdown_and_exit_are_observed_before_pass(self):
+        receipt = self.valid_receipt()
+        client, core = mock.Mock(), mock.Mock()
+        core.wait.return_value = 0
+        probe.cleanup_core(receipt, client, core)
+        self.assertTrue(receipt['cleanup']['ok'], receipt)
+        self.assertEqual(probe.timing_exit(receipt), 0)
+        client.call.assert_called_once_with('core.shutdown')
+        client.close.assert_called_once()
+        core.kill.assert_not_called()
 
     def test_a_missing_measurement_is_not_a_pass(self):
         for name in probe.BUDGETS:

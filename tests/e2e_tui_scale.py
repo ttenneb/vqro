@@ -142,9 +142,15 @@ class KeyLedger:
                 "evidence_status": "complete" if complete else "evidence incomplete"}
 
 
+def finite_measure(value):
+    # Preserve the probe's existing zero-as-missing guard as well as finiteness.
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+
+
 def exceeded(measured):
-    """Budget names whose measured value is above its limit (a missing measurement counts as exceeded)."""
-    return sorted(name for name, (limit, _) in BUDGETS.items() if not measured.get(name) or measured[name] > limit)
+    """Missing/non-finite evidence is invalid, never an apparently met budget."""
+    return sorted(name for name, (limit, _) in BUDGETS.items()
+                  if not finite_measure(measured.get(name)) or measured[name] > limit)
 
 
 def timing_exit(receipt):
@@ -153,15 +159,63 @@ def timing_exit(receipt):
     Memory/CPU/frame caps, missing measurements, invalid workload, lost inputs,
     exceptions and leftovers remain hard failures, even on a contended machine.
     """
-    if receipt.get("result") == "pass":
-        return 0
-    if receipt.get("error") or receipt.get("leftover_processes") or not receipt.get("correctness_ok"):
+    keys, tui, events = (receipt.get(name) for name in ("keys", "tui", "events"))
+    extensions, cleanup = receipt.get("extensions"), receipt.get("cleanup")
+    if not all(isinstance(value, dict) for value in (keys, tui, events, extensions, cleanup)):
         return 1
-    measured = {**receipt.get("tui", {}), "key_p99_ms": receipt.get("keys", {}).get("p99_ms")}
-    if all(isinstance(measured.get(key), (int, float)) and math.isfinite(measured[key]) and measured[key] > 0
-           for key in BUDGETS) and receipt.get("budgets_exceeded") == ["key_p99_ms"]:
-        return 78
-    return 1
+    sidebar = extensions.get("sidebar")
+    if not isinstance(sidebar, dict):
+        return 1
+    if (receipt.get("error") is not None or receipt.get("leftover_processes") != []
+        or receipt.get("correctness_ok") is not True or receipt.get("workload_valid") is not True
+        or type(keys.get("samples")) is not int or keys["samples"] <= 0 or keys.get("lost") != []
+        or type(events.get("missed")) is not int or events["missed"] != 0
+        or sidebar.get("status") != "running" or type(sidebar.get("crashes")) is not int or sidebar["crashes"] != 0
+        or cleanup.get("ok") is not True or cleanup.get("shutdown_requested") is not True
+        or cleanup.get("forced_kill") is not False or type(cleanup.get("core_exit")) is not int or cleanup["core_exit"] != 0
+        or any(cleanup.get(name, "missing") is not None for name in ("shutdown_error", "client_close_error", "wait_error"))):
+        return 1
+    measured = {**tui, "key_p99_ms": keys.get("p99_ms")}
+    if not all(finite_measure(measured.get(key)) for key in BUDGETS):
+        return 1
+    # Derive from actual evidence; neither a PASS tag nor a claimed breach list
+    # can bypass validation, invent a breach or suppress a measured one.
+    over = exceeded(measured)
+    return 0 if not over else 78 if over == ["key_p99_ms"] else 1
+
+
+def cleanup_core(receipt, client, core):
+    """Only an observed successful shutdown/exit can complete correctness proof."""
+    cleanup = dict(shutdown_requested=False, shutdown_error=None, client_close_error=None,
+                   core_exit=None, forced_kill=False, wait_error=None)
+    if client is not None:
+        cleanup["shutdown_requested"] = True
+        try:
+            client.call("core.shutdown")
+        except Exception as error:
+            cleanup["shutdown_error"] = f"{type(error).__name__}: {error}"
+        try:
+            client.close()
+        except Exception as error:
+            cleanup["client_close_error"] = f"{type(error).__name__}: {error}"
+    if core is not None:
+        try:
+            cleanup["core_exit"] = core.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            cleanup["forced_kill"] = True
+            try:
+                core.kill()
+                cleanup["core_exit"] = core.wait()
+            except Exception as error:
+                cleanup["wait_error"] = f"{type(error).__name__}: {error}"
+        except Exception as error:
+            cleanup["wait_error"] = f"{type(error).__name__}: {error}"
+    cleanup["ok"] = bool(cleanup["shutdown_requested"] and cleanup["core_exit"] == 0
+        and not cleanup["forced_kill"] and not any(cleanup[key] for key in
+        ("shutdown_error", "client_close_error", "wait_error")))
+    receipt["cleanup"] = cleanup
+    if not cleanup["ok"]:
+        receipt.update(result="fail", correctness_ok=False)
 
 
 class Peer:
@@ -392,17 +446,7 @@ def main():
         subprocess.run([*harness, "-N", "kill-server"], env=env, capture_output=True, timeout=5)
         if observer:
             observer.close()
-        if client:
-            try:
-                client.call("core.shutdown")
-            except Exception:
-                pass
-            client.close()
-        if core:
-            try:
-                core.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                core.kill(); core.wait()
+        cleanup_core(receipt, client, core)
         time.sleep(.1)
         left = owned(root)
         receipt["leftover_processes"] = left
@@ -430,6 +474,7 @@ def main():
         shutil.rmtree(root)
     code = timing_exit(receipt)
     receipt["failure_class"] = {0: "pass", 78: "budget"}.get(code, "correctness")
+    receipt["result"] = "pass" if code == 0 else "fail"
     wire = json.dumps(receipt, indent=2) + "\n"
     if args.receipt:
         args.receipt.parent.mkdir(parents=True, exist_ok=True)
