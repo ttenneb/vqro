@@ -227,7 +227,7 @@ class SharedVectors(unittest.TestCase):
 
     def test_every_vector(self):
         path = pathlib.Path(__file__).resolve().parent / "fixtures" / "items-vectors.jsonl"
-        cases = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+        cases = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
         cases = [c for c in cases if "name" in c]
         self.assertGreaterEqual(len(cases), 20)
         for case in cases:

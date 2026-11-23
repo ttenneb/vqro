@@ -80,6 +80,11 @@ class TmuxServerTests(unittest.TestCase):
             popen.assert_not_called()
 
     def setUp(self):
+        # The helper is mocked: exercise the supported policy branch on any host. The Windows
+        # negative test below overrides this explicitly and still forbids all native effects.
+        platform = patch.object(m.sys, "platform", "linux")
+        platform.start()
+        self.addCleanup(platform.stop)
         self.ext = Ext()
         self.server = Server(self.ext)
 
@@ -161,7 +166,7 @@ class TmuxServerTests(unittest.TestCase):
                 if len(seen) == 2: raise StopIteration
             with patch.object(m, "Extension", return_value=self.ext), \
                     patch.object(m.subprocess, "Popen", return_value=child) as spawn, \
-                    patch.object(m.os, "killpg"), patch.object(m.time, "sleep", side_effect=sleep):
+                    patch.object(m.os, "killpg", create=True), patch.object(m.time, "sleep", side_effect=sleep):
                 with self.assertRaises(StopIteration): m.main()
             # Declared at start, before the first helper call, and the timeout is reported in the panel.
             self.assertIn("view/tmux-server", self.ext.contributions[0])

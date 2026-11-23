@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
-SOURCE = Path(__file__).with_name('e2e_tui_keys.py').read_text()
+SOURCE = Path(__file__).with_name('e2e_tui_keys.py').read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE)
 
 

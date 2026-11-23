@@ -15,7 +15,7 @@ from test_account_capacity import Core, resource
 
 class CapacityProducerPipeline(unittest.TestCase):
     def fixture(self,key):
-        data=json.loads((Path(__file__).parent/'fixtures'/'usage_limits_incomplete.json').read_text())
+        data=json.loads((Path(__file__).parent/'fixtures'/'usage_limits_incomplete.json').read_text(encoding="utf-8"))
         normalized=copy.deepcopy(data[key]);account=normalized['account']
         core=Core();accounts=Accounts(core)
         source={'id':'source-account','label':'Source','runtime':'pi','kind':'subscription','profile':'/fake/source'}

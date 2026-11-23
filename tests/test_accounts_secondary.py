@@ -27,7 +27,7 @@ class AccountsSecondary(unittest.TestCase):
         metadata=profiles.fact(selected)
         self.assertNotIn('provider',metadata)
         fixture=Path(__file__).parent/'fixtures'/'configured_account_omitted_provider.json'
-        self.assertEqual(metadata,json.loads(fixture.read_text()))  # same golden fixture parsed by Rust; no profile I/O
+        self.assertEqual(metadata,json.loads(fixture.read_text(encoding="utf-8")))  # same golden fixture parsed by Rust; no profile I/O
         self.assertFalse(any(method=='resource.spawn' for method,params in core.calls))
 
     def test_codex_sign_in_validates_full_suffix_before_any_spawn(self):

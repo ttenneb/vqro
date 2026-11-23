@@ -257,14 +257,14 @@ class SettingsTests(unittest.TestCase):
     def test_builtins_have_complete_readable_manifests(self):
         import json
         root=EXT
-        names={s["name"] for s in json.loads((root/"defaults.json").read_text())["extensions"]}
+        names={s["name"] for s in json.loads((root/"defaults.json").read_text(encoding="utf-8"))["extensions"]}
         self.assertEqual(len(names),24)
         self.assertIn('accounts', names)
         self.assertIn("test-perf",names)
         self.assertIn("codex",names)
         self.assertIn("test-unit",names)
         for name in names:
-            manifest=json.loads((root/"manifests"/(name+".json")).read_text())
+            manifest=json.loads((root/"manifests"/(name+".json")).read_text(encoding="utf-8"))
             self.assertEqual(manifest["name"],name)
             self.assertTrue(manifest["summary"])
             self.assertNotIn("\n",manifest["summary"])

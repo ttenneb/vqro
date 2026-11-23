@@ -16,7 +16,28 @@ installer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(installer)
 
 
+def symlink_or_skip(test_case, link, target, *, target_is_directory=False):
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except OSError as error:
+        if sys.platform == "win32" and getattr(error, "winerror", None) == 1314:
+            test_case.skipTest("Windows symlink fixture requires Developer Mode or symlink privilege")
+        raise
+
+
 class InstallExtensionTests(unittest.TestCase):
+    def test_symlink_fixture_skips_only_missing_windows_privilege(self):
+        link = mock.Mock()
+        privilege = OSError("fixture privilege missing")
+        privilege.winerror = 1314
+        with mock.patch.object(sys, "platform", "win32"):
+            link.symlink_to.side_effect = privilege
+            with self.assertRaises(unittest.SkipTest):
+                symlink_or_skip(self, link, "fixture")
+            link.symlink_to.side_effect = PermissionError("unexpected destination failure")
+            with self.assertRaisesRegex(PermissionError, "unexpected destination failure"):
+                symlink_or_skip(self, link, "fixture")
+
     def test_mapping_names_and_sources(self):
         mapping = installer.test_files(ROOT)
         self.assertTrue(mapping)
@@ -54,7 +75,7 @@ class InstallExtensionTests(unittest.TestCase):
                                      capture_output=True, text=True, timeout=10)
             self.assertEqual(checked.returncode, 0, checked.stderr)
             self.assertEqual(list(home.iterdir()), [])
-        script = (ROOT / "scripts/dev-install.sh").read_text()
+        script = (ROOT / "scripts/dev-install.sh").read_text(encoding="utf-8")
         self.assertLess(script.index("install_extension_tests.py --check"), script.index("cp extensions/"))
 
     def test_bad_mapping_preflight_preserves_existing_suite(self):
@@ -87,7 +108,7 @@ class InstallExtensionTests(unittest.TestCase):
                     link = destination / "tests/tier1"
                 else:
                     link = destination / "tests"
-                link.symlink_to(outside, target_is_directory=True)
+                symlink_or_skip(self, link, outside, target_is_directory=True)
                 for check in (True, False):
                     completed = subprocess.run([sys.executable, "-B", str(ROOT / "scripts/install_extension_tests.py"),
                                                 *(["--check"] if check else []), str(destination)],
@@ -120,7 +141,7 @@ class InstallExtensionTests(unittest.TestCase):
                 else:
                     if kind == "symlink":
                         outside.write_bytes(b"unchanged outside file")
-                    metadata.symlink_to(outside)
+                    symlink_or_skip(self, metadata, outside)
                 before = {str(path.relative_to(destination)): path.read_bytes()
                           for path in destination.rglob("*") if path.is_file() and not path.is_symlink()}
                 before_paths = {str(path.relative_to(destination)) for path in destination.rglob("*")}
@@ -212,9 +233,9 @@ class InstallExtensionTests(unittest.TestCase):
             shutil.copytree(ROOT / "extensions", destination, ignore=shutil.ignore_patterns("__pycache__", "node_modules"))  # dev packages are never installed
             (destination / "tier1").mkdir(exist_ok=True)
             shutil.copyfile(ROOT / "integrations/pi/vqro-pull.ts", destination / "tier1/vqro-pull.ts")
-            env = {"HOME": str(home), "PATH": os.environ.get("PATH", os.defpath)}
+            env = {"HOME": str(home), "PATH": os.environ.get("PATH", os.defpath), "PYTHONIOENCODING": "utf-8"}
             copied = subprocess.run([sys.executable, "-B", str(ROOT / "scripts/install_extension_tests.py"), str(destination)],
-                                    env=env, cwd=home, capture_output=True, text=True, timeout=10)
+                                    env=env, cwd=home, capture_output=True, text=True, encoding="utf-8", timeout=10)
             self.assertEqual(copied.returncode, 0, copied.stderr)
             mapping = installer.test_files(ROOT)
             # Only declare mapped extensions, all enabled; no binaries or live core are needed offline.
@@ -228,7 +249,7 @@ class InstallExtensionTests(unittest.TestCase):
                        "--extensions-dir", str(destination), "--state-dir", str(state)]
 
             def run_cli():
-                completed = subprocess.run(command, env=env, cwd=home, capture_output=True, text=True, timeout=120)
+                completed = subprocess.run(command, env=env, cwd=home, capture_output=True, text=True, encoding="utf-8", timeout=120)
                 result = json.loads(completed.stdout)
                 return completed, result, {row["subject"]: row for row in result["rows"] if row["id"].startswith("tests/")}
 

@@ -489,6 +489,12 @@ class NativePipeQueryTests(unittest.TestCase):
 
 
 class UnixTransportTests(unittest.TestCase):
+    def setUp(self):
+        # This is a mocked Unix branch, not a native socket open. Keep it runnable on Windows too.
+        patch = mock.patch.object(transport.socket, "AF_UNIX", 12345, create=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def test_socket_connect_and_timeout_behavior_unchanged(self):
         with mock.patch.object(transport, "_WINDOWS", False), mock.patch.object(transport.socket, "socket") as factory:
             sock = factory.return_value
@@ -535,7 +541,7 @@ class AsyncTransportTests(unittest.IsolatedAsyncioTestCase):
         self.patches.enter_context(mock.patch.object(transport, "_WINDOWS", True))
 
     async def test_unix_calls_existing_asyncio_api(self):
-        with mock.patch.object(transport, "_WINDOWS", False), mock.patch.object(transport.asyncio, "open_unix_connection", new_callable=mock.AsyncMock) as connect:
+        with mock.patch.object(transport, "_WINDOWS", False), mock.patch.object(transport.asyncio, "open_unix_connection", new_callable=mock.AsyncMock, create=True) as connect:
             connect.return_value = ("reader", "writer")
             self.assertEqual(await transport.open_endpoint("opaque", limit=123), ("reader", "writer"))
             connect.assert_awaited_once_with("opaque", limit=123)

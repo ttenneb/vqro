@@ -7,6 +7,7 @@ from pathlib import Path
 import socket
 import sys
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "extensions"))
@@ -568,16 +569,20 @@ class CancelledWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider._outgoing, 0)
 
     async def test_close_aborts_bytes_left_below_the_high_water_mark(self):
-        provider, _, _ = await self.stalled()
-        # A 30 KB line on a stalled peer: the kernel takes a few KB, the rest stays in the transport buffer
-        # below the 64 KiB high-water mark, so drain() returns at once and no flush is pending at close().
-        publish = asyncio.create_task(provider.call("view.publish", {"view": "agent-r1", "content": {"blob": "x" * 30_000}}))
-        await asyncio.sleep(0.2)
-        transport = provider.writer.transport
-        self.assertEqual(self.pending_drains(), [])
-        self.assertGreater(transport.get_write_buffer_size(), 0)
+        # Kernel buffers differ across platforms: 30 KB may fit entirely on Windows. Model the exact
+        # below-high-water residue rather than relying on a particular socketpair buffer capacity.
+        provider = Provider("pi-x", "instance", {})
+        buffered = [30_000]
+        transport = mock.Mock()
+        transport.get_write_buffer_size.side_effect = lambda: buffered[0]
+        transport.abort.side_effect = lambda: buffered.__setitem__(0, 0)
+        provider.writer = mock.Mock(transport=transport)
+        provider.writer.wait_closed = mock.AsyncMock()
+        provider._reader_task = asyncio.create_task(asyncio.Event().wait())
+        self.assertEqual(provider._flushes, set())
         await provider.close()
-        await asyncio.gather(publish, return_exceptions=True)
+        transport.abort.assert_called_once_with()
+        provider.writer.close.assert_called_once_with()
         self.assertEqual(transport.get_write_buffer_size(), 0, "nothing left buffered after close()")
 
     async def test_close_settles_detached_flushes_when_the_peer_never_resumes(self):

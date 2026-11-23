@@ -2,6 +2,7 @@
 # Copyright 2026 Bennett Garcia
 """Native framing checker inversions, not public qualification."""
 import unittest
+import sys
 import tempfile
 from pathlib import Path
 from agent_conformance.part_b.native_framing_case import (
@@ -28,7 +29,15 @@ class NativeFrames(unittest.TestCase):
             before = module_tree_digest(root)
             path.write_text("second")
             self.assertNotEqual(before, module_tree_digest(root))
-            (Path(root) / "escape").symlink_to("/usr/bin/python3")
+
+    def test_native_module_seal_rejects_symlinks(self):
+        with tempfile.TemporaryDirectory() as root:
+            try:
+                (Path(root) / "escape").symlink_to(sys.executable)
+            except OSError as error:
+                if sys.platform == "win32" and getattr(error, "winerror", None) == 1314:
+                    self.skipTest("Windows symlink fixture requires Developer Mode or symlink privilege")
+                raise
             with self.assertRaises(FixtureFailed):
                 module_tree_digest(root)
 

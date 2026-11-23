@@ -32,7 +32,7 @@ class CausalShapes(unittest.TestCase):
             self.assertEqual(caught.exception.kind, "invalid")
 
     def test_unicode_format_vectors_rejected_in_known_links_only(self):
-        vectors = json.loads((Path(__file__).parent / "fixtures/text_controls.json").read_text())
+        vectors = json.loads((Path(__file__).parent / "fixtures/text_controls.json").read_text(encoding="utf-8"))
         self.assertEqual([list(pair) for pair in _FORMAT_RANGES], vectors["format_ranges"])
         count = 0
         for first, last in vectors["format_ranges"]:

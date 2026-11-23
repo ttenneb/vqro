@@ -17,12 +17,8 @@ import tier1_run  # noqa: E402
 from agent_fixture import FakeCore  # noqa: E402
 from vqro_ext import VqroError  # noqa: E402
 
-HOOK = """#!/bin/sh
-case "$1" in
-  declaration) echo '{"pull": {"points": {"turn": {"precision": "exact"}, "idle": {"precision": "approximate"}}, "insert": "context", "evidence": "none"}}' ;;
-  settings) echo '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "'"$2"'", "args": ["hook"]}]}]}}' ;;
-esac
-"""
+PULL = {"points": {"turn": {"precision": "exact"}, "idle": {"precision": "approximate"}},
+        "insert": "context", "evidence": "none"}
 
 
 class Tier1Tests(unittest.TestCase):
@@ -34,8 +30,15 @@ class Tier1Tests(unittest.TestCase):
         self.env = patch.dict(os.environ, {"HOME": str(self.home), "VQRO_STATE_DIR": str(self.state)})
         self.env.start()
         self.hook = root / "vqro-claude-hook"
-        self.hook.write_text(HOOK)
-        self.hook.chmod(0o755)
+        self.hook.write_text("import json, sys\n"
+            f"pull = {PULL!r}\n"
+            "value = {'pull': pull} if sys.argv[1] == 'declaration' else "
+            "{'hooks': {'Stop': [{'hooks': [{'type': 'command', 'command': sys.argv[2], 'args': ['hook']}]}]}}\n"
+            "print(json.dumps(value))\n", encoding="utf-8")
+        run_hook = tier1.Tier1.run
+        def hook_output(argv):
+            self.assertEqual(argv[0], str(self.hook))
+            return run_hook([sys.executable, *argv])
         self.core = FakeCore("tier1")
         self.core.make_agent = False
         self.coord_calls, self.refuse = [], set()
@@ -54,6 +57,7 @@ class Tier1Tests(unittest.TestCase):
             return original(name, args)
         self.core.invoke = invoke
         self.ext = tier1.Tier1(self.core)
+        self.ext.run = hook_output  # Instance-local: other suites also reuse this fixture directly.
 
     def tearDown(self):
         self.env.stop()
@@ -77,9 +81,10 @@ class Tier1Tests(unittest.TestCase):
         self.assertEqual(argv[4], "--settings")
         settings = Path(argv[5])
         self.assertEqual(settings.parent, self.state / "tier1")
-        self.assertEqual(stat.S_IMODE(settings.stat().st_mode), 0o600)
-        self.assertEqual(stat.S_IMODE(settings.parent.stat().st_mode), 0o700)
-        self.assertEqual(json.loads(settings.read_text())["hooks"]["Stop"][0]["hooks"][0]["command"], str(self.hook))
+        if sys.platform != "win32":  # Windows ACLs are not POSIX mode bits.
+            self.assertEqual(stat.S_IMODE(settings.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(settings.parent.stat().st_mode), 0o700)
+        self.assertEqual(json.loads(settings.read_text(encoding="utf-8"))["hooks"]["Stop"][0]["hooks"][0]["command"], str(self.hook))
         nonce = spawn["env"]["VQRO_TIER1_LAUNCH"]
         self.assertRegex(spawn["env"]["VQRO_PRINCIPAL"], r"^p:[0-9a-f]{32}$")
         self.assertEqual(set(spawn["env"]), {"VQRO_PRINCIPAL", "VQRO_TIER1_LAUNCH"})

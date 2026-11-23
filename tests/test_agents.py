@@ -54,7 +54,7 @@ class AgentsTests(unittest.TestCase):
         self.assertNotIn("agents.settings", self.core.handlers)
         self.assertNotIn("binding/agents.new", self.core.entries)
         self.assertEqual(self.native(), [])
-        source = (EXT / "agents.py").read_text()
+        source = (EXT / "agents.py").read_text(encoding="utf-8")
         self.assertNotIn("pi_bridge", source)
         self.assertNotIn("pi1", source)
         self.assertNotIn("resource.spawn", source)

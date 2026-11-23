@@ -14,9 +14,9 @@ class Links(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         self.record = os.path.join(self.dir.name, "opened")
         opener = os.path.join(self.dir.name, "opener")
-        with open(opener, "w") as f:
-            f.write(f"#!/bin/sh\nprintf '%s\\n' \"$@\" >> {self.record}\n")
-        os.chmod(opener, 0o755)
+        with open(opener, "w", encoding="utf-8") as f:
+            f.write("import sys\nwith open(sys.argv[1], 'a', encoding='utf-8') as out:\n"
+                    "    out.write(''.join(arg + '\\n' for arg in sys.argv[2:]))\n")
         os.makedirs(os.path.join(self.dir.name, "src"))
         open(os.path.join(self.dir.name, "src", "main.rs"), "w").close()
         self.core = Core()
@@ -25,7 +25,7 @@ class Links(unittest.TestCase):
             {"op": "set", "key": "view/term-r0", "value": {"kind": "terminal", "resource": "r0"}},
             {"op": "set", "key": "layout/main", "value": {"tabs": [{"title": "sh", "node": {"view": "term-r0"}}], "active": 0}},
             {"op": "set", "key": "workspace/active", "value": {"layout": "main"}},
-            {"op": "set", "key": "doc/settings/links", "value": {"opener": [opener], "editor": ["myedit", "--flag"]}}], "setup")
+            {"op": "set", "key": "doc/settings/links", "value": {"opener": [sys.executable, opener, self.record], "editor": ["myedit", "--flag"]}}], "setup")
         mods = load(self.core, "panes", "links")
         self.core.vqro.call = self.call_through(self.core.call)
         self.mods = mods
@@ -48,7 +48,7 @@ class Links(unittest.TestCase):
     def opened(self):
         for _ in range(50):
             if os.path.exists(self.record):
-                with open(self.record) as f:
+                with open(self.record, encoding="utf-8") as f:
                     return f.read().split("\n")[:-1]
             time.sleep(0.05)
         return None
@@ -57,6 +57,11 @@ class Links(unittest.TestCase):
         out = self.core.handlers["links.open"]({"context": self.ctx({"kind": "url", "text": "https://example.org/zz"})})
         self.assertEqual(out["opened"], "https://example.org/zz")
         self.assertEqual(self.opened(), ["https://example.org/zz"])
+
+    def test_a_non_ascii_url_reaches_the_python_opener_unchanged(self):
+        url = "https://example.org/café/λ"
+        self.core.handlers["links.open"]({"context": self.ctx({"kind": "url", "text": url})})
+        self.assertEqual(self.opened(), [url])
 
     def test_a_relative_file_opens_in_an_editor_split_at_its_line(self):
         out = self.core.handlers["links.open"]({"context": self.ctx({"kind": "path", "text": "src/main.rs", "line": 12, "column": 5})})

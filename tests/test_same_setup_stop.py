@@ -13,7 +13,7 @@ import subprocess
 from types import SimpleNamespace
 import unittest
 
-SOURCE = (Path(__file__).resolve().parent / "e2e_same_setup.py").read_text()
+SOURCE = (Path(__file__).resolve().parent / "e2e_same_setup.py").read_text(encoding="utf-8")
 PROVIDER, SERVER, PANE = 11, 22, 33
 
 
