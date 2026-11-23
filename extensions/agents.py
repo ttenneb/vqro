@@ -982,16 +982,20 @@ class Agents:
         """Native applicability travels with the panel, never through per-turn workspace writes."""
         facts = agent_facts(r)
         available = r.get("available") is True and not ended(r) and facts.get("lifecycle") != "ended"
-        if facts:
+        # Legacy runtimes also publish data.agent config/commands; choose facts by the declared op,
+        # not by that object's presence (the same dispatch rule as the action handler).
+        if self.v0(r, "interrupt"):
             incomplete = facts.get("incomplete") if isinstance(facts.get("incomplete"), list) else []
             working = (facts.get("lifecycle") == "live" and facts.get("state") == "running"
                        and not any(field in incomplete for field in ("state", "lifecycle")))
+        else:
+            legacy = r.get("status") if isinstance(r.get("status"), dict) else {}
+            working = legacy.get("state") in ("working", "running")
+        if self.v0(r, "queue"):
             queue = facts.get("queue")
             queued = isinstance(queue, list) and any(isinstance(item, dict) and isinstance(item.get("mode"), str)
                                                     and bool(item["mode"]) for item in queue)
         else:
-            legacy = r.get("status") if isinstance(r.get("status"), dict) else {}
-            working = legacy.get("state") in ("working", "running")
             queues = data(r).get("queues")
             queued = isinstance(queues, dict) and any(isinstance(queues.get(key), list)
                 and any(isinstance(item, str) for item in queues[key]) for key in ("steering", "follow_up"))

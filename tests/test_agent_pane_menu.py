@@ -83,6 +83,15 @@ class AgentPaneMenu(unittest.TestCase):
         self.assertFalse(flags['agent_working'])
         self.assertFalse(flags['agent_queued'])
 
+    def test_v0_unknown_facts_do_not_fall_back_to_legacy_fields(self):
+        self.r['data']['agent'].pop('state')
+        self.r['data']['agent'].pop('queue')
+        self.r['status'] = {'state': 'working'}
+        self.r['data']['queues'] = {'steering': ['stale legacy value']}
+        flags = self.agents.pane_menu_flags(self.r)
+        self.assertFalse(flags['agent_working'])
+        self.assertFalse(flags['agent_queued'])
+
     def test_forget_matches_handler_availability_not_resource_state(self):
         for state in ('live', 'finished'):
             self.r['state'] = state
@@ -95,7 +104,9 @@ class AgentPaneMenu(unittest.TestCase):
     def test_old_clients_hide_conditional_actions_and_legacy_native_facts_work(self):
         self.assertFalse(any(m['command'] in ('agents.abort', 'agents.clear_queue', 'agents.forget')
                              for m in self.menu(supports_context=False)))
-        self.r['data'] = {'queues': {'steering': ['native queued'], 'follow_up': []}}
+        # The actual legacy Pi profile publishes a v:0 config object, but no v0 interrupt/queue ops.
+        self.r['data'] = {'agent': {'v': 0, 'config': []},
+                          'queues': {'steering': ['native queued'], 'follow_up': []}}
         self.core.providers['other']['capabilities'] = {'agent.abort': {}, 'agent.clear_queue': {}}
         self.r['status'] = {'state': 'working'}
         self.assertTrue(self.agents.pane_menu_flags(self.r)['agent_working'])
