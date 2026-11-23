@@ -144,9 +144,8 @@ class CheckTests(unittest.TestCase):
         body = '\n'.join(['set -u', 'CHECK_SYSTEM=Darwin', 'TARGET=$HOME/target',
                           'command -v tmux && exit 49', arrays,
                           '"${CLEAN[@]}" bash -c \'printf "%s\\n" "$BASH"\''])
-        # The Python directories precede the selected Bash on CLEAN PATH, so they must not hold a bash of their own:
-        # with the inherited sys.executable in /usr/bin, /usr/bin/bash won and the result depended on how the suite
-        # was started. A private directory holding only python3 keeps this about Bash selection.
+        # A private directory holding only python3 keeps this about Bash selection; a bash beside the chosen Python
+        # is covered by the shadow test below.
         python_dir = self.root/'selected-python'
         python_dir.mkdir()
         (python_dir/'python3').symlink_to(sys.executable)
@@ -155,6 +154,32 @@ class CheckTests(unittest.TestCase):
         result = subprocess.run([str(tools/'bash'), '-c', body], env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), str(tools/'bash'))
+
+    def test_non_linux_clean_path_selected_bash_wins_over_one_beside_python(self):
+        tools = self.root/'selected-bash'
+        tools.mkdir()
+        (tools/'bash').symlink_to(BASH)
+        for name in ('env', 'dirname'):
+            (tools/name).symlink_to('/usr/bin/' + name)
+        # The chosen Python's directory also holds an older bash (e.g. /usr/local/bin): it must not shadow the selection.
+        python_dir = self.root/'python-with-old-bash'
+        python_dir.mkdir()
+        (python_dir/'python3').symlink_to(sys.executable)
+        shadow = python_dir/'bash'
+        shadow.write_text('#!/bin/sh\necho shadowed\n')
+        shadow.chmod(0o700)
+        private = self.root/'python-bin'
+        private.mkdir()
+        (private/'python3').symlink_to(sys.executable)
+        arrays = SOURCE[SOURCE.index('CARGO=(env'):SOURCE.index('STEPS=$LOGS/steps.tsv')]
+        for system, expected in (('Darwin', str(tools/'bash')), ('Linux', 'shadowed')):
+            body = '\n'.join(['set -u', f'CHECK_SYSTEM={system}', 'TARGET=$HOME/target', arrays,
+                              '"${CLEAN[@]}" bash -c \'printf "%s\\n" "$BASH"\''])
+            env = dict(self.env, PATH=str(tools), VQRO_PYTHON=str(python_dir/'python3'), PYTHON_BIN=str(private))
+            result = subprocess.run([str(tools/'bash'), '-c', body], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, system + ': ' + result.stdout + result.stderr)
+            # Linux keeps its pinned order (Python directories, then /usr/bin:/bin); only other systems put Bash first.
+            self.assertEqual(result.stdout.strip(), expected, system)
 
     def test_zig_reaches_clean_build_arrays_and_windows_cross_check(self):
         fake = self.root/'bin'

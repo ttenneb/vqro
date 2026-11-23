@@ -95,12 +95,14 @@ CARGO=(env -i HOME="$HOME" PATH="$PATH" VQRO_PYTHON="$VQRO_PYTHON" CARGO_TARGET_
 CLEAN_PATH=/usr/bin:/bin
 # Portable suites may resolve tmux from PATH (e.g. Homebrew); pinned Linux harnesses do not.
 if [ "$CHECK_SYSTEM" != Linux ]; then
-  # Keep the interpreter that passed bootstrap discoverable even without optional tmux.
-  CLEAN_PATH="$(dirname "$BASH"):$CLEAN_PATH"
   CHECK_TMUX=$(command -v tmux || :)
   if [ -n "$CHECK_TMUX" ]; then CLEAN_PATH="$(dirname "$CHECK_TMUX"):$CLEAN_PATH"; fi
 fi
-CLEAN_PATH="$PYTHON_BIN:$(dirname "$VQRO_PYTHON"):$CLEAN_PATH"
+CLEAN_PATH="$(dirname "$VQRO_PYTHON"):$CLEAN_PATH"
+# Keep the Bash that passed bootstrap first (even without optional tmux), so an older bash beside the chosen Python
+# or tmux can never shadow it. Only PYTHON_BIN, private and holding python3 alone, precedes it.
+if [ "$CHECK_SYSTEM" != Linux ]; then CLEAN_PATH="$(dirname "$BASH"):$CLEAN_PATH"; fi
+CLEAN_PATH="$PYTHON_BIN:$CLEAN_PATH"
 CLEAN=(env -i HOME="$HOME" PATH="$CLEAN_PATH" VQRO_PYTHON="$VQRO_PYTHON")
 # An explicit compiler selection must survive every clean build environment.
 if [ -n "${ZIG:-}" ]; then CARGO+=("ZIG=$ZIG"); CLEAN+=("ZIG=$ZIG"); fi
