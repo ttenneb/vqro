@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! Launcher assignment is core-owned resource metadata, not a child/provider identity assertion.
 use serde_json::{json,Value};
 use std::sync::{Arc,Mutex};

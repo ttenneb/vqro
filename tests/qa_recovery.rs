@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! Regressions from the independent foundation review. Private fake adapters/sockets only.
 use std::time::Duration;
 use vqro::{adapter::{AdapterCmd, AdapterHandle, ResourceFacts, Stream, StreamInput}, client, core::Core, queue, server::{self, Backend}, store::Store};

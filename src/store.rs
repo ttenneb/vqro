@@ -4,8 +4,9 @@
 //! a list of operations that is validated against the resulting state and applied all-or-nothing,
 //! recorded with its author, persisted atomically, and revertible.
 //!
-//! Success means the candidate file and its containing directory have been synced. Before rename,
-//! persistence failure leaves memory and history untouched. After rename, a directory-sync failure
+//! Success means the platform's durable publication completed: file + containing-directory sync on Unix,
+//! or file flush + write-through replacement on Windows. Before replacement, persistence failure leaves
+//! memory and history untouched. After a Unix rename, a directory-sync failure
 //! adopts the candidate (the file already names it) but returns `durability_unconfirmed`, with the
 //! transaction id in error data. Callers must publish that adopted change, report the uncertainty,
 //! and never replay it automatically. A restart after a crash may recover either state.
@@ -226,16 +227,42 @@ impl Recovery {
 }
 
 // Back up raw source bytes, not a sanitized re-encoding. Failure never replaces the original.
+#[cfg(unix)]
 fn backup_quarantine(path:&Path)->std::io::Result<PathBuf> {
     let parent=path.parent().filter(|p|!p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     // Same private0600/exclusive tempfile mechanism as durable workspace replacement.
     let mut backup=tempfile::Builder::new().prefix("workspace.quarantine-").suffix(".json").tempfile_in(parent)?;
     std::io::copy(&mut std::fs::File::open(path)?,&mut backup)?;
+    #[cfg(windows)]
+    clear_temporary_attribute(backup.path())?;
     backup.as_file().sync_all()?;
     // The exclusive final pathname already exists; keep only disarms tempfile cleanup.
     // If the directory barrier fails, the guard removes our copy and the original is untouched.
+    #[cfg(unix)]
     std::fs::File::open(parent)?.sync_all()?;
     let (_file,backup)=backup.keep().map_err(|error|error.error)?;
+    Ok(backup)
+}
+
+#[cfg(windows)]
+fn backup_quarantine(path: &Path) -> std::io::Result<PathBuf> {
+    backup_quarantine_with_publish(path, move_file_write_through)
+}
+
+// Private publication seam: Linux tests can refuse the Windows barrier without native API effects.
+#[cfg(any(windows, test))]
+fn backup_quarantine_with_publish(path: &Path, publish: impl FnOnce(&Path, &Path) -> std::io::Result<()>) -> std::io::Result<PathBuf> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    // Reserve a unique final name and retain its guard until publication succeeds. The copy is
+    // staged separately: merely syncing the final file is not a publication barrier on Windows.
+    let backup = tempfile::Builder::new().prefix("workspace.quarantine-").suffix(".json").tempfile_in(parent)?;
+    let mut staged = tempfile::Builder::new().prefix(".vqro-").tempfile_in(parent)?;
+    std::io::copy(&mut std::fs::File::open(path)?, &mut staged)?;
+    #[cfg(windows)]
+    clear_temporary_attribute(staged.path())?;
+    staged.as_file().sync_all()?;
+    publish(staged.path(), backup.path())?;
+    let (_file, backup) = backup.keep().map_err(|error| error.error)?;
     Ok(backup)
 }
 
@@ -553,14 +580,22 @@ pub fn create_dir_all_durable(path: &Path) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {}
         Err(e) => return Err(e),
     }
-    std::fs::File::open(path)?.sync_all()?;
-    std::fs::File::open(parent)?.sync_all()
+    #[cfg(unix)]
+    {
+        std::fs::File::open(path)?.sync_all()?;
+        std::fs::File::open(parent)?.sync_all()
+    }
+    // Windows has no directory fsync; file publication uses a write-through move below.
+    #[cfg(windows)]
+    { Ok(()) }
 }
 
+#[cfg(unix)]
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AtomicWriteError> {
     write_atomic_with_sync(path, bytes, |dir| dir.sync_all())
 }
 
+#[cfg(unix)]
 fn write_atomic_with_sync(path: &Path, bytes: &[u8], sync_dir: impl FnOnce(&std::fs::File) -> std::io::Result<()>) -> Result<(), AtomicWriteError> {
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     create_dir_all_durable(dir)?;
@@ -572,6 +607,52 @@ fn write_atomic_with_sync(path: &Path, bytes: &[u8], sync_dir: impl FnOnce(&std:
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| e.error)?;
     sync_dir(&directory).map_err(|source| AtomicWriteError { renamed: true, source })
+}
+
+#[cfg(windows)]
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AtomicWriteError> {
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    create_dir_all_durable(dir)?;
+    let mut tmp = tempfile::Builder::new().prefix(".vqro-").tempfile_in(dir)?;
+    tmp.write_all(bytes)?;
+    clear_temporary_attribute(tmp.path())?;
+    tmp.as_file().sync_all()?;
+    // Retain the cleanup guard until the move succeeds. No fallible operation follows adoption.
+    move_file_write_through(tmp.path(), path)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_file_path(path: &Path) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut value: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if value.contains(&0) { return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "file path contains NUL")); }
+    value.push(0);
+    Ok(value)
+}
+
+#[cfg(windows)]
+fn clear_temporary_attribute(path: &Path) -> std::io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_ATTRIBUTE_NORMAL};
+    let path = windows_file_path(path)?;
+    // Match tempfile's persist/keep: a published file must no longer be marked temporary.
+    // SAFETY: path is a live NUL-terminated UTF-16 buffer for our exclusive tempfile.
+    if unsafe { SetFileAttributesW(path.as_ptr(), FILE_ATTRIBUTE_NORMAL) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn move_file_write_through(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+    let source = windows_file_path(source)?;
+    let destination = windows_file_path(destination)?;
+    // SAFETY: both buffers are live, NUL-terminated UTF-16 paths. No delayed or cross-volume move.
+    // WRITE_THROUGH does not return until the file is moved on disk (Microsoft MoveFileExW docs).
+    let moved = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
+    if moved == 0 { return Err(std::io::Error::last_os_error()); }
+    Ok(())
 }
 
 pub fn now_ms() -> u64 {
@@ -866,6 +947,7 @@ mod tests {
         assert_eq!(Store::open(path).unwrap().entries, s.entries);
     }
 
+    #[cfg(unix)]
     #[test]
     fn directory_sync_failure_adopts_candidate_and_reports_uncertainty() {
         let dir = tempfile::tempdir().unwrap();
@@ -906,6 +988,67 @@ mod tests {
         write_atomic(&path, b"committed").unwrap();
         assert_eq!(std::fs::read(path).unwrap(), b"committed");
         assert_eq!(std::fs::read(legacy).unwrap(), b"not ours");
+    }
+
+    #[test]
+    fn quarantine_backup_requires_publication_barrier_before_original_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("workspace.json");
+        let raw = b"raw unsafe state, not a sanitized re-encoding";
+        std::fs::write(&original, raw).unwrap();
+        let error = backup_quarantine_with_publish(&original, |staged, destination| {
+            assert_ne!(staged, destination, "syncing the final name alone is not publication");
+            assert_eq!(std::fs::read(staged).unwrap(), raw);
+            assert_eq!(std::fs::read(&original).unwrap(), raw);
+            Err(std::io::Error::other("fake write-through publication failure"))
+        }).unwrap_err();
+        assert!(error.to_string().contains("publication failure"));
+        assert_eq!(std::fs::read(&original).unwrap(), raw);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "failed publication removes only its backup and staging guards");
+        let backup = backup_quarantine_with_publish(&original, |staged, destination| {
+            assert_eq!(std::fs::read(&original).unwrap(), raw);
+            std::fs::rename(staged, destination) // powerless substitute for MoveFileExW
+        }).unwrap();
+        std::fs::write(&original, b"replacement after confirmed backup").unwrap();
+        assert_eq!(std::fs::read(backup).unwrap(), raw);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_replace_with_open_delete_shared_reader() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("工作.json");
+        write_atomic(&path, b"original").unwrap();
+        // Rust's default share mode includes FILE_SHARE_DELETE.
+        let mut reader = std::fs::File::open(&path).unwrap();
+        write_atomic(&path, b"replacement").unwrap();
+        let mut original = Vec::new();
+        reader.read_to_end(&mut original).unwrap();
+        assert_eq!(original, b"original");
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        use std::os::windows::fs::MetadataExt;
+        assert_eq!(std::fs::metadata(&path).unwrap().file_attributes() & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_TEMPORARY, 0);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_sharing_violation_preserves_original_and_cleans_temp() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ws.json");
+        write_atomic(&path, b"original").unwrap();
+        let reader = std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(&path).unwrap();
+        let error = write_atomic(&path, b"candidate").unwrap_err();
+        assert!(!error.renamed);
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        drop(reader);
+        write_atomic(&path, b"committed").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"committed");
     }
 
     #[test]

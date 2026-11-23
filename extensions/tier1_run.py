@@ -12,18 +12,17 @@ inert, and one line says why: the human is never blocked. Stdlib only; no state 
 """
 import json
 import os
-import socket
 import sys
 import time
+
+from vqro_transport import connect_endpoint
 
 DEADLINE_S = 10
 
 
 class Core:
     def __init__(self, path):
-        self.sock = socket.socket(socket.AF_UNIX)
-        self.sock.settimeout(3)
-        self.sock.connect(path)
+        self.sock = connect_endpoint(path, timeout=3)
         self.file = self.sock.makefile("rw", encoding="utf-8")
         self.next = 0
         principal = os.environ.get("VQRO_PRINCIPAL")

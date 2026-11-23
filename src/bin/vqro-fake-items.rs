@@ -113,7 +113,7 @@ async fn main() {
     let mut config = Config::new(name, instance.clone(), caps);
     config.max_item_streams = arg("--max-item-streams", "1024").parse().unwrap();
     let endpoint = std::env::var("VQRO_SOCKET").expect("VQRO_SOCKET");
-    let sock = tokio::net::UnixStream::connect(&endpoint).await.expect("core");
+    let sock = vqro::transport::connect(&endpoint).await.expect("core");
     let (provider, mut requests) = Provider::connect(sock, config).await.expect("register");
     let facts: Vec<Value> = (0..n).map(|i| json!({"ref": format!("a{i}"), "incarnation": instance, "kind": "agent", "state": "live",
         "name": format!("fake-agent-{i}"), "data": {"items": cfg.facts()}})).collect();

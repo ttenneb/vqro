@@ -17,8 +17,9 @@ impl Fallback {
     pub fn tty()->Self{
         if unsafe{libc::isatty(1)}!=1{return Self::default();}
         // Raw writes never hold Rust's global stdout lock. A stalled terminal cannot block the native
-        // reader or process shutdown; this detached thread is deliberately never joined on exit.
-        Self::writer(|bytes|{let mut at=0;while at<bytes.len(){let n=unsafe{libc::write(1,bytes[at..].as_ptr().cast(),bytes.len()-at)};if n>0{at+=n as usize;}else if std::io::Error::last_os_error().kind()!=std::io::ErrorKind::Interrupted{return false;}}true})
+        // reader or process shutdown; this detached thread is deliberately never joined on exit. (On Windows these are
+        // the C runtime's `_isatty`/`_write`, whose count is 32-bit.)
+        Self::writer(|bytes|{let mut at=0;while at<bytes.len(){let n=unsafe{libc::write(1,bytes[at..].as_ptr().cast(),(bytes.len()-at).min(i32::MAX as usize) as _)};if n>0{at+=n as usize;}else if std::io::Error::last_os_error().kind()!=std::io::ErrorKind::Interrupted{return false;}}true})
     }
     #[cfg(test)]
     #[allow(dead_code)] // Used by the separately compiled pi_panel integration test.

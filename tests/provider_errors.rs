@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! Wire provider errors reach callers with the right certainty (provider-v0 9.1, 9.4): protocol errors
 //! mean no effect (outcome rejected, the provider's kind); a provider's `backend` error stays
 //! indeterminate. A real in-process core, with vqro::provider_client as the provider.

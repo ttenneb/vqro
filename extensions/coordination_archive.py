@@ -33,6 +33,9 @@ def verify(locator, expected):
 
 
 def export(destination, archive, records):
+    # Do not claim durable evidence without confirming the new directory entry.
+    if os.name == "nt":
+        raise OSError("archive export is not supported on native Windows yet; source evidence retained")
     directory = Path(destination)
     if not directory.is_absolute() or not directory.is_dir():
         raise ValueError("archive destination must be an explicit existing absolute directory")

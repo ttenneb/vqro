@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! A healthy wire-provider connection must not exhaust a lifetime effect-id ledger.
 use std::time::Duration;
 use vqro::{client, provider_client::{Config, Outcome, Provider, Request}, server::{self, Backend}};

@@ -12,6 +12,7 @@ import os
 import re
 import unicodedata
 import vqro_ext  # managed extension lifetime watcher
+from vqro_transport import open_endpoint
 
 MAX_RECORD = 1048576
 MAX_DATA = 65536
@@ -289,7 +290,7 @@ class Provider:
         if sock is not None:
             self.reader, self.writer = await asyncio.open_connection(sock=sock, limit=MAX_RECORD + 1)
         else:
-            self.reader, self.writer = await asyncio.open_unix_connection(path or os.environ["VQRO_SOCKET"], limit=MAX_RECORD + 1)
+            self.reader, self.writer = await open_endpoint(path or os.environ["VQRO_SOCKET"], limit=MAX_RECORD + 1)
         self._reader_task = asyncio.create_task(self._read())
         try:
             await self.call("hello", {"extension": os.environ.get("VQRO_EXTENSION", self.name), "extension_token": os.environ.get("VQRO_EXTENSION_TOKEN")})

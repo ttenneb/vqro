@@ -435,6 +435,7 @@ class OriginRoute:
         if not sdk.is_file():
             raise HarnessGap("D17 callback requires the harness checkout's public Python SDK")
         shutil.copyfile(sdk, directory / "vqro_ext.py")
+        shutil.copyfile(sdk.with_name("vqro_transport.py"), directory / "vqro_transport.py")
         script = directory / "callback.py"
         script.write_text(CALLBACK_SOURCE)
         await self.create("extension/coord", {"enabled": True, "argv": [sys.executable, str(script)]})
@@ -464,6 +465,7 @@ class OriginRoute:
         self.ctx.evidence.append({"kind": "D17_public_callback", "actor": self.actor,
                                   "principals": self.principals, "worker": self.worker.core_origin,
                                   "sdk_sha256": hashlib.sha256((directory / "vqro_ext.py").read_bytes()).hexdigest(),
+                                  "transport_sha256": hashlib.sha256((directory / "vqro_transport.py").read_bytes()).hexdigest(),
                                   "fixture_sha256": hashlib.sha256(CALLBACK_SOURCE.encode()).hexdigest(),
                                   "sender_scope": "extension-asserted input; upstream inbox persistence not certified"})
 

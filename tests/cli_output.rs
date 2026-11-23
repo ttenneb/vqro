@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! CLI plumbing and bounded diagnostics. Only private fake endpoints.
 use std::{io::BufRead,process::Stdio};
 use vqro::rpc::{Incoming,Peer,RpcError};

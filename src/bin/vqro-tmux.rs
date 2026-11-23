@@ -764,6 +764,12 @@ mod platform_tests {
 }
 
 fn main() {
+    // tmux has no native Windows build (only WSL, Cygwin or MSYS2). Say so and stop; never reach into WSL or emulate
+    // (D14). vqro running inside WSL is a Linux build and takes the normal path.
+    if cfg!(windows) {
+        eprintln!("vqro-tmux: tmux is not available on native Windows; run vqro inside WSL to use the tmux backend");
+        std::process::exit(1);
+    }
     let argv: Vec<String> = std::env::args().collect();
     let server_command = argv.get(1).map(String::as_str) == Some("server");
     // The status helper is polled: it needs no multi-thread worker pool. Keep the provider's
@@ -855,7 +861,7 @@ async fn registration(a: &Args, endpoint: &str, socket: &PathBuf) -> Result<(), 
         std::process::Command::new(&a.tmux).arg("-V").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).map_err(|e| e.to_string())
     });
     pconfig.software = json!({"name": "tmux", "version": version.unwrap_or_default().trim().trim_start_matches("tmux ")});
-    let stream = tokio::net::UnixStream::connect(endpoint).await.map_err(|e| format!("cannot reach the core: {e}"))?;
+    let stream = vqro::transport::connect(endpoint).await.map_err(|e| format!("cannot reach the core: {e}"))?;
     let (provider, mut requests) = Provider::connect(stream, pconfig).await.map_err(|e| e.to_string())?;
 
     let app = Arc::new(App {

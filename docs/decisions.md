@@ -312,6 +312,7 @@ have no chooser checkbox. Open: the exact `provider.relay` mapping.
   platform's connect call and never parse it. Messages are LF-delimited JSON-RPC in binary mode. Relays
   (`provider.relay`) carry this byte stream, never a path or handle. Stdlib Python on Windows, which lacks `AF_UNIX`,
   uses `asyncio`'s proactor pipe connection.
+  (2026-11-22, vqro-lead: synchronous Python uses overlapped pipe I/O; asyncio callers use the proactor.)
 - **Stopping the core.** `core.shutdown` (and the built-in recovery command `prim.shutdown`) stops the core in
   order: extensions, connections, endpoint, exit. `prim stop` uses it. Pidfiles and signals are not part of the
   contract; Ctrl-C and SIGTERM remain extra local ways to run the same stop.
@@ -325,6 +326,31 @@ after.
 3, 6 and 9). `core.shutdown` and `prim.shutdown` are implemented, including commit/reply draining. CLI stop is
 protocol-first with a legacy no-answer signal fallback. Windows named-pipe transport and `prim_ext.py` on Windows
 remain implementation work; confirmation of the contract is not a claim that Windows is implemented.
+
+### D22 refinement: handle-bound owner identity and local Windows names (2026-11-22, Lead-approved)
+
+**Decision.** On Windows the endpoint is opaque **within the local pipe namespace**: accept only `\\.\pipe\<name>`
+(case-insensitive ASCII prefix, non-empty name, no further backslash or embedded NUL); reject remote UNC, device and
+file paths before opening, without normalization or fallback. Unix behavior is unchanged. Every server instance
+explicitly sets `O:<TokenUser SID>` plus its protected user-only DACL. Before writing anything, every client checks
+pipe type/client end and the connected object's owner via `GetSecurityInfo(..., OWNER_SECURITY_INFORMATION)`:
+require exact equality with the client's TokenUser SID. Any query failure, other-user owner or group owner refuses.
+Server PID followed by OpenProcess is not identity proof and is removed.
+
+**Boundary and accepted residual.** Same-user processes are trusted, not a particular executable; no broadening to
+an Administrators/shared owner group. Privileged administrators, including holders of SeRestorePrivilege or
+SeTakeOwnershipPrivilege, are outside this boundary. SeRestorePrivilege permits arbitrary valid owner SIDs;
+SeTakeOwnershipPrivilege by itself permits only legitimately assignable owner values. No claim is made that it
+alone can set any user's SID. Windows documents normal owner validity as TokenUser or a token group with
+SE_GROUP_OWNER (not deny-only); this implementation deliberately accepts only TokenUser.
+
+**Evidence.** [GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo)
+returns the owner from the connected object's security descriptor;
+[owner-validity rules](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createprivateobjectsecurityex)
+and [privilege definitions](https://learn.microsoft.com/en-us/windows/win32/secauthz/privilege-constants), with
+Microsoft's [ownership-rights explanation](https://devblogs.microsoft.com/oldnewthing/20050818-09/?p=34533), define
+the assignment/residual boundary. Native cross-user/privilege enforcement remains separately unverified; mocks and
+cross-compilation establish source rules, not Windows-kernel certification.
 
 ## D23. Multi-machine stays cheap, and no backend-specific remote transport (2026-11-17)
 

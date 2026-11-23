@@ -24,6 +24,9 @@ fn zig_target(target: &str) -> &str {
         "aarch64-apple-darwin" => "aarch64-macos",
         "x86_64-pc-windows-msvc" => "x86_64-windows-msvc",
         "aarch64-pc-windows-msvc" => "aarch64-windows-msvc",
+        "x86_64-pc-windows-gnu" => "x86_64-windows-gnu",
+        "aarch64-pc-windows-gnullvm" => "aarch64-windows-gnu",
+        "x86_64-pc-windows-gnullvm" => "x86_64-windows-gnu",
         other => panic!("unsupported target for libghostty-vt: {other}"),
     }
 }
@@ -53,7 +56,8 @@ fn wanted_zig(vendored: &std::path::Path) -> String {
 fn find_zig(vendored: &std::path::Path) -> String {
     let wanted = wanted_zig(vendored);
     let version = |zig: &str| Command::new(zig).arg("version").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-    let local = env::var("HOME").ok().map(|home| format!("{home}/.local/zig-{wanted}/zig"))
+    let exe = if cfg!(windows) { "zig.exe" } else { "zig" };
+    let local = home().map(|home| home.join(".local").join(format!("zig-{wanted}")).join(exe).display().to_string())
         .filter(|local| version(local).as_deref() == Some(wanted.as_str()));
     if let Ok(zig) = env::var("ZIG") {
         // An explicit choice is never replaced silently: a wrong version stops the build and says what would work.
@@ -74,14 +78,21 @@ fn find_zig(vendored: &std::path::Path) -> String {
     local.unwrap_or_else(|| "zig".into())
 }
 
+/// The build host's home: `HOME`, else (Windows, where it is usually unset) `USERPROFILE`.
+fn home() -> Option<PathBuf> {
+    ["HOME", "USERPROFILE"].iter().find_map(|v| env::var_os(v).filter(|d| !d.is_empty())).map(PathBuf::from)
+}
+
 /// Where Zig keeps fetched packages: `LIBGHOSTTY_VT_ZIG_PKG_DIR`, else the user's cache (`XDG_CACHE_HOME`, else
-/// `~/.cache`) under `vqro/zig-pkg`, else (no home) the build's own out dir.
+/// `%LOCALAPPDATA%` on a Windows host, else `~/.cache`) under `vqro/zig-pkg`, else (no home) the build's own out dir.
 fn pkg_dir() -> PathBuf {
     if let Ok(dir) = env::var("LIBGHOSTTY_VT_ZIG_PKG_DIR") { return dir.into(); }
+    let local_app_data = if cfg!(windows) { env::var_os("LOCALAPPDATA").filter(|d| !d.is_empty()).map(PathBuf::from) } else { None };
     let cache = env::var("XDG_CACHE_HOME").ok().filter(|d| !d.is_empty()).map(PathBuf::from)
-        .or_else(|| env::var("HOME").ok().map(|h| PathBuf::from(h).join(".cache")));
+        .or(local_app_data)
+        .or_else(|| home().map(|h| h.join(".cache")));
     match cache {
-        Some(cache) => cache.join("vqro/zig-pkg"),
+        Some(cache) => cache.join("vqro").join("zig-pkg"),
         None => PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("zig-pkg"),
     }
 }
@@ -146,7 +157,12 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", lib.display());
     if target.contains("apple-darwin") {
         println!("cargo:rustc-link-arg={}", lib.join("libghostty-vt.a").display());
-    } else if target.contains("windows-msvc") {
+    } else if target.contains("-windows-msvc") {
+        // `ghostty-vt.lib` is the DLL's import library; the static archive is `ghostty-vt-static.lib`.
+        println!("cargo:rustc-link-lib=static=ghostty-vt-static");
+    } else if target.contains("-windows-") {
+        // Zig names the GNU-ABI archive the Windows way too, but GNU linking looks for `lib<name>.a`.
+        fs::copy(lib.join("ghostty-vt-static.lib"), lib.join("libghostty-vt-static.a")).expect("libghostty-vt static archive");
         println!("cargo:rustc-link-lib=static=ghostty-vt-static");
     } else {
         println!("cargo:rustc-link-lib=static=ghostty-vt");

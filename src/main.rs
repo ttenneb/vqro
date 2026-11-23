@@ -103,7 +103,7 @@ async fn run() -> Result<()> {
 }
 
 async fn ui(name: Option<String>, list: bool, args: Vec<String>) -> Result<()> {
-    let dir = paths::extensions_dir();
+    let dir = paths::extensions_dir()?;
     if list {
         for c in ui_launch::list(&dir) {
             writeln!(std::io::stdout(), "{}\t{}\t{}", c["name"].as_str().unwrap_or(""), c["title"].as_str().unwrap_or(""), c["summary"].as_str().unwrap_or(""))?;
@@ -117,7 +117,7 @@ async fn ui(name: Option<String>, list: bool, args: Vec<String>) -> Result<()> {
     }
     let manifest = ui_launch::find(&dir, &name)?;
     client::ensure_core().await?;
-    let status = ui_launch::command(&dir, &manifest, &paths::socket_path()?, &args).status()
+    let status = ui_launch::command(&dir, &manifest, &paths::socket_path()?, &args)?.status()
         .map_err(|e| anyhow::anyhow!("cannot start client {name}: {e}; `vqro ui` runs the built-in one"))?;
     if !status.success() {
         bail!("client {name} exited with {status}; `vqro ui` runs the built-in one");
@@ -156,11 +156,15 @@ async fn stop() -> Result<()> {
         Ok(Err(error)) if error.downcast_ref::<vqro::rpc::RpcError>().is_some_and(|e| !matches!(e.kind(), "timeout" | "disconnected")) => return Err(error),
         _ => {} // No answer: legacy Unix fallback only; never bypass a protocol refusal.
     }
-    stop_pidfile()
+    #[cfg(unix)]
+    { stop_pidfile() }
+    #[cfg(windows)]
+    { bail!("core did not answer core.shutdown; Windows stop uses the protocol only (no pidfile or signal fallback)") }
 }
 
+#[cfg(unix)]
 fn stop_pidfile() -> Result<()> {
-    let pidfile = paths::state_dir().join("serve.pid");
+    let pidfile = paths::state_dir()?.join("serve.pid");
     let pid = std::fs::read_to_string(&pidfile).map_err(|_| anyhow::anyhow!("no running core (no {})", pidfile.display()))?;
     let number: u32 = pid.trim().parse().map_err(|_| anyhow::anyhow!("invalid core pidfile"))?;
     if number <= 1 { bail!("refusing invalid core pid {number}"); }
@@ -176,15 +180,22 @@ fn stop_pidfile() -> Result<()> {
 async fn serve(safe: bool, fake: bool) -> Result<()> {
     let socket = paths::socket_path()?;
     let backend = if fake { vqro::adapter::Backend::Fake } else { vqro::adapter::Backend::Extensions };
-    let core = server::start(socket.clone(), paths::state_dir(), safe, backend, Some(paths::extensions_dir()))?;
-    let pidfile = paths::state_dir().join("serve.pid");
+    let core = server::start(socket.clone(), paths::state_dir()?, safe, backend, Some(paths::extensions_dir()?))?;
+    let pidfile = paths::state_dir()?.join("serve.pid");
     std::fs::write(&pidfile, std::process::id().to_string())?;
     eprintln!("vqro {} listening on {}{}", env!("CARGO_PKG_VERSION"), socket.display(), if safe { " (safe mode)" } else { "" });
+    #[cfg(unix)]
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let lifetime = core.lock().unwrap().shutdown.clone();
+    #[cfg(unix)]
     let reason = tokio::select! {
         r = tokio::signal::ctrl_c() => { r?; "interrupt signal" },
         signal = term.recv() => if signal.is_some() { "terminate signal" } else { "terminate signal stream closed" },
+        _ = lifetime.stopped() => "protocol/listener shutdown",
+    };
+    #[cfg(windows)]
+    let reason = tokio::select! {
+        r = tokio::signal::ctrl_c() => { r?; "interrupt signal" },
         _ = lifetime.stopped() => "protocol/listener shutdown",
     };
     eprintln!("vqro: stopping core ({reason})");

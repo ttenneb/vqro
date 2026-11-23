@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! Real tool CLI children of a two-endpoint runtime use only its verified host context.
 use serde_json::json;
 use vqro::{client,provider_client::{Config,Provider},rpc::{Incoming,Peer},server::{self,Backend}};

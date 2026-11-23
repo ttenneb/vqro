@@ -29,6 +29,8 @@ mod ghostty;
 mod scrollback;
 use emulator::{CursorShape, Effect, Emulator};
 mod frame_budget;
+#[cfg(any(windows, test))]
+mod console_reader;
 mod theme;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -473,6 +475,16 @@ pub async fn run(socket: &Path) -> Result<()> {
         restore_hook(info)
     }));
     let (key_tx, mut keys) = mpsc::unbounded_channel();
+    #[cfg(windows)]
+    let mut console_reader = console_reader::ConsoleReader::start(move |timeout| {
+        // poll(true) guarantees the next read will not block; this thread is the sole reader.
+        // Bounded polling lets shutdown join even when no console event arrives.
+        if crossterm::event::poll(timeout)? {
+            key_tx.send(crossterm::event::read()?).map_err(|_| std::io::Error::other("console event receiver closed"))?;
+        }
+        Ok(())
+    });
+    #[cfg(unix)]
     std::thread::spawn(move || {
         while let Ok(ev) = crossterm::event::read() {
             if key_tx.send(ev).is_err() {
@@ -579,15 +591,31 @@ pub async fn run(socket: &Path) -> Result<()> {
     ratatui::restore();
     if reexec {
         if let Some((exe, _)) = exe_stamp() {
+            let mut cmd = std::process::Command::new(exe);
+            #[cfg(unix)]
+            { let args: Vec<String> = std::env::args().skip(1).collect(); cmd.args(args); }
+            #[cfg(windows)]
+            cmd.args(std::env::args_os().skip(1));
+            // The restarted UI keeps showing this window's workspace; all other env is inherited.
+            if let Some(layout) = &shown { cmd.env(LAYOUT_ENV, layout); }
             #[cfg(unix)]
             {
                 use std::os::unix::process::CommandExt;
-                let args: Vec<String> = std::env::args().skip(1).collect();
-                let mut cmd = std::process::Command::new(exe);
-                // The restarted UI keeps showing this window's workspace.
-                if let Some(layout) = &shown { cmd.env(LAYOUT_ENV, layout); }
-                let err = cmd.args(args).exec();
+                let err = cmd.exec();
                 anyhow::bail!("could not restart into the new vqro: {err}");
+            }
+            #[cfg(windows)]
+            {
+                // Stop and join the predecessor's sole console reader before spawn. Then inherit
+                // stdin/stdout/stderr, wait for the replacement UI, and exit with its status.
+                let status = console_reader.stop_then(|| {
+                    // The waiting predecessor is no longer an active UI client, including after
+                    // reconnect (app.peer can differ from the initial connection).
+                    app.peer.close();
+                    peer.close();
+                    cmd.status()
+                }).map_err(|error| anyhow::anyhow!("could not restart into the new vqro: {error}"))?;
+                std::process::exit(status.code().unwrap_or(1));
             }
         }
     }

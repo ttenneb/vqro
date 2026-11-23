@@ -57,7 +57,7 @@ mod unix {
     use std::fs::{self, OpenOptions};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    use std::os::unix::net::UnixStream;
+    use vqro::transport::{self, SyncStream};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -83,8 +83,8 @@ mod unix {
     }
 
     struct Core {
-        r: BufReader<UnixStream>,
-        w: UnixStream,
+        r: BufReader<SyncStream>,
+        w: SyncStream,
         next: u64,
         events: Vec<Value>,
         /// The op id of the last mutation sent (a lost take is inspected by it).
@@ -93,7 +93,7 @@ mod unix {
 
     impl Core {
         fn connect(path: &str) -> Result<Core, String> {
-            let w = UnixStream::connect(path).map_err(|e| format!("transport: connect: {e}"))?;
+            let w = transport::connect_sync(path).map_err(|e| format!("transport: connect: {e}"))?;
             w.set_read_timeout(Some(Duration::from_millis(CALL_MS))).ok();
             let r = BufReader::new(w.try_clone().map_err(|e| format!("transport: {e}"))?);
             let mut core = Core { r, w, next: 0, events: Vec::new(), last_op: String::new() };

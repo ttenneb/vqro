@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::net::UnixListener;
+use crate::transport::{self, Listener, ServerStream};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::adapter::{SpawnRequest, StreamInput, StreamOutput};
@@ -86,23 +86,12 @@ pub fn start(socket: std::path::PathBuf, state: std::path::PathBuf, safe: bool, 
     crate::store::create_dir_all_durable(&state)?;
     let mut store=crate::store::Store::open_locked(state.join("workspace.json"))?;
     principal::bootstrap(&mut store)?;
-    if socket.exists() {
-        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
-            anyhow::bail!("vqro is already running at {}", socket.display());
-        }
-        std::fs::remove_file(&socket)?;
-    }
     if let Some(dir) = &defaults {
         install_defaults(&mut store, dir);
     }
     let core: Shared = Arc::new(Mutex::new(Core::new(store, Some(state), socket.clone(), safe)?));
     if let Some(dir)=defaults {core.lock().unwrap().manifest_catalog.root=dir;}
-    let listener = UnixListener::bind(&socket)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-    }
+    let listener = Listener::bind(&socket)?;
     core.lock().unwrap().embedder_backend=Some(backend.clone());
     // Only explicit test/embedder adapters remain; even they stay stopped in safe mode.
     if !safe {
@@ -215,11 +204,17 @@ fn raise_nofile_limit() {
 #[cfg(not(unix))] fn raise_nofile_limit() {}
 
 fn transient_accept_error(error:&std::io::Error)->bool {
-    matches!(error.kind(),std::io::ErrorKind::Interrupted|std::io::ErrorKind::ConnectionAborted|std::io::ErrorKind::WouldBlock)
-        || matches!(error.raw_os_error(),Some(libc::EMFILE|libc::ENFILE|libc::ENOMEM|libc::ENOBUFS))
+    if matches!(error.kind(),std::io::ErrorKind::Interrupted|std::io::ErrorKind::ConnectionAborted|std::io::ErrorKind::WouldBlock) { return true; }
+    #[cfg(unix)]
+    { matches!(error.raw_os_error(),Some(libc::EMFILE|libc::ENFILE|libc::ENOMEM|libc::ENOBUFS)) }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{ERROR_NOT_ENOUGH_MEMORY, ERROR_NO_SYSTEM_RESOURCES, ERROR_PIPE_BUSY};
+        error.raw_os_error().is_some_and(|code| matches!(code as u32, ERROR_NOT_ENOUGH_MEMORY | ERROR_NO_SYSTEM_RESOURCES | ERROR_PIPE_BUSY))
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod accept_tests {
     #[test]
     fn descriptor_and_transient_accept_failures_are_not_fatal_listener_errors() {
@@ -228,7 +223,7 @@ mod accept_tests {
     }
 }
 
-async fn refuse_connection(mut stream:tokio::net::UnixStream) {
+async fn refuse_connection(mut stream:ServerStream) {
     use tokio::io::{AsyncReadExt,AsyncBufReadExt,AsyncWriteExt};
     // A tiny bounded handshake preserves the caller's request id, so normal clients receive
     // the overload reason instead of an unexplained EOF. Silent clients do not hold admission.
@@ -244,14 +239,14 @@ async fn refuse_connection(mut stream:tokio::net::UnixStream) {
     let _=tokio::time::timeout(std::time::Duration::from_millis(100),stream.write_all(line.as_bytes())).await;
 }
 
-pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
+pub async fn serve(core: Shared, mut listener: Listener) -> anyhow::Result<()> {
     let next = AtomicU64::new(1);
     let shutdown = core.lock().unwrap().shutdown.clone();
     let mut connections = tokio::task::JoinSet::new();
     let mut peers = HashMap::new();
     let mut last_accept_notice=None::<std::time::Instant>;
     loop {
-        let (stream, _) = tokio::select! {
+        let stream = tokio::select! {
             biased;
             _ = shutdown.requested() => break,
             done = connections.join_next(), if !connections.is_empty() => { if let Some(Ok(id)) = done { peers.remove(&id); } continue; }
@@ -274,9 +269,10 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
         // with the scale harness: a 64 KiB/s viewer's first echo after attaching to output floods fell
         // from 5.6 s with the 208 KiB default to 0.5-0.65 s; much smaller buffers slow such a reader
         // down. Draining viewers' throughput is unchanged. Best effort: failure keeps the OS default.
+        #[cfg(unix)]
         let _ = socket2::SockRef::from(&stream).set_send_buffer_size(CONNECTION_SEND_BUFFER);
         let id = next.fetch_add(1, Ordering::Relaxed);
-        let (r, w) = stream.into_split();
+        let (r, w) = tokio::io::split(stream);
         let (peer, incoming) = Peer::spawn_serving(r, w);
         let mutations=Arc::new(tokio::sync::Semaphore::new(MUTATION_SLOTS));
         peers.insert(id,(peer.clone(),mutations.clone()));
@@ -329,7 +325,7 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
     for (peer,_) in peers.values() { peer.close(); }
     if tokio::time::timeout(std::time::Duration::from_secs(1), async { while connections.join_next().await.is_some() {} }).await.is_err() { connections.abort_all(); }
     let socket = core.lock().unwrap().socket.clone();
-    let _ = std::fs::remove_file(socket);
+    transport::unlink(&socket);
     drop(listener);
     { let mut c=core.lock().unwrap();c.operational.release_state();c.store.release_state();shutdown.finish(); }
     Ok(())

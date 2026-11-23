@@ -11,7 +11,7 @@ pub async fn socket(explicit: Option<PathBuf>, standalone: bool) -> Result<PathB
         peer.close();
         hello["state_dir"].as_str().map(PathBuf::from).ok_or("tmux requires a persistent core state directory")?
     } else if standalone {
-        vqro::paths::state_dir()
+        vqro::paths::state_dir().map_err(|error| error.to_string())?
     } else {
         return Err("cannot locate vqro state: VQRO_SOCKET or VQRO_STATE_DIR is required".into());
     };

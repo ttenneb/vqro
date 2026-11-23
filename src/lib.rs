@@ -3,6 +3,7 @@
 
 pub mod adapter;
 pub mod client;
+pub mod transport;
 mod commit;
 mod invocation;
 pub mod core;

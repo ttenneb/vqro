@@ -42,12 +42,19 @@ ROUTES = "doc/agents/request-routes/"
 
 
 def state_dir():
-    """Private per-launch files beside the core's state (`VQRO_STATE_DIR`, else XDG/`~/.local/state/vqro`)."""
-    base = os.environ.get("VQRO_STATE_DIR") or os.path.join(
-        os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state"), "vqro")
+    """Private per-launch files beside the core's platform-specific state directory."""
+    if sys.platform == "win32":
+        default = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Local"), "vqro", "state")
+    else:
+        default = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.join(
+            os.path.expanduser("~"), ".local", "state"), "vqro")
+    base = os.environ.get("VQRO_STATE_DIR") or default
     path = Path(base) / "tier1"
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(path, 0o700)
+    # Windows chmod only controls the read-only bit, not owner-only ACLs.
+    if sys.platform != "win32":
+        os.chmod(path, 0o700)
     return path
 
 
@@ -71,7 +78,7 @@ def find_hook(configured=None):
 
 def pi_declaration():
     """The Pi plugin's own declaration (`PULL_DECLARATION`, one JSON line in the plugin source)."""
-    match = re.search(r"^export const PULL_DECLARATION = (.*);$", PI_PLUGIN.read_text(), re.M)
+    match = re.search(r"^export const PULL_DECLARATION = (.*);$", PI_PLUGIN.read_text(encoding="utf-8"), re.M)
     if not match:
         raise VqroError("the installed Pi plugin declares no PULL_DECLARATION", "unavailable")
     return json.loads(match.group(1))["pull"]
@@ -106,7 +113,7 @@ class Tier1:
             hooks = json.loads(self.run([hook, "settings", hook]))
             path = state_dir() / f"claude-{nonce}.json"
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w") as file:
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
                 json.dump(hooks, file)
             argv = [*argv, "--settings", str(path)]
         else:
@@ -166,7 +173,7 @@ class Tier1:
     @staticmethod
     def run(argv):
         try:
-            return subprocess.run(argv, capture_output=True, text=True, timeout=10, check=True).stdout
+            return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", timeout=10, check=True).stdout
         except (OSError, subprocess.SubprocessError) as error:
             raise VqroError(f"{argv[0]} failed: {error}", "unavailable") from None
 

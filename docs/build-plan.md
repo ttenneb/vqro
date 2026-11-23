@@ -394,7 +394,7 @@ written the same way was contained by the crash budget and removed with one reve
 - **Resize ownership:** with several viewers of one terminal, the latest active one sets the size (herdr-core's
   rule). No vqro-level rule yet.
 - **Extension views** are only `panel` (declarative) or `terminal`; the hybrid option is untested.
-- **Portability:** Unix socket only; Windows (named pipe) not yet validated (D12, D22 proposed). See "Windows work".
+- **Portability:** Unix sockets and Windows named pipes are implemented (D12, D22 confirmed); native Windows runtime validation remains pending. See `windows.md` and "Windows work".
 - **Agents** run PTY-backed for now; the headless agent bridge (pi RPC, Claude Code) is the next slice.
 - **Adapters are in-process** Rust tasks behind a channel interface; the out-of-process adapter protocol from
   `spec/backend-adapter-v0.md` waits until a second backend shows what it needs.
@@ -475,10 +475,16 @@ bridge not built); second backend (tmux) not started; Windows untested.
   per herdr-core connection). Opt-in tests on a private herdr-core (`tests/herdr_provider.rs`). Notes and findings:
   `research/herdr-provider.md`. Native adapter env now reaches hc; the external wrapper still declares env unsupported.
 
-## Windows work (known, 2026-11-17)
+## Windows work (2026-11-22 status; original audit 2026-11-17)
 
-From the static portability audit (D22 proposed; nothing compiled for Windows yet; installing a Windows target needs
-the human's OK). Contracts are updated; this is implementation.
+The Windows named-pipe transport, platform paths, write-through store publication, Python transport, core-side
+interpreter selection and provider discovery are implemented. Windows GNU all-targets type checks and Wine fake-backend
+receipts are development evidence, not native Windows certification. Source review corrections are in progress;
+see `windows.md` for native prerequisites, smoke steps and remaining gaps (Claude hook, terminal-host Python,
+tmux, archive export and optional OpenTUI). No new protocol surface is required.
+
+**Historical implementation checklist below (2026-11-17), not the current support status.** The compile/runtime
+blockers listed here have implementations now; remaining source-review and native-runtime validation must still pass.
 - **Compile:** a transport module with a named-pipe arm for `src/server.rs` / `src/client.rs` (tokio has
   `net::windows::named_pipe`; `src/rpc.rs` is already generic over the byte stream); `cfg(unix)` around SIGTERM in
   `src/main.rs`; a Windows branch for the TUI re-exec (today an unused variable there would break zero warnings);

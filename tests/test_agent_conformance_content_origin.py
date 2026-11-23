@@ -661,6 +661,7 @@ class CallbackWireChecks(unittest.IsolatedAsyncioTestCase):
             script.write_text(subject.CALLBACK_SOURCE)
             sdk = Path(subject.__file__).resolve().parents[2] / "extensions/vqro_ext.py"
             shutil.copyfile(sdk, root / "vqro_ext.py")
+            shutil.copyfile(sdk.with_name("vqro_transport.py"), root / "vqro_transport.py")
             endpoint = root / "s"
             ready = asyncio.get_running_loop().create_future()
             pending, requests, handlers = {}, [], []

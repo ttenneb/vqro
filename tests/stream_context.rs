@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! Full caller context and explicit links reach native stream.open without inferring callback causes.
 use serde_json::json;
 use tokio::sync::oneshot;

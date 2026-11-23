@@ -27,6 +27,8 @@ import time
 import traceback
 import unicodedata
 
+from vqro_transport import connect_endpoint
+
 
 def _watch_lifetime():
     """Managed stdin is a lifetime pipe, never extension input or the RPC wire."""
@@ -93,8 +95,7 @@ class Vqro:
 
     def __init__(self, path, handler, *, recover_notifications=False, principal=None):
         self.principal = os.environ.get("VQRO_PRINCIPAL") if principal is None else principal
-        self.sock = socket.socket(socket.AF_UNIX)
-        self.sock.connect(path)
+        self.sock = connect_endpoint(path)
         self.file = self.sock.makefile("rwb", buffering=0)
         self.lock = threading.Lock()
         self.next = 1

@@ -1,7 +1,7 @@
 {
   "name": "coord", "title": "Agent coordination", "version": "0.1.0", "license": "Apache-2.0", "author": "Bennett Garcia", "kind": "interface",
   "summary": "Durable attributed inboxes, safe-point pull, grants and explicit scope resume.",
-  "description": "The replaceable coordination-v0 policy over the core protected operational domain. Restart closes inbox admission, never suspends backend processes or replays uncertain input. Turning it off leaves native terminals and recovery available; saved evidence stays in its protected domain.",
+  "description": "Archive export is not supported on native Windows yet; source evidence is retained. The replaceable coordination-v0 policy over the core protected operational domain. Restart closes inbox admission, never suspends backend processes or replays uncertain input. Turning it off leaves native terminals and recovery available; saved evidence stays in its protected domain.",
   "requires": {"protocol": 1},
   "provides": ["command/coord.inbox.window", "command/coord.inbox.send", "command/coord.inbox.edit", "command/coord.inbox.withdraw",
     "command/coord.inbox.take", "command/coord.inbox.report", "command/coord.inbox.reconcile", "command/coord.inbox.peek",

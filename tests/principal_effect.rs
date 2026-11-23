@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! Real Rust SDK and fake native ledger: attribution is core supplied, rejected delegation dispatches nothing.
 use std::sync::{Arc,Mutex};
 use serde_json::{json,Value};

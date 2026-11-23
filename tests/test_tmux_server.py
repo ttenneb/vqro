@@ -55,6 +55,30 @@ class Server(m.TmuxServer):
 
 
 class TmuxServerTests(unittest.TestCase):
+    def test_windows_commands_and_poll_refuse_without_spawning_or_inspecting_endpoint(self):
+        ext = Ext()
+        server = m.TmuxServer(ext)
+        server.socket = Mock()  # Even a pre-existing marker must not cause a helper launch.
+        server.socket.stat.return_value = Mock(st_dev=1, st_ino=2, st_mtime_ns=3, st_ctime_ns=4)
+        paths = [lambda: ext.commands["tmux.server.status"]({}),
+                 lambda: ext.commands["tmux.server.stop"]({}),
+                 server.poll, lambda: server.call("stop")]
+        with patch.object(m.sys, "platform", "win32"), patch.object(m.subprocess, "Popen") as popen:
+            for invoke in paths:
+                with self.subTest(invoke=invoke), self.assertRaises(m.VqroError) as caught:
+                    invoke()
+                self.assertEqual(caught.exception.kind, "unavailable")
+                self.assertEqual(str(caught.exception), m.UNAVAILABLE)
+            popen.assert_not_called()
+            server.socket.stat.assert_not_called()
+            self.assertEqual(ext.applied, [])
+
+    def test_windows_panel_says_tmux_is_unavailable_and_never_runs_the_helper(self):
+        with patch.object(m.sys, "platform", "win32"), patch.object(m.subprocess, "Popen") as popen:
+            panel = m.TmuxServer.panel({"running": False})
+            self.assertIn("tmux is not available on native Windows", panel["items"][0]["text"])
+            popen.assert_not_called()
+
     def setUp(self):
         self.ext = Ext()
         self.server = Server(self.ext)

@@ -3,13 +3,22 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
+import coordination_archive
 from coordination_archive import export
 import test_coordination_engine as fixtures
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_windows_export_refuses_before_any_filesystem_effect(self):
+        with patch.object(coordination_archive.os, "name", "nt"), \
+                patch.object(coordination_archive, "Path") as path:
+            with self.assertRaisesRegex(OSError, "not supported on native Windows yet"):
+                export("C:\\archive", "abc", [])
+            path.assert_not_called()
+
     def test_exact_export_and_reconcile_never_overwrite_a_different_set(self):
         with tempfile.TemporaryDirectory(prefix="coord-archive-") as directory:
             records = [{"delivery": "d:1", "version": 7, "record": {"state": "unknown", "content": "evidence"}}]

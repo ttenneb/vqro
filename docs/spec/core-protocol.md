@@ -13,23 +13,43 @@ the core forwards `command.invoke` to the connection that registered the command
 
 - The core listens on one **local endpoint**: a reliable, ordered byte stream per connection, reachable only by the
   user who started the core. `VQRO_SOCKET` names it. Clients, extensions, providers and bridges treat the value as
-  **opaque**: they pass it to their platform's connect call and never parse it, build paths next to it or assume a
-  file exists. On Unix it is a Unix socket path (mode 0600; default `<state dir>/vqro.sock`; implemented). On Windows
-  it is a named pipe name (`\\.\pipe\vqro-<per-user id>`) whose DACL admits only the owner and which rejects remote
-  clients (not implemented yet).
+  **opaque within the local transport namespace**: they pass it unchanged to the transport helper, never build
+  paths next to it or assume a file exists. The Windows helper validates the local namespace before opening. On Unix it is a Unix socket path (mode 0600; default `<state dir>/vqro.sock`). On Windows
+  it is a named pipe name (`\\.\pipe\vqro-<state-dir id>`, a stable hash of the canonical per-user state directory)
+  whose protected DACL admits only the starting user's SID and which rejects remote clients. Distinct scratch state
+  directories select their default endpoints by that hash; `VQRO_SOCKET` overrides the default on either platform.
+- Windows endpoints must be `\\.\pipe\<name>` (ASCII-case-insensitive prefix, non-empty name, no further backslash
+  or embedded NUL). Remote UNC hosts, `\\?\`/device forms and file paths are refused before opening; accepted names
+  retain their original spelling. Unix endpoint behavior is unchanged.
+- **Local trust boundary:** same-user processes are trusted, not a particular executable. Each server pipe instance
+  explicitly sets its owner and protected DACL to the starting process's **TokenUser SID**, never its default/group
+  owner. Before exposing a Windows connection to any protocol writer, clients check pipe type/client end and read
+  the **connected object's owner** (`GetSecurityInfo`, `SE_KERNEL_OBJECT`, `OWNER_SECURITY_INFORMATION`); it must
+  exactly equal their TokenUser SID. Group owners (including Administrators), other-user owners and every failed
+  query are refused before hello, credentials or other bytes. No PID lookup is used as identity proof.
+  SQOS remains identification-only. Auth-refused automatic-start probes report `unavailable` and stop, never count
+  that endpoint as running/absent or select another name. Default endpoint resolution may first create/canonicalize
+  the state directory; a refusal still prevents core startup and opening the workspace store.
+  Privileged administrators/holders of `SeRestorePrivilege` or `SeTakeOwnershipPrivilege` are outside this boundary:
+  restore privilege can assign an arbitrary valid owner SID; take-ownership privilege permits taking ownership only
+  with legitimately assignable SIDs, not arbitrary reassignment by itself. This is not protection against such actors.
 - Messages are UTF-8 JSON, one per line, separated by LF. Open the endpoint in binary mode: no newline translation.
-- Clean request-input EOF is a one-shot half-close: the serving core finishes already-read valid requests under
+- Where the native transport supports a request-input half-close (Unix sockets), clean request-input EOF is
+  one-shot: the serving core finishes already-read valid requests under
   normal admission limits, locally flushes their replies, then closes the response half and runs connection cleanup.
   It cannot issue new callbacks after input EOF. Clients must keep reading if they want those replies; subscriptions,
   interactive streams and command owners keep a full-duplex connection instead. This is not remote-read/delivery
   acknowledgement: reset, write failure, protocol/queue failure or core shutdown can still make an admitted effect
   indeterminate. Inspect state/history, never replay it automatically. No admitted write is rolled back.
-- Stdlib Python on Windows has no `AF_UNIX` (`socket` docs: the `AF_UNIX` constant is absent where unsupported).
-  A Python client there connects to the named pipe with `asyncio`'s Windows proactor loop
-  (`loop.create_pipe_connection`), not with a synchronous `open()` of the pipe, whose single handle serializes reads
-  and writes. `extensions/vqro_ext.py` does this once the Windows endpoint exists (`build-plan.md`, Windows work).
+  Windows named pipes do not support this half-close: clients keep the full-duplex connection open until they have
+  read their replies, then close it. Tokio's named-pipe write shutdown only flushes; it does not send request EOF.
+- Stdlib CPython 3.11+ on Windows uses `extensions/vqro_transport.py`: synchronous SDK clients use overlapped
+  named-pipe reads/writes through `_winapi`; asyncio providers use the Windows proactor loop's
+  `loop.create_pipe_connection`. Neither uses synchronous `open()` of the pipe, whose handle serializes reads and
+  writes. Endpoint names are passed through unchanged. Linux simulations cover both paths; native Windows smoke
+  validation remains required (`tests/windows_pipe_smoke.py`; `../research/windows-python-transport.md`).
 - The per-platform state directory holds the store and logs: `VQRO_STATE_DIR`; else on Unix
-  `$XDG_STATE_HOME/vqro` or `~/.local/state/vqro`; on Windows `%LOCALAPPDATA%\vqro\state` (not implemented yet).
+  `$XDG_STATE_HOME/vqro` or `~/.local/state/vqro`; on Windows `%LOCALAPPDATA%\vqro\state`.
 - **Stopping the core** is a protocol request, not a pidfile and a signal: `core.shutdown` (below, Session). Platform
   signals (Ctrl-C, SIGTERM on Unix) remain extra ways in that run the same ordered stop.
 
@@ -155,7 +175,7 @@ adapter dispatch. Reusing the author name never revives an old connection. Stale
 retirement still completes, adopts and reports its real result; retirement never discards a persisted candidate or
 pretends that native work already dispatched was recalled. No uncertain effect is replayed.
 
-`core.shutdown` is implemented (D22 is confirmed; Windows transport remains implementation work). The accepted reply is locally
+`core.shutdown` and the Windows named-pipe transport are implemented (D22 is confirmed; native Windows runtime validation remains pending). The accepted reply is locally
 written/flushed before stop begins, not a remote-read guarantee. The core stops accepting and rejects new workspace
 commits, then gives admitted commits3s to persist, publish and run adoption hooks. At expiry queued/unstarted
 commits are cleanly rejected without effects; an already dispatched durable write remains indeterminate, never
@@ -215,8 +235,8 @@ it the default, and the client that ran it shows it (other windows keep theirs).
 
 A successful apply or revert has persisted the candidate through a unique temporary file in the same directory,
 then the platform's **durable replace**: on Unix file sync, rename, then directory sync (implemented); on Windows file
-flush, then a write-through replace (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`; not
-implemented yet), where "directory sync" below means that final confirmation step. Before replacement, persistence failure returns `io` with no change
+flush, then a write-through replace (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`;
+implemented), where "directory sync" below means that final confirmation step. Before replacement, persistence failure returns `io` with no change
 to entries, versions, history, transaction numbering or events. Failed writes clean up their own temporary files;
 other writers' files and legacy `.tmp` paths are not swept or overwritten. Process crashes can leave harmless
 orphaned temporary files, which are never loaded as workspace state.
@@ -356,7 +376,9 @@ get inert recovery placeholders so healthy references remain valid; other unsafe
 Unsafe undo preimages become explicit `undoable:false` boundaries, not silently skipped undo targets.
 Startup does not rewrite the original. Before the first later durable write, a private, byte-identical
 `workspace.quarantine-*.json` backup must be file/directory-synced; failure rejects the write and preserves
-the original. Backup ownership is shared across discarded writer snapshots. Snapshot `recovery_notice`
+the original. Windows has no directory fsync: its equivalent preservation barrier is flushing the staged
+backup with `FlushFileBuffers` (`sync_all`), then publishing it with `MoveFileExW(..., MOVEFILE_WRITE_THROUGH)`
+before replacing the original. Backup ownership is shared across discarded writer snapshots. Snapshot `recovery_notice`
 (and the existing TUI recovery message) identifies the quarantine and backup path; it survives restart.
 Quarantine archives are retained for manual repair, not automatically interpreted or replayed.
 
@@ -1546,7 +1568,7 @@ Icons page.
 
 On first run the core declares the extensions listed in `<extensions dir>/defaults.json` (`VQRO_EXTENSIONS_DIR`,
 default: the per-platform extensions directory, `~/.local/share/vqro/extensions` on Unix and
-`%LOCALAPPDATA%\vqro\extensions` on Windows, not implemented yet) and records `doc/vqro/defaults`, so removing one sticks. Bundled:
+`%LOCALAPPDATA%\vqro\extensions` on Windows) and records `doc/vqro/defaults`, so removing one sticks. Bundled:
 `tabs`, `panes`, `gestures`, `workspaces`, `sidebar`, `themes`, `icons`, `keys`, `settings`, `logs` (`extensions/`, helper
 `vqro_ext.py`), and two backends as provider extensions (D21; human decision 2026-11-17):
 - `herdr`: `vqro-herdr --name herdr`, `kind: "provider"`, `default: true`. Terminals in herdr-core, reached with
@@ -1558,8 +1580,13 @@ default: the per-platform extensions directory, `~/.local/share/vqro/extensions`
 
 `vqro serve` runs no backend in process; `--fake` adds the in-process fake for tests. A bare `vqro-*` program in a
 default stays bare in stored state and resolves on each start: executable sibling of the running `vqro`, then
-platform-native `PATH` search (including `.exe` on Windows). An unavailable program reports `failed` and an
-actionable diagnostic; hello/snapshot `backend_notice` and the built-in status bar expose unavailable backends.
+platform-native `PATH` search (including `.exe` on Windows). Likewise a literal `python3` program (in extension and
+client `argv`) means "a Python 3 interpreter", resolved on each start: `VQRO_PYTHON` (one program path) on every
+platform, else `python3` on Unix; on Windows, which has no python.org `python3`, the first found walking `PATH` of
+`py -3`, `python`, `python3`, skipping `WindowsApps` directories entirely (their executables may be Store stubs).
+No candidate means an actionable discovery failure for extensions and UI clients, not a retry through bare `python3`.
+This is native PATH selection, not interpreter identity/version validation; no executable probes run. An unavailable program reports
+`failed` and an actionable diagnostic; hello/snapshot `backend_notice` and the built-in status bar expose unavailable backends.
 `entries`, `provider` (and compatibility `adapter`), and `safe_mode` event data also carry the current
 `backend_notice` (string or null). Null clears a previous notice; absent fields from older cores leave it unchanged.
 The status bar prioritizes this recovery warning over contributed status buttons, including when an alternative
@@ -1588,8 +1615,9 @@ registers under that name the provider for spawns that name none. Without one, t
 used; a runtime bridge never is. A declared default that has not registered rejects unnamed spawns as unavailable;
 registration order must never route them to a different backend. Other `argv[0]` values are resolved by the platform's process
 launcher (`PATH` on Unix; `CreateProcess` search on Windows, where a `.py` file is not directly executable and
-`python3` is often absent). The bundled `defaults.json` names `python3`, which is Unix-only for now; Windows defaults
-need a portable interpreter choice such as the `py -3` launcher (`build-plan.md`, Windows work). Started with `VQRO_SOCKET`,
+`python3` is often absent). The bundled `defaults.json` names `python3`; the core resolves that literal program through
+the interpreter selection described above for supervised extensions and UI clients. Terminal-host argv launched by
+`pi.py` and `tier1.py` still require a host-side `python3` or explicit launcher configuration (`../windows.md`). Started with `VQRO_SOCKET`,
 `VQRO_EXTENSION`, `VQRO_EXTENSION_TOKEN`, and `VQRO_EXTENSION_LIFETIME=stdin`. Stdout/stderr are drained through
 bounded pipes into `<state>/ext-<name>.log`, with one `.log.1` backup, each at most 1 MiB. Rotation works during a
 single long-lived generation and across overlapping replacement cleanup; there are no child-held log file descriptors.

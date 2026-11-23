@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! A raw explicit native environment is not evidence of a reserved core principal.
 use serde_json::{json, Value};
 use vqro::{client,provider_client::{Config,Provider,Request,Outcome},server::{self,Backend}};

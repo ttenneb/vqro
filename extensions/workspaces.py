@@ -91,7 +91,7 @@ def layout_name(path):
 
 
 def folder_title(path):
-    return os.path.basename(norm(path).rstrip("/")) or norm(path)
+    return os.path.basename(norm(path).rstrip("/" + os.sep)) or norm(path)
 
 
 def scan():
@@ -99,7 +99,7 @@ def scan():
         data = []
         for e in entries():
             path = os.path.expanduser(e["path"])
-            item = {"path": path, "name": e.get("name") or os.path.basename(path.rstrip("/")) or path}
+            item = {"path": path, "name": e.get("name") or os.path.basename(path.rstrip("/" + os.sep)) or path}
             if not os.path.isdir(path):
                 item["missing"] = True
             elif os.path.realpath((git(path, "rev-parse", "--show-toplevel") or "").strip() or "/nonexistent") == os.path.realpath(path):
@@ -337,7 +337,7 @@ def switcher():
     for w in data:
         items.append(row(w["name"], "workspaces.open", w["layout"], {"path": w["path"]}))
         for t in w.get("worktrees", []):
-            items.append(row(os.path.basename(t["path"].rstrip("/")), "workspaces.open", t["layout"], {"path": t["path"]}, 1))
+            items.append(row(os.path.basename(t["path"].rstrip("/" + os.sep)), "workspaces.open", t["layout"], {"path": t["path"]}, 1))
     items.append({"type": "separator"})
     items.append({"text": "Add workspace…", "command": "workspaces.add", "input": "Folder path"})
     return {"title": "Switch workspace", "items": items}
@@ -354,7 +354,7 @@ def new_worktree(args):
     repo, branch = args.get("repo"), (args.get("text") or "").strip()
     if not repo or not branch:
         raise VqroError("needs a repo and a branch name", "invalid")
-    dest = os.path.join(os.path.dirname(repo.rstrip("/")), f"{os.path.basename(repo.rstrip('/'))}-{branch.replace('/', '-')}")
+    dest = os.path.join(os.path.dirname(repo.rstrip("/" + os.sep)), f"{os.path.basename(repo.rstrip('/' + os.sep))}-{branch.replace('/', '-')}")
     exists = git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}") is not None
     cmd = ["git", "-C", repo, "worktree", "add", dest] + ([branch] if exists else ["-b", branch])
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)

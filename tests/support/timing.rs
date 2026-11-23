@@ -2,6 +2,7 @@
 //! The clock is local to the measuring thread: never carry a sample across an await.
 use std::{marker::PhantomData, rc::Rc, time::{Duration, Instant}};
 
+#[cfg(unix)]
 fn thread_cpu() -> Duration {
     let mut value = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     // SAFETY: clock_gettime writes one valid, exclusively borrowed timespec. This clock exists
@@ -9,6 +10,22 @@ fn thread_cpu() -> Duration {
     let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut value) };
     assert_eq!(result, 0, "thread CPU clock: {}", std::io::Error::last_os_error());
     Duration::new(value.tv_sec.try_into().unwrap(), value.tv_nsec.try_into().unwrap())
+}
+
+#[cfg(windows)]
+fn thread_cpu() -> Duration {
+    use windows_sys::Win32::{Foundation::FILETIME, System::Threading::{GetCurrentThread, GetThreadTimes}};
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: the pseudo-handle names this thread; all four output pointers are valid and distinct.
+    let result = unsafe { GetThreadTimes(GetCurrentThread(), &mut creation, &mut exit, &mut kernel, &mut user) };
+    assert_ne!(result, 0, "thread CPU clock: {}", std::io::Error::last_os_error());
+    let ticks = |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    // GetThreadTimes reports kernel and user CPU time in units of 100 ns, not wall time.
+    let ticks = ticks(kernel) + ticks(user);
+    Duration::new(ticks / 10_000_000, ((ticks % 10_000_000) * 100) as u32)
 }
 
 pub struct WorkClock {

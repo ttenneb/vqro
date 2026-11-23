@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! Read EOF is a half-close, not permission to throw away replies to accepted work.
 //! Private fake backend/state only; no native programs or real sessions.
 use std::{sync::{Arc,Mutex,Condvar},time::Duration};

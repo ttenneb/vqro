@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use tokio::net::UnixStream;
+use crate::transport;
 
 use crate::rpc::{IncomingReceiver, Peer};
 
@@ -44,22 +44,31 @@ pub fn supervision_hello(mut hello:Value)->Value {
 /// Explicit hello retains rendering declarations; environment identity is not supervision authority.
 pub async fn connect_with(socket:&Path,mut hello:Value)->Result<(Peer,IncomingReceiver,Value)> {
     if hello.get("identity").is_none(){if let Ok(principal)=std::env::var("VQRO_PRINCIPAL"){if principal!=crate::principal::UNDECLARED{hello["identity"]=json!({"kind":"principal","principal":principal});}}}
-    let stream = UnixStream::connect(socket)
+    let stream = transport::connect(socket)
         .await
         .with_context(|| format!("cannot reach vqro at {} (is `vqro serve` running?)", socket.display()))?;
-    let (r, w) = stream.into_split();
+    let (r, w) = tokio::io::split(stream);
     let (peer, incoming) = Peer::spawn(r, w);
     let hello=peer.call("hello",hello).await?;
     Ok((peer, incoming, hello))
 }
 
-/// Start `vqro serve` in the background if nothing answers on the socket.
+/// Authentication refusal is not an absent core: abort before state access or background spawn.
+pub(crate) fn core_probe_result<S>(result: std::io::Result<S>) -> Result<bool> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(error) if transport::is_server_verification_error(&error) => Err(error.into()),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Start `vqro serve` only if nothing answers; never start past a server-authentication refusal.
 pub async fn ensure_core() -> Result<()> {
     let socket = crate::paths::socket_path()?;
-    if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+    if core_probe_result(transport::connect(&socket).await)? {
         return Ok(());
     }
-    let state = crate::paths::state_dir();
+    let state = crate::paths::state_dir()?;
     std::fs::create_dir_all(&state)?;
     // Fail clearly before spawning/retrying a core whose predecessor still owns state.
     // Release this probe before the child acquires its lifetime lock.
@@ -74,10 +83,16 @@ pub async fn ensure_core() -> Result<()> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::{DETACHED_PROCESS, CREATE_NEW_PROCESS_GROUP};
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
     cmd.spawn()?;
     for _ in 0..50 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+        if core_probe_result(transport::connect(&socket).await)? {
             return Ok(());
         }
     }

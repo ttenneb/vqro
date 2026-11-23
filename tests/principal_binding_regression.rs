@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! A free per-call claim must not override the launcher's connection identity (AS6).
 use serde_json::json;
 use vqro::{rpc::Peer,server::{self,Backend}};

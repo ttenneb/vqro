@@ -43,18 +43,52 @@ pub fn list(extensions_dir: &Path) -> Vec<Value> {
 }
 
 /// The command that runs a client from its manifest, with extra arguments appended and the core endpoint set.
-pub fn command(extensions_dir: &Path, manifest: &Value, socket: &Path, extra: &[String]) -> std::process::Command {
+pub fn command(extensions_dir: &Path, manifest: &Value, socket: &Path, extra: &[String]) -> Result<std::process::Command> {
+    command_with_python(extensions_dir, manifest, socket, extra, crate::program::python)
+}
+
+fn command_with_python(
+    extensions_dir: &Path, manifest: &Value, socket: &Path, extra: &[String],
+    python: impl FnOnce() -> std::result::Result<(PathBuf, Vec<String>), String>,
+) -> Result<std::process::Command> {
     let dir = extensions_dir.join("clients");
     let argv: Vec<&str> = manifest["argv"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     let resolve = |arg: &str| -> PathBuf { let p = PathBuf::from(arg); if p.is_relative() && dir.join(&p).is_file() { dir.join(p) } else { p } };
-    let mut cmd = std::process::Command::new(resolve(argv[0]));
-    cmd.args(argv[1..].iter().map(|a| resolve(a))).args(extra).current_dir(&dir).env("VQRO_SOCKET", socket);
-    cmd
+    // Keep discovery's actionable error; never retry through a different implicit executable search.
+    let (program, leading) = match argv[0] { "python3" => python().map_err(anyhow::Error::msg)?, other => (resolve(other), Vec::new()) };
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(leading).args(argv[1..].iter().map(|a| resolve(a))).args(extra).current_dir(&dir).env("VQRO_SOCKET", socket);
+    Ok(cmd)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn python_discovery_failure_is_returned_without_a_fallback_command() {
+        let manifest = json!({"argv": ["python3", "text.py"]});
+        let error = command_with_python(Path::new("ext"), &manifest, Path::new("endpoint"), &[],
+            || Err("no Python 3 found; set VQRO_PYTHON".into())).unwrap_err();
+        assert_eq!(error.to_string(), "no Python 3 found; set VQRO_PYTHON");
+    }
+
+    #[test]
+    fn python_discovery_keeps_program_and_leading_args_literal() {
+        let manifest = json!({"argv": ["python3", "text.py"]});
+        let cmd = command_with_python(Path::new("ext"), &manifest, Path::new("endpoint"), &[],
+            || Ok(("C:/Program Files/Python/py.exe".into(), vec!["-3".into()]))).unwrap();
+        assert_eq!(cmd.get_program(), "C:/Program Files/Python/py.exe");
+        assert_eq!(cmd.get_args().next().unwrap(), "-3");
+    }
+
+    #[test]
+    fn other_clients_do_not_discover_python() {
+        let manifest = json!({"argv": ["other-client"]});
+        let cmd = command_with_python(Path::new("ext"), &manifest, Path::new("endpoint"), &[],
+            || panic!("non-Python client must not discover Python")).unwrap();
+        assert_eq!(cmd.get_program(), "other-client");
+    }
 
     #[test]
     fn manifests_are_checked_listed_and_resolved_against_the_clients_directory() {
@@ -71,7 +105,8 @@ mod tests {
         assert!(format!("{:#}", find(root.path(), "missing").unwrap_err()).contains("vqro ui --list"));
         let names: Vec<Value> = list(root.path()).iter().map(|c| c["name"].clone()).collect();
         assert_eq!(names, vec![json!("tui"), json!("text")]);
-        let cmd = command(root.path(), &m, Path::new("/run/p.sock"), &["--once".into()]);
+        let cmd = command_with_python(root.path(), &m, Path::new("/run/p.sock"), &["--once".into()],
+            || Ok(("python3".into(), Vec::new()))).unwrap();
         assert_eq!(cmd.get_program(), "python3");
         let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(args, vec![root.path().join("clients/text.py").to_string_lossy().into_owned(), "--once".into()]);

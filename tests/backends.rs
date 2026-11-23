@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! Backends as provider extensions: no in-process backend by default, default extensions installed
 //! once per state with migrations for existing installs, a deterministic default provider, and the
 //! core's endpoint in every spawned terminal's environment.

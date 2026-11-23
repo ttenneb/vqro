@@ -165,12 +165,12 @@ pub fn reconcile(core: &Shared) {
             let state=rt.to_json();c.emit("extension",json!({"name":name,"state":state}));continue;
         }
         rt.token=secret.iter().map(|b|format!("{b:02x}")).collect();
-        let program=match crate::program::resolve_provider(&argv[0]) {
-            Ok(program)=>program,
+        let (program,leading)=match crate::program::resolve_argv0(&argv[0]) {
+            Ok(resolved)=>resolved,
             Err(error)=>{ rt.last_exit=Some(error.clone());rt.fail("startup",error);let state=rt.to_json();c.emit("extension",json!({"name":name,"state":state}));continue; }
         };
         let mut cmd = Command::new(program);
-        cmd.args(&argv[1..])
+        cmd.args(&leading).args(&argv[1..])
             .env("VQRO_SOCKET", &socket)
             .env_remove("VQRO_SOCKET_SOURCE")
             .env_remove("VQRO_HOST_CONTEXT")

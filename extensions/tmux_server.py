@@ -17,6 +17,12 @@ from vqro_ext import Extension, VqroError
 from vqro_display import label
 
 POLL_INTERVAL = 5
+UNAVAILABLE = "tmux is not available on native Windows; run vqro inside WSL"
+
+
+def require_supported():
+    if sys.platform == "win32":
+        raise VqroError(UNAVAILABLE, "unavailable")
 
 
 class TmuxServer:
@@ -34,6 +40,7 @@ class TmuxServer:
         ext.command("tmux.server.stop", "Stop vqro-owned tmux server (kills its terminals)")(self.stop)
 
     def call(self, action, *args):
+        require_supported()
         state = self.state_dir
         if not state:
             raise VqroError("tmux needs a persistent vqro state directory", "unavailable")
@@ -71,6 +78,7 @@ class TmuxServer:
                             "indeterminate" if action == "stop" else "backend")
 
     def poll(self):
+        require_supported()
         absent = {"running": False, "terminals": 0, "socket": str(self.socket) if self.socket else None}
         try:
             metadata = self.socket.stat() if self.socket else None
@@ -131,8 +139,11 @@ class TmuxServer:
     @staticmethod
     def panel(observed):
         if not observed.get("running"):
+            text = "No vqro-owned tmux server running"
+            if sys.platform == "win32":
+                text += " (tmux is not available on native Windows; run vqro inside WSL)"
             return {"title": "vqro-owned tmux server", "requires": ["menu", "input"], "items": [
-                {"type": "text", "text": "No vqro-owned tmux server running"}]}
+                {"type": "text", "text": text}]}
         n = observed["terminals"]
         return {"title": "vqro-owned tmux server", "requires": ["menu", "input"], "items": [
             {"type": "text", "text": f"Running · {n} terminals"},
@@ -146,12 +157,14 @@ class TmuxServer:
         return {"running": False, "outcome": "not_submitted"}
 
     def status(self, args):
+        require_supported()
         observed = self.refresh()
         if not observed.get("running"):
             return self.absent()
         return {**observed, "client": {"popup": {"view": "tmux-server", "width": 74}}}
 
     def stop(self, args):
+        require_supported()
         observed = self.refresh()
         if not observed.get("running"):
             return self.absent()
@@ -183,6 +196,8 @@ class TmuxServer:
 
 
 def main():
+    # Stay available for diagnostics on Windows, but commands/poll explicitly refuse before filesystem or helper
+    # access. The normal poll error path publishes the unavailable reason; no endpoint absence is assumed.
     ext = Extension("tmux-server", event_types=["entries"])
     server = TmuxServer(ext)
     # Keep the SDK's command/event dispatcher; poll only the native server, never a provider RPC.

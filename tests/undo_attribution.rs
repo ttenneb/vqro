@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! D24 attribution over public RPC. Every core/state/process belongs to this private fixture.
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};

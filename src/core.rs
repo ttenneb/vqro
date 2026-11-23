@@ -180,7 +180,7 @@ impl Core {
             bridge_tokens: crate::bridge_tokens::Tokens::open(state_dir.as_ref().map(|dir| dir.join("runtime-tokens.json")))?,
             providers: BTreeMap::new(),provider_metadata_bytes:0,
             adapter_state: BTreeMap::new(),
-            manifest_catalog:crate::manifest::Catalog::new(crate::paths::extensions_dir()),
+            manifest_catalog:crate::manifest::Catalog::new(crate::paths::extensions_dir()?),
             default_adapter: None,
             embedder_backend: None,
             next_provider_source: 1,

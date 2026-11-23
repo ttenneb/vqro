@@ -171,8 +171,9 @@ async fn spawn(handle: &AdapterHandle, known: &Known, args: &Value) -> Result<Ou
         _ => return Err(ProviderError::new("invalid", "env must be an object of strings")),
     }
     let dim = |k: &str| args[k].as_u64().filter(|v| (1..=9999).contains(v)).map(|v| v as u16);
-    if argv.is_empty() {
-        // The provider's default shell for its host (9.4).
+    if argv.is_empty() && !cfg!(windows) {
+        // The provider's default shell for its host (9.4). On Windows there is no `$SHELL`: the argv stays empty, the
+        // adapter leaves it out, and herdr-core starts its machine's shell (it finds PowerShell or cmd itself).
         argv = vec![std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into())];
     }
     let req = SpawnRequest { argv, cwd: args["cwd"].as_str().map(String::from), name: args["name"].as_str().map(String::from), env, cols: dim("cols"), rows: dim("rows"), placement: args.get("placement").filter(|p| !p.is_null()).cloned() };
@@ -316,7 +317,7 @@ async fn run() -> Result<(), String> {
         let name = a.name.clone().unwrap_or_else(|| default_name(&info.instance));
         let mut config = Config::new(name, info.instance.clone(), capabilities());
         config.software = info.software.clone();
-        let sock = tokio::net::UnixStream::connect(&endpoint).await.map_err(|e| format!("cannot reach the core: {e}"))?;
+        let sock = vqro::transport::connect(&endpoint).await.map_err(|e| format!("cannot reach the core: {e}"))?;
         let (provider, mut requests) = Provider::connect(sock, config).await.map_err(|e| e.to_string())?;
         let ended = serve(&handle, &known, &provider, &mut requests, &mut events).await;
         provider.close();

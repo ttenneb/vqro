@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! Disposable core processes only; these tests never use the user's endpoint, pidfile or hc.
 use std::{path::{Path, PathBuf}, process::{Child, Command, Stdio}, time::Duration};
 use vqro::{client, rpc::{Incoming, Peer, RpcError}};

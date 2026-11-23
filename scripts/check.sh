@@ -283,6 +283,20 @@ step manifest-deps "${CLEAN[@]}" python3 scripts/check_manifest_deps.py
 step build-zero-warnings no_warnings
 step cargo-test "${CARGO[@]}" cargo test
 step python-unittest "${CLEAN[@]}" python3 -m unittest discover -s tests -p 'test_*.py'
+windows_check() {  # native Windows compiles with zero warnings (type check only; Zig cross-builds libghostty-vt
+  # for windows-gnu, MSVC needs the Windows SDK). Not Windows conformance: nothing runs on Windows here.
+  local installed
+  if ! installed=$(env -i HOME="$HOME" PATH="$PATH" rustup target list --installed); then
+    echo "FAIL Windows check: could not obtain installed targets from rustup" >&2
+    return 1
+  fi
+  env -i PATH="$PATH" grep -qx x86_64-pc-windows-gnu <<<"$installed" \
+    || { echo "SKIP Windows check: rustup target x86_64-pc-windows-gnu not installed"; return "$SKIP_EXIT"; }
+  local cargo=(env -i HOME="$HOME" PATH="$PATH" CARGO_TARGET_DIR="$TARGET/windows" cargo check --target x86_64-pc-windows-gnu --all-targets)
+  "${cargo[@]}" 2>&1 | env -i PATH="$PATH" tee /dev/stderr | env -i PATH="$PATH" grep -q '^warning' && return 1
+  "${cargo[@]}" >/dev/null 2>&1
+}
+step windows-check windows_check
 opentui_model() {  # the OpenTUI trial client's model against the shared fixtures, its card colour and roles; needs Bun, not its packages
   local bun; bun=$(command -v bun) || { echo "SKIP OpenTUI trial client model: bun not found"; return "$SKIP_EXIT"; }
   (cd extensions/clients/opentui && env -i HOME="$HOME" PATH="$(dirname "$bun"):/usr/bin:/bin" "$bun" test src/conformance.test.ts src/cardcolor.test.ts src/roles.test.ts)

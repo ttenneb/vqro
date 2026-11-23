@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! Production bridge binary over the provider wire against a private socket core stub and native
 //! fake app-server. No installed runtime, model, live core, backend or credential store is opened.
 use base64::Engine;

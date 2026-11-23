@@ -152,7 +152,7 @@ def folder_of(r):
     cwd = r.get("cwd")
     if not cwd:
         return None
-    return "~" if os.path.realpath(cwd) == os.path.realpath(os.path.expanduser("~")) else os.path.basename(cwd.rstrip("/")) or cwd
+    return "~" if os.path.realpath(cwd) == os.path.realpath(os.path.expanduser("~")) else os.path.basename(cwd.rstrip("/" + os.sep)) or cwd
 
 
 def term_row(rid, r, where=False):
@@ -510,7 +510,7 @@ def build(sh=None, compact=True):
             for t in wts:
                 inner = tab_rows(t.get("layout"), hide_ended) + loose_group(t["path"], loose.get(t["path"], []), compact)
                 kids.append({
-                    "id": f"wt:{t['path']}", "text": os.path.basename(t["path"].rstrip("/")), "expanded": True, "_level": "worktree",
+                    "id": f"wt:{t['path']}", "text": os.path.basename(t["path"].rstrip("/" + os.sep)), "expanded": True, "_level": "worktree",
                     "icon": ICON["worktree"], "icon_style": "changed" if t.get("dirty") else "muted",
                     "badges": git_badges(t) + rollup(inner), **current_when(t.get("layout")), "children": inner,
                     "command": "workspaces.open", "args": {"path": t["path"]},

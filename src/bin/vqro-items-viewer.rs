@@ -77,8 +77,8 @@ async fn main() {
     let out = arg("--out", "");
     // The harness ends viewers by creating this file after it has taken the runtime's truth (never a fixed time).
     let stop_file = arg("--stop-file", "");
-    let sock = tokio::net::UnixStream::connect(std::env::var("VQRO_SOCKET").unwrap()).await.unwrap();
-    let (rd, mut wr) = sock.into_split();
+    let sock = vqro::transport::connect(std::env::var("VQRO_SOCKET").unwrap()).await.unwrap();
+    let (rd, mut wr) = tokio::io::split(sock);
     let mut rd = BufReader::with_capacity(1 << 20, rd);
     let mut next_id = 1u64;
     let mut send = |method: &str, params: Value, wr_buf: &mut Vec<u8>| -> u64 {

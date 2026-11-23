@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! Scale harness: a deterministic load test of a real vqro core over its socket, with budgets.
 //!
 //! Ignored by default. Run (see docs/test-plan.md, "Scale harness"):
@@ -317,7 +318,7 @@ async fn scale_load() {
     let prof = Profile::from_env();
     eprintln!("scale profile: {prof:?}");
     // One run directory for socket and state, on a real disk so durable writes cost what they do:
-    // $VQRO_SCALE_RUN_DIR, default ~/.local/share/herdr/scratch/vqro-scale. Removed after the run.
+    // $VQRO_SCALE_RUN_DIR, default <private-notes> Removed after the run.
     let base = std::env::var("VQRO_SCALE_RUN_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap()).join(".local/share/herdr/scratch/vqro-scale"));
     std::fs::create_dir_all(&base).unwrap();
     let run_dir = tempfile::Builder::new().prefix("run").tempdir_in(&base).unwrap();

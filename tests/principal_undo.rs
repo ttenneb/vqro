@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! AS6 connection defaults, diagnostic labels and exact cooperative delegation; no security claim.
 use std::path::PathBuf;
 use vqro::{client,core::Shared,rpc::{Incoming,Peer},server::{self,Backend}};

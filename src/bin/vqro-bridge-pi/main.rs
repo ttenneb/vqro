@@ -141,7 +141,7 @@ async fn main()->Result<()> {
         let mut config=Config::new(&name,&instance,shared.agent.lock().unwrap().provider_capabilities());
         config.role="runtime".into();config.token=Some(credential.clone());config.max_effect_ids=2048;config.max_item_streams=4;config.max_streams=1;config.call_timeout=Duration::from_secs(5);
         config.software=json!({"name":"vqro-bridge-pi","version":env!("CARGO_PKG_VERSION")});
-        let connected=async {let socket=tokio::net::UnixStream::connect(&endpoint).await.map_err(|e|ProviderError::new("unavailable",format!("core transport: {e}")))?;Provider::connect(socket,config).await};
+        let connected=async {let socket=vqro::transport::connect(&endpoint).await.map_err(|e|ProviderError::new("unavailable",format!("core transport: {e}")))?;Provider::connect(socket,config).await};
         let result=tokio::select! {result=connected=>result,_=life.notified()=>{native.stop();break;},_=native.exited()=>break};
         let mut healthy=None;
         match result {

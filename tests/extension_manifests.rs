@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 use vqro::{client,server::{self,Backend}};
 use serde_json::{json,Value};
 #[tokio::test]

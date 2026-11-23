@@ -237,7 +237,7 @@ async fn serve(
         }
         let connected = tokio::select! {
             result=async {
-                let socket=tokio::net::UnixStream::connect(core).await.map_err(|e|ProviderError::new("unavailable",e.to_string()))?;
+                let socket=vqro::transport::connect(core).await.map_err(|e|ProviderError::new("unavailable",e.to_string()))?;
                 Provider::connect(socket,config.clone()).await
             } => result,
             _=exit.changed()=>return Ok(()),

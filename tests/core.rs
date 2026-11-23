@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket/signal fixtures; on Windows the lib's unit tests run (docs/windows.md).
 //! End-to-end tests of the core protocol over a real socket, with the fake backend as a fixture.
 
 use std::path::PathBuf;
