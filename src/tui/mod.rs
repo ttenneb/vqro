@@ -1025,6 +1025,14 @@ impl App {
             t.emu.set_scroll_offset(0);
             if let Some(sid) = t.stream {
                 self.send_input(sid, bytes);
+            } else {
+                // No stream (attaching, closed, or waiting to reattach): the key goes nowhere. Say so rather than
+                // drop it silently; it is never kept to send later (no replay).
+                self.message = match (&t.closed, t.attaching) {
+                    (Some(why), _) => format!("not sent: this terminal's stream is closed ({why})"),
+                    (None, true) => "not sent: still attaching to this terminal".into(),
+                    (None, false) => "not sent: this terminal is not attached".into(),
+                };
             }
         }
     }
@@ -5258,6 +5266,20 @@ mod tests {
         assert!(!client.is_closed());
         app.run_command("client.quit", Value::Null, Value::Null, None);
         assert!(app.quit);
+    }
+
+    #[tokio::test]
+    async fn a_key_for_a_terminal_without_a_stream_says_it_was_not_sent() {
+        // scale-rca: send_to_focused dropped such keys silently. Never queued for later (no replay).
+        let (mut app, _) = app();
+        app.leaves = vec!["view".into()];
+        app.terms.insert("view".into(), Term { resource:"r1".into(), stream:None, emu:new_parser(80,24), size:(80,24), attaching:true, closed:None, retry_at:None, modes:Default::default() });
+        app.send_to_focused(b"x".to_vec());
+        assert_eq!(app.message, "not sent: still attaching to this terminal");
+        app.terms.get_mut("view").unwrap().closed = Some("slow_consumer".into());
+        app.send_to_focused(b"x".to_vec());
+        assert_eq!(app.message, "not sent: this terminal's stream is closed (slow_consumer)");
+        assert!(app.typed.is_none(), "nothing went out");
     }
 
     #[tokio::test]
