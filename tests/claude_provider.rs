@@ -693,3 +693,104 @@ async fn final_ack_deadline_includes_a_budget_stalled_enqueue() {
     drop(held);
     provider.close();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retirement_ack_is_withheld_then_delivered_late_before_final_sync() {
+    let shared = Shared::new(
+        "late-ack".into(),
+        "claude-fixture".into(),
+        "fixture-instance".into(),
+    );
+    let (provider, mut requests, mut core) = registered(&shared).await;
+    core.open_items(&shared, &provider, &mut requests).await;
+    shared
+        .state
+        .lock()
+        .unwrap()
+        .observe(&vqro::native_process::Event::Exited(
+            vqro::native_process::Exit {
+                code: Some(0),
+                success: true,
+            },
+        ));
+    shared.wake();
+    let closing_shared = shared.clone();
+    let closing_provider = provider.clone();
+    let shutdown = tokio::spawn(async move {
+        closing_shared.finish(&closing_provider).await.unwrap();
+        closing_provider.close();
+    });
+    loop {
+        let frame = core.recv().await;
+        match frame["method"].as_str() {
+            Some("stream.data") => core.item_data(&frame).await,
+            Some("stream.closed") => break,
+            _ => panic!("unexpected pre-retirement frame {frame}"),
+        }
+    }
+    // Fault injection: the core has received the terminal but deliberately withholds retirement.
+    // Old enqueue/sync-only shutdown emits provider.sync here; that is a protocol-order RED,
+    // not a demand that the scheduler manufacture the real core's race.
+    if let Ok(frame) = tokio::time::timeout(Duration::from_millis(100), core.recv()).await {
+        panic!("publication/disconnect crossed the WITHHELD retirement ACK: {frame}");
+    }
+    assert!(!shutdown.is_finished());
+    core.send(
+        json!({"jsonrpc":"2.0","method":"stream.close","params":{"generation":7,"stream":44}}),
+    )
+    .await;
+    let sync = core.recv().await;
+    assert_eq!(sync["method"], "provider.sync");
+    assert!(!shutdown.is_finished());
+    core.reply(&sync, json!({})).await;
+    shutdown.await.unwrap();
+    provider.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retirement_ack_never_arrives_is_bounded_and_unconfirmed_not_ended() {
+    let shared = Shared::new(
+        "missing-ack".into(),
+        "claude-fixture".into(),
+        "fixture-instance".into(),
+    );
+    let (provider, mut requests, mut core) = registered(&shared).await;
+    core.open_items(&shared, &provider, &mut requests).await;
+    shared
+        .state
+        .lock()
+        .unwrap()
+        .observe(&vqro::native_process::Event::Exited(
+            vqro::native_process::Exit {
+                code: Some(0),
+                success: true,
+            },
+        ));
+    shared.wake();
+    let closing_shared = shared.clone();
+    let closing_provider = provider.clone();
+    let shutdown = tokio::spawn(async move {
+        let result = closing_shared.finish(&closing_provider).await;
+        closing_provider.close();
+        result
+    });
+    loop {
+        let frame = core.recv().await;
+        match frame["method"].as_str() {
+            Some("stream.data") => core.item_data(&frame).await,
+            Some("stream.closed") => break,
+            _ => panic!("unexpected pre-retirement frame {frame}"),
+        }
+    }
+    // No ACK at all. This is the adapter's retirement deadline, not the SDK reply timer.
+    let error = tokio::time::timeout(Duration::from_secs(3), shutdown)
+        .await
+        .expect("retirement stage bounded")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.kind, "timeout");
+    assert!(error.message.contains("retirement unconfirmed"));
+    assert!(!shared.state.lock().unwrap().end_ready);
+    assert_eq!(shared.facts()["data"]["agent"]["lifecycle"], "ending");
+    provider.close();
+}
