@@ -33,6 +33,11 @@ screen) and more. The [Extensions guide](docs/extensions.md) covers the searchab
 Agents and scripts drive the same primitives with `vqro call <method> '<json>'` and
 `vqro run <command> '<json args>'`. Reinstalling restarts the core and any open UI restarts into the new build.
 
+**Native Windows:** experimental. The background-extension console-window storm has a local fix,
+with detached-core restart and installed desktop/TUI smokes passing. Services were stopped after testing.
+The full gate is still not green and `dev-install.sh` is Unix-only. See the [Windows install attempt and friction log](docs/research/windows-native-install.md)
+for prerequisites, the tested local installation, private launch commands and remaining failures. Treat it as experimental.
+
 Upgrading a pre-rename installation is a one-time offline operation: use the copy-only migration utility in
 `scripts/` (`--help` first), with old UIs/launchers closed and the old core stopped. It retains the old state as a
 backup, refuses an existing destination and never changes live backends or creates compatibility links. The
