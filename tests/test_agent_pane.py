@@ -668,7 +668,7 @@ class AgentPane(unittest.TestCase):
         self.compose_submit('/review this diff')
         calls = [p for m, p in self.core.calls if m == 'resource.invoke']
         self.assertEqual(calls[-1]['op'], 'agent.command')
-        self.assertEqual(calls[-1]['args'], {'v': 0, 'caps_rev': 1, 'name': 'review', 'args': 'this diff'})
+        self.assertEqual(calls[-1]['args'], {'v': 0, 'caps_rev': 1, 'epoch': 'e1', 'name': 'review', 'args': 'this diff'})
         self.compose_submit('/reviewer this diff')
         self.assertEqual([p for m, p in self.core.calls if m == 'resource.invoke'][-1]['op'], 'agent.send')
         r['data']['agent']['commands'] = [{'name': 'skill:review'}]
@@ -754,10 +754,81 @@ class AgentPane(unittest.TestCase):
                 # First ASCII space only: every remaining argument byte is preserved for every kind.
                 self.compose_submit('/' + name + ' ' + suffix)
                 sent = [p for m, p in self.core.calls if m == 'resource.invoke'][-1]
-                self.assertEqual(sent['args'], {'v': 0, 'caps_rev': 1, 'name': name, 'args': suffix})
+                self.assertEqual(sent['args'], {'v': 0, 'caps_rev': 1, 'epoch': 'e1', 'name': name, 'args': suffix})
                 self.compose_submit('/' + name + suffix.lstrip(' '))
                 sent = [p for m, p in self.core.calls if m == 'resource.invoke'][-1]
                 self.assertEqual(sent['op'], 'agent.send')
+
+    def invocation_fixture(self):
+        r = self.core.resources['r2']
+        self.core.providers['items']['capabilities'].update({'agent.send': {}, 'agent.command': {}})
+        r['data']['agent'] = {'v': 0, 'state': 'idle', 'lifecycle': 'live', 'epoch': 'e1',
+            'commands': [{'name': 'review'}], 'caps': {'rev': 1,
+            'agent.send': {'modes': {'start': {}}}, 'agent.command': {}}}
+        self.feed(snapshot({('startup', 'current'): {'skills': [{'name': 'display-only'}]}}))
+        row = next(row for row in self.agents.bottom_rows(r) if row.get('id') == 'compose')
+        self.core.calls.clear()
+        return r, dict(row['args'], mode='auto', text='/review notes')
+
+    def test_invocation_fences_resource_epoch_and_sends_displayed_epoch_downstream(self):
+        r, draft = self.invocation_fixture()
+        self.agents.compose(draft)
+        sent = [p for m, p in self.core.calls if m == 'resource.invoke'][-1]
+        self.assertEqual(sent['args'].get('epoch'), 'e1')
+        self.core.calls.clear()
+        r['data']['agent']['epoch'] = 'e2'
+        with self.assertRaises(VqroError):
+            self.agents.compose(draft)
+        self.feed(line({'op': 'snapshot', 'phase': 'begin', 'epoch': 'e2', 'coverage': 'all_retained'}))
+        with self.assertRaises(VqroError):
+            self.compose_submit('/review notes')
+        self.assertFalse([p for m, p in self.core.calls if m == 'resource.invoke'])
+
+    def test_partial_broken_or_uninstalled_inventory_cannot_authorize_invocation(self):
+        self.invocation_fixture()
+        c = self.agents.conversations['r2']
+        self.feed(line({'op': 'snapshot', 'phase': 'begin', 'epoch': 'e1', 'coverage': 'all_retained'}))
+        with self.assertRaises(VqroError):
+            self.compose_submit('/review notes')
+        self.feed(line({'op': 'snapshot', 'phase': 'end', 'seq': 0}))
+        c.view.broken = True
+        with self.assertRaises(VqroError):
+            self.compose_submit('/review notes')
+        c.view.broken = False
+        c.view.epoch = None
+        with self.assertRaises(VqroError):
+            self.compose_submit('/review notes')
+        self.assertFalse([p for m, p in self.core.calls if m == 'resource.invoke'])
+
+    def test_display_only_skill_never_becomes_an_invocation_key(self):
+        self.invocation_fixture()
+        self.compose_submit('/display-only notes')
+        sent = [p for m, p in self.core.calls if m == 'resource.invoke'][-1]
+        self.assertEqual(sent['op'], 'agent.send')
+
+    def test_settings_failure_is_isolated_and_keeps_failed_dirty_work(self):
+        self.invocation_fixture()
+        self.agents.strict = False
+        self.agents.open_settings.add('r2')
+        self.agents.conv_dirty = {'r2', 'r7'}
+        seen = []
+        self.agents.publish_panel = lambda r: seen.append(r['id'])
+        original = self.core.publish
+        def failing(view, content):
+            if view == 'agents-settings-r2':
+                raise RuntimeError('private publication failure')
+            return original(view, content)
+        self.core.publish = failing
+        import contextlib, io
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.agents.flush_conversations()
+        self.assertEqual(set(seen), {'r2', 'r7'})
+        self.assertIn('r2', self.agents.conv_dirty)
+        self.assertNotIn('r2', self.agents.settings_inventory)
+        self.core.publish = original
+        self.agents.flush_conversations()
+        self.assertNotIn('r2', self.agents.conv_dirty)
+        self.assertIn('r2', self.agents.settings_inventory)
 
     def test_customizations_are_read_only_and_show_native_extension_limits(self):
         self.feed(snapshot({('startup', 'current'): {'extensions': [
@@ -998,7 +1069,8 @@ class AgentPane(unittest.TestCase):
         composer = next(r for r in items if r.get("type") == "composer")
         self.assertEqual((composer["pin"], composer["autofocus"], composer["submit"], composer["args"]),
                          ("bottom", True, "Enter", {"resource": "r2", "caps_rev": 2,
-                                               "inventory_rev": self.agents.invocation_inventory(self.core.resources['r2'])[0]}))
+                                               "inventory_rev": self.agents.invocation_inventory(self.core.resources['r2'])[0],
+                                               "inventory_epoch": 'e1'}))
         self.assertEqual((composer["controls"][0]["type"], composer["controls"][0]["value"]), ("select", "auto"), "one input-settings button")
         self.assertEqual(composer["controls"][1], {"type": "button", "text": "", "icon": {"name": "settings", "text": "⚙"},
                                                    "style": "control", "icon_style": "control", "command": "agents.pane", "args": {"resource": "r2"}}, "⚙ beside Input")

@@ -645,25 +645,38 @@ class Agents:
             self.conv_attach, self.conv_dirty = set(), set()
         for rid in attach:
             self.isolated(rid, "attach", self.attach, rid)
-        for rid in dirty:
-            r = self.ext.resources.get(rid)
-            if r is not None:
-                self.isolated(rid, "publish", self.publish_panel, r)
-                if rid in self.open_settings:
-                    stamp = self.invocation_inventory(r)[0]
-                    if self.settings_inventory.get(rid) != stamp:
-                        self.ext.publish("agents-settings-" + rid, self.settings_panel(r))
-                        self.settings_inventory[rid] = stamp
+        remaining = set(dirty)
+        try:
+            for rid in dirty:
+                r = self.ext.resources.get(rid)
+                if r is None or self.isolated(rid, "publish", self.publish_conversation, r):
+                    remaining.discard(rid)
+        finally:
+            # Preserve failed work (and unvisited work if strict/debug mode raises).
+            with self.conv_lock:
+                self.conv_dirty.update(remaining)
+
+    def publish_conversation(self, r):
+        """One agent's entire derived publication belongs to one isolation boundary."""
+        self.publish_panel(r)
+        rid = r["id"]
+        if rid in self.open_settings:
+            stamp = self.invocation_inventory(r)[0]
+            if self.settings_inventory.get(rid) != stamp:
+                self.ext.publish("agents-settings-" + rid, self.settings_panel(r))
+                self.settings_inventory[rid] = stamp
 
     def isolated(self, rid, what, fn, *args):
         """Run one agent's step so that its failure never stops the others' (review: one agent's render bug stalled
         every pane). The failure is logged; publish_panel already shows it in that agent's own pane."""
         try:
             fn(*args)
+            return True
         except Exception as error:  # noqa: BLE001 - any bug in one agent's step
             if self.strict:
                 raise
             self.log_failure(rid, what, error)
+            return False
 
     def log_failure(self, rid, what, error):
         """Log an agent's failure once per distinct error: `logged` keeps the LAST line logged per (agent, step), so a
@@ -910,7 +923,8 @@ class Agents:
                 {"label": names.get(m, m), "value": m} for m in modes if m not in ("start", "admit")]
             rows.append({"type": "composer", "id": "compose", "pin": "bottom", "text": "Message " + name,
                          "command": "agents.compose", "args": {"resource": rid, "caps_rev": caps(r).get("rev"),
-                                                                   "inventory_rev": self.invocation_inventory(r)[0]},
+                                                                   "inventory_rev": self.invocation_inventory(r)[0],
+                                                                   "inventory_epoch": self.invocation_inventory(r)[3]},
                          "placeholder": f"Message {name}… /exact-name invokes a command (idle auto/start only)", "rows": COMPOSER_ROWS, "max_bytes": 65536, "submit": "Enter",
                          "autofocus": True, "requires": ["composer"], "send_button": False,  # Enter sends (the human, relay-11)
                          # One input-settings button (the human, relay-11): the delivery mode now, more input options later.
@@ -919,7 +933,8 @@ class Agents:
                                       {"type": "button", **gear}],
                          "fallback": {"text": f"Message {name}…", "command": "agents.compose",
                                       "args": {"resource": rid, "mode": "auto", "caps_rev": caps(r).get("rev"),
-                                               "inventory_rev": self.invocation_inventory(r)[0]}, "input": "Message", "multiline": True}})
+                                               "inventory_rev": self.invocation_inventory(r)[0],
+                                               "inventory_epoch": self.invocation_inventory(r)[3]}, "input": "Message", "multiline": True}})
         # Clients without composer buttons (or a pane with no message box) get the ⚙ as a one-chip row at the bottom.
         rows.append({"type": "chips", "id": "gear", "pin": "bottom", "text": "Pane options", "chips": [gear],
                      **({"requires_absent": ["composer_buttons"]} if composing else {})})
@@ -1346,43 +1361,46 @@ class Agents:
     def invocation_inventory(self, r):
         """Revision fence for a displayed composer: native commands plus retained startup identity."""
         commands = advertised(r, "commands")
-        epoch, rev, startup = None, None, {}
+        epoch, rev, startup, ready = None, None, {}, False
         conversation = self.conversations.get(r["id"])
         if conversation is not None:
             with conversation.lock:
                 epoch = conversation.view.epoch
+                ready = epoch is not None and not conversation.view.broken and not conversation.view.snapshot_pending and conversation.stream is not None
                 rev, startup = conversation.view.entities.get(("startup", "current"), (None, {}))
-        stamp = hashlib.sha256(json.dumps([epoch, rev, commands], sort_keys=True).encode()).hexdigest()
-        return stamp, commands, startup if isinstance(startup, dict) else {}
+        resource_epoch = agent_facts(r).get("epoch")
+        ready = ready and (resource_epoch is None or resource_epoch == epoch)
+        stamp = hashlib.sha256(json.dumps([epoch, resource_epoch, ready, rev, commands], sort_keys=True).encode()).hexdigest()
+        return stamp, commands, startup if isinstance(startup, dict) else {}, epoch, ready
 
     def compose(self, args):
         """Explicit message-box intent, distinct from the public literal-data send command."""
         self.ext.fresh()
         r = self.agent(args, "send")
-        stamp, commands, startup = self.invocation_inventory(r)
-        if args.get("caps_rev") != caps(r).get("rev") or args.get("inventory_rev") != stamp:
+        stamp, commands, startup, epoch, ready = self.invocation_inventory(r)
+        if args.get("caps_rev") != caps(r).get("rev") or args.get("inventory_rev") != stamp or args.get("inventory_epoch") != epoch:
             raise VqroError("agent capabilities or customization inventory changed; review the message box again. Nothing sent.", "stale")
         text, mode = args.get("text"), args.get("mode")
         if isinstance(text, str) and text.startswith("/"):
             # vqro composer grammar, deliberately not an emulation of any runtime's parser.
             name, separator, arguments = text[1:].partition(" ")
             names = {entry["name"] for entry in commands}
-            for field in ("commands", "prompts", "skills"):
+            for field in ("commands", "prompts"):
                 inventory = startup.get(field)
                 if isinstance(inventory, list):
                     for entry in inventory:
                         if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
                             continue
-                        candidate = entry["name"]
-                        # A display skill name is not an alias for its advertised invocation spelling.
-                        if field != "skills" or "skill:" + candidate not in names:
-                            names.add(candidate)
+                        names.add(entry["name"])
+            # Skills are display inventory, never invocation keys; use only positively advertised commands.
             if name and name in names:
+                if not ready:
+                    raise VqroError("customization inventory is not current (loading, stale, disconnected or epoch mismatch); nothing sent", "stale")
                 if mode not in ("auto", "start") or busy(r) or "start" not in self.modes(r):
                     raise VqroError("explicit invocation requires idle start/auto; the selected delivery mode cannot run agent.command. Nothing sent.", "unsupported")
                 if not self.supported(r, "command"):
                     raise VqroError("explicit invocation requires agent.command; nothing sent", "unsupported")
-                native = {**self.v0_args(r), "name": name}
+                native = {**self.v0_args(r), "epoch": args["inventory_epoch"], "name": name}
                 if separator:
                     native["args"] = arguments
                 if self.invocation_inventory(r)[0] != stamp or args.get("caps_rev") != caps(r).get("rev"):

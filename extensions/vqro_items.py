@@ -83,6 +83,11 @@ class ItemView:
         self._overflow = False
         self._buf = bytearray()
 
+    @property
+    def snapshot_pending(self):
+        """A snapshot is being received, not yet installed (Rust ItemCursor parity)."""
+        return self._pending is not None
+
     def after(self):
         """The `items.after` to reattach with, or None before any installed snapshot."""
         return {"epoch": self.epoch, "seq": self.seq} if self.epoch is not None else None

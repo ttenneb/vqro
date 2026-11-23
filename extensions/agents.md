@@ -36,6 +36,10 @@
   delivery modes are refused with an explanation, not silently bypassed (`agent.command` has no delivery-mode field).
   Capabilities revision and startup epoch/revision plus advertised command declarations are fenced against the
   displayed composer; changed declarations send nothing and require reviewing the current message box again.
+  The installed item epoch must match the current resource epoch when reported; loading, broken, disconnected or
+  partial-snapshot inventory cannot authorize invocation. The displayed epoch is also passed to `agent.command`
+  as its downstream admission precondition, protecting a subsequent native epoch change. A skill display name
+  without an advertised invocation key remains visible but is not callable.
   `agents.compose` is explicit invocation intent, not an authentication boundary: callers wanting literal data must
   use `agents.send`, which never promotes slash text to commands. No new core/client primitive is involved.
 - Prefix `P` (Shift-p) opens Agent settings for the agent in the focused pane (`binding/agents.config`, same `when`).

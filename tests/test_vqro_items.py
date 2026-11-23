@@ -30,6 +30,30 @@ def message(text, final=False):
             "native": {"raw": ""}}
 
 
+class SnapshotPendingParity(unittest.TestCase):
+    def test_pending_covers_split_snapshot_and_clears_on_install_or_end(self):
+        view = ItemView()
+        self.assertFalse(view.snapshot_pending)
+        begin = line({'op': 'snapshot', 'phase': 'begin', 'epoch': 'e1', 'coverage': 'all_retained'})
+        view.feed(begin[:-1])
+        self.assertFalse(view.snapshot_pending)
+        view.feed(begin[-1:])
+        self.assertTrue(view.snapshot_pending)
+        self.assertIsNone(view.epoch)
+        view.feed(line({'op': 'put', 'kind': 'message', 'id': 'm', 'rev': 1, 'value': message('x')}))
+        self.assertTrue(view.snapshot_pending)
+        self.assertFalse(view.entities)
+        view.feed(line({'op': 'snapshot', 'phase': 'end', 'seq': 0}))
+        self.assertFalse(view.snapshot_pending)
+        self.assertEqual(view.epoch, 'e1')
+        view.feed(begin.replace(b'e1', b'e2'))
+        self.assertTrue(view.snapshot_pending)
+        self.assertEqual(view.epoch, 'e1')
+        view.stream_ended()
+        self.assertFalse(view.snapshot_pending)
+        self.assertEqual(view.epoch, 'e1')
+
+
 class Producer:
     """A tiny reference producer: the expected entities, and the records that build them."""
 
