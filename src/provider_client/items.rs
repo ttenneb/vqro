@@ -470,6 +470,7 @@ pub struct ItemView {
     pub records: u64,
     /// Snapshots installed (opening resets and epoch changes).
     pub snapshots: u64,
+    snapshot_starts: u64,
 }
 
 impl ItemView {
@@ -480,6 +481,9 @@ impl ItemView {
     /// Data was lost (a missing record, a stale append, an oversized line, a bound exceeded): close the stream and
     /// reattach from [`ItemView::after`]. Cleared by [`ItemView::stream_ended`].
     pub fn broken(&self) -> bool { self.broken }
+    /// Accepted valid snapshot begins, including replacement cuts; never reset by stream end or install.
+    /// Unlike `snapshots` (completed installs), this observes a new cut while an older cut is still pending.
+    pub fn snapshot_starts(&self) -> u64 { self.snapshot_starts }
     pub fn epoch(&self) -> Option<&str> { self.epoch.as_deref() }
     pub fn seq(&self) -> u64 { self.seq }
     pub fn len(&self) -> usize { self.entities.len() }
@@ -547,7 +551,10 @@ impl ItemView {
             "snapshot" => {
                 match (r["phase"].as_str(), self.pending.take()) {
                     (Some("begin"), _) => match r["epoch"].as_str() {
-                        Some(e) if r["coverage"].is_string() => self.pending = Some((e.to_string(), BTreeMap::new())),
+                        Some(e) if r["coverage"].is_string() => {
+                            self.pending = Some((e.to_string(), BTreeMap::new()));
+                            self.snapshot_starts += 1;
+                        },
                         _ => self.errors.bad_record += 1,
                     },
                     // Installed only now (agent-v0 §4): epoch, every entity and the cut's seq.
@@ -632,6 +639,27 @@ impl ItemView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_starts_observes_valid_replacement_begins_not_installs() {
+        let mut view = ItemView::new();
+        assert_eq!(view.snapshot_starts(), 0);
+        view.feed(&line(&json!({"op":"snapshot","phase":"begin","epoch":"bad"})));
+        assert_eq!(view.snapshot_starts(), 0);
+        view.stream_ended();
+        let begin = line(&json!({"op":"snapshot","phase":"begin","epoch":"e1","coverage":"all_retained"}));
+        view.feed(&begin[..begin.len()-1]);
+        assert_eq!(view.snapshot_starts(), 0);
+        view.feed(&begin[begin.len()-1..]);
+        assert_eq!((view.snapshot_starts(), view.snapshots), (1, 0));
+        view.feed(b"{bad json\n");
+        view.feed(&line(&json!({"op":"snapshot","phase":"begin","epoch":"e2","coverage":"all_retained"})));
+        assert_eq!((view.snapshot_starts(), view.snapshots), (2, 0));
+        view.feed(&line(&json!({"op":"snapshot","phase":"end","seq":0})));
+        assert_eq!((view.snapshot_starts(), view.snapshots, view.epoch()), (2, 1, Some("e2")));
+        view.stream_ended();
+        assert_eq!(view.snapshot_starts(), 2);
+    }
 
     #[test]
     fn overflowing_an_unfinished_cut_gaps_before_more_pieces_and_installs_nothing() {

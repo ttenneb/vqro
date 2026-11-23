@@ -831,6 +831,18 @@ class AgentPane(unittest.TestCase):
                 self.compose_submit('/review notes')
         self.assertEqual(len([p for m, p in self.core.calls if m == 'resource.invoke']), len(bad_cases))
 
+    def test_clean_replacement_snapshot_recovers_from_corrupt_pending_snapshot(self):
+        self.invocation_fixture()
+        c = self.agents.conversations['r2']
+        begin = line({'op': 'snapshot', 'phase': 'begin', 'epoch': 'e1', 'coverage': 'all_retained'})
+        c.data(begin + b'{bad json\n')
+        with self.assertRaises(VqroError):
+            self.compose_submit('/review notes')
+        # No end for the corrupt snapshot: a fresh begin replaces the still-pending reconstruction.
+        c.data(snapshot({('startup', 'current'): {'commands': [{'name': 'review'}]}}))
+        self.compose_submit('/review notes')
+        self.assertEqual([p for m, p in self.core.calls if m == 'resource.invoke'][-1]['op'], 'agent.command')
+
     def test_display_only_skill_never_becomes_an_invocation_key(self):
         self.invocation_fixture()
         self.compose_submit('/display-only notes')

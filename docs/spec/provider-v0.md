@@ -539,6 +539,13 @@ parameters remain ignorable; this adds no core sizing arbitration.
   accepts `continue` only for an open that carried `after`, in that same epoch; anything else ends the stream as
   `invalid`. The producer side is the Rust SDK's `provider_client::items` (`ItemJournal`, `ItemCursor`, `ItemView`);
   the Python SDK does not serve item streams yet (Rust only).
+  Local viewer observations (Rust `ItemView`, Python `vqro_items.ItemView`) include `snapshots`, the number of
+  completed snapshot installations, and read-only `snapshot_starts` (Rust accessor, Python property), the number
+  of accepted valid snapshot begins. Both counters survive stream end and replacement cuts. A replacement begin
+  increments `snapshot_starts` even while another snapshot is pending; malformed/rejected begins do not.
+  A start is not an installation or proof of valid contents: consumers needing a clean reconstruction also track
+  viewer errors and wait for `snapshots` to advance. These are SDK observations only, not wire fields or changes
+  to parser/recovery behavior.
 - **Stream ids** are chosen by the core, unique for the life of the provider connection, never reused. Messages for
   a stream that is closed or unknown are ignored by the provider (`stream.credit`, `stream.input` after close) and
   dropped by the core; neither is an error.

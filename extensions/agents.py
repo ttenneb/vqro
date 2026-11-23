@@ -366,11 +366,11 @@ class Conversation:
                 chunk = piece + b"\n" if index < len(pieces) - 1 else piece
                 if not chunk:
                     continue
-                pending, snapshots = self.view.snapshot_pending, self.view.snapshots
+                starts, snapshots = self.view.snapshot_starts, self.view.snapshots
                 errors = sum(self.view.errors.values())
                 received.extend(self.view.feed(chunk, epochs=True))
                 invalid = sum(self.view.errors.values()) != errors
-                if not pending and self.view.snapshot_pending:
+                if self.view.snapshot_starts != starts:
                     self.reconstruction_clean = not invalid
                 if self.view.snapshot_pending:
                     self.reconstruction_ready = False

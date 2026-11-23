@@ -77,11 +77,17 @@ class ItemView:
         self.errors = dict.fromkeys(ERRORS, 0)
         self.records = 0  # live records applied
         self.snapshots = 0  # snapshots installed
+        self._snapshot_starts = 0  # accepted valid begins, including replacement cuts
         self.broken = False
         self.rejection = None  # the latest incompatible rejection: {kind, op?, unknown_op?, seq?, limits}
         self._pending = None  # [epoch, coverage, entities, entity bytes] while a snapshot is being received
         self._overflow = False
         self._buf = bytearray()
+
+    @property
+    def snapshot_starts(self):
+        """Accepted valid snapshot begins; monotonic across installs, replacements and stream ends."""
+        return self._snapshot_starts
 
     @property
     def snapshot_pending(self):
@@ -178,6 +184,7 @@ class ItemView:
             if phase == "begin":
                 if isinstance(r.get("epoch"), str) and isinstance(r.get("coverage"), str):
                     self._pending = [r["epoch"], r["coverage"], {}, 0]
+                    self._snapshot_starts += 1
                 else:
                     self._error("bad_record")
             elif phase == "end" and pending is not None:

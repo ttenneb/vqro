@@ -31,6 +31,27 @@ def message(text, final=False):
 
 
 class SnapshotPendingParity(unittest.TestCase):
+    def test_starts_count_valid_begins_including_replacements_not_installs(self):
+        view = ItemView()
+        self.assertEqual(view.snapshot_starts, 0)
+        view.feed(line({'op': 'snapshot', 'phase': 'begin', 'epoch': 'bad'}))
+        self.assertEqual(view.snapshot_starts, 0)
+        view.stream_ended()
+        begin = line({'op': 'snapshot', 'phase': 'begin', 'epoch': 'e1', 'coverage': 'all_retained'})
+        view.feed(begin[:-1])
+        self.assertEqual(view.snapshot_starts, 0)
+        view.feed(begin[-1:])
+        self.assertEqual((view.snapshot_starts, view.snapshots), (1, 0))
+        view.feed(b'{bad json\n')
+        view.feed(begin.replace(b'e1', b'e2'))
+        self.assertEqual((view.snapshot_starts, view.snapshots), (2, 0))
+        view.feed(line({'op': 'snapshot', 'phase': 'end', 'seq': 0}))
+        self.assertEqual((view.snapshot_starts, view.snapshots, view.epoch), (2, 1, 'e2'))
+        view.stream_ended()
+        self.assertEqual(view.snapshot_starts, 2)
+        with self.assertRaises(AttributeError):
+            view.snapshot_starts = 0
+
     def test_pending_covers_split_snapshot_and_clears_on_install_or_end(self):
         view = ItemView()
         self.assertFalse(view.snapshot_pending)
