@@ -181,6 +181,12 @@ try {
     Assert-PlainTree $extensions
     Assert-PlainPath $backupRoot
     Assert-PlainPath $root
+    $manifest = Join-Path $root 'Cargo.toml'
+    Assert-PlainPath $manifest 'File'
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { throw 'Checkout Cargo.toml is missing; nothing installed.' }
+    $manifestPhysical = Resolve-PhysicalPath $manifest
+    Assert-PlainTree (Join-Path $root 'src')
+    Assert-PlainTree (Join-Path $root 'tests')
     Assert-PlainTree (Join-Path $root 'extensions')
     Assert-PlainTree (Join-Path $root 'integrations/pi')
     Assert-PlainTree (Join-Path $root 'scripts')
@@ -221,7 +227,6 @@ try {
     $python = Find-Python
     Invoke-Python -Arguments @('-c', 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required"')
     Invoke-Python -Arguments @((Join-Path $root 'scripts/install_extension_tests.py'), '--check', $extensions)
-    $manifest = Join-Path $root 'Cargo.toml'
     $metadataText = & cargo metadata --manifest-path $manifest --no-deps --format-version=1
     if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed; nothing installed.' }
     $metadata = $metadataText | ConvertFrom-Json
@@ -235,12 +240,11 @@ try {
     $intermediate = [IO.Path]::GetFullPath($buildProperty.Value)
     foreach ($writeRoot in @($target, $intermediate)) {
         Assert-PlainTree $writeRoot
-        foreach ($sourceDirectory in @('extensions', 'integrations', 'scripts', 'src')) {
+        foreach ($sourceDirectory in @('extensions', 'integrations', 'scripts', 'src', 'tests')) {
             Assert-Separate $writeRoot (Join-Path $root $sourceDirectory)
         }
         foreach ($destination in @($BinDir, $extensions, $backupRoot)) { Assert-Separate $writeRoot $destination }
     }
-    $manifestPhysical = Resolve-PhysicalPath (Join-Path $root 'Cargo.toml')
     $packages = @($metadata.packages | Where-Object { (Resolve-PhysicalPath $_.manifest_path) -ieq $manifestPhysical })
     if ($packages.Count -ne 1) { throw 'Cannot identify exactly one checkout package; nothing installed.' }
     $packageId = $packages[0].id
@@ -307,7 +311,13 @@ try {
     $priorBinaries = @(Get-BinaryInventory $BinDir)
     $priorExtensionsPresent = Test-Path -LiteralPath $extensions
     $priorExtensions = @(Get-TreeInventory $extensions)
-    $backup = Join-Path $backupRoot (([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffffffZ')) + '-' + [Guid]::NewGuid().ToString('N'))
+    $slot = Join-Path $backupRoot (([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffffffZ')) + '-' + [Guid]::NewGuid().ToString('N'))
+    Assert-PlainPath $slot
+    if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($slot)).TrimEnd('\') -ine [IO.Path]::GetFullPath($backupRoot).TrimEnd('\')) {
+        throw 'Generated backup slot must be a plain direct child of the backup root.'
+    }
+    if (Test-Path -LiteralPath $slot) { throw "Backup slot already exists; retained backup will not be reused: $slot" }
+    $backup = $slot
     [IO.Directory]::CreateDirectory($backup) | Out-Null
     $backupBin = Join-Path $backup 'bin'
     [IO.Directory]::CreateDirectory($backupBin) | Out-Null

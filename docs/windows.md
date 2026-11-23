@@ -58,7 +58,10 @@ aliases), not drive-letter prefixes; volumes whose final physical identity canno
 The root is derived from the script location and must match Git's exact physical checkout root; there is no
 wildcard-capable `-Root` argument. Filesystem operations use literal paths, including checkouts with brackets in
 their names. Reparse/junction paths are refused rather than followed; extended path forms must pass the same
-physical-volume identity checks or fail closed.
+physical-volume identity checks or fail closed. Before Cargo metadata, the selected `Cargo.toml` and its
+ancestors must be plain, and the script checks `src`, `tests`, `extensions`, `integrations/pi` and `scripts`
+for links/reparse points. Package selection is bound to that checked manifest. This is not a sandbox for
+arbitrary trusted Cargo build scripts or dependencies.
 Cargo metadata must report both `target_directory` and `build_directory` (verified with Cargo 1.96.1; older
 versions without the latter field are refused). Both final output and independent intermediate output
 (`build.build-dir` / `CARGO_BUILD_BUILD_DIR`, including Cargo's resolved templates) are checked against protected
@@ -86,7 +89,8 @@ or herdr-core. It prints installed executable hashes, version and source commit 
 
 PATH is unchanged unless `-AddToPath` is supplied; otherwise the script prints the exact user-PATH command.
 Open a new terminal after changing PATH. Run `vqro tui` to start the installed core. Before replacing files, the script copies existing seven binaries and the entire extensions directory into a
-unique UTC-timestamped `%LOCALAPPDATA%\vqro\backups` folder and prints its path. It verifies the entire backup
+unique UTC-timestamped `%LOCALAPPDATA%\vqro\backups` folder and prints its path. The generated slot must be
+a plain direct child and must not already exist; retained backup slots are never reused. It verifies the entire backup
 inventory and SHA256 hashes against the prior install before writing `inventory.json` and the `restore.txt`
 completion marker, then replacing anything. The inventory records prior presence/absence for all seven binaries
 and the extensions root, including hidden files and empty directories. Previous backups are retained
