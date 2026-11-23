@@ -33,9 +33,11 @@ def warnings(binary):
         found.append("could not inspect process command lines with ps; check for old cores manually")
         processes = []
     try:
-        current_pid = int((state / "serve.pid").read_text().strip())
+        pidfile = state / "serve.pid"
+        recorded_pid = int(pidfile.read_text().strip())
+        recorded_at = pidfile.stat().st_mtime
     except (OSError, ValueError):
-        current_pid = None
+        recorded_pid = None
     for line in processes:
         fields = line.split(None, 6)
         if len(fields) != 7:
@@ -45,13 +47,16 @@ def warnings(binary):
             found.append(f"legacy core process {pid}: {command}")
         elif re.match(r"(?:\S*/)?(?:prim|vqro)\s+serve(?:\s|$)", command) and str(legacy) in command:
             found.append(f"old-layout core process {pid}: {command}")
-        if current_pid is not None and pid == str(current_pid) and re.match(r"(?:\S*/)?vqro\s+serve(?:\s|$)", command):
+        if recorded_pid is not None and pid == str(recorded_pid) and re.match(r"(?:\S*/)?vqro\s+serve(?:\s|$)", command):
+            recorded = f"a core recorded in {state} (pid {pid}, started {' '.join(fields[1:6])}, command: {command})"
             try:
                 started = datetime.datetime.strptime(" ".join(fields[1:6]), "%a %b %d %H:%M:%S %Y").timestamp()
-                if started < Path(binary).stat().st_mtime:
-                    found.append(f"current-endpoint core {pid} predates the new binary; it may be an older build")
+                if started > recorded_at + 1:
+                    found.append(f"{recorded}: pidfile predates this process; identity unconfirmed")
+                elif started < Path(binary).stat().st_mtime:
+                    found.append(f"{recorded} predates the new binary; it may be an older build (pidfile identity and endpoint unverified)")
             except (OSError, ValueError):
-                found.append(f"current-endpoint core {pid}: build age could not be checked")
+                found.append(f"{recorded}: build age, pidfile identity and endpoint unverified")
     return found
 
 
