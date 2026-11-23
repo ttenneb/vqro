@@ -35,8 +35,10 @@ pub fn python() -> &'static str {
             };
             if status.is_some_and(|status| status.success()) {
                 let selected = fs::read_to_string(&out).expect("Python path is UTF-8");
-                assert!(!selected.trim().is_empty(), "empty Python resolver output");
-                return selected.trim().to_owned();
+                let path = selected.strip_suffix('\n').unwrap_or(&selected);
+                let path = if cfg!(windows) { path.strip_suffix('\r').unwrap_or(path) } else { path };
+                assert!(!path.is_empty(), "empty Python resolver output");
+                return path.to_owned();
             }
             errors.push_str(&fs::read_to_string(&err).unwrap_or_default());
         }
