@@ -18,6 +18,12 @@ const WRITTEN: u8 = 2;
 const REPLIED: u8 = 3;
 const CANCELLED: u8 = 4;
 
+/// No-effect failures must win the SAME atomic boundary as the byte writer, not pre-read it.
+/// An already cancelled write is safe; every other observed phase remains potentially acted.
+fn revoke_unwritten(phase: &AtomicU8) -> bool {
+    matches!(phase.compare_exchange(QUEUED, CANCELLED, Ordering::SeqCst, Ordering::SeqCst), Ok(_) | Err(CANCELLED))
+}
+
 #[derive(Debug, Clone)]
 pub struct Error {
     pub kind: &'static str,
@@ -81,9 +87,9 @@ struct Inner {
 impl Inner {
     fn fail_pending(&self, message: &str) {
         for (_, pending) in self.pending.lock().unwrap().drain() {
-            let error = if matches!(pending.phase.load(Ordering::SeqCst),WRITING | WRITTEN | REPLIED) {
-                Error::unknown("unavailable",message)
-            } else { Error::new("unavailable",message) };
+            let error = if revoke_unwritten(&pending.phase) {
+                Error::new("unavailable",message)
+            } else { Error::unknown("unavailable",message) };
             let _ = pending.result.send(Err(error));
         }
     }
@@ -119,8 +125,8 @@ impl Ticket {
     pub fn written(&self) -> bool { matches!(self.phase.load(Ordering::SeqCst), WRITTEN | REPLIED) }
     pub async fn reply(&mut self) -> Result<Reply, Error> {
         let Some(result) = self.result.as_mut() else { return Err(Error::new("invalid", "native result already taken")); };
-        let result = result.await.map_err(|_| if self.write_begun() { Error::unknown("unavailable", "native response channel closed") }
-            else { Error::new("unavailable", "native response channel closed") })?;
+        let result = result.await.map_err(|_| if revoke_unwritten(&self.phase) { Error::new("unavailable", "native response channel closed") }
+            else { Error::unknown("unavailable", "native response channel closed") })?;
         self.result = None;
         result
     }
@@ -245,7 +251,7 @@ impl Process {
             match phase.load(Ordering::SeqCst) {
                 WRITTEN => return Ok(()),
                 CANCELLED => return Err(Error::new("timeout","native notice expired before dispatch")),
-                _ if !self.alive() => return Err(if phase.load(Ordering::SeqCst)==QUEUED { Error::new("unavailable","native notice not dispatched") }
+                _ if !self.alive() => return Err(if revoke_unwritten(&phase) { Error::new("unavailable","native notice not dispatched") }
                     else { Error::unknown("unavailable","native notice outcome unknown") }),
                 _ if Instant::now() >= deadline => {
                     if phase.compare_exchange(QUEUED,CANCELLED,Ordering::SeqCst,Ordering::SeqCst).is_ok() { return Err(Error::new("timeout","native notice expired before dispatch")); }
@@ -257,7 +263,7 @@ impl Process {
     }
 }
 
-async fn write_native(mut stdin: tokio::process::ChildStdin, mut writes: mpsc::Receiver<Write>, state: Arc<Inner>) {
+async fn write_native(mut stdin: impl tokio::io::AsyncWrite + Unpin, mut writes: mpsc::Receiver<Write>, state: Arc<Inner>) {
     let mut exit = state.exit.subscribe();
     loop {
         let write = tokio::select! { value = writes.recv() => value, _ = exit.wait_for(|value|value.is_some()) => None };
@@ -338,6 +344,10 @@ async fn read_native(stdout: tokio::process::ChildStdout, state: Arc<Inner>) {
         if !state.dead.load(Ordering::SeqCst) { state.protocol_error("native stdout closed while process remains alive"); }
     }
 }
+
+#[cfg(test)]
+#[path = "native_process_failure_tests.rs"]
+mod failure_tests;
 
 async fn read_stderr(mut stderr: tokio::process::ChildStderr, state: Arc<Inner>) {
     let mut exit = state.exit.subscribe();
