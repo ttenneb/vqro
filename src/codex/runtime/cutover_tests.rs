@@ -6,6 +6,7 @@ struct Fake {
     runtime: Arc<Runtime>,
     methods: Arc<Mutex<Vec<String>>>,
     foreign: Arc<AtomicBool>,
+    active_b: Arc<AtomicBool>,
     drain: tokio::task::JoinHandle<()>,
     server: tokio::task::JoinHandle<()>,
 }
@@ -35,6 +36,8 @@ async fn fake(mode: &'static str) -> Fake {
     let calls = methods.clone();
     let foreign = Arc::new(AtomicBool::new(false));
     let native_foreign = foreign.clone();
+    let active_b = Arc::new(AtomicBool::new(false));
+    let native_b = active_b.clone();
     let server = tokio::spawn(async move {
         let (read, mut write) = tokio::io::split(server);
         let mut lines = BufReader::new(read).lines();
@@ -43,7 +46,11 @@ async fn fake(mode: &'static str) -> Fake {
             let request: Value = serde_json::from_str(&line).unwrap();
             let method = request["method"].as_str().unwrap();
             calls.lock().unwrap().push(method.to_owned());
-            let active = if switched { "saved-b" } else { "saved-a" };
+            let active = if switched || native_b.load(Ordering::Acquire) {
+                "saved-b"
+            } else {
+                "saved-a"
+            };
             let sessions = |active: &str| {
                 json!({"activeSessionId":active,"sessions":[
                 {"sessionId":"saved-a","isActive":active=="saved-a","selectedWorkspaceAccountId":"workspace-a","workspaces":[{"accountId":"workspace-a"}],"email":"never-publish@example.test"},
@@ -102,6 +109,7 @@ async fn fake(mode: &'static str) -> Fake {
                         sessions("saved-b")
                     }
                 }
+                "account/rateLimits/read" => json!({"ordinaryUsageAllowed":null}),
                 "thread/resume" => {
                     assert_eq!(request["params"], json!({"threadId":"thread-a"}));
                     json!({"thread":{"id":if mode == "wrong_thread" {"other"} else {"thread-a"},"status":{"type":"idle"}}})
@@ -120,6 +128,7 @@ async fn fake(mode: &'static str) -> Fake {
         runtime,
         methods,
         foreign,
+        active_b,
         server,
         drain,
     }
@@ -194,6 +203,73 @@ async fn native_binding_refuses_inactive_b_and_maps_current_a_readonly() {
             .unwrap()
             .iter()
             .all(|m| m == "accountSession/list")
+    );
+}
+
+fn limit(f: &Fake, turn: &str) {
+    let mut endpoint = f.runtime.slots[0].endpoint.lock().unwrap();
+    endpoint.notification("error",&json!({"threadId":"thread-a","turnId":turn,"willRetry":false,"error":{"codexErrorInfo":"usageLimitExceeded"}}));
+}
+
+#[tokio::test]
+async fn auth_change_cannot_relabel_a_limit_as_verified_b() {
+    let f = fake("ok").await;
+    let source = json!({"login_ref":{"sessionId":"saved-a","accountId":"workspace-a"},"account":{"id":"a","label":"A","kind":"subscription"}});
+    command(&f, "_account.bind", source).await.unwrap();
+    limit(&f, "limit-under-a");
+    assert_eq!(
+        f.runtime.fact("endpoint-1").unwrap()["data"]["agent"]["availability"]["native"]["turnId"],
+        "limit-under-a"
+    );
+    f.active_b.store(true, Ordering::Release);
+    f.runtime.incoming(Incoming::Notification {
+        method: "account/updated".into(),
+        params: json!({"authMode":"chatgpt"}),
+    });
+    command(&f, "_account.bind", target()).await.unwrap();
+    let mut facts = f.runtime.facts();
+    facts.push(f.runtime.fact("endpoint-1").unwrap());
+    facts.extend(f.runtime.take_dirty_facts());
+    for fact in facts {
+        assert_eq!(fact["data"]["agent"]["account"]["id"], "b");
+        assert!(
+            fact["data"]["agent"]["availability"].is_null(),
+            "A quota is not B quota or evidence of recovery"
+        );
+    }
+    limit(&f, "limit-under-a");
+    assert!(
+        f.runtime.fact("endpoint-1").unwrap()["data"]["agent"]["availability"].is_null(),
+        "late A error is retired, not B evidence"
+    );
+    f.runtime.slots[0].endpoint.lock().unwrap().notification(
+        "turn/started",
+        &json!({"threadId":"thread-a","turn":{"id":"limit-under-b","status":"inProgress"}}),
+    );
+    limit(&f, "limit-under-b");
+    assert_eq!(
+        f.runtime.fact("endpoint-1").unwrap()["data"]["agent"]["availability"]["native"]["turnId"],
+        "limit-under-b"
+    );
+    limit(&f, "limit-under-a");
+    assert_eq!(
+        f.runtime.fact("endpoint-1").unwrap()["data"]["agent"]["availability"]["native"]["turnId"],
+        "limit-under-b"
+    );
+}
+
+#[tokio::test]
+async fn same_auth_readonly_bind_preserves_current_native_limit() {
+    let f = fake("ok").await;
+    let source = json!({"login_ref":{"sessionId":"saved-a","accountId":"workspace-a"},"account":{"id":"a","label":"A","kind":"subscription"}});
+    command(&f, "_account.bind", source.clone()).await.unwrap();
+    limit(&f, "limit-under-a");
+    command(&f, "_account.bind", source).await.unwrap();
+    let fact = f.runtime.fact("endpoint-1").unwrap();
+    assert_eq!(fact["data"]["agent"]["account"]["id"], "a");
+    assert_eq!(
+        fact["data"]["agent"]["availability"]["native"]["turnId"],
+        "limit-under-a"
     );
 }
 

@@ -90,6 +90,11 @@ account's label. Initial launcher metadata remains a configured hint, not native
 initial attribution uses native active-reference verification before it can establish a quota source.
 `data.agent.account.native.login_ref` records that verified nonsecret reference; consumers must match the
 current registry binding, not trust a launcher label or reuse an old binding after a registry edit.
+An auth notification invalidates current usage and limit eligibility to **unknown**, not recovered/available.
+Known old turn causes are retired; a new native turn is required before quota/rate errors can qualify in the new
+auth generation. Read-only binding alone never reattaches A's episode to B. A same-auth metadata bind preserves
+its current limit. Retirement is bounded at256 known causes per host endpoint lifetime; exhaustion stays unknown
+rather than evicting old causes and risking reuse. Historical A block policy remains the common ledger's concern.
 
 ## Evidence and limits
 

@@ -562,7 +562,7 @@ async fn newer_false_or_null_permission_push_fences_an_older_true_read() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn account_change_fences_the_old_native_permission_response() {
+async fn account_change_discards_old_permission_without_inventing_recovery() {
     let w = wire(json!({"ordinaryUsageAllowed":true,"_fixture_account_change":true})).await;
     w.native
         .notify("error", error(json!("usageLimitExceeded"), json!(false)));
@@ -570,22 +570,18 @@ async fn account_change_fences_the_old_native_permission_response() {
     for _ in 0..64 {
         tokio::task::yield_now().await;
     }
-    assert_eq!(
-        w.runtime.facts()[0]["data"]["agent"]["availability"]["state"],
-        "blocked"
-    );
+    assert!(w.runtime.facts()[0]["data"]["agent"]["availability"].is_null());
     *w.permission.lock().unwrap() = json!({"ordinaryUsageAllowed":true});
     tokio::time::advance(Duration::from_secs(60)).await;
-    until(&w, |f| {
-        f["data"]["agent"]["availability"]["state"] == "available"
-    })
-    .await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        w.runtime.facts()[0]["data"]["agent"]["availability"].is_null(),
+        "neither elapsed time nor A's old true read proves B recovery"
+    );
     assert_eq!(
         w.calls.lock().unwrap().as_slice(),
-        [
-            "thread/start",
-            "account/rateLimits/read",
-            "account/rateLimits/read"
-        ]
+        ["thread/start", "account/rateLimits/read"]
     );
 }

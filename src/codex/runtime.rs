@@ -500,7 +500,7 @@ impl Runtime {
                 ) {
                     for (index, slot) in self.slots.iter().enumerate() {
                         let mut endpoint = slot.endpoint.lock().unwrap();
-                        if auth_changed { endpoint.usage_limits = Default::default(); }
+                        if auth_changed { endpoint.invalidate_availability_auth_scope(); }
                         let mut changes = endpoint.notification(&method, &params);
                         if auth_changed && changes.is_empty() { changes.push(endpoint.state_entity()); }
                         if !changes.is_empty() {

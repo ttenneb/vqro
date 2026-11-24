@@ -11,6 +11,39 @@ impl Endpoint {
         self.availability_generation = self.availability_generation.saturating_add(1);
     }
 
+    pub(super) fn invalidate_availability_auth_scope(&mut self) {
+        // An auth notification is not quota recovery. Retire the old account's known
+        // turn causes and require a new native turn before accepting a new episode.
+        if let Some(session) = self.session.clone() {
+            let turns = self
+                .run
+                .clone()
+                .into_iter()
+                .chain(
+                    self.completion
+                        .as_ref()
+                        .and_then(|v| v["id"].as_str())
+                        .map(str::to_owned),
+                )
+                .chain(
+                    self.availability_blocks
+                        .iter()
+                        .chain(self.availability_retry.iter())
+                        .filter_map(|v| v["native"]["turnId"].as_str().map(str::to_owned)),
+                );
+            for turn in turns {
+                let key = (session.clone(), turn);
+                if !self.availability_retired_turns.contains(&key)
+                    && self.availability_retired_turns.len() < 256
+                {
+                    self.availability_retired_turns.push(key);
+                }
+            }
+        }
+        self.availability_auth_fenced = true;
+        self.reset_availability(); // Unknown, never a fabricated available/recovered level.
+    }
+
     // At most three persistent native classes plus one transient native retry. A clear for one
     // cause must not invent recovery for another. The public fact shows retry, else latest cause.
     fn refresh_availability(&mut self, native_clear: Value) -> bool {
@@ -50,6 +83,24 @@ impl Endpoint {
                         json!({"method":method,"success":true}),
                     ),
             ),
+            "turn/started" => {
+                if self.session.is_some() && p["threadId"].as_str() == self.session.as_deref() {
+                    if let Some(turn) = p["turn"]["id"].as_str().filter(|s| {
+                        !s.is_empty() && s.len() <= 128 && !s.chars().any(char::is_control)
+                    }) {
+                        if self
+                            .availability_retired_turns
+                            .contains(&(self.session.clone().unwrap(), turn.to_owned()))
+                        {
+                            return Some(false);
+                        }
+                        if self.availability_retired_turns.len() < 256 {
+                            self.availability_auth_fenced = false;
+                        }
+                    }
+                }
+                None
+            }
             "error" => {
                 if self.session.is_none() || p["threadId"].as_str() != self.session.as_deref() {
                     return Some(false);
@@ -60,6 +111,13 @@ impl Endpoint {
                 else {
                     return Some(false);
                 };
+                if self.availability_auth_fenced
+                    || self
+                        .availability_retired_turns
+                        .contains(&(self.session.clone().unwrap(), turn.to_owned()))
+                {
+                    return Some(false);
+                }
                 if self.run.as_deref().is_some_and(|run| run != turn)
                     || self.completion.as_ref().is_some_and(|c| c["id"] == turn)
                 {
