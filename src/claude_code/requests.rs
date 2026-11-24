@@ -436,12 +436,18 @@ impl Requests {
     }
     /// A full request that could not be published must not remain approvable through summaries.
     pub fn unrepresentable(&mut self, id: &str) -> Option<Outbound> {
-        let pending = self.pending.remove(id)?;
-        self.native.remove(&pending.native);
+        let mut pending = self.pending.remove(id)?;
         if !self.remember(&pending.native, &pending.request) {
+            // RECENT cannot accept another identity. Retain the already bounded original entry
+            // and native mapping: a failed revoke must not erase a possibly-written claim.
+            // It must NOT remain approvable through summaries when publication failed either.
             pending.token.cancel_before_write();
+            pending.value["status"] = json!("expired");
+            pending.value["incomplete"] = json!(true);
+            self.pending.insert(id.into(), pending);
             return None;
         }
+        self.native.remove(&pending.native);
         let token = pending.token;
         self.unsupported_tokens
             .insert(pending.native.clone(), token.clone());
@@ -574,6 +580,27 @@ mod tests {
         assert!(!token.write_begun());
         assert!(!token.cancel_before_write(), "already revoked by reuse");
         assert!(book.answer(&id, 1, &json!({"action":"decline"})).is_err());
+    }
+    #[test]
+    fn full_recent_unpublished_unclaimed_request_is_bounded_and_not_approvable() {
+        let mut book = Requests::default();
+        let frame = permission();
+        for n in 0..RECENT {
+            assert!(book.remember(&format!("occupied-{n}"), &frame["request"]));
+        }
+        let id = book.observe(&frame, None).changes.remove(0).id;
+        let token = book.answer_token(&id).unwrap();
+        assert!(book.unrepresentable(&id).is_none());
+        assert_eq!(book.pending.len(), 1);
+        assert_eq!(book.recent.len(), RECENT);
+        assert!(book.summaries().is_empty());
+        assert!(!token.write_begun());
+        assert!(
+            !token.cancel_before_write(),
+            "queued answer already revoked"
+        );
+        assert!(book.answer(&id, 1, &json!({"action":"decline"})).is_err());
+        assert!(book.observe(&frame, None).changes.is_empty());
     }
     #[test]
     fn changed_human_claim_revokes_before_reading_write_phase() {

@@ -122,6 +122,67 @@ async fn automatic_response_post_write_failure_same_id_never_rearms() {
 }
 
 #[tokio::test]
+async fn full_recent_failed_publication_retains_possibly_written_claim() {
+    let mut book = Requests::default();
+    for n in 0..256 {
+        let frame = serde_json::json!({"type":"control_request","request_id":format!("occupied-{n}"),"request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":format!("tool-{n}"),"input":{},"requires_user_interaction":true}});
+        assert_eq!(book.observe(&frame, None).outgoing.len(), 1);
+    }
+    let mut frame = serde_json::json!({"type":"control_request","request_id":"fresh-full","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"tool-full","input":{"command":"old"}}});
+    let old = book.observe(&frame, None).changes.remove(0).id;
+    let response = book
+        .answer(&old, 1, &serde_json::json!({"action":"decline"}))
+        .unwrap();
+    let token = book.answer_token(&old).unwrap();
+    let (state, receiver) = inner();
+    state.exit.send_replace(None);
+    state.dead.store(false, Ordering::SeqCst);
+    let permit = state.budget.clone().acquire_many_owned(64).await.unwrap();
+    let mut line = serde_json::to_vec(&response).unwrap();
+    line.push(b'\n');
+    state
+        .writes
+        .try_send(Write {
+            id: None,
+            line: line.clone(),
+            deadline: Instant::now() + Duration::from_secs(3),
+            phase: token.phase.clone(),
+            _permit: permit,
+        })
+        .unwrap_or_else(|_| panic!("fixture queue full"));
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    write_native(FlushFailure(bytes.clone()), receiver, state).await;
+    assert_eq!(*bytes.lock().unwrap(), line);
+    assert!(token.write_begun());
+    // Expired NORMAL publication fails: the fallback must not drop its original claim when
+    // the separate RECENT store is already full. This calls that exact reducer fallback.
+    book.expire();
+    assert!(book.unrepresentable(&old).is_none());
+    frame["request"]["input"]["command"] =
+        serde_json::json!("changed after failed expired publication");
+    let reused = book.observe(&frame, None);
+    assert!(
+        book.summaries().is_empty(),
+        "FULL RECENT publication fallback lost a possibly-written claim and re-armed the same native ID"
+    );
+    assert!(reused.outgoing.is_empty());
+    assert!(
+        book.answer(&old, 1, &serde_json::json!({"action":"decline"}))
+            .is_err()
+    );
+    assert!(
+        book.answer_token(&old).unwrap().write_begun(),
+        "original bounded claim/token retained"
+    );
+    book.tool_started("tool-full");
+    assert_eq!(
+        book.observe(&frame, None).changes.len(),
+        1,
+        "only independent settlement permits replacement"
+    );
+}
+
+#[tokio::test]
 async fn human_pending_claim_actual_writer_write_wins_or_revoke_wins() {
     for write_wins in [false, true] {
         let mut book = Requests::default();
