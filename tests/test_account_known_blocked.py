@@ -101,6 +101,25 @@ class KnownBlocked(unittest.TestCase):
         self.now[0]=old['observed_at']+3601
         self.assertFalse(self.journal.known_blocked(self.b))
 
+    def test_first_source_claim_preserves_legacy_episode_and_other_canonical_reset(self):
+        from accounts_cutover import credential_key
+        self.a['provider']='openai-codex';self.now[0]=9900
+        row=self.observe(turn='turn-1')
+        value,revision=self.journal.read();canonical=credential_key(self.a)
+        old_identity=('codex','openai-codex','subscription',None,'login_ref','saved-a','native-a')
+        legacy=hashlib.sha256(json.dumps(old_identity,separators=(',',':')).encode()).hexdigest()
+        evidence=value['blocks'].pop(canonical)
+        earlier=dict(evidence,observed_at=9800,reset_at=13300,episode='earlier-E0')
+        value['blocks'].update({legacy:copy.deepcopy(evidence),canonical:copy.deepcopy(earlier)})
+        self.journal.write(value,revision);self.now[0]=10000
+        self.journal.observe_limits([row],[self.a,self.b,self.alias])
+        plan={'setup_id':'shared','membership_revision':'members','native_episode':'turn-1','affected':[member()]}
+        self.journal.claim(row,self.b,7,plan,True,'One NEW turn.')
+        value,_=self.journal.read()
+        self.assertEqual(value['blocks'][canonical],earlier);self.assertEqual(value['blocks'][legacy],evidence)
+        self.now[0]=13501
+        self.assertFalse(self.journal.known_blocked(self.a))
+
     def test_known_blocked_saved_codex_login_excludes_singleton_provider_spelling_alias(self):
         from account_credentials import eligible_alternatives
         self.b['provider']='openai';alias=dict(self.b,id='alias-b',provider='openai-codex')

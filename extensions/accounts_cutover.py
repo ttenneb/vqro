@@ -363,32 +363,31 @@ class Cutovers:
             exhausted=capacities([resource],[account]).get(account['id'])==0 and reported.get('ordinaryUsageAllowed') is not True
             if not limited and not exhausted:continue
             marker=limit_marker(resource) if limited else hashlib.sha256(json.dumps(native.get('usage_limits'),sort_keys=True).encode()).hexdigest()
-            key=credential_key(account)
-            if key is None or value['blocks'].get(key,{}).get('episode')==marker:continue
-            old=next((value['blocks'][oldkey] for oldkey in block_keys(account,accounts)
-                      if oldkey in value['blocks'] and value['blocks'][oldkey]['episode']==marker),None)
-            if old is not None:
-                # Identical legacy evidence is not a new observation, even when
-                # canonical holds a different episode. Preserve both clocks.
-                if key not in value['blocks'] and len(value['blocks'])<128:
-                    value['blocks'][key]=copy.deepcopy(old);changed=True
-                continue
             resets=[]
             for limit in native.get('usage_limits') or []:
                 if isinstance(limit,dict) and (limit.get('used_percent')==100 or limit.get('remaining')==0):
                     reset=limit.get('resets_at_ms')
                     if type(reset) in (int,float) and math.isfinite(reset) and reset/1000>now:resets.append(reset/1000)
-            self.mark_blocked(value,account,now,max(resets) if resets else None,marker)
-            changed=True
+            changed=self.mark_blocked(value,account,now,max(resets) if resets else None,marker,
+                                      accounts=accounts) or changed
         if changed:self.write(value,revision)
 
     @staticmethod
-    def mark_blocked(value,account,now,reset_at=None,marker='cutover'):
+    def mark_blocked(value,account,now,reset_at=None,marker='cutover',*,accounts=()):
         key=credential_key(account)
-        if key is None:return
+        if key is None:return False
+        old=next((value['blocks'][oldkey] for oldkey in block_keys(account,accounts)
+                  if oldkey in value['blocks'] and value['blocks'][oldkey]['episode']==marker),None)
+        if old is not None:
+            # ALL writers, including the first source claim, must preserve
+            # existing evidence clocks. Canonicalization is not new evidence.
+            if key not in value['blocks'] and len(value['blocks'])<128:
+                value['blocks'][key]=copy.deepcopy(old);return True
+            return False
         if key not in value['blocks'] and len(value['blocks'])>=128:
             raise VqroError('known-blocked journal is full; refuse rather than forget limits','unavailable')
         value['blocks'][key]={'observed_at':now,'reset_at':reset_at,'episode':marker}
+        return True
 
     def claim(self, source, target, registry_revision, plan, automatic, message, *, background_loss_disclosed=False, continuation_parent=None):
         native = facts(source)
@@ -469,7 +468,7 @@ class Cutovers:
                 if isinstance(limit,dict) and (limit.get('used_percent')==100 or limit.get('remaining')==0):
                     reset=limit.get('resets_at_ms')
                     if type(reset) in (int,float) and math.isfinite(reset) and reset/1000>now:resets.append(reset/1000)
-            self.mark_blocked(value,origin,now,max(resets) if resets else None,limit_marker(source))
+            self.mark_blocked(value,origin,now,max(resets) if resets else None,limit_marker(source),accounts=accounts)
         marker = episode(source)
         record = {'state': 'claimed', **{key: identity[key] for key in ('resource', 'host', 'session')},
                   'episode': marker, 'account': target['id'], '_account_revision': registry_revision,
@@ -571,7 +570,8 @@ class Cutovers:
                 account=by_id.get(observation['account'])
                 if account is None:raise VqroError('observed account disappeared','unavailable')
                 reset=observation['reset_at_ms']
-                self.mark_blocked(value,account,now,reset/1000 if reset is not None else None,'inspection:'+token+':'+account['id'])
+                self.mark_blocked(value,account,now,reset/1000 if reset is not None else None,
+                                  'inspection:'+token+':'+account['id'],accounts=accounts)
                 seen.add(account['id'])
             record['attempted_targets']=list(attempted)
             if selected_account is not None:
