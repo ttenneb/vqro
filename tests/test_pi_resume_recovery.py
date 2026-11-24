@@ -110,6 +110,17 @@ class PiResumeRecovery(unittest.TestCase):
         with patch('pi.launch') as launch,self.assertRaises(VqroError):frontend.recover_resume({'_claim':token})
         launch.assert_not_called()
 
+    def test_unavailable_protected_store_keeps_normal_account_selection(self):
+        core,journal,frontend,token,app=self.fixture();call=core.call
+        def unavailable(method,args=None):
+            if method.startswith('operational.'):raise VqroError('protected store unavailable','unsupported')
+            return call(method,args)
+        core.call=unavailable
+        self.assertEqual(self.actions(core,app),[])
+        items=core.live['accounts']['items']
+        self.assertTrue(any('Protected Pi recovery unavailable' in item.get('text','') for item in items))
+        self.assertTrue(any(item.get('command')=='pi.new' for item in items))
+
     def test_non_owner_cannot_use_unused_recovery_slot(self):
         core,journal,frontend,token,app=self.fixture();core.caller_record={'principal':'other','initiator':'other'}
         with patch('pi.launch') as launch,self.assertRaises(VqroError):app.recover_pi({'_claim':token})

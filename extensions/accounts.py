@@ -125,7 +125,11 @@ class Accounts:
                      if pi_error(row) or policy.blocked(row,limit_only=True)][:64]
         items.extend({'text':('Choose account for '+label(rid)+' (human-judged)' if is_pi else 'Fresh-work options for '+label(rid)),
                       'command':'accounts.offer','args':{'resource':rid}} for rid,is_pi in stopped)
-        recovery,_=self.cutovers.read()
+        try:recovery,_=self.cutovers.read()
+        except Exception as error:
+            recovery={'claims':{}}
+            items.append({'type':'text','style':'warn','text':'Protected Pi recovery unavailable: '+label(str(error))+
+                          '; ordinary account selection remains available.'})
         by_id={row['id']:row for row in rows}
         for token,claim in recovery['claims'].items():
             if claim['runtime']!='pi' or claim['state']!='unknown':continue
