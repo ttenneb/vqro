@@ -30,6 +30,16 @@ def history_file(native):
     return value
 
 
+def same_model(original,current,target):
+    """Native model/alias/API and exact conversation thinking-level readback."""
+    if not isinstance(original,dict) or not isinstance(current,dict):return False
+    before=original.get('native') or {};after=current.get('native') or {}
+    return (isinstance(before,dict) and isinstance(after,dict)
+            and bounded(original.get('id')) and bounded(original.get('effort'),64)
+            and current.get('id')==original['id'] and current.get('effort')==original['effort']
+            and after.get('provider')==target.get('native_provider') and after.get('api')==before.get('api'))
+
+
 def membership_revision(affected,episode,revision,model,history,principal):
     members=[affected] if isinstance(affected,dict) else affected
     return hashlib.sha256(json.dumps([members,episode,revision,model,history,principal],sort_keys=True,separators=(',',':')).encode()).hexdigest()
@@ -80,6 +90,8 @@ class PiCutover:
         if not isinstance(native_model,dict) or not bounded(native_model.get('provider'),128) \
                 or not bounded(native_model.get('api'),128) or not bounded(model.get('id')):
             raise VqroError('native Pi model metadata is unavailable; upgrade the matching bridge','unsupported')
+        if not bounded(model.get('effort'),64):
+            raise VqroError('native Pi thinking level is unavailable; nothing stopped','unsupported')
         if native_model['api']=='pi-virtual':
             raise VqroError('account switching unavailable for this model','unsupported')
         return row
@@ -133,6 +145,9 @@ class PiCutover:
                         affected=plan['affected'],inference=plan['inference'],source_history=history_file(native),source_principal=native['tool_principal'])
         if not isinstance(claim,dict) or any(claim.get(key)!=value for key,value in expected.items()):
             raise VqroError('protected Pi source/session/error claim changed; nothing restarted','conflict')
+        mode=claim.get('blocked_mode')
+        if mode not in ('auto_restart','offer_restart') or args['automatic'] and mode!='auto_restart':
+            raise VqroError('current protected mode does not allow this switch; nothing stopped','offer_required')
         validate_claim_authority(self.ext,claim,args['automatic'])
         if args['automatic']:
             allowance=claim.get('max_switches');blocked=claim.get('known_blocked_targets')
@@ -188,15 +203,14 @@ class PiCutover:
         if len(rows)!=1:
             raise VqroError('resumed Pi endpoint unavailable; no continuation','indeterminate')
         resumed=rows[0];state=policy.facts(resumed);session=state.get('session') or {}
-        next_model=session.get('model') or {};native_model=next_model.get('native') or {}
+        next_model=session.get('model') or {}
         provider=self.ext.providers.get(resumed.get('provider')) or {}
         if resumed.get('available') is not True or state.get('lifecycle')!='live' \
                 or state.get('epoch')==native['epoch'] or not bounded(state.get('epoch')) \
                 or state.get('tool_principal')!=native['tool_principal'] \
                 or ((state.get('caps') or {}).get('agent') or {}).get('tool_principal')!='env' \
                 or session.get('id')!=native['session']['id'] or policy.configured_id(resumed)!=target['id'] \
-                or next_model.get('id')!=model['id'] or native_model.get('provider')!=target['native_provider'] \
-                or native_model.get('api')!=model['native']['api'] or history_file(state)!=history_file(native) or provider.get('role')!='runtime' \
+                or not same_model(model,next_model,target) or history_file(state)!=history_file(native) or provider.get('role')!='runtime' \
                 or provider.get('host')!=resumed.get('host') or resumed.get('host')!=launched.get('host'):
             raise VqroError('Pi native same-session/account/model readback unconfirmed; no continuation','indeterminate')
         affected={'resource':rid,'host':resumed['host'],'session':session['id'],'requested_session':native['session']['id'],

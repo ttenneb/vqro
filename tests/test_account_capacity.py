@@ -34,7 +34,7 @@ def pi_source(core, rid, account, **kwargs):
     native=row['data']['agent']
     native.update(state='idle',queue=[],tool_principal='p:original-work',
         session={'id':SESSION,'native':{'file':'/synthetic/native-history.jsonl'},
-                 'model':{'id':'gpt-6-luna','native':{'provider':account['native_provider'],'api':'openai-codex-responses'}}},
+                 'model':{'id':'gpt-6-luna','effort':'high','native':{'provider':account['native_provider'],'api':'openai-codex-responses'}}},
         completion={'reason':'error','error':{'message':'You have hit your ChatGPT usage limit.'},
                     'native':{'stopReason':'error','timestamp':NOW,'error_message_complete':True}},
         commands=[{'name':'vqro-account-quiesce'}])
@@ -51,7 +51,7 @@ class Core(FakeCore):
         self.resumes=[];self.stops=[];self.sends=[]
     def call(self, method, params):
         if method=='resource.invoke' and params.get('op')=='agent.command':
-            self.calls.append((method,copy.deepcopy(params)));self.stops.append(copy.deepcopy(params))
+            self.calls.append((method,copy.deepcopy(params)))
             row=self.resources[params['resource']];native=row['data']['agent'];wire=params['args']
             if wire['guard']!={'session':native['session']['id']} or wire['v']!=0 \
                     or wire['caps_rev']!=native['caps']['rev'] or wire['epoch']!=native['epoch'] \
@@ -60,7 +60,11 @@ class Core(FakeCore):
             expected={'session':native['session']['id'],'provider':native['session']['model']['native']['provider'],
                       'model':native['session']['model']['id'],'file':native['session']['native']['file'],
                       'error_timestamp':native['completion']['native']['timestamp']}
-            if json.loads(wire['text'])!=expected:raise VqroError('native resume/error fence changed','stale')
+            if set(wire)-{'v','caps_rev','epoch','guard','cause','correlation','name','args'} \
+                    or not isinstance(wire.get('args'),str) or len(wire['args'].encode('utf-8'))>16*1024:
+                raise VqroError('undeclared native command arguments','unsupported')
+            if json.loads(wire['args'])!=expected:raise VqroError('native resume/error fence changed','stale')
+            self.stops.append(copy.deepcopy(params))
             row['available']=False;row['exit']={'code':0,'success':True}
             row['data']['agent']['lifecycle']='ended'
             return {'outcome':'observed'}
@@ -132,6 +136,18 @@ class CapacityPolicy(unittest.TestCase):
     def choose(self): return profiles.choose(self.core,{},'pi','pi.new')
     def blocked(self, **kwargs):
         pi_source(self.core,'old',self.a,**kwargs)
+    def test_common_rechecks_pi_effort_after_callback_before_new_continuation(self):
+        self.blocked();self.settings(blocked='auto_restart');original=self.core.invoke
+        def invoke(name,args=None):
+            result=original(name,args)
+            if name=='accounts.cutover.pi':
+                for item in result['affected']:
+                    self.core.resources[item['resource']]['data']['agent']['session']['model']['effort']='medium'
+            return result
+        self.core.invoke=invoke;self.accounts.handle_blocked('old')
+        self.assertEqual(len(self.core.resumes),1);self.assertEqual(self.core.sends,[])
+        self.assertEqual(next(iter(self.core.op_entry['value']['claims'].values()))['state'],'unknown')
+
     def test_fresh_launchers_refuse_resume_or_prompt_argv_before_spawn(self):
         from pi import Pi
         from codex import Codex

@@ -18,6 +18,13 @@ class Reservations(KnownBlocked):
               'affected':affected or [member()],'authorized_targets':list(targets)}
         return self.journal.claim(source(),self.b,7,plan,True,'One NEW turn.')
 
+    def test_hourly_cap_four_does_not_allow_four_target_claim(self):
+        self.core.entries['doc/settings/accounts-policy']['value']['auto_cutover_max_per_hour']=4
+        self.core.entries[SETTINGS]['value']['accounts'].append(dict(self.b,id='e',label='E',
+            login_ref={'sessionId':'saved-e','accountId':'native-e'}))
+        with self.assertRaises(VqroError) as caught:self.reserve(('b','c','d','e'))
+        self.assertEqual(caught.exception.kind,'invalid');self.assertIsNone(self.core.op_entry)
+
     def test_definite_predispatch_reject_refunds_full_plan_for_every_member_without_replay(self):
         affected=[member(),member(resource='r2',session='session-2')]
         token=self.reserve(affected=affected)

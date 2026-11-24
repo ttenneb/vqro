@@ -95,7 +95,7 @@ class PiPrepare(unittest.TestCase):
     def arm_restart(self, automatic=True):
         plan=self.callback.prepare(self.args(automatic))
         native=self.row['data']['agent']
-        claim={'max_switches':3,'known_blocked_targets':[],'state':'claimed','resource':'r1','episode':policy.episode(self.row),'host':'terminal-1',
+        claim={'blocked_mode':'auto_restart','max_switches':3,'known_blocked_targets':[],'state':'claimed','resource':'r1','episode':policy.episode(self.row),'host':'terminal-1',
           'source_history':'/synthetic/native-history.jsonl','source_principal':'p:original-work','session':SESSION,'source_incarnation':self.row['incarnation'],'source_epoch':native['epoch'],
           'source_account':'a','native_episode':plan['native_episode'],'account':'b','_account_revision':7,
           'automatic':automatic,'runtime':'pi','setup_id':plan['setup_id'],
@@ -147,6 +147,22 @@ class PiPrepare(unittest.TestCase):
         self.core.call=call;self.core.invoke=invoke
         return claim
 
+    def test_final_callback_projection_refuses_notify_or_missing_mode_in_auto_and_offer(self):
+        for automatic in (True,False):
+            for mode in ('notify',None):
+                with self.subTest(automatic=automatic,mode=mode):
+                    self.setUp();claim=self.arm_restart(automatic);original=self.core.invoke;reads=[]
+                    def invoke(name,args=None):
+                        if name=='accounts.claim.read':
+                            reads.append(True)
+                            if len(reads)==2:
+                                if mode is None:claim.pop('blocked_mode')
+                                else:claim['blocked_mode']=mode
+                        return original(name,args)
+                    self.core.invoke=invoke
+                    with self.assertRaises(VqroError):self.callback.restart(dict(self.args(automatic),_claim='a'*32))
+                    self.assertEqual(len(reads),2);self.assertEqual(self.stops,[]);self.assertEqual(self.resumes,[])
+
     def test_public_command_fake_rejects_text_field_before_fabricating_native_exit(self):
         self.arm_restart()
         request={'v':0,'caps_rev':1,'epoch':'epoch-1','guard':{'session':SESSION},
@@ -174,6 +190,16 @@ class PiPrepare(unittest.TestCase):
         self.assertTrue(result['affected'][0]['session_confirmed'])
         with self.assertRaises(VqroError):self.callback.restart(args)
         self.assertEqual(len(self.resumes),1)
+
+    def test_resume_requires_exact_native_thinking_level_readback(self):
+        self.arm_restart();original=self.core.invoke
+        def invoke(name,args=None):
+            result=original(name,args)
+            if name=='pi.resume':self.core.resources['r2']['data']['agent']['session']['model']['effort']='medium'
+            return result
+        self.core.invoke=invoke
+        with self.assertRaises(VqroError) as caught:self.callback.restart(dict(self.args(),_claim='a'*32))
+        self.assertEqual(caught.exception.kind,'indeterminate');self.assertEqual(len(self.resumes),1)
 
     def test_resume_requires_positive_exact_logical_work_principal_readback(self):
         for principal,proof in ((None,'env'),('p:wrong-work','env'),('p:original-work','unknown'),('p:original-work',None)):

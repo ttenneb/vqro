@@ -4,7 +4,8 @@ Runtime callbacks own native execution. This owner alone claims and submits the
 continuation. Neither a callback result nor a failed send is ever replayed.
 """
 import copy
-from accounts_cutover import member, text
+from accounts_cutover import MAX_TARGETS, member, text
+from accounts_pi import same_model as same_pi_model
 from account_credentials import snapshot, credential_identity
 import accounts_policy as policy
 from vqro_ext import VqroError
@@ -179,7 +180,7 @@ class Dispatch:
             ordered += [row['id'] for row in rest]
             remaining=self.journal.remaining('codex',plan['affected'])
             if remaining==0:raise VqroError('no shared-agent hourly allowance remains','offer_required')
-            ordered=ordered[:min(remaining,10)]
+            ordered=ordered[:min(remaining,MAX_TARGETS)]
         plan['authorized_targets']=ordered
         claim = self.journal.claim(source, target, revision, plan, automatic, configured['continuation_text'],
                                    background_loss_disclosed=background_loss_disclosed)
@@ -246,6 +247,16 @@ class Dispatch:
         else:disposition='invalid'
         normalized=self.result_members(result,plan,target,allow_original=restored_only or nonready and not selected_in_plan) if disposition in ('ready','offer','all_blocked') else None
         restored=[]
+        if normalized is not None and target['runtime']=='pi':
+            original_model=(policy.facts(source).get('session') or {}).get('model')
+            for old,item,_confirmed in normalized:
+                rows=self.ext.vqro.call('resource.list',{'id':item['resource']}).get('resources',[])
+                row=rows[0] if len(rows)==1 else {};native=policy.facts(row);session=native.get('session') or {}
+                if (row.get('available') is not True or native.get('lifecycle')!='live'
+                        or row.get('host')!=item['host'] or native.get('epoch')!=item['epoch']
+                        or session.get('id')!=old['session'] or policy.configured_id(row)!=target['id']
+                        or not same_pi_model(original_model,session.get('model'),target)):
+                    normalized=None;break
         if normalized is not None and (nonready or target['runtime']=='codex'):
             if nonready and (result.get('continuation_allowed') is not False or result.get('fenced') is not False):normalized=None
             else:

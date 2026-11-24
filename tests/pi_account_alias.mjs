@@ -5,8 +5,9 @@ const record = {id:'b',label:'B',provider:'fake-base',native_provider:'vqro-acco
 const session = '01234567-89ab-4cde-8fab-0123456789ab';
 const physical = {id:'custom',provider:record.provider,api:'fake-api',headers:{custom:'retained'}};
 const nativeOAuth = {login:()=>{throw Error('no login')},refresh:()=>{throw Error('no refresh')}};
-function fixture({raw=JSON.stringify(record),login=false,configured=true,model=physical,notifyFails=false}={}) {
+function fixture({raw=JSON.stringify(record),login=false,configured=true,model=physical,notifyFails=false,restoreThinking=true}={}) {
   const handlers={},commands={},providers=new Map();const notices=[];let stops=0;let selections=0;let idle=true;let pending=false;
+  let thinking='high';
   providers.set(record.provider,{id:record.provider,auth:{oauth:nativeOAuth},getModels:()=>[physical],
     stream:()=>{throw Error('no model calls')},streamSimple:()=>{throw Error('no model calls')}});
   const context={model,ui:{notify:(message)=>{if(notifyFails)throw Error('broken UI');notices.push(message)}},
@@ -17,9 +18,12 @@ function fixture({raw=JSON.stringify(record),login=false,configured=true,model=p
   const pi={registerFlag:()=>{},getFlag:name=>name==='vqro-account'?(raw === null ? undefined : raw):login,
     getSettings:()=>({defaultModel:physical.id}),on:(event,callback)=>{handlers[event]=callback},
     registerCommand:(name,value)=>{commands[name]=value},registerProvider:value=>providers.set(value.id,value),
-    setModel:async model=>{if(!configured)return false;selections++;context.model=model;return true}};
+    getThinkingLevel:()=>thinking,setThinkingLevel:value=>{if(restoreThinking)thinking=value},
+    // Pi1.5.2 applies the shared/per-model default during model selection,
+    // before falling back to the old current thinking level.
+    setModel:async model=>{if(!configured)return false;selections++;context.model=model;thinking='medium';return true}};
   extension(pi);
-  return {context,handlers,commands,providers,notices,get stops(){return stops},get selections(){return selections},setIdle:value=>{idle=value},setPending:value=>{pending=value}};
+  return {context,handlers,commands,providers,notices,get thinking(){return thinking},get stops(){return stops},get selections(){return selections},setIdle:value=>{idle=value},setPending:value=>{pending=value}};
 }
 // An earlier configured extension may submit from its session_start before
 // our initializer. A declared alias must fence input even before metadata parses.
@@ -32,10 +36,13 @@ assert.equal(beforeLogin.handlers.input({},beforeLogin.context).action,'handled'
 const normalBeforeStart=fixture({raw:null});
 assert.equal(normalBeforeStart.handlers.input({},normalBeforeStart.context).action,'continue');
 const good=fixture();await good.handlers.session_start({},good.context);
+assert.equal(good.thinking,'high');
 assert.equal(good.context.model.provider,record.native_provider);assert.equal(good.selections,1);assert.equal(good.stops,0);
 assert.equal(good.providers.get(record.native_provider).auth.oauth,nativeOAuth);
 assert.equal(good.context.model.headers.custom,'retained');
 assert.equal(good.handlers.input({},good.context).action,'continue');
+const effortFailure=fixture({restoreThinking:false});await effortFailure.handlers.session_start({},effortFailure.context);
+assert.equal(effortFailure.stops,1);assert.equal(effortFailure.handlers.input({},effortFailure.context).action,'handled');
 const missing=fixture({configured:false});await missing.handlers.session_start({},missing.context);
 assert.equal(missing.stops,1);assert.equal(missing.handlers.input({},missing.context).action,'handled');
 const broken=fixture({configured:false,notifyFails:true});await broken.handlers.session_start({},broken.context);

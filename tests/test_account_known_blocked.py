@@ -30,6 +30,30 @@ class KnownBlocked(unittest.TestCase):
         self.journal.observe_limits([row],[self.a,self.b,self.alias])
         return row
 
+    def test_final_projection_rejects_concurrent_block_observation_during_policy_read(self):
+        plan={'setup_id':'shared','membership_revision':'members','native_episode':'turn-1','affected':[member()]}
+        token=self.journal.claim(source(),self.b,7,plan,True,'One NEW turn.')
+        original=self.core.call;changed=[]
+        def call(method,params=None):
+            if method=='workspace.get' and params['key']==POLICY and not changed:
+                changed.append(True);row=source();row.update(kind='agent',available=True)
+                row['data']['agent'].update(account={'id':'b'},lifecycle='live',
+                    caps={'agent.availability':{'reasons':['quota']}},
+                    availability={'state':'blocked','reason':'quota','native':{'turnId':'new-b-limit'}})
+                self.journal.observe_limits([row],[self.a,self.b,self.alias])
+            return original(method,params)
+        self.core.call=call
+        with self.assertRaises(VqroError) as caught:self.journal.lookup(token)
+        self.assertEqual(caught.exception.kind,'stale');self.assertTrue(changed)
+        self.assertTrue(self.journal.known_blocked(self.b))
+
+    def test_projection_exposes_mode_separately_from_manual_zero_budget(self):
+        plan={'setup_id':'shared','membership_revision':'members','native_episode':'turn-1','affected':[member()]}
+        token=self.journal.claim(source(),self.b,7,plan,False,'One NEW turn.')
+        self.core.entries[POLICY]['value'].update(blocked='notify',auto_cutover_max_per_hour=0)
+        self.assertEqual(self.journal.lookup(token)['blocked_mode'],'notify')
+        self.assertEqual(self.journal.lookup(token)['max_switches'],0)
+
     def test_native_limit_blocks_all_known_aliases_not_unknown_b(self):
         self.observe()
         self.assertEqual(self.journal.blocked_accounts([self.a,self.alias,self.b]),{'a','alias-a'})

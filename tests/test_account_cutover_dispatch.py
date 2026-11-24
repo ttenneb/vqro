@@ -74,6 +74,22 @@ class CutoverDispatch(unittest.TestCase):
         self.clock.start(); self.addCleanup(self.clock.stop)
     def execute(self, automatic=True):
         return self.dispatch.execute(self.owner.source('r1'), self.core.b, 7, automatic=automatic)
+    def test_hourly_cap_four_still_builds_at_most_three_authorized_targets(self):
+        self.core.entries[policy.POLICY]['value']['auto_cutover_max_per_hour']=4
+        choices=[self.core.b]+[dict(self.core.b,id=name,label=name,
+            login_ref={'sessionId':'saved-'+name,'accountId':'native-'+name}) for name in ('c','d','e')]
+        self.core.entries[SETTINGS]['value']['accounts']=[self.core.a,*choices]
+        self.owner.alternatives=lambda source,configured:(choices,7,{},list(self.core.resources.values()))
+        original=self.core.invoke
+        def invoke(name,args=None):
+            if name=='accounts.cutover.codex':raise VqroError('synthetic unresolved callback','indeterminate')
+            return original(name,args)
+        self.core.invoke=invoke
+        with self.assertRaises(VqroError):self.execute()
+        record=next(iter(self.owner.cutovers.read()[0]['claims'].values()))
+        self.assertEqual(record['authorized_targets'],['b','c','d'])
+        self.assertEqual(self.owner.cutovers.remaining('codex',record['affected']),1)
+
     def test_auto_switches_same_session_then_sends_exactly_one_new_tool_turn(self):
         self.core.resources['r1']['data']['agent']['old_input'] = 'NEVER REPLAY THIS'
         self.execute()

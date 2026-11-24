@@ -105,7 +105,9 @@ authentication, billing or cross-account interoperability certification.
 
 `doc/settings/accounts-policy` contains `new_agents`, `blocked`,
 `api_key_overflow`, `continuation_text`, and `auto_cutover_max_per_hour` (0–10,
-default 3; zero disables AUTO cutover). Invalid settings fall back conservatively.
+default 3; zero disables AUTO cutover). This **hourly cap remains 0–10**, while
+one claim's ordered native target plan is independently capped at **three**
+targets (the native fence bound). Invalid settings fall back conservatively.
 
 - `new_agents: ask` is the default. `most_remaining_capacity` ranks comparable,
   sourced account-scoped percentage reports. Missing, incomplete, stale, expired,
@@ -128,7 +130,11 @@ Percentage/time hints alone are not native limit verdicts.
 One protected claim binds the original native episode, conversation, incarnation,
 epoch, source credential and exact prepared membership. A Codex claim can contain
 an ordered bounded `authorized_targets` plan chosen by common policy. The full
-plan reserves hourly slots for **every affected native conversation**. A definite
+plan (at most three targets, even with an hourly cap above three) reserves hourly
+slots for **every affected native conversation**. Final projections include the
+explicit current blocked mode: NOTIFY/missing mode refuses both AUTO and OFFER.
+Registry/policy reads are followed by a journal revision check; a concurrent
+observation or reservation invalidates the projection before native work. A definite
 attempted prefix refunds unused slots; a definite pre-callback rejection settles
 to zero attempts and refunds every reserved slot while keeping the episode
 tombstone. Uncertainty retains the entire reservation.
@@ -162,7 +168,11 @@ gets a fabricated native session guard.
 Pi refuses ephemeral/unpersisted history or unknown logical-work identity before
 stopping A. Native graceful shutdown settles credential writes; a replacement starts
 only after successful old-process exit. It resumes the native history reference and
-preserves the logical tool principal/model, with exact native readback before input.
+preserves the logical tool principal/model and current thinking level. Alias
+selection captures/restores the level with public native APIs rather than taking
+a per-alias/shared default. Exact model/alias/API/effort readback is required by
+the runtime callback and rechecked by common dispatch before input; mismatch is
+unconfirmed and sends no continuation.
 
 Current policy/authority is checked after native completion and before every new
 turn intent/submission. The continuation is separately recorded and visibly

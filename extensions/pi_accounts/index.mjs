@@ -95,7 +95,13 @@ export default function accountExtension(pi) {
         return;
       }
       const model = ctx.modelRegistry.getModelOfType('chat', account.native_provider, current.id);
+      const thinking = pi.getThinkingLevel();
       if (!model || !await pi.setModel(model)) throw new Error('Native account sign-in required');
+      // Native Pi model selection applies per-model/shared defaults first.
+      // Preserve this conversation's current level, not the alias's default.
+      pi.setThinkingLevel(thinking);
+      if (pi.getThinkingLevel() !== thinking || ctx.model?.id !== model.id
+          || ctx.model?.provider !== account.native_provider) throw new Error('Native account model/effort unconfirmed');
       ready = true;
     } catch {
       // Do not expose raw native errors or flag values in a public notice.

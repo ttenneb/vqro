@@ -34,7 +34,7 @@ class Fake:
                        'kind': 'subscription', 'secret_ref': 'b' * 32, 'host': 'r1'}
         self.registry = {'version': 7, 'value': {'accounts': [self.target]}}
         self.episode = policy.episode(self.source)
-        self.claim = {'max_switches':1,'known_blocked_targets':[], 'state': 'claimed', 'resource': 'r2', 'episode': self.episode, 'host': 'r1',
+        self.claim = {'blocked_mode':'auto_restart','max_switches':1,'known_blocked_targets':[], 'state': 'claimed', 'resource': 'r2', 'episode': self.episode, 'host': 'r1',
                       'account': 'b', '_account_revision': 7, 'automatic': True,
                       'source_incarnation': 'birth', 'source_epoch': 'e1', 'source_account': 'a',
                       'session': 'native-session', 'native_episode': 'native-result-uuid',
@@ -102,6 +102,21 @@ class CutoverTests(unittest.TestCase):
         with self.assertRaises(VqroError):
             self.run_cutover()
         self.assertEqual(self.ext.native(), [])
+
+    def test_final_projection_refuses_notify_or_missing_mode_for_auto_and_owner_offer(self):
+        for automatic in (True,False):
+            for mode in ('notify',None):
+                with self.subTest(automatic=automatic,mode=mode):
+                    self.setUp()
+                    if not automatic:self.offer_claim()
+                    original=self.ext.invoke;reads=[]
+                    def invoke(command,args):
+                        reads.append(True)
+                        if len(reads)==2:
+                            if mode is None:self.ext.claim.pop('blocked_mode')
+                            else:self.ext.claim['blocked_mode']=mode
+                        return original(command,args)
+                    self.ext.invoke=invoke;self.refused();self.assertEqual(len(reads),2)
 
     def test_second_protected_read_honors_current_auto_allowance_and_target_blocks(self):
         for patch in ({'max_switches':0},{'known_blocked_targets':['b']},

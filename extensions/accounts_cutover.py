@@ -17,6 +17,7 @@ import hashlib
 
 KEY = 'operational/accounts/cutovers'
 MAX_BYTES = 48 * 1024
+MAX_TARGETS = 3  # One native claim/fence; distinct from the configurable hourly cap.
 STATES = {'claimed', 'native_ready', 'unknown', 'completed', 'rejected', 'awaiting_owner', 'owner_turn'}
 CHILD_STATES = {'claimed', 'observed', 'unknown', 'cancelled'}
 MEMBER_FIELDS = {'resource', 'host', 'session', 'epoch', 'incarnation', 'account'}
@@ -162,6 +163,8 @@ class Cutovers:
                 for item in episodes:
                     if not isinstance(item,dict) or set(item)!={'resource','host','incarnation','epoch','session','account','native_episode','episode'} \
                             or not all(text(value) for value in item.values()):raise ValueError()
+                # Read historical wider reservations without forgetting unknown
+                # effects; NEW claims below are bounded to the native three.
                 targets=record['authorized_targets'];attempted=record['attempted_targets']
                 if not isinstance(targets,list) or not 1<=len(targets)<=10 or len(set(targets))!=len(targets) \
                         or not all(text(target,64) for target in targets) or record['account'] not in targets:
@@ -255,8 +258,9 @@ class Cutovers:
         record = value['claims'].get(token)
         if record is None:
             raise VqroError('cutover claim is not acknowledged', 'not_found')
-        # All other blocking reads precede the policy used for this allowance.
-        # Callbacks consume this projection, never mix it with a later settings read.
+        # Registry precedes policy; the final journal-revision check below
+        # rejects observations/reservations committed during either blocking read.
+        # Callbacks never mix this projection with a later standalone policy read.
         accounts,registry_revision=account_snapshot(self.ext)
         if registry_revision!=record['_account_revision']:
             raise VqroError('account registry changed after claim; no native effect authorized','stale')
@@ -271,10 +275,16 @@ class Cutovers:
             raise VqroError('local time unavailable; no native switch authorized','unavailable')
         others={key:old for key,old in value['claims'].items() if key!=token}
         available=configured['auto_cutover_max_per_hour']-max(hourly_counts(others,record['runtime'],record['affected'],now),default=0)
-        maximum=min(len(record['authorized_targets']),max(0,available)) if configured['blocked']=='auto_restart' else 0
+        maximum=min(MAX_TARGETS,len(record['authorized_targets']),max(0,available)) if configured['blocked']=='auto_restart' else 0
         blocked_ids={account['id'] for account in accounts if credential_key(account) in value['blocks']
                      and block_active(value['blocks'][credential_key(account)],now)}
-        return dict(record, version=revision, max_switches=maximum, known_blocked_targets=sorted(blocked_ids))
+        # Registry/policy reads can yield to another Accounts worker which
+        # observes limits or claims budget. Never publish an older journal frame.
+        _,latest_revision=self.read()
+        if latest_revision!=revision:
+            raise VqroError('cutover journal changed during authority projection; no native effect authorized','stale')
+        return dict(record, version=revision, blocked_mode=configured['blocked'],
+                    max_switches=maximum, known_blocked_targets=sorted(blocked_ids))
 
     def remaining(self,runtime,affected):
         value,_=self.read();now=self.clock();maximum=settings(self.ext)['auto_cutover_max_per_hour']
@@ -369,7 +379,7 @@ class Cutovers:
             raise VqroError('background-loss override is not declared by this runtime', 'unsupported')
         authority = self.authorization(automatic, background_loss_disclosed=background_loss_disclosed)
         targets=plan.get('authorized_targets',[target['id']])
-        if not isinstance(targets,list) or not 1<=len(targets)<=10 or targets[0]!=target['id'] \
+        if not isinstance(targets,list) or not 1<=len(targets)<=MAX_TARGETS or targets[0]!=target['id'] \
                 or not all(text(item,64) for item in targets) or len(set(targets))!=len(targets) \
                 or target['runtime']!='codex' and len(targets)!=1:
             raise VqroError('invalid common authorized target order','invalid')

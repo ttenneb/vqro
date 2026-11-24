@@ -136,6 +136,9 @@ class ClaudeCutover:
         if (not isinstance(claim, dict) or type(claim.get('automatic')) is not bool
                 or any(claim.get(key) != value for key, value in expected.items())):
             raise VqroError('matching protected account cutover claim is required; no switch', 'conflict')
+        mode=claim.get('blocked_mode')
+        if mode not in ('auto_restart','offer_restart') or args['automatic'] and mode!='auto_restart':
+            raise VqroError('current protected mode does not allow this switch; no native effect','offer_required')
         authority = claim.get('authorization')
         disclosed = authority.get('background_loss_disclosed', False) if isinstance(authority, dict) else None
         if type(disclosed) is not bool or disclosed != (not args['automatic']):
