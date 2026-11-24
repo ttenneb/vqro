@@ -67,8 +67,8 @@ They are not same-session cutover targets in this slice.
 
 Named launch is allowed only where the launcher binds the credential route;
 metadata alone never authorizes fallback to the shared native login. This table
-covers every registry-consuming agent launcher (`pi.new`, `codex.new`, and the two
-`tier1` launchers). Raw backend spawn is not a named-account launcher. Normal
+covers every registry-consuming agent launcher (`pi.new`, `codex.new`,
+`claude-code.new`, and the two `tier1` launchers). Raw backend spawn is not a named-account launcher. Normal
 `account: normal` launches keep the shared native setup and do not claim a named
 identity. Cross-runtime account IDs refuse in registry selection.
 
@@ -78,6 +78,8 @@ identity. Cross-runtime account IDs refuse in registry selection.
 | `pi.new` | Pi | API key | Refused before launch; entry kept | `tests/test_accounts_route_integration.py::test_unbound_named_api_key_launch_refuses_instead_of_shared_login_fallback` |
 | `codex.new` | Codex | subscription | Bound to exact native login reference; current native login readback required | `tests/test_codex_launcher.py::test_shared_login_maps_active_a_without_selecting_inactive_b`; `test_inactive_launch_selection_is_refused_before_empty_thread_or_prompt` |
 | `codex.new` | Codex | API key | Refused before launch; entry kept | `tests/test_accounts_route_integration.py::test_unbound_named_api_key_launch_refuses_instead_of_shared_login_fallback` |
+| `claude-code.new` | Claude | subscription | Refused before backend launch; shared native login remains available | `tests/test_claude_code_launcher.py::test_unbound_named_account_kinds_refuse_before_any_backend_launch` |
+| `claude-code.new` | Claude | API key | Refused before launch; entry kept | `tests/test_claude_code_launcher.py::test_unbound_named_account_kinds_refuse_before_any_backend_launch` |
 | `tier1.pi` | Pi | subscription | Bound by same shipped account extension before pull plugin, explicit `--vqro-account` | `tests/test_tier1.py::test_named_pi_launch_loads_native_alias_before_pull_with_explicit_flag`; `tests/pi_account_alias.mjs` |
 | `tier1.pi` | Pi | API key | Refused before spawn; entry kept | `tests/test_accounts_route_integration.py::test_unbound_named_api_key_launch_refuses_instead_of_shared_login_fallback` |
 | `tier1.claude` | Claude | subscription | Refused before hook creation/spawn: “account choice is not available for this launcher yet” | `tests/test_tier1.py::test_named_claude_subscription_refuses_before_any_hook_or_spawn` |

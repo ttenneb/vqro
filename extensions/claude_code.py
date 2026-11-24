@@ -11,7 +11,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
-from account_profiles import choose as choose_account, environment as account_environment, runtime_environment, require_fresh
+from account_credentials import choose as choose_account, environment as account_environment, runtime_environment, require_fresh
 from agent_launch import initialize_request_route, launch, launch_cwd, runtimes as validate_runtimes
 SETTINGS = 'doc/settings/claude-code'
 DEFAULTS = {'runtimes': [{'name': 'claude', 'argv': ['claude']}]}
@@ -77,6 +77,9 @@ class ClaudeCode:
         account, popup = choose_account(self.ext, dict(args, runtime=runtime['name'], **({'cwd': cwd} if cwd else {})), 'claude', 'claude-code.new')
         if popup:
             return popup
+        if account is not None:
+            raise VqroError('API-key accounts: launching is not available yet; the keychain entry is kept'
+                            if account['kind']=='api_key' else 'account choice is not available for this launcher yet','unsupported')
         principal = 'p:' + uuid.uuid4().hex
         env = account_environment(account, runtime_environment('claude', runtime))
         env['VQRO_PRINCIPAL'] = principal

@@ -102,6 +102,17 @@ class ClaudeCodeLauncherTests(unittest.TestCase):
         self.assertFalse(Path(helper[1]).exists())
         self.assertEqual(argv[at+2:],['--','claude'])
 
+    def test_unbound_named_account_kinds_refuse_before_any_backend_launch(self):
+        for kind in ('subscription','api_key'):
+            with self.subTest(kind=kind):
+                obj=launcher([{'name':'native','argv':['claude']}])
+                with patch.object(MODULE,'choose_account',return_value=({'kind':kind},None)), \
+                     patch.object(MODULE,'launch_cwd',return_value=None),patch.object(MODULE,'launch') as launch:
+                    with self.assertRaises(MODULE.VqroError) as caught:obj.new({'account':'named'})
+                launch.assert_not_called();self.assertEqual(caught.exception.kind,'unsupported')
+                self.assertIn('launching is not available yet' if kind=='api_key' else
+                              'account choice is not available for this launcher yet',str(caught.exception))
+
     def test_account_popup_returns_before_any_backend_effect(self):
         obj = launcher([{'name': 'native', 'argv': ['claude']}])
         popup = {'client': {'popup': {'view': 'synthetic-account-choice'}}}
