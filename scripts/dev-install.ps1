@@ -26,6 +26,17 @@ if (-not $PSCmdlet.ShouldProcess($BinDir, 'Build and install vqro and bundled ex
 # One consent scope: required backup/copy operations cannot be individually skipped.
 $ConfirmPreference = 'None'
 
+function Get-PythonPackageFiles($Package) {
+    Get-ChildItem -LiteralPath $Package.FullName -Filter '*.py' -File
+    if ($Package.Name -eq 'pi_accounts') {
+        # One inventory for preflight and publication; these are shipped code/data,
+        # never native user configuration, credentials or conversation files.
+        foreach ($name in @('index.mjs', 'provider.mjs', 'limit_messages.json')) {
+            Get-Item -LiteralPath (Join-Path $Package.FullName $name)
+        }
+    }
+}
+
 function Find-Python {
     if ($env:VQRO_PYTHON) {
         if ($env:VQRO_PYTHON -match '(?i)[\\/]WindowsApps[\\/]') { throw 'VQRO_PYTHON points to a WindowsApps stub.' }
@@ -214,7 +225,7 @@ try {
         if (-not (Test-Path -LiteralPath (Join-Path $package.FullName '__init__.py'))) { continue }
         $destination = Join-Path $extensions $package.Name
         Assert-PlainPath $destination
-        foreach ($file in Get-ChildItem -LiteralPath $package.FullName -Filter '*.py' -File) {
+        foreach ($file in @(Get-PythonPackageFiles $package)) {
             Assert-PlainPath (Join-Path $destination $file.Name) 'File'
         }
     }
@@ -374,7 +385,7 @@ try {
             Remove-Item -LiteralPath $destination -Recurse -Force
         }
         [IO.Directory]::CreateDirectory($destination) | Out-Null
-        Get-ChildItem -LiteralPath $package.FullName -Filter '*.py' -File |
+        Get-PythonPackageFiles $package |
             ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $destination -Force }
     }
     foreach ($name in $names) {
