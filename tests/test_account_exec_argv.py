@@ -26,13 +26,13 @@ class AccountExecArgv(unittest.TestCase):
                 self.assertEqual(program,argv[0])
                 self.assertEqual(crt_split(' '.join(encoded)) if platform=='nt' else encoded,argv)
 
-    def test_subscription_helper_exec_preserves_program_and_crt_roundtrip_without_retry(self):
+    def test_supported_helper_exec_preserves_program_and_crt_roundtrip_without_retry(self):
         for platform in ('nt','posix'):
             with self.subTest(platform=platform):
                 argv=self.argv();execute=Mock();store=Mock()
                 store.retrieve.return_value=Secret('synthetic-only-never-a-real-token')
                 with patch.object(helper,'os',SimpleNamespace(name=platform)):
-                    helper.launch('b'*32,'anthropic',argv,credential_kind='claude_subscription',
+                    helper.launch('b'*32,'anthropic',argv,credential_kind='api_key' if platform=='nt' else 'claude_subscription',
                                   store=store,environment={},execute=execute)
                 execute.assert_called_once();store.retrieve.assert_called_once_with('b'*32)
                 program,encoded,_=execute.call_args.args
