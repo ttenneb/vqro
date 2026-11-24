@@ -225,7 +225,12 @@ class Dispatch:
             attempts=result.get('attempted_targets');observations=result.get('inspected_blocked')
             if not isinstance(attempts,list) or not isinstance(observations,list) or any(not isinstance(item,dict) for item in observations):
                 disposition='invalid'
-            elif [item.get('account') for item in observations] != (attempts if disposition=='all_blocked' else attempts[:-1]):
+            elif [item.get('account') for item in observations] not in (
+                    [attempts] if disposition=='all_blocked' else
+                    [attempts[:-1],attempts] if disposition=='offer' else [attempts[:-1]]):
+                # Mixed native quota can retain a scoped negative for the final
+                # account while its aggregate verdict remains unknown/OFFER.
+                # Preserve that evidence; it is not positive AUTO permission.
                 disposition='invalid'
             elif disposition=='ready' and (result.get('continuation_allowed') is not True or result.get('fenced') is not False):
                 disposition='invalid'

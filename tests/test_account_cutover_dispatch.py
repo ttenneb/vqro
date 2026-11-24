@@ -184,6 +184,24 @@ class CutoverDispatch(unittest.TestCase):
         with self.assertRaises(VqroError):self.dispatch.confirm_continuation(token)
         self.assertEqual(len(self.core.sends),1)
 
+    def test_mixed_final_quota_preserves_negative_evidence_and_same_claim_owner_offer(self):
+        self.nonready('offer');original=self.core.invoke
+        def invoke(name,args=None):
+            result=original(name,args)
+            if name=='accounts.cutover.codex':
+                result['inspected_blocked']=[{'account':'b','observed_at_ms':1234,'reset_at_ms':None,
+                                             'source':'codex.account/rateLimits'}]
+            return result
+        self.core.invoke=invoke;self.execute()
+        self.assertIsNotNone(self.owner.offered)
+        token=self.owner.offered;value,_=self.owner.cutovers.read()
+        self.assertEqual(value['groups'],{});self.assertEqual(value['claims'][token]['state'],'awaiting_owner')
+        self.assertTrue(self.owner.cutovers.known_blocked(self.core.b))
+        self.assertEqual(self.core.sends,[]);self.assertEqual(self.core.effect_count,1)
+        self.dispatch.confirm_continuation(token)
+        self.assertEqual(len(self.core.sends),1);self.assertEqual(self.core.effect_count,1)
+        self.assertTrue(self.owner.cutovers.known_blocked(self.core.b))
+
     def test_all_blocked_restores_releases_notifies_and_never_auto_continues(self):
         self.nonready('all_blocked');self.execute()
         value,_=self.owner.cutovers.read();self.assertEqual(value['groups'],{})
