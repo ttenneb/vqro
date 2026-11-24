@@ -135,6 +135,9 @@ class PiCutover:
             raise VqroError('protected Pi source/session/error claim changed; nothing restarted','conflict')
         validate_claim_authority(self.ext,claim,args['automatic'])
         if args['automatic']:
+            allowance=claim.get('max_switches');blocked=claim.get('known_blocked_targets')
+            if type(allowance) is not int or allowance<1 or not isinstance(blocked,list) or args['account'] in blocked:
+                raise VqroError('Pi switch no longer has protected budget/target eligibility; nothing stopped','offer_required')
             configured=policy.settings(self.ext)
             if configured['blocked']!='auto_restart' or configured['auto_cutover_max_per_hour']==0:
                 raise VqroError('automatic switching was turned off before Pi shutdown','offer_required')

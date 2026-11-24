@@ -35,6 +35,20 @@ class ResumeConsumption(unittest.TestCase):
         core.invoke=invoke
         return core,journal,Pi(core),token
 
+    def test_lowered_protected_allowance_blocks_pi_before_shutdown(self):
+        core,journal,_,token=self.fixture()
+        value,revision=journal.read();prior=copy.deepcopy(value['claims'][token])
+        prior.update(episode='prior-episode',native_episode='prior-native',state='completed')
+        value['claims']['b'*32]=prior;journal.write(value,revision)
+        core.entries['doc/settings/accounts-policy']['value']['auto_cutover_max_per_hour']=1
+        self.assertEqual(journal.lookup(token)['max_switches'],0)
+        row=core.resources['r1'];row['available']=True;row.pop('exit')
+        row['data']['agent']['lifecycle']='live'
+        setup=PiPrepare();setup.setUp();args=dict(setup.args(),_claim=token)
+        with self.assertRaises(VqroError) as caught:PiCutover(core).restart(args)
+        self.assertEqual(caught.exception.kind,'offer_required')
+        self.assertFalse(any(method=='resource.invoke' for method,_ in core.calls))
+
     def test_same_acknowledged_claim_can_launch_only_once(self):
         core,journal,frontend,token=self.fixture()
         with patch('pi.launch',return_value={'outcome':'observed','agent':'new','host':'new-host'}) as launch:

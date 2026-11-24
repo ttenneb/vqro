@@ -95,7 +95,7 @@ class PiPrepare(unittest.TestCase):
     def arm_restart(self, automatic=True):
         plan=self.callback.prepare(self.args(automatic))
         native=self.row['data']['agent']
-        claim={'state':'claimed','resource':'r1','episode':policy.episode(self.row),'host':'terminal-1',
+        claim={'max_switches':3,'known_blocked_targets':[],'state':'claimed','resource':'r1','episode':policy.episode(self.row),'host':'terminal-1',
           'source_history':'/synthetic/native-history.jsonl','source_principal':'p:original-work','session':SESSION,'source_incarnation':self.row['incarnation'],'source_epoch':native['epoch'],
           'source_account':'a','native_episode':plan['native_episode'],'account':'b','_account_revision':7,
           'automatic':automatic,'runtime':'pi','setup_id':plan['setup_id'],
