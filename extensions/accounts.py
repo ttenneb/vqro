@@ -9,7 +9,7 @@ import uuid
 import accounts_policy as policy
 from accounts_cutover import Cutovers
 from accounts_claude import ClaudeCutover, eligible_episode as claude_episode
-from accounts_pi import PiCutover, eligible_error as pi_error
+from accounts_pi import PiCutover, eligible_error as pi_error, native_error_episode, error_inference
 from accounts_dispatch import Dispatch
 from accounts_codex_logins import SavedLogins
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -53,7 +53,10 @@ class Accounts:
                         'view/accounts-restart-warning':{'kind':'panel','title':'Claude background-loss warning','items':[]},
                         'view/accounts-continuation':{'kind':'panel','title':'Confirm continuation','items':[]},
                         'view/accounts-codex-logins':{'kind':'panel','title':'Codex saved logins','items':[]},
-                        'menu/accounts':{'where':'status','label':'accounts','command':'accounts.show','order':55}})
+                        'menu/accounts':{'where':'status','label':'accounts','command':'accounts.show','order':55},
+                        'menu/accounts.pi-error':{'where':'pane','label':'Continue on another account… (human-judged)',
+                            'command':'accounts.offer','group':'agent','order':106,
+                            'when':{'resource_kind':'agent','menu.agent_error':True,'menu.agent_app':'pi'}}})
         ext.on_event(self.changed)
 
     def read_claim(self, args):
@@ -91,8 +94,10 @@ class Accounts:
         items.append({'text':'Edit automatic continuation text','input':'Literal new-turn text (4096 UTF-8 bytes maximum)',
                       'command':'accounts.policy','args':{'field':'continuation_text','expect':entry['version'] if entry else 0}})
         with self.ext.cache_lock:
-            blocked_ids=[rid for rid,row in self.ext.resources.items() if policy.blocked(row,limit_only=True)][:64]
-        items.extend({'text':'Fresh-work options for '+label(rid),'command':'accounts.offer','args':{'resource':rid}} for rid in blocked_ids)
+            stopped=[(rid,pi_error(row)) for rid,row in self.ext.resources.items()
+                     if pi_error(row) or policy.blocked(row,limit_only=True)][:64]
+        items.extend({'text':('Choose account for '+label(rid)+' (human-judged)' if is_pi else 'Fresh-work options for '+label(rid)),
+                      'command':'accounts.offer','args':{'resource':rid}} for rid,is_pi in stopped)
         for runtime in SELECTORS:
             items.append({'type':'text','style':'bold','text':runtime})
             items.append({'text':'Shared runtime login', 'command':COMMANDS[runtime], 'args':{'account':'normal'}})
@@ -211,6 +216,7 @@ class Accounts:
 
 
     def configure_policy(self,args):
+        if not args or set(args)<={'context'}:return self.show({})
         entry=self.ext.vqro.call('workspace.get',{'key':policy.POLICY})
         revision=entry['version'] if entry else 0
         if type(args.get('expect')) is not int or args['expect']!=revision:
@@ -279,17 +285,24 @@ class Accounts:
         self.ext.notify(text,'warn')
 
     def offer(self,args):
-        source=self.source(args.get('resource'))
+        context=args.get('context') if isinstance(args.get('context'),dict) else {}
+        source=self.source(args.get('resource') or context.get('resource'))
         candidates,revision,scores,_=self.alternatives(source,policy.settings(self.ext))
         token=policy.episode(source)
         items=[{'type':'text','text':'Continue the same native conversation. Earlier input is never replayed. AUTO submits one NEW visible vqro/tool continuation; an owner choice waits for your explicit next turn.'},
                {'type':'text','text':'Continuing a conversation on an API-key account: not yet. API-key accounts: launching is not available yet; the keychain entry is kept.'}]
+        pi_episode=native_error_episode(source) if pi_error(source) else None
+        if pi_episode is not None:
+            items.append({'type':'text','style':'warn','text':
+                'Human-judged: The error was not recognised as a usage limit; switch anyway?'
+                if error_inference(source) is None else 'Human-judged account choice; no earlier input is replayed.'})
         for target in candidates:
             score=scores.get(target['id'])
             items.append({'text':'Continue on '+label(target['label']),
                           'description':('Reported headroom '+str(round(score,1))+'%' if score is not None else 'Capacity unknown/incomparable')+'; native same-conversation restart',
                           'command':'accounts.restart','args':{'resource':source['id'],'episode':token,
-                                                               'account':target['id'],'_account_revision':revision}})
+                                                               'account':target['id'],'_account_revision':revision,
+                                                               **({'native_episode':pi_episode} if pi_episode is not None else {})}})
         if not candidates: items.append({'type':'text','text':'No configured alternative allowed by this policy. Native login and API-key setup are separate, explicit actions.'})
         self.ext.publish('accounts-restarts',{'title':'Continue this conversation','requires':['menu'],'items':items})
         return {'client':{'popup':{'view':'accounts-restarts','width':90}}}
@@ -312,7 +325,8 @@ class Accounts:
                 {'type':'text','text':'Background work may be lost when restarting Claude. Earlier input is never replayed.','style':'warn'},
                 {'text':'I understand: continue on '+label(target['label']),'command':'accounts.restart.confirm','args':wire}]})
             return {'client':{'popup':{'view':'accounts-restart-warning','width':90}}}
-        return self.dispatch.execute(source,target,revision,automatic=False)
+        return self.dispatch.execute(source,target,revision,automatic=False,
+                                     expected_native_episode=args.get('native_episode'))
 
     def confirm_restart(self,args):
         authority=self.cutovers.authorization(False)

@@ -1068,7 +1068,11 @@ class Agents:
             queues = data(r).get("queues")
             queued = isinstance(queues, dict) and any(isinstance(queues.get(key), list)
                 and any(isinstance(item, str) for item in queues[key]) for key in ("steering", "follow_up"))
-        return {"agent_working": available and working and self.supported(r, "abort"),
+        completion=facts.get("completion") or {};status=r.get("status") or {}
+        return {"agent_error": available and facts.get("state")=="idle" and isinstance(completion,dict)
+                               and completion.get("reason")=="error",
+                "agent_app": status.get("app") if isinstance(status,dict) and isinstance(status.get("app"),str) else None,
+                "agent_working": available and working and self.supported(r, "abort"),
                 "agent_queued": available and queued and self.supported(r, "clear_queue"),
                 # Core resources declare availability as a boolean, exactly the Forget handler's guard.
                 "agent_forgettable": r.get("available") is False}

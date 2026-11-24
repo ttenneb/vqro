@@ -190,7 +190,15 @@ continuation is the probe. A limit on that turn is a new episode, subject to the
 hourly cap. Earlier/failed prompts, queues and transcripts are never copied into
 a fresh agent. Pi's conservative versioned error-message inference is a documented
 human-approved exception, labelled **switched because the error looked like a
-usage limit**. Other Pi errors require an owner choice.
+usage limit**. Other Pi errors require an owner choice. After any eligible idle,
+unqueued Pi native error, Accounts shows **Choose account for … (human-judged)**;
+the agent pane menu also offers **Continue on another account… (human-judged)**.
+Both open the same account choices. An unrecognised error explicitly asks whether
+to switch anyway, without claiming a quota verdict or granting AUTO. The choice
+is bound to the displayed native error episode; a changed error is refused.
+Manual switching resumes the same conversation and then WAITS for the human's
+next input: no new vqro turn and no earlier input replay. The **Account capacity
+strategies** command now opens Accounts when invoked without save arguments.
 
 Claude AUTO requires latest idle native episode, a complete empty vqro-owned input
 ledger, and a complete empty native background level at both checks. Native queue

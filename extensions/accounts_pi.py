@@ -66,6 +66,20 @@ def eligible_error(row):
             and isinstance(commands,list) and any(isinstance(command,dict) and command.get('name')==COMMAND for command in commands))
 
 
+def native_error_episode(row):
+    record=error_record(row);session=(policy.facts(row).get('session') or {}).get('id')
+    if record is None or not isinstance(session,str):return None
+    return 'pi-error:'+hashlib.sha256(json.dumps([session,record['timestamp']],separators=(',',':')).encode()).hexdigest()
+
+
+def error_inference(row):
+    """UI label only; preparation/native admission still authorize effects."""
+    native=policy.facts(row);model=(native.get('session') or {}).get('model') or {}
+    base=(native.get('account') or {}).get('provider') or (model.get('native') or {}).get('provider')
+    record=error_record(row)
+    return match_limit(base,record) if record is not None else None
+
+
 class PiCutover:
     def __init__(self,ext):
         self.ext=ext
@@ -126,7 +140,7 @@ class PiCutover:
             raise VqroError('Pi restart requires one unambiguous shared native runtime','unsupported')
         require_fresh('pi',programs[0]['argv']);provider_argv(programs[0]['argv'],target)
         session=native['session']['id'];record=error_record(source)
-        episode='pi-error:'+hashlib.sha256(json.dumps([session,record['timestamp']],separators=(',',':')).encode()).hexdigest()
+        episode=native_error_episode(source)
         affected={'resource':source['id'],'host':source['host'],'session':session,'epoch':native['epoch'],
                   'incarnation':source['incarnation'],'account':target['id']}
         inference=match_limit(base,record)
