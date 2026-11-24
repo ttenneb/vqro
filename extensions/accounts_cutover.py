@@ -255,13 +255,15 @@ class Cutovers:
         record = value['claims'].get(token)
         if record is None:
             raise VqroError('cutover claim is not acknowledged', 'not_found')
+        # All other blocking reads precede the policy used for this allowance.
+        # Callbacks consume this projection, never mix it with a later settings read.
+        accounts,_=account_snapshot(self.ext)
         configured=settings(self.ext);now=self.clock()
         if type(now) not in (int,float) or not math.isfinite(now) or now<0:
             raise VqroError('local time unavailable; no native switch authorized','unavailable')
         others={key:old for key,old in value['claims'].items() if key!=token}
         available=configured['auto_cutover_max_per_hour']-max(hourly_counts(others,record['runtime'],record['affected'],now),default=0)
         maximum=min(len(record['authorized_targets']),max(0,available)) if configured['blocked']=='auto_restart' else 0
-        accounts,_=account_snapshot(self.ext)
         blocked_ids={account['id'] for account in accounts if credential_key(account) in value['blocks']
                      and block_active(value['blocks'][credential_key(account)],now)}
         return dict(record, version=revision, max_switches=maximum, known_blocked_targets=sorted(blocked_ids))

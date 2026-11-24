@@ -138,9 +138,9 @@ class PiCutover:
             allowance=claim.get('max_switches');blocked=claim.get('known_blocked_targets')
             if type(allowance) is not int or allowance<1 or not isinstance(blocked,list) or args['account'] in blocked:
                 raise VqroError('Pi switch no longer has protected budget/target eligibility; nothing stopped','offer_required')
-            configured=policy.settings(self.ext)
-            if configured['blocked']!='auto_restart' or configured['auto_cutover_max_per_hour']==0:
-                raise VqroError('automatic switching was turned off before Pi shutdown','offer_required')
+            # The protected projection computes allowance from its final policy
+            # read. Do not follow it with a separate blocking settings read and
+            # accidentally combine an older allowance with a newer positive cap.
         return claim
 
     def restart(self,args):

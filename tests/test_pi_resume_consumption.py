@@ -49,6 +49,25 @@ class ResumeConsumption(unittest.TestCase):
         self.assertEqual(caught.exception.kind,'offer_required')
         self.assertFalse(any(method=='resource.invoke' for method,_ in core.calls))
 
+    def test_final_blocking_registry_read_cannot_mix_old_allowance_with_new_cap(self):
+        core,journal,_,token=self.fixture()
+        value,revision=journal.read();prior=copy.deepcopy(value['claims'][token])
+        prior.update(episode='prior-episode',native_episode='prior-native',state='completed')
+        value['claims']['b'*32]=prior;journal.write(value,revision)
+        row=core.resources['r1'];row['available']=True;row.pop('exit');row['data']['agent']['lifecycle']='live'
+        original=core.call;reads=[]
+        def call(method,params=None):
+            if method=='workspace.get' and params['key']=='doc/settings/accounts':
+                reads.append(True)
+                if len(reads)==4:core.entries['doc/settings/accounts-policy']['value']['auto_cutover_max_per_hour']=1
+            return original(method,params)
+        core.call=call
+        setup=PiPrepare();setup.setUp()
+        with self.assertRaises(VqroError):PiCutover(core).restart(dict(setup.args(),_claim=token))
+        self.assertEqual(len(reads),4)
+        self.assertFalse(any(method=='resource.invoke' for method,_ in core.calls))
+        self.assertEqual(journal.lookup(token)['max_switches'],0)
+
     def test_same_acknowledged_claim_can_launch_only_once(self):
         core,journal,frontend,token=self.fixture()
         with patch('pi.launch',return_value={'outcome':'observed','agent':'new','host':'new-host'}) as launch:
