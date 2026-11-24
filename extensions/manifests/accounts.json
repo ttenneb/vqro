@@ -11,6 +11,7 @@
                 {"cap":"doc/settings/tier1","suggest":"tier1","without":"Native Claude sign-in uses its documented default argv"},
                 {"cap":"command/pi.new","suggest":"pi","without":"Pi account launches are unavailable"},
                 {"cap":"command/pi.resume","suggest":"pi","without":"Pi lifecycle restarts refuse; no native replacement is replayed"},
+                {"cap":"command/pi.resume.prepare","suggest":"pi","without":"Pi restarts refuse before stopping without read-only resume prevalidation"},
                 {"cap":"command/codex.new","suggest":"codex","without":"Codex account launches are unavailable"},
                 {"cap":"command/tier1.claude","suggest":"tier1","without":"Claude account launches are unavailable"},
                 {"cap":"command/tabs.show","suggest":"tabs","without":"Native sign-in terminal remains available in the resource picker"}],

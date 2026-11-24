@@ -189,6 +189,9 @@ class PiCutover:
         if args['automatic'] and not plan['automatic_allowed']:
             raise VqroError('unrecognized Pi native error; owner-click OFFER only','offer_required')
         source=self.source(args);self.claimed(args,source,plan)
+        prepared=self.ext.invoke('pi.resume.prepare',{'_claim':args['_claim']})
+        if not isinstance(prepared,dict) or prepared.get('prepared') is not True:
+            raise VqroError('Pi resume prevalidation unconfirmed; nothing stopped','unavailable')
         if self.prepare(args)!=plan:
             raise VqroError('Pi error/session/runtime changed after claim','stale')
         source=self.source(args);self.claimed(args,source,plan)

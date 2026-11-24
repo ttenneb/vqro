@@ -29,12 +29,14 @@ class ResumeConsumption(unittest.TestCase):
         source['data']['agent']['lifecycle']='ended'
         original=core.invoke
         def invoke(name,args=None):
+            if name=='pi.resume.prepare':return frontend.prepare_resume(args)
             if name=='accounts.claim.read':return journal.lookup(args['claim'])
             if name=='accounts.claim.resume.consume':return journal.consume_resume(args['claim'])
             if name=='accounts.claim.resume.result':journal.resume_result(args['claim'],args['observed']);return {'recorded':True}
             return original(name,args)
         core.invoke=invoke
-        return core,journal,Pi(core),token
+        frontend=Pi(core)
+        return core,journal,frontend,token
 
     def test_real_manual_resume_accepts_produced_claim_for_known_and_unknown_errors(self):
         for message in ('You have hit your ChatGPT usage limit.','Synthetic unrecognised native error.'):
@@ -58,6 +60,7 @@ class ResumeConsumption(unittest.TestCase):
                         source['data']['agent']['lifecycle']='ended';return {'outcome':'accepted'}
                     return call(method,params)
                 def public_invoke(name,args=None):
+                    if name=='pi.resume.prepare':return frontend.prepare_resume(args)
                     return frontend.resume(args) if name=='pi.resume' else invoke(name,args)
                 def native_launch(*args,**kwargs):
                     new=copy.deepcopy(source);new.update(id='new',host='new-host',provider='new-runtime',available=True)
@@ -79,6 +82,24 @@ class ResumeConsumption(unittest.TestCase):
                 self.assertEqual(result['affected'][0]['session'],result['affected'][0]['requested_session'])
                 self.assertEqual(journal.lookup(token)['resume_launch']['state'],'observed')
                 self.assertFalse(any(method=='resource.invoke' and params.get('op')=='agent.send' for method,params in core.calls))
+
+    def test_missing_execution_backend_refuses_before_old_process_stop(self):
+        core,journal,frontend,token=self.fixture(automatic=False)
+        source=core.resources['r1'];source['available']=True;source.pop('exit');source['data']['agent']['lifecycle']='live'
+        core.resources.pop('terminal-1');call=core.call;invoke=core.invoke;stops=[]
+        def public_call(method,params=None):
+            if method=='resource.invoke' and params.get('op')=='agent.command':
+                stops.append(params);source['available']=False;source['exit']={'code':0,'success':True}
+                source['data']['agent']['lifecycle']='ended';return {'outcome':'accepted'}
+            return call(method,params)
+        def public_invoke(name,args=None):
+            if name=='pi.resume':return frontend.resume(args)
+            if name=='pi.resume.prepare':return frontend.prepare_resume(args)
+            return invoke(name,args)
+        core.call=public_call;core.invoke=public_invoke;setup=PiPrepare();setup.setUp()
+        with patch('pi.launch') as launch,self.assertRaises(VqroError):
+            PiCutover(core).restart(dict(setup.args(False),_claim=token))
+        self.assertEqual(stops,[]);self.assertTrue(source['available']);launch.assert_not_called()
 
     def test_display_fence_is_separate_from_shared_native_membership(self):
         core,journal,frontend,token=self.fixture(automatic=False)
@@ -127,12 +148,12 @@ class ResumeConsumption(unittest.TestCase):
         def call(method,params=None):
             if method=='workspace.get' and params['key']=='doc/settings/accounts':
                 reads.append(True)
-                if len(reads)==4:core.entries['doc/settings/accounts-policy']['value']['auto_cutover_max_per_hour']=1
+                if len(reads)==6:core.entries['doc/settings/accounts-policy']['value']['auto_cutover_max_per_hour']=1
             return original(method,params)
         core.call=call
         setup=PiPrepare();setup.setUp()
         with self.assertRaises(VqroError):PiCutover(core).restart(dict(setup.args(),_claim=token))
-        self.assertEqual(len(reads),4)
+        self.assertEqual(len(reads),6)
         self.assertFalse(any(method=='resource.invoke' for method,_ in core.calls))
         self.assertEqual(journal.lookup(token)['max_switches'],0)
 
@@ -143,14 +164,14 @@ class ResumeConsumption(unittest.TestCase):
         def call(method,params=None):
             if method=='workspace.get' and params['key']=='doc/settings/accounts':
                 reads.append(True)
-                if len(reads)==4:
+                if len(reads)==6:
                     entry=core.entries['doc/settings/accounts'];entry['version']=8
                     entry['value']['accounts'][1]['native_provider']='vqro_changed_b'
             return original(method,params)
         core.call=call
         setup=PiPrepare();setup.setUp()
         with self.assertRaises(VqroError) as caught:PiCutover(core).restart(dict(setup.args(),_claim=token))
-        self.assertEqual(caught.exception.kind,'stale');self.assertEqual(len(reads),4)
+        self.assertEqual(caught.exception.kind,'stale');self.assertEqual(len(reads),6)
         self.assertFalse(any(method=='resource.invoke' for method,_ in core.calls))
 
     def test_same_acknowledged_claim_can_launch_only_once(self):

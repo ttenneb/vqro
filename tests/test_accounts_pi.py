@@ -136,6 +136,7 @@ class PiPrepare(unittest.TestCase):
                 claim['resume_launch']={'state':'claimed'};return {'consumed':True}
             if name=='accounts.claim.resume.result':
                 claim['resume_launch']['state']='observed' if args['observed'] else 'unknown';return {'recorded':True}
+            if name=='pi.resume.prepare':return {'prepared':True}
             if name=='pi.resume':
                 self.resumes.append(copy.deepcopy(args))
                 new=copy.deepcopy(self.row);new.update(id='r2',host='terminal-2',provider='pi-new',available=True)

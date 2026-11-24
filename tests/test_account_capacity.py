@@ -89,6 +89,7 @@ class Core(FakeCore):
         if name in self.handlers:
             self.calls.append((name,copy.deepcopy(args)))
             return self.handlers[name](args)
+        if name=='pi.resume.prepare':return {'prepared':True}
         if name=='pi.resume':
             # Real Pi preparation/restart and common claims/authority are not mocked.
             # Fake only the public native exit/start boundary; never open history.

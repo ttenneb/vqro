@@ -200,6 +200,11 @@ Manual switching resumes the same conversation and then WAITS for the human's
 next input: no new vqro turn and no earlier input replay. The **Account capacity
 strategies** command now opens Accounts when invoked without save arguments.
 
+`pi.resume.prepare` runs the real frontend's read-only claim, native membership,
+model/history/principal, runtime argv and original backend checks before quiesce.
+`pi.resume` repeats the same admission after confirmed old exit, then consumes its
+once-only launch intent. Preparation is not a promise of future backend acceptance.
+
 Claude AUTO requires latest idle native episode, a complete empty vqro-owned input
 ledger, and a complete empty native background level at both checks. Native queue
 remains null, never fabricated empty. A dedicated owner-confirmed warning may set

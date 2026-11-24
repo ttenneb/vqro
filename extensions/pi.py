@@ -34,7 +34,7 @@ def runtimes(value):
 class Pi:
     def __init__(self, ext):
         self.ext = ext
-        for name, fn, title in [("new", self.new, "New Pi agent"), ("resume", self.resume, "Resume acknowledged Pi account cutover"), ("settings", self.settings, "Pi runtime settings"),
+        for name, fn, title in [("new", self.new, "New Pi agent"), ("resume", self.resume, "Resume acknowledged Pi account cutover"), ("resume.prepare", self.prepare_resume, "Validate Pi resume before stopping"), ("settings", self.settings, "Pi runtime settings"),
                                 ("configure", self.configure, "Configure Pi runtime argv")]:
             ext.command("pi."+name, title)(self.guarded(fn))
         def initialize():
@@ -117,12 +117,8 @@ class Pi:
                 testing_notice(self.ext, "testing plugin loading unconfirmed for this RPC launch (NOT VERIFIED); no launch retry")
         return answer
 
-    def resume(self,args):
-        """Finish one admitted lifecycle restart; no prompt/history or credential reads.
-
-        The old process already exited gracefully. This completes that lifecycle;
-        common rechecks CURRENT policy/authority before any NEW continuation.
-        """
+    def _resume_parameters(self,args,*,require_exit):
+        """Shared read-only admission for pre-stop preparation and real resume."""
         if not isinstance(args,dict) or set(args)!={'_claim'}:
             raise VqroError('Pi resume requires only its protected claim reference','invalid')
         claim=self.ext.invoke('accounts.claim.read',{'claim':args['_claim']})
@@ -134,9 +130,12 @@ class Pi:
         expected={'host':source.get('host'),'source_incarnation':source.get('incarnation'),
                   'source_epoch':native.get('epoch'),'source_account':policy.configured_id(source),'session':session.get('id'),
                   'source_history':history_file(native),'source_principal':native.get('tool_principal')}
-        if any(claim.get(key)!=value for key,value in expected.items()) or native.get('lifecycle')!='ended' \
-                or exited.get('success') is not True or type(exited.get('code')) is not int or exited['code']!=0:
-            raise VqroError('old Pi did not prove matching successful graceful exit','indeterminate')
+        settled=(native.get('lifecycle')=='ended' and exited.get('success') is True
+                 and type(exited.get('code')) is int and exited['code']==0)
+        live=(source.get('available') is True and native.get('lifecycle')=='live'
+              and native.get('state')=='idle' and native.get('queue')==[])
+        if any(claim.get(key)!=value for key,value in expected.items()) or not (settled if require_exit else live):
+            raise VqroError('Pi source identity/lifecycle is not ready for this resume phase','indeterminate')
         self.ext.fresh()
         if not isinstance(claim['source_principal'],str) or not claim['source_principal'] or claim['source_principal']==self.ext.owner():
             raise VqroError('original non-owner tool principal is unavailable; never invent a fresh work scope','forbidden')
@@ -163,6 +162,15 @@ class Pi:
                 'argv':[*runtime.get('bridge_argv',default_bridge()),'--',*native_argv],'env':env}
         cwd=session.get('cwd') or source.get('cwd')
         if isinstance(cwd,str) and cwd:params['cwd']=cwd
+        return params
+
+    def prepare_resume(self,args):
+        self._resume_parameters(args,require_exit=False)
+        return {'prepared':True}
+
+    def resume(self,args):
+        """Finish one admitted restart only after confirmed graceful old exit."""
+        params=self._resume_parameters(args,require_exit=True)
         consumed=self.ext.invoke('accounts.claim.resume.consume',{'claim':args['_claim']})
         if not isinstance(consumed,dict) or consumed.get('consumed') is not True:
             raise VqroError('Pi resume launch consumption unconfirmed; do not launch','indeterminate')
