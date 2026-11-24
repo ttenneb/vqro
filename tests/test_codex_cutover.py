@@ -301,6 +301,25 @@ class Tests(unittest.TestCase):
                 names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
                 self.assertNotIn('_account.switch',names);self.assertEqual(names.count('_account.abort'),2)
                 self.assertNotIn('_account.resume',names)
+    def test_first_readonly_prepare_failure_is_zero_only_after_literal_all_abort_acks(self):
+        for ack in (True,False,1,None,'missing','unknown'):
+            with self.subTest(ack=ack):
+                ext,c,args=self.walk();ext.fail='_account.prepare_switch';original=ext.call
+                def call(method,arguments):
+                    if method=='resource.invoke' and arguments['args']['name']=='_account.abort' and arguments['resource']=='x' and ack=='unknown':raise VqroError('unknown abort','indeterminate')
+                    result=original(method,arguments)
+                    if method=='resource.invoke' and arguments['args']['name']=='_account.abort' and arguments['resource']=='x':
+                        if ack=='missing':result['data'].pop('aborted')
+                        else:result['data']['aborted']=ack
+                    return result
+                ext.call=call
+                if ack is True:
+                    result=c.cutover(args)
+                    self.assertEqual(result['outcome'],'rejected');self.assertEqual(result['attempted_targets'],[]);self.assertFalse(result['fenced']);self.assertFalse(result['continuation_allowed'])
+                else:
+                    with self.assertRaises(VqroError):c.cutover(args)
+                names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
+                self.assertNotIn('_account.switch',names);self.assertNotIn('_account.resume',names);self.assertEqual(names.count('_account.abort'),1 if ack=='unknown' else 2)
     def test_prepare_is_readonly_and_native_episode_not_commonhash(self):
         ext=Ext();p=Cutover(ext).prepare(self.args())
         self.assertEqual(p['native_episode'],'native-turn');self.assertEqual(len(p['affected']),2)
@@ -421,7 +440,8 @@ class Tests(unittest.TestCase):
             self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
     def test_known_first_switch_rejection_aborts_local_fences_but_never_replays(self):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p);ext.reject='_account.switch'
-        with self.assertRaises(VqroError):c.cutover(args)
+        result=c.cutover(args)
+        self.assertEqual(result['outcome'],'rejected');self.assertEqual(result['attempted_targets'],[]);self.assertFalse(result['fenced'])
         names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
         self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.prepare_switch','_account.switch']+['_account.abort']*2)
     def test_target_discovered_on_every_host_before_any_switch(self):

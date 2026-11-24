@@ -386,10 +386,11 @@ class Cutover:
                 if isinstance(error,_NativeRejected):
                     if dispatched and not switched:attempted.pop()  # Explicit no-effect target, not a charged switch.
                     if attempted:return self._walk_result(self._restore_revoked(fenced,hosts,payload,prepared,'unconfirmed'),attempted,blocked,'offer')
-                if not attempted or (not switched and not dispatched):
-                    for row,_ in fenced:
-                        try:self._invoke(row,'_account.abort',payload)
-                        except Exception:pass
+                if not attempted:
+                    # Read-only preparation (or an authoritative no-effect reject)
+                    # dispatched no credential target. Preserve literal all-host
+                    # abort acknowledgements rather than inventing UNKNOWN cost.
+                    return self._abort_unattempted(fenced,payload,'before_credential_dispatch')
                 # An uncertain credential effect can still change the shared login:
                 # keep every fence, never guess a prefix or resume/replay it.
                 raise

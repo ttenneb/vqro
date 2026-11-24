@@ -210,6 +210,13 @@ class SharedPipeline(unittest.TestCase):
                 self.assertFalse(any(m=='resource.invoke' and a['args']['name']=='_account.switch' and a['args']['args']['account']['id']=='c' for m,a in core.native.calls))
                 self.assertEqual(sum(m=='resource.invoke' and a['args']['name']=='_account.release' for m,a in core.native.calls),2)
 
+    def test_first_readonly_prepare_all_ack_refunds_without_rearming_episode(self):
+        core=Pipeline(True,True);core.native.fail='_account.prepare_switch';core.app.handle_blocked('x')
+        token,record=next((t,r) for t,r in core.op_entry['value']['claims'].items() if r.get('continuation_parent') is None)
+        self.assertEqual(record['state'],'rejected');self.assertEqual(record['attempted_targets'],[])
+        self.assertEqual(core.op_entry['value']['groups'],{});self.assertEqual(core.app.cutovers.remaining('codex',record['affected']),3)
+        self.assertEqual(core.sends,[]);self.assertNotIn('accounts-continuation',core.live)
+        self.assertFalse(any(m=='resource.invoke' and a['args']['name']=='_account.switch' for m,a in core.native.calls))
     def test_b_blocked_c_ready_is_one_claim_prefix_and_one_new_turn(self):
         core=self.run_case(False,True)
         self.assertEqual(len(core.sends),1)
