@@ -625,6 +625,7 @@ class E2E:
 
     def rust_default_checks(self, rid, host, native_process):
         self.log.append({'bridge_profile': 'default-rust-agent-v0', 'agent': rid})
+        assert self.resource(rid)['status'].get('app') == 'pi', self.resource(rid)['status']
         facts = self.resource(rid)['data']['agent']
         assert facts['v'] == 0 and facts['caps']['agent']['v'] == 0, facts
         assert facts['session']['cwd'] == str(self.root/'work'), facts

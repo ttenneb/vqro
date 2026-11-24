@@ -10,7 +10,7 @@ fn observe(agent:&mut Agent, record:Value) {
 fn failed(message:&str, stop:&str)->Value {
     let mut agent=Agent::new("error-witness-test".into(),admission::Signals::new());
     observe(&mut agent,json!({"type":"response","command":"get_state","success":true,"data":{
-        "sessionId":"01234567-89ab-4cde-8fab-0123456789ab","isStreaming":false,
+        "sessionId":"01234567-89ab-4cde-8fab-0123456789ab","isStreaming":false,"isCompacting":false,
         "model":{"id":"model","provider":"native-alias","api":"pi-virtual"}}}));
     observe(&mut agent,json!({"type":"agent_start"}));
     observe(&mut agent,json!({"type":"message_end","message":{"role":"assistant","content":[],
@@ -27,6 +27,28 @@ fn native_error_witness_is_not_native_quota_classification() {
     assert_eq!(facts["data"]["agent"]["caps"]["agent.availability"]["reasons"],json!(["_retrying"]));
     assert_eq!(facts["data"]["agent"]["session"]["model"]["native"],
                json!({"provider":"native-alias","api":"pi-virtual"}));
+}
+#[test]
+fn actual_error_facts_satisfy_the_generic_pane_menu_predicate() {
+    use std::{io::Write, process::{Command, Stdio}};
+    let facts=failed("synthetic native error","error");
+    let agent=Agent::new("menu-capabilities".into(),admission::Signals::new());
+    let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let home=tempfile::tempdir().unwrap();
+    let mut child=Command::new(std::env::var("VQRO_PYTHON").unwrap_or_else(|_|"python3".into()))
+        .arg(root.join("tests/pi_error_menu_facts.py"))
+        .env_clear().env("HOME",home.path()).env("PATH",std::env::var_os("PATH").unwrap_or_default())
+        .env("PYTHONDONTWRITEBYTECODE","1")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(serde_json::to_string(&json!({"facts":facts,
+        "capabilities":agent.provider_capabilities()})).unwrap().as_bytes()).unwrap();
+    let output=child.wait_with_output().unwrap();
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    let derived:Value=serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(derived["menu"]["command"],"accounts.offer");
+    assert_eq!(derived["context"]["menu.agent_error"],true);
+    assert_eq!(derived["context"]["menu.agent_app"],"pi");
+    assert!(vqro::ui_model::workspace::when_holds(&derived["menu"],&derived["context"]),"{derived}");
 }
 #[test]
 fn truncation_and_success_never_create_a_complete_native_error() {

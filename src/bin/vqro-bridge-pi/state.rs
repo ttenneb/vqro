@@ -153,7 +153,7 @@ impl Agent {
     pub fn facts(&self,provider:&str,cwd:&str)->Value {
         let phase=match self.state() {"running"=>"working","requires_action"=>"blocked","idle" if self.completion.as_ref().is_some_and(|c|c["reason"]=="error")=>"error","idle"=>"idle",_=>"working"};
         let mut facts=json!({"ref":"agent","incarnation":"","kind":"agent","state":if self.exit.is_some(){"finished"}else{"live"},"name":"Pi","cwd":cwd,"exit":self.exit.as_ref().map(|exit|json!({"code":exit.code,"success":exit.success})),
-            "status":{"state":phase},
+            "status":{"state":phase,"app":"pi"},
             "data":{"agent":{"v":0,"state":self.state(),"lifecycle":if self.exit.is_some(){"ended"}else{"live"},
                 "availability":if self.exit.is_some(){None}else{self.availability.as_ref()},
                 // agent-v0 7: whether extensions are loaded is a launch fact for the process's life. With them, Pi names

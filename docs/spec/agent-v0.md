@@ -85,7 +85,7 @@ hook firing or a run completing. `queued`, `inserted` and `handled` are alternat
 
 ### 2.3 Facts
 
-The resource keeps the coarse OSC-7501-compatible `status` and carries `data.agent` (≤ 64 KiB). Facts alone render
+The resource keeps the coarse OSC-7501-compatible `status` and carries `data.agent` (≤ 64 KiB). The Pi adapter reports `status.app: "pi"` as its own app identity; generic pane-menu presentation may use this reported value. Missing/unknown app identities do not imply Pi, and app identity never authorizes native effects. Facts alone render
 current state; they carry no per-token stream position.
 
 ```jsonc
