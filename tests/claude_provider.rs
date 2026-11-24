@@ -9,6 +9,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHal
 use tokio::sync::mpsc::UnboundedReceiver;
 use vqro::claude_code::runtime::Shared;
 use vqro::provider_client::{Config, Provider, Request};
+#[path = "claude_provider/lifetime_budget.rs"]
+mod lifetime_budget;
 #[path = "claude_provider/restart.rs"]
 mod restart;
 struct Core {
@@ -108,6 +110,14 @@ async fn registered_with_timeout(
     capacity: usize,
     reply_timeout: Duration,
 ) -> (Provider, UnboundedReceiver<Request>, Core) {
+    registered_with_budget(shared, capacity, reply_timeout, 2 << 20).await
+}
+async fn registered_with_budget(
+    shared: &Arc<Shared>,
+    capacity: usize,
+    reply_timeout: Duration,
+    outgoing_bytes: usize,
+) -> (Provider, UnboundedReceiver<Request>, Core) {
     let (a, b) = tokio::io::duplex(capacity);
     let (r, w) = tokio::io::split(b);
     let mut core = Core {
@@ -123,6 +133,7 @@ async fn registered_with_timeout(
     );
     config.role = "runtime".into();
     config.call_timeout = reply_timeout;
+    config.outgoing_bytes = outgoing_bytes;
     let connect = tokio::spawn(Provider::connect(a, config));
     let hello = core.recv().await;
     assert_eq!(hello["method"], "hello");

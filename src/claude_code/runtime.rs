@@ -371,6 +371,9 @@ impl Shared {
                 "bridge lifetime ended before native admission",
             );
         }
+        if Instant::now() >= effect.deadline {
+            return rejected("timeout", "deadline before native admission");
+        }
         let Some(native) = self.process() else {
             return rejected("unavailable", "native process is not present");
         };
@@ -384,10 +387,23 @@ impl Shared {
         match effect.op.as_str() {
             "claude.restart" => self.restart_owned(provider, effect, &native).await,
             "agent.send" => {
-                let owner = provider
-                    .call("workspace.get", json!({"key":"doc/principals/owner"}))
-                    .await
-                    .unwrap_or(Value::Null);
+                // SDK reply timeout starts AFTER send_line's budget/channel wait. Bound the
+                // WHOLE read-only lookup while holding admission, so EOF/signal cannot be
+                // stranded behind a backpressured but open provider. No input claim exists yet.
+                let owner = match tokio::time::timeout_at(
+                    effect.deadline,
+                    provider.call("workspace.get", json!({"key":"doc/principals/owner"})),
+                )
+                .await
+                {
+                    Ok(result) => result.unwrap_or(Value::Null),
+                    Err(_) => {
+                        return rejected(
+                            "timeout",
+                            "owner lookup deadline before native input dispatch",
+                        );
+                    }
+                };
                 let uuid = match uuid() {
                     Ok(id) => id,
                     Err(_) => return rejected("backend", "native client identifier unavailable"),
