@@ -106,6 +106,22 @@ class PiPrepare(unittest.TestCase):
         original_call=self.core.call;original_invoke=self.core.invoke
         def call(method,params=None):
             if method=='resource.invoke':
+                # Match main.rs::command's CLOSED public shape and
+                # commands.rs::Registry.prepare string bound before native write.
+                request=params.get('args') or {}
+                allowed={'v','caps_rev','epoch','guard','cause','correlation','name','args'}
+                text=request.get('args')
+                if (not isinstance(request,dict) or set(request)-allowed
+                        or request.get('name') not in [item['name'] for item in self.row['data']['agent']['commands']]
+                        or not isinstance(text,str) or len(text.encode('utf-8'))>16*1024):
+                    return {'outcome':'rejected','error':{'kind':'unsupported'}}
+                native=self.row['data']['agent'];model=native['session']['model']
+                try:payload=json.loads(text)
+                except ValueError:return {'outcome':'rejected','error':{'kind':'invalid'}}
+                if payload!={'session':native['session']['id'],'provider':model['native']['provider'],
+                             'model':model['id'],'file':native['session']['native']['file'],
+                             'error_timestamp':native['completion']['native']['timestamp']}:
+                    return {'outcome':'rejected','error':{'kind':'invalid'}}
                 self.stops.append(copy.deepcopy(params))
                 if self.stop_unknown:raise VqroError('uncertain native stop','indeterminate')
                 self.row['available']=False;self.row['exit']={'code':0,'success':True}
@@ -131,13 +147,29 @@ class PiPrepare(unittest.TestCase):
         self.core.call=call;self.core.invoke=invoke
         return claim
 
+    def test_public_command_fake_rejects_text_field_before_fabricating_native_exit(self):
+        self.arm_restart()
+        request={'v':0,'caps_rev':1,'epoch':'epoch-1','guard':{'session':SESSION},
+                 'name':'vqro-account-quiesce','text':'{}'}
+        result=self.core.call('resource.invoke',{'resource':'r1','op':'agent.command','args':request})
+        self.assertEqual(result['outcome'],'rejected');self.assertEqual(self.stops,[])
+        self.assertEqual(self.row['data']['agent']['lifecycle'],'live')
+        self.assertEqual(self.resumes,[])
+
+    def test_public_command_fake_contract_tracks_the_actual_bridge_closed_allowlist(self):
+        root=Path(__file__).resolve().parents[1]/'src/bin/vqro-bridge-pi'
+        command=(root/'main.rs').read_text(encoding='utf-8').split('async fn command(',1)[1].split('\nasync fn ',1)[0]
+        self.assertIn('["v","caps_rev","epoch","guard","cause","correlation","name","args"]',command)
+        self.assertIn('Some(Value::String(text)) if text.len()<=16*1024',
+                      (root/'commands.rs').read_text(encoding='utf-8'))
+
     def test_restart_observes_old_exit_and_exact_native_session_before_reporting_resumed(self):
         self.arm_restart();args=dict(self.args(),_claim='a'*32)
         result=self.callback.restart(args)
         self.assertEqual(len(self.stops),1);self.assertEqual(len(self.resumes),1)
         request=self.stops[0]['args']
         self.assertEqual(request['guard'],{'session':SESSION})
-        self.assertEqual(json.loads(request['text'])['error_timestamp'],123456)
+        self.assertEqual(json.loads(request['args'])['error_timestamp'],123456)
         self.assertEqual(result['affected'][0]['session'],SESSION)
         self.assertTrue(result['affected'][0]['session_confirmed'])
         with self.assertRaises(VqroError):self.callback.restart(args)

@@ -154,7 +154,7 @@ class PiCutover:
         native=policy.facts(source);model=native['session']['model'];record=error_record(source)
         request={'v':0,'caps_rev':native['caps']['rev'],'epoch':native['epoch'],
                  'guard':{'session':native['session']['id']},'name':COMMAND,
-                 'text':json.dumps({'session':native['session']['id'],'provider':model['native']['provider'],
+                 'args':json.dumps({'session':native['session']['id'],'provider':model['native']['provider'],
                                     'model':model['id'],'error_timestamp':record['timestamp'],'file':history_file(native)},separators=(',',':'))}
         stopped=self.ext.vqro.call('resource.invoke',{'resource':source['id'],'op':'agent.command','args':request})
         if not isinstance(stopped,dict) or stopped.get('outcome') not in ('accepted','observed','dispatched'):
