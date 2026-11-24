@@ -10,7 +10,8 @@ also not exercised against a real keychain; fake tests prove plumbing, not OS be
 ## Windows Claude credential refusal
 
 Claude credential-backed restart and helper launch are **not supported on Windows
-yet**. The runtime refuses before polling any restart work, including helper
+yet**. The runtime does not declare `claude.restart` on Windows; its defensive
+refusal remains. It refuses before polling any restart work, including helper
 preflight, secret lookup, owned stop or replacement spawn. The helper launch also
 refuses before constructing its OS store. There is no retry or ambient-login
 fallback. Linux/macOS credential paths, the API-key helper and ordinary shared-login

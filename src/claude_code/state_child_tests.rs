@@ -1,5 +1,30 @@
 use super::*;
 #[test]
+fn windows_never_declares_restart_even_when_private_helper_is_configured() {
+    let mut state = State::new("platform-test".into());
+    state.restart_configured = true;
+    state.ready = true;
+    state.version = Some("2.1.329".into());
+    for upper in [false, true] {
+        let windows = state.declarations_on_host(upper, true);
+        assert!(
+            windows.get("claude.restart").is_none(),
+            "Windows must not declare an always-refused operation"
+        );
+        assert!(
+            windows.get("agent.send").is_some(),
+            "ordinary shared-login operations remain"
+        );
+        assert!(
+            state
+                .declarations_on_host(upper, false)
+                .get("claude.restart")
+                .is_some()
+        );
+    }
+}
+
+#[test]
 fn joint_pending_and_recent_saturation_cannot_rearm_lost_child_as_root() {
     let mut s = state();
     start(&mut s);

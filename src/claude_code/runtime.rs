@@ -119,7 +119,7 @@ impl Shared {
         config.validate()?;
         *self.restart_config.lock().unwrap() = Some(Arc::new(config));
         let mut state = self.state.lock().unwrap();
-        state.restart_configured = true;
+        state.restart_configured = !cfg!(windows);
         state.refresh();
         Ok(())
     }
