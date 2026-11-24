@@ -50,6 +50,19 @@ needs a separate compatibility/security decision by the secondary/lead, not an u
 must use private HC selectors (or no HC environment), never the user's endpoints. These findings are source facts,
 not a live-environment or credential inspection.
 
+## Host executable identity
+
+The optional probe does not use shutil.which: on Windows its cwd/PATHEXT policy differs from CPython
+os._execvpe's explicit PATH walk. The launcher selects in that PATH order and binds both help Popen and the one
+ordinary execv to the SAME absolute target. It never implicitly prepends cwd; an explicit empty/dot PATH entry
+still has its normal meaning. Windows CRT extension order is literal, then .com/.exe/.bat/.cmd, not PATHEXT;
+see [Microsoft's exec remarks](https://learn.microsoft.com/en-us/cpp/c-runtime-library/exec-wexec-functions).
+POSIX selection does not add Windows suffixes. Missing/inaccessible/nonregular/non-executable or ambiguous
+extensionless Windows identity disables the optional field/probe and keeps the original ordinary execvp lookup.
+There is no retry after the resolved ordinary exec. This is lookup consistency, not file authenticity/TOCTOU proof.
+Mocked Windows controls cover cwd shadow vs PATH, .exe/.cmd and PATHEXT order, conservative ambiguity; POSIX
+controls preserve PATH-only/no-suffix behaviour. No native Windows process is used for these controls.
+
 ## Platform review boundary
 
 Admission uses host paths; canonicalization and Pi's reported path spelling must agree. Shared Rust/legacy bridge

@@ -97,7 +97,9 @@ RPC admits exactly one separate bridge field, `--testing-plugin`, before the nat
 never another arbitrary path. The bridge maps that field to native `-e`/`--skill`; arbitrary native `-e`, extension
 and prompt-template flags remain refused. Only `VQRO_TESTING_SOCKET` and `VQRO_TESTING_STATE_DIR` are added to the
 native protected-name allowlist. The existing unrelated environment policy is unchanged. The isolated host wrapper
-probes the resolved bridge's `--help` once per path/mtime, with a two-second execution and bounded output. An older
+probes the PATH-selected bridge's `--help` once per path/mtime, with a two-second execution and bounded output.
+Probe and ordinary exec use the same explicit target, without Windows cwd/PATHEXT expansion; uncertain selection
+omits the field and preserves ordinary lookup. An older
 bridge that does not advertise the field gets a single ordinary launch without the field, never a retry.
 The warning is attempted once, best-effort; failed stderr write/flush cannot veto launch, claim delivery or use
 protocol stdout. Unknown configured `bridge_argv` launchers also stay unhooked/NOT VERIFIED rather than receiving an

@@ -126,15 +126,15 @@ class RpcTestingTests(unittest.TestCase):
         reader.is_alive.return_value = False
         args = ["--testing-plugin", str(self.plugin), "--", "pi", "--mode", "rpc"]
         # No actual process or Windows API is used. Exercise the real main/negotiation/cache path.
-        with patch.object(launch.shutil, "which", return_value=binary), \
+        with patch.object(launch, "exec_target", return_value=binary), \
                 patch.object(launch, "_background_kwargs", return_value={"creationflags": 1234}), \
                 patch.object(launch.subprocess, "Popen", return_value=process) as popen, \
                 patch.object(launch.threading, "Thread", return_value=reader), \
                 patch.object(launch.sys, "argv", ["launch.py", *args]), \
-                patch.object(launch.os, "execvp") as execute, contextlib.redirect_stderr(io.StringIO()) as notices:
+                patch.object(launch.os, "execv") as execute, contextlib.redirect_stderr(io.StringIO()) as notices:
             launch.main()
-            execute.assert_called_once_with("vqro-bridge-pi", ["vqro-bridge-pi", "--", "pi", "--mode", "rpc"])
-            self.assertEqual(launch.negotiated(args), ["--", "pi", "--mode", "rpc"])
+            execute.assert_called_once_with(binary, ["vqro-bridge-pi", "--", "pi", "--mode", "rpc"])
+            self.assertEqual(launch.negotiated(args, binary), ["--", "pi", "--mode", "rpc"])
         popen.assert_called_once()
         self.assertEqual(popen.call_args.kwargs["creationflags"], 1234, "probe must use shared background flags")
         self.assertEqual(process.wait.call_count, 2)
@@ -171,17 +171,17 @@ class RpcTestingTests(unittest.TestCase):
                     raise error_type("fixture diagnostic flush failure")
 
         diagnostic = Diagnostic()
-        with patch.object(launch.shutil, "which", return_value=binary), \
+        with patch.object(launch, "exec_target", return_value=binary), \
                 patch.object(launch, "_background_kwargs", return_value={}), \
                 patch.object(launch.subprocess, "Popen", return_value=process) as popen, \
                 patch.object(launch.sys, "argv", ["launch.py", *args]), \
                 patch.object(launch.sys, "stderr", diagnostic), \
-                patch.object(launch.os, "execvp") as execute, contextlib.redirect_stdout(io.StringIO()) as stdout:
+                patch.object(launch.os, "execv") as execute, contextlib.redirect_stdout(io.StringIO()) as stdout:
             launch.main()
             attempts = (diagnostic.writes, diagnostic.flushes)
-            self.assertEqual(launch.negotiated(args), ["--", "pi", "--mode", "rpc"])
+            self.assertEqual(launch.negotiated(args, binary), ["--", "pi", "--mode", "rpc"])
             self.assertEqual((diagnostic.writes, diagnostic.flushes), attempts, "failed warning is attempted only once")
-        execute.assert_called_once_with("vqro-bridge-pi", ["vqro-bridge-pi", "--", "pi", "--mode", "rpc"])
+        execute.assert_called_once_with(binary, ["vqro-bridge-pi", "--", "pi", "--mode", "rpc"])
         popen.assert_called_once()
         self.assertEqual(set(launch._HELP.values()), {False})
         self.assertEqual(stdout.getvalue(), "", "never fall back to protocol stdout")
@@ -202,6 +202,62 @@ class RpcTestingTests(unittest.TestCase):
 
     def test_warning_flush_broken_pipe_still_launches_once(self):
         self._assert_warning_io_failure_does_not_veto_main(BrokenPipeError, "flush")
+
+    def _assert_main_lookup(self, windows, names, expected, advertised=True):
+        cwd, tools = self.root / "cwd", self.root / "tools"
+        cwd.mkdir(); tools.mkdir()
+        for name in names:
+            path = self.root / name
+            path.write_bytes(b"inert fixture, never executed")
+            path.chmod(0o700)
+        wanted = str(self.root / expected) if expected else None
+        process = Mock(returncode=0, stdout=io.BytesIO(b"--testing-plugin\n" if advertised else b"old help\n"))
+        args = ["--testing-plugin", str(self.plugin), "--", "pi"]
+        checked = []
+        original_stat = os.stat
+        def metadata(path, *args, **kwargs):
+            checked.append(os.fspath(path))
+            return original_stat(path, *args, **kwargs)
+        with patch.object(launch.os, "name", "nt" if windows else "posix"), \
+                patch.object(launch.os, "get_exec_path", return_value=[str(tools)]), \
+                patch.object(launch.os, "getcwd", return_value=str(cwd)), \
+                patch.dict(os.environ, {"PATHEXT": ".CMD;.EXE"}), \
+                patch.object(launch.os, "stat", side_effect=metadata), \
+                patch.object(launch, "_background_kwargs", return_value={}), \
+                patch.object(launch.subprocess, "Popen", return_value=process) as popen, \
+                patch.object(launch.sys, "argv", ["launch.py", *args]), \
+                patch.object(launch.os, "execv") as execute, patch.object(launch.os, "execvp") as search, \
+                contextlib.redirect_stderr(io.StringIO()):
+            launch.main()
+        self.assertFalse(any(path.startswith(str(cwd) + os.sep) for path in checked), "never prepend cwd")
+        if wanted:
+            popen.assert_called_once()
+            self.assertEqual(popen.call_args.args[0], [wanted, "--help"])
+            forwarded = args if advertised else ["--", "pi"]
+            execute.assert_called_once_with(wanted, ["vqro-bridge-pi", *forwarded])
+            search.assert_not_called()
+        else:
+            popen.assert_not_called()
+            execute.assert_not_called()
+            search.assert_called_once_with("vqro-bridge-pi", ["vqro-bridge-pi", "--", "pi"])
+
+    def test_windows_cwd_shadow_cannot_advertise_for_the_path_bridge(self):
+        self._assert_main_lookup(True, ["cwd/vqro-bridge-pi.exe", "tools/vqro-bridge-pi.exe"], "tools/vqro-bridge-pi.exe", advertised=False)
+
+    def test_windows_crt_exe_precedes_cmd_regardless_of_pathext_order(self):
+        self._assert_main_lookup(True, ["cwd/vqro-bridge-pi.exe", "tools/vqro-bridge-pi.exe", "tools/vqro-bridge-pi.cmd"], "tools/vqro-bridge-pi.exe")
+
+    def test_windows_cmd_target_is_bound_to_the_same_probe_and_exec(self):
+        self._assert_main_lookup(True, ["cwd/vqro-bridge-pi.exe", "tools/vqro-bridge-pi.cmd"], "tools/vqro-bridge-pi.cmd")
+
+    def test_windows_extensionless_identity_is_conservatively_unverified(self):
+        self._assert_main_lookup(True, ["cwd/vqro-bridge-pi.exe", "tools/vqro-bridge-pi", "tools/vqro-bridge-pi.exe"], None)
+
+    def test_posix_path_order_does_not_add_cwd_or_pathext(self):
+        self._assert_main_lookup(False, ["cwd/vqro-bridge-pi", "tools/vqro-bridge-pi", "tools/vqro-bridge-pi.cmd"], "tools/vqro-bridge-pi")
+
+    def test_posix_does_not_expand_windows_suffixes(self):
+        self._assert_main_lookup(False, ["cwd/vqro-bridge-pi", "tools/vqro-bridge-pi.exe", "tools/vqro-bridge-pi.cmd"], None)
 
     def executable(self, body):
         path = self.root / "bridge"

@@ -2,7 +2,7 @@
 import importlib.util
 import os
 from pathlib import Path
-import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -21,6 +21,34 @@ def _background_kwargs():
     return module.background_kwargs()
 
 
+def exec_target(binary):
+    """Follow execvp's PATH-only order, not shutil.which's Windows cwd/PATHEXT policy.
+
+    Windows CRT exec checks the literal name, then .com/.exe/.bat/.cmd (not PATHEXT).
+    Inaccessible/unsupported candidates are ambiguous: keep ordinary execvp, without testing.
+    """
+    suffixes = ("",)
+    if os.name == "nt" and not os.path.splitext(binary)[1] and not binary.endswith("."):
+        suffixes = ("", ".com", ".exe", ".bat", ".cmd")
+    directories = [""] if os.path.dirname(binary) else os.get_exec_path()
+    for directory in directories:
+        for suffix in suffixes:
+            candidate = os.path.abspath(os.path.join(directory, binary + suffix))
+            try:
+                metadata = os.stat(candidate)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError:
+                return None
+            if not stat.S_ISREG(metadata.st_mode) or (os.name != "nt" and not os.access(candidate, os.X_OK)):
+                return None
+            # CreateProcess/CRT spelling for an extensionless Windows file is not a stable probe identity.
+            if os.name == "nt" and not os.path.splitext(candidate)[1]:
+                return None
+            return candidate
+    return None
+
+
 def supports_testing(binary):
     """Any optional-probe failure, including cleanup, is cached unsupported, never a launch veto."""
     key = (binary, None)
@@ -28,13 +56,15 @@ def supports_testing(binary):
     process = reader = None
     output = bytearray()
     try:
-        path = shutil.which(binary)
+        path = os.path.abspath(binary) if binary is not None and os.path.dirname(binary) else None
         if path is not None:
             key = (path, os.stat(path).st_mtime_ns)
         if key in _HELP:
             return _HELP[key]
         if path is None:
-            raise FileNotFoundError("bridge executable unavailable for help probe")
+            _HELP[key] = False
+            _HELP_REASONS[binary] = "bridge executable identity unverified; help not probed"
+            return False
         try:
             process = subprocess.Popen([path, "--help"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                        stderr=subprocess.DEVNULL, **_background_kwargs())
@@ -82,7 +112,7 @@ def supports_testing(binary):
     return supported
 
 
-def negotiated(arguments, binary="vqro-bridge-pi"):
+def negotiated(arguments, binary=None):
     # Only the wrapper's dedicated field before -- is optional. Native argv is never rewritten/replayed.
     before, separator, after = list(arguments), [], []
     if "--" in before:
@@ -102,8 +132,22 @@ def negotiated(arguments, binary="vqro-bridge-pi"):
 
 
 def main():
+    binary = "vqro-bridge-pi"
+    arguments = sys.argv[1:]
+    before = arguments[:arguments.index("--")] if "--" in arguments else arguments
+    requested = any(arg == "--testing-plugin" or arg.startswith("--testing-plugin=") for arg in before)
+    target = None
+    if requested:
+        try:
+            target = exec_target(binary)
+        except Exception:
+            pass  # Ambiguous selection cannot authorize a help probe or an optional field.
     try:
-        os.execvp("vqro-bridge-pi", ["vqro-bridge-pi", *negotiated(sys.argv[1:])])
+        argv = [binary, *negotiated(arguments, target)]
+        if target is None:
+            os.execvp(binary, argv)  # Original lookup, no optional field, no speculative probe.
+        else:
+            os.execv(target, argv)  # Probe and ordinary launch are bound to this SAME explicit path.
     except OSError as error:
         raise SystemExit("Cannot start vqro-bridge-pi on the terminal host: " + str(error)
                          + ". Install the matching bridge or configure bridge_argv explicitly."
