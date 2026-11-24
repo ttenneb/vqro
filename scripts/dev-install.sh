@@ -46,6 +46,9 @@ for source in extensions/*; do
   mkdir -p "$destination"
   cp "$source"/*.py "$destination/"
 done
+# Native account extension assets are installed beside their Python witness table,
+# never into a user's native Pi settings, history or credential directories.
+cp extensions/pi_accounts/*.mjs extensions/pi_accounts/*.json "$HOME/.local/share/vqro/extensions/pi_accounts/"
 # Atomic replace: a running binary keeps its old inode. The provider programs (backends run as
 # extensions: vqro-herdr, vqro-tmux, the optional vqro-rex) go next to vqro, where the default extensions find them; so does
 # vqro-claude-hook, which the tier1 extension finds there.

@@ -28,6 +28,12 @@ async fn v1_native_state_upgrades_via_defaults_and_unconfigured_vqro_herdr() {
     let hc=bin.join("hc");test_script::write_executable(&hc,&std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/upgrade_hc.py")).unwrap());
     symlink(test_python::python(),bin.join("python3")).unwrap();
     for entry in std::fs::read_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("extensions")).unwrap(){let entry=entry.unwrap();if entry.path().is_file(){std::fs::copy(entry.path(),ext.join(entry.file_name())).unwrap();}}
+    // This private install carries the account package used by the launcher,
+    // not just top-level Python modules. No native profile/history is copied.
+    let package=ext.join("pi_accounts");std::fs::create_dir(&package).unwrap();
+    for name in ["__init__.py","limits.py","limit_messages.json","index.mjs","provider.mjs"] {
+        std::fs::copy(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("extensions/pi_accounts").join(name),package.join(name)).unwrap();
+    }
     let old=server::start(socket.clone(),state.clone(),false,Backend::Herdr(vec![hc.to_string_lossy().into(),"connect".into()]),None).unwrap();
     let p=peer(&socket).await;let before=resource(&p).await;let id=before["id"].clone();
     let layout=json!({"tabs":[{"title":"kept","node":{"view":"kept"}}],"active":0});
