@@ -183,10 +183,14 @@ class Cutovers:
             for token, record in value['claims'].items():
                 if not text(token, 32) or len(token) != 32 or any(char not in '0123456789abcdef' for char in token):
                     raise ValueError()
-                if not isinstance(record, dict) or set(record) != RECORD_FIELDS or record['state'] not in STATES:
+                if not isinstance(record, dict) or set(record) not in (RECORD_FIELDS, RECORD_FIELDS|{'displayed_error'}) or record['state'] not in STATES:
                     raise ValueError()
                 if not all(text(record[key]) for key in ('resource', 'episode', 'host', 'account', 'setup_id',
                         'membership_revision', 'runtime', 'source_incarnation', 'source_epoch', 'session')):
+                    raise ValueError()
+                binding=record.get('displayed_error')
+                if 'displayed_error' in record and (record['runtime']!='pi' or record['automatic'] is not False
+                        or not text(binding,64) or len(binding)!=64 or any(c not in '0123456789abcdef' for c in binding)):
                     raise ValueError()
                 launch=record['resume_launch']
                 if launch is not None and (record['runtime']!='pi' or not isinstance(launch,dict)
@@ -413,6 +417,10 @@ class Cutovers:
         native_episode = plan.get('native_episode')
         if native_episode is not None and not text(native_episode):
             raise VqroError('native limit episode is invalid', 'invalid')
+        binding=plan.get('displayed_error')
+        if binding is not None and (target['runtime']!='pi' or automatic is not False
+                or not text(binding,64) or len(binding)!=64 or any(c not in '0123456789abcdef' for c in binding)):
+            raise VqroError('invalid manual Pi displayed-error binding','invalid')
         inference = plan.get('inference')
         if inference is not None and (not isinstance(inference, dict)
                 or set(inference) != {'table_version', 'entry', 'label'}
@@ -481,6 +489,7 @@ class Cutovers:
                   'source_principal': facts(source).get('tool_principal') if target['runtime']=='pi' else None,
                   'authorized_targets':list(targets),'attempted_targets':None,'resumed_members':[],'continuation_owner':None,'member_episodes':copy.deepcopy(plan.get('member_episodes',[])),
                   'continuation_parent':continuation_parent,'resume_launch':None}
+        if binding is not None:record['displayed_error']=binding
         if self.group(record) in value['groups']:
             raise VqroError('another cutover owns this shared setup; never overlap switches', 'busy')
         if any(old['runtime'] == target['runtime'] and (continuation_parent is not None or old['setup_id'] == plan['setup_id'])

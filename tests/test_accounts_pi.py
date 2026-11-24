@@ -102,6 +102,7 @@ class PiPrepare(unittest.TestCase):
           'membership_revision':plan['membership_revision'],'affected':plan['affected'],'inference':plan['inference'],
           'authorization':{'mode':'auto','principal':None,'owner_revision':None} if automatic else
                           {'mode':'offer','principal':'owner','owner_revision':1}}
+        if plan.get('displayed_error') is not None:claim['displayed_error']=plan['displayed_error']
         self.resumes=[];self.stops=[];self.stop_unknown=False
         original_call=self.core.call;original_invoke=self.core.invoke
         def call(method,params=None):

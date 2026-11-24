@@ -31,6 +31,7 @@ class Dispatch:
             raise VqroError('native prepared membership is unavailable', 'unavailable')
         plan = {key: copy.deepcopy(reply.get(key)) for key in
                 ('setup_id', 'membership_revision', 'native_episode', 'automatic_allowed', 'affected', 'inference')}
+        if reply.get('displayed_error') is not None:plan['displayed_error']=reply['displayed_error']
         if not text(plan['native_episode']):
             raise VqroError('native limit/error episode witness is unavailable; never infer from text', 'unavailable')
         rows = {row.get('id'): row for row in policy.resources(self.ext)}

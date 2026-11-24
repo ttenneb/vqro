@@ -153,10 +153,9 @@ class PiCutover:
                   'incarnation':source['incarnation'],'account':target['id']}
         inference=match_limit(base,record)
         membership=membership_revision(affected,episode,entry['version'] if entry else 0,model,history_file(native),native['tool_principal'])
-        if not args['automatic']:
-            membership=hashlib.sha256(json.dumps([membership,displayed_error_binding(source)],separators=(',',':')).encode()).hexdigest()
         return {'setup_id':'pi:'+session,'membership_revision':membership,'native_episode':episode,
-                'automatic_allowed':inference is not None,'affected':[affected],'inference':inference}
+                'automatic_allowed':inference is not None,'affected':[affected],'inference':inference,
+                **({'displayed_error':displayed_error_binding(source)} if not args['automatic'] else {})}
 
     def claimed(self,args,source,plan):
         claim=self.ext.invoke('accounts.claim.read',{'claim':args.get('_claim')})
@@ -167,6 +166,7 @@ class PiCutover:
                         source_account=policy.configured_id(source),native_episode=plan['native_episode'],
                         setup_id=plan['setup_id'],membership_revision=plan['membership_revision'],
                         affected=plan['affected'],inference=plan['inference'],source_history=history_file(native),source_principal=native['tool_principal'])
+        expected['displayed_error']=plan.get('displayed_error')
         if not isinstance(claim,dict) or any(claim.get(key)!=value for key,value in expected.items()):
             raise VqroError('protected Pi source/session/error claim changed; nothing restarted','conflict')
         mode=claim.get('blocked_mode')
