@@ -10,6 +10,9 @@ class CutoverAuthority(unittest.TestCase):
     def fixture(self, maximum=3):
         core = Core()
         core.entries[POLICY] = {'version': 1, 'value': {'blocked': 'auto_restart', 'auto_cutover_max_per_hour': maximum, 'continuation_text': 'One NEW turn.'}}
+        core.entries['doc/settings/accounts']={'version':7,'value':{'accounts':[
+            {'id':value,'label':value.upper(),'runtime':'codex','kind':'subscription',
+             'login_ref':{'sessionId':'login-'+value,'accountId':'account-'+value}} for value in ('a','b')]}}
         now = [10000.0]
         return core, Cutovers(core, clock=lambda: now[0]), now
 
@@ -83,7 +86,8 @@ class CutoverAuthority(unittest.TestCase):
 
     def test_background_warning_is_protected_owner_offer_only(self):
         core, journal, _ = self.fixture()
-        target={'id':'b','label':'B','runtime':'claude','kind':'subscription'}
+        target={'id':'b','label':'B','runtime':'claude','kind':'subscription','host':'synthetic-host','secret_ref':'b'*32}
+        core.entries['doc/settings/accounts']['value']['accounts'][1]=target
         plan={'setup_id':'shared-setup','membership_revision':'members-1','native_episode':'turn-1','affected':[member()]}
         token=journal.claim(source(),target,7,plan,False,'One NEW turn.',background_loss_disclosed=True)
         self.assertEqual(journal.lookup(token)['authorization'],
