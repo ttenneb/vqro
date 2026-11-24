@@ -167,6 +167,19 @@ async fn fake(mode: &'static str) -> Fake {
     }
 }
 async fn command(f: &Fake, name: &str, extra: Value) -> Result<Outcome, ProviderError> {
+    if name == "_account.switch" && extra.get("prepared_ticket").is_none() {
+        let prepared = raw_command(f, "_account.prepare_switch", extra.clone()).await?;
+        let Outcome::Observed(Some(data)) = &prepared else {
+            return Ok(prepared);
+        };
+        let mut commit = extra;
+        commit["prepared_ticket"] = data["prepared_ticket"].clone();
+        return raw_command(f, name, commit).await;
+    }
+    raw_command(f, name, extra).await
+}
+
+async fn raw_command(f: &Fake, name: &str, extra: Value) -> Result<Outcome, ProviderError> {
     let mut p =
         json!({"operation":"claimed-once","setup_id":"shared","authorized_targets":[target()]});
     p.as_object_mut()
@@ -630,6 +643,157 @@ async fn released_permission_rev_guards_auto_but_not_ordinary_human_input() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn prepared_commit_has_no_later_discovery_and_is_consumed_once() {
+    let f = fake("ok").await;
+    fence(&f).await;
+    assert!(matches!(
+        raw_command(&f, "_account.switch", target()).await.unwrap(),
+        Outcome::Rejected { .. }
+    ));
+    let Outcome::Observed(Some(data)) = raw_command(&f, "_account.prepare_switch", target())
+        .await
+        .unwrap()
+    else {
+        panic!("prepare")
+    };
+    let before = f.methods.lock().unwrap().len();
+    assert!(matches!(
+        raw_command(&f, "_account.switch", json!({"prepared_ticket":"foreign"}))
+            .await
+            .unwrap(),
+        Outcome::Rejected { .. }
+    ));
+    assert_eq!(f.methods.lock().unwrap().len(), before);
+    raw_command(
+        &f,
+        "_account.switch",
+        json!({"prepared_ticket":data["prepared_ticket"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.methods.lock().unwrap()[before],
+        "accountSession/switch",
+        "no discovery after callback final authority"
+    );
+    let count = f
+        .methods
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| m.as_str() == "accountSession/switch")
+        .count();
+    assert!(matches!(
+        raw_command(
+            &f,
+            "_account.switch",
+            json!({"prepared_ticket":data["prepared_ticket"]})
+        )
+        .await
+        .unwrap(),
+        Outcome::Rejected { .. }
+    ));
+    assert_eq!(
+        f.methods
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.as_str() == "accountSession/switch")
+            .count(),
+        count
+    );
+}
+
+#[tokio::test]
+async fn auth_revision_change_after_prepare_rejects_commit_before_credentials() {
+    let f = fake("ok").await;
+    fence(&f).await;
+    let Outcome::Observed(Some(data)) = raw_command(&f, "_account.prepare_switch", target())
+        .await
+        .unwrap()
+    else {
+        panic!("prepare")
+    };
+    f.runtime.incoming(Incoming::Notification {
+        method: "account/updated".into(),
+        params: json!({"authMode":"chatgpt"}),
+    });
+    assert!(matches!(
+        raw_command(
+            &f,
+            "_account.switch",
+            json!({"prepared_ticket":data["prepared_ticket"]})
+        )
+        .await
+        .unwrap(),
+        Outcome::Rejected { .. }
+    ));
+    assert!(
+        !f.methods
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m == "accountSession/switch")
+    );
+    command(&f, "_account.abort", json!({})).await.unwrap();
+}
+
+#[tokio::test]
+async fn processed_quota_change_before_spawned_input_worker_rejects_prepared_caps() {
+    use std::future::Future;
+    let f = fake("quota_ready_send").await;
+    fence(&f).await;
+    command(&f, "_account.switch", target()).await.unwrap();
+    command(&f, "_account.inspect", json!({})).await.unwrap();
+    command(&f, "_account.resume", json!({})).await.unwrap();
+    let Outcome::Observed(Some(data)) = command(&f, "_account.release", json!({})).await.unwrap()
+    else {
+        panic!("release")
+    };
+    let future = guarded_input(&f, "auto-worker", data["admissions"][0]["caps_rev"].clone());
+    tokio::pin!(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(future.as_mut().poll(&mut context).is_pending());
+    assert!(
+        f.runtime.slots[0].admission.try_lock().is_err(),
+        "prepared worker owns admission"
+    );
+    f.runtime.incoming(Incoming::Notification {
+        method: "account/rateLimits/updated".into(),
+        params: json!({"ordinaryUsageAllowed":false}),
+    });
+    assert!(
+        matches!(future.await, Outcome::Rejected { .. }),
+        "worker must recheck captured guard before native input"
+    );
+    assert!(!f.methods.lock().unwrap().iter().any(|m| m == "turn/start"));
+}
+
+#[tokio::test]
+async fn worker_rejects_global_revision_even_before_endpoint_invalidation_runs() {
+    let f = fake("quota_ready_send").await;
+    fence(&f).await;
+    command(&f, "_account.switch", target()).await.unwrap();
+    command(&f, "_account.inspect", json!({})).await.unwrap();
+    command(&f, "_account.resume", json!({})).await.unwrap();
+    let Outcome::Observed(Some(data)) = command(&f, "_account.release", json!({})).await.unwrap()
+    else {
+        panic!("release")
+    };
+    f.runtime.account_revision.fetch_add(1, Ordering::AcqRel); // Incoming increments before taking endpoint locks.
+    assert!(matches!(
+        guarded_input(
+            &f,
+            "auto-counter",
+            data["admissions"][0]["caps_rev"].clone()
+        )
+        .await,
+        Outcome::Rejected { .. }
+    ));
+    assert!(!f.methods.lock().unwrap().iter().any(|m| m == "turn/start"));
 }
 
 fn restore_accounts() -> Value {

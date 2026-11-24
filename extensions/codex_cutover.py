@@ -10,7 +10,7 @@ from vqro_ext import VqroError
 
 SETTINGS = 'doc/settings/codex-cutover'
 MAX_MEMBERS = 200
-HOST_COMMANDS = {'_account.inspect','_account.fence','_account.status','_account.switch','_account.resume','_account.restore','_account.release','_account.abort','_account.list'}
+HOST_COMMANDS = {'_account.prepare_switch','_account.inspect','_account.fence','_account.status','_account.switch','_account.resume','_account.restore','_account.release','_account.abort','_account.list'}
 
 
 class _NativeRejected(VqroError):
@@ -190,7 +190,7 @@ class Cutover:
             fail('Codex cutover native outcome is unconfirmed; no automatic retry or continuation', 'indeterminate')
         return result['data']
 
-    def _authorization(self, claim):
+    def _private_authority(self,claim):
         authority = claim.get('authorization')
         if claim.get('automatic') is True:
             if authority != {'mode':'auto','principal':None,'owner_revision':None}:
@@ -203,6 +203,11 @@ class Cutover:
             owner = self.ext.vqro.call('workspace.get',{'key':'doc/principals/owner'})
             if not isinstance(owner,dict) or owner.get('value')!=authority['principal'] or owner.get('version')!=authority['owner_revision']:
                 fail('OFFER human authority changed after the claim','stale')
+        if claim.get('automatic') is True and not self._automatic_allowed(claim['setup_id']):
+            fail('Automatic shared-login consent was revoked; offer instead','offer_required')
+
+    def _authorization(self,claim):
+        self._private_authority(claim)
         from accounts_policy import settings
         configured = settings(self.ext)
         mode = configured['blocked']
@@ -348,13 +353,16 @@ class Cutover:
             switched, dispatched = [], False
             try:
                 for row, _ in fenced:
-                    issue = self._walk_issue(args,claim,plan,target_index)
+                    preparation=self._invoke(row,'_account.prepare_switch',dict(payload,login_ref=target['login_ref'],account=fact(target)))
+                    ticket=preparation.get('prepared_ticket')
+                    if not text(ticket):fail('native credential preparation unconfirmed','indeterminate')
+                    issue = self._effect_issue(args,claim,target_index)
                     if issue:
                         if attempted:return self._walk_result(self._restore_revoked(fenced,hosts,payload,prepared,issue),attempted,blocked,'offer')
                         fail('protected switch authority changed before dispatch','stale')
                     if not dispatched:attempted.append(target['id'])
                     dispatched = True
-                    result = self._invoke(row, '_account.switch', dict(payload, login_ref=target['login_ref'], account=fact(target)))
+                    result = self._invoke(row, '_account.switch', dict(payload, prepared_ticket=ticket,login_ref=target['login_ref'], account=fact(target)))
                     if result.get('account_confirmed') is not True:fail('native account readback unconfirmed','indeterminate')
                     switched.append(row)
             except Exception as error:
@@ -406,6 +414,21 @@ class Cutover:
         if disposition=='ready' and any('admission_caps_rev' not in member for member in result['affected']):disposition='offer'
         if not issue and self._walk_issue(args,claim,plan,final_index):result.update(restored_only=True,continuation_allowed=False)
         return self._walk_result(result,attempted,blocked,disposition)
+
+    def _effect_issue(self,args,claim,target_index):
+        try:
+            current=self.ext.vqro.call('command.invoke',{'name':'accounts.claim.read','args':{'claim':args['_claim']}})
+            if not self._same_claim(claim,current) or not self._common_view_valid(current):return 'unconfirmed'
+            mode=current.get('blocked_mode')
+            if claim.get('automatic') is True:
+                if mode!='auto_restart' or not self._common_target_allowed(current,target_index):return 'disabled'
+            elif mode not in ('auto_restart','offer_restart'):return 'disabled'
+            # This is the LAST blocking private-authority read; native commit does
+            # only local ticket/revision validation before credential IPC.
+            self._private_authority(claim)
+        except VqroError as error:return 'disabled' if error.kind=='offer_required' else 'unconfirmed'
+        except Exception:return 'unconfirmed'
+        return None
 
     def _walk_issue(self,args,claim,plan,target_index=None):
         try:

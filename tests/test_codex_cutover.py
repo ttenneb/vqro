@@ -50,7 +50,9 @@ class Ext:
             return {'version':3 if args['key']==SETTINGS else self.registry_revision,'value':copy.deepcopy(self.consent if args['key']==SETTINGS else self.registry)}
         if method=='command.invoke':
             assert args['name']=='accounts.claim.read'
-            return dict(copy.deepcopy(self.claim),max_switches=self.max_switches,known_blocked_targets=copy.deepcopy(self.known_blocked)) if isinstance(self.claim,dict) else None
+            self.call('workspace.get',{'key':'doc/settings/accounts'}) # Actual protected lookup blocks on this read.
+            if isinstance(self.claim,dict) and self.registry_revision!=self.claim['_account_revision']:raise VqroError('registry changed','stale')
+            return dict(copy.deepcopy(self.claim),blocked_mode=self.policy['blocked'],max_switches=self.max_switches if self.policy['blocked']=='auto_restart' else 0,known_blocked_targets=copy.deepcopy(self.known_blocked)) if isinstance(self.claim,dict) else None
         if method=='resource.invoke':
             op=args['args']['name'];self.counter+=1
             if self.hook:self.hook(op,args)
@@ -65,6 +67,7 @@ class Ext:
                 target['data']['agent']['_codex']['input_ledger']['epoch']='resumed-'+target['id']
             return {'outcome':'observed','data':{'quiescent':True,'operation':args['args']['args'].get('operation'),
                 'account_confirmed':True,'resumed':True,'released':self.released,'account':account,
+                'prepared_ticket':'prepared-'+args['resource']+'-'+str(self.counter),
                 'admissions':[{'session':'thread-'+args['resource'],'epoch':'resumed-'+args['resource'],'caps_rev':1,'expires_at_ms':int(time.time()*1000)+30000}] if op=='_account.release' and self.quota.get(ident) is True else [],
                 'ordinary_usage_allowed':self.quota.get(ident),'observed_at_ms':int(time.time()*1000),'reset_at_ms':None,'source':'codex.account/rateLimits',
                 'logins':[] if args['resource']==self.missing_on else [
@@ -300,7 +303,7 @@ class Tests(unittest.TestCase):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());result=c.cutover(self.claimed(ext,p))
         self.assertEqual(result['outcome'],'observed');self.assertEqual(len(result['affected']),2)
         names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
-        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.switch']*2+['_account.inspect']*2+['_account.resume']*2+['_account.release']*2)
+        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.prepare_switch','_account.switch']*2+['_account.inspect']*2+['_account.resume']*2+['_account.release']*2)
         self.assertFalse(any(a.get('op')=='agent.send' for m,a in ext.calls if m=='resource.invoke'))
     def test_changed_group_or_claim_refuses_before_effect(self):
         for field in ['membership_revision','account','native_episode','state']:
@@ -311,7 +314,7 @@ class Tests(unittest.TestCase):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p);ext.fail='_account.switch'
         with self.assertRaises(VqroError):c.cutover(args)
         names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
-        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.switch'])
+        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.prepare_switch','_account.switch'])
     def test_prepare_waits_for_all_running_siblings_without_claim_or_fence(self):
         ext=Ext();ext.rows[1]['data']['agent'].update(state='running',run='other-turn')
         with self.assertRaises(VqroError) as error:Cutover(ext).prepare(self.args())
@@ -383,7 +386,7 @@ class Tests(unittest.TestCase):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p);ext.reject='_account.switch'
         with self.assertRaises(VqroError):c.cutover(args)
         names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
-        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.switch']+['_account.abort']*2)
+        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.prepare_switch','_account.switch']+['_account.abort']*2)
     def test_target_discovered_on_every_host_before_any_switch(self):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p);ext.missing_on='y'
         with self.assertRaises(VqroError):c.cutover(args)
@@ -433,7 +436,7 @@ class Tests(unittest.TestCase):
         self.assertTrue(result['restored_only']);self.assertFalse(result['continuation_allowed'])
         self.assertEqual([r['account'] for r in result['affected']],['b','a'])
         names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
-        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.switch']+['_account.restore']*2+['_account.release']*2)
+        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.prepare_switch','_account.switch','_account.prepare_switch']+['_account.restore']*2+['_account.release']*2)
         self.assertFalse(any(a.get('op')=='agent.send' for m,a in ext.calls if m=='resource.invoke'))
     def test_consent_revocation_after_last_switch_restores_all_b_without_continuation(self):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p);switched=[]
@@ -446,7 +449,7 @@ class Tests(unittest.TestCase):
         self.assertTrue(result['restored_only']);self.assertFalse(result['continuation_allowed'])
         self.assertEqual([r['account'] for r in result['affected']],['b','b'])
         names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
-        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.switch']*2+['_account.restore']*2+['_account.release']*2)
+        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.prepare_switch','_account.switch']*2+['_account.restore']*2+['_account.release']*2)
         self.assertFalse(any(a.get('op')=='agent.send' for m,a in ext.calls if m=='resource.invoke'))
     def test_resume_failure_after_revocation_releases_known_peer_without_retrying_unknown(self):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p)

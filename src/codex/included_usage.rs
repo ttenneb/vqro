@@ -9,6 +9,8 @@ pub(super) struct IncludedUsage {
     session: Option<String>,
     epoch: String,
     config_rev: u64,
+    auth_revision: u64,
+    quota_revision: u64,
 }
 
 impl Endpoint {
@@ -35,16 +37,24 @@ impl Endpoint {
         }
     }
 
-    pub(super) fn bind_included_usage(&mut self, deadline: Instant, expires_at_ms: u64) {
+    pub(super) fn bind_included_usage(
+        &mut self,
+        deadline: Instant,
+        expires_at_ms: u64,
+        auth_revision: u64,
+        quota_revision: u64,
+    ) {
         if Instant::now() >= deadline {
             self.invalidate_included_usage();
             return;
         }
         if self.included_usage_current()
-            && self
-                .included_usage
-                .as_ref()
-                .is_some_and(|p| p.deadline == deadline && p.expires_at_ms == expires_at_ms)
+            && self.included_usage.as_ref().is_some_and(|p| {
+                p.deadline == deadline
+                    && p.expires_at_ms == expires_at_ms
+                    && p.auth_revision == auth_revision
+                    && p.quota_revision == quota_revision
+            })
         {
             return;
         }
@@ -56,7 +66,15 @@ impl Endpoint {
             session: self.session.clone(),
             epoch: self.epoch.clone(),
             config_rev: self.config_rev,
+            auth_revision,
+            quota_revision,
         });
+    }
+
+    pub(super) fn included_usage_revisions(&self) -> Option<(u64, u64)> {
+        self.included_usage
+            .as_ref()
+            .map(|p| (p.auth_revision, p.quota_revision))
     }
 
     pub(super) fn included_usage_fact(&self) -> Option<Value> {

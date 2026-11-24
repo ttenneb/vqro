@@ -65,6 +65,10 @@ read-only `_account.list` and `_account.bind`; setup-enabled endpoints add the f
   and active flags only. No email, user ID, image, token, auth URL or unfiltered native response is published.
 - `_account.fence`: exact all-slot session/epoch witnesses plus operation/setup ID; acquires ALL admission guards.
   It freezes `authorized_targets`, one to three unique native login/workspace references in order.
+- `_account.prepare_switch`: complete all blocking native target discovery, return a one-use native-owned
+  ticket bound to the unchanged local authentication revision and retained admission fence. The callback then
+  reads protected common authority and refreshes private consent/owner authority. `_account.switch` consumes
+  this ticket with local revision/quiescence validation, with no later discovery before credential IPC.
 - `_account.inspect`: after a confirmed selection, read native `account/rateLimits/read` between stable active-login
   readbacks. Only explicit `ordinaryUsageAllowed` classifies permission; percentages/reset timestamps do not.
   Wrong-account scope or unavailable permission is unknown. A failed quota RPC can still return unknown after

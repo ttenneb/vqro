@@ -8,7 +8,8 @@ use tokio::sync::OwnedMutexGuard;
 mod tests;
 
 pub(super) const METADATA_COMMANDS: [&str; 2] = ["_account.list", "_account.bind"];
-pub(super) const COMMANDS: [&str; 10] = [
+pub(super) const COMMANDS: [&str; 11] = [
+    "_account.prepare_switch",
     "_account.inspect",
     "_account.bind",
     "_account.fence",
@@ -29,6 +30,13 @@ struct PermissionFence {
     expires_at_ms: u64,
 }
 
+struct PreparedSwitch {
+    ticket: String,
+    login_ref: (String, String),
+    account: Value,
+    auth_revision: u64,
+}
+
 pub(super) struct Barrier {
     operation: String,
     threads: Vec<(usize, String, String)>,
@@ -41,6 +49,7 @@ pub(super) struct Barrier {
     authorized_targets: Vec<(String, String)>,
     attempted_targets: usize,
     permission: Option<PermissionFence>,
+    prepared: Option<PreparedSwitch>,
 }
 
 fn bounded(v: &Value, max: usize) -> Option<&str> {
@@ -76,8 +85,16 @@ impl Runtime {
         let mut admissions = Vec::new();
         for (i, slot) in self.slots.iter().enumerate() {
             let mut e = slot.endpoint.lock().unwrap();
-            if let Some(p) = &permission {
-                e.bind_included_usage(p.deadline, p.expires_at_ms);
+            if let Some(p) = permission.as_ref().filter(|p| {
+                p.auth_revision == self.auth_revision.load(Ordering::Acquire)
+                    && p.quota_revision == self.account_revision.load(Ordering::Acquire)
+            }) {
+                e.bind_included_usage(
+                    p.deadline,
+                    p.expires_at_ms,
+                    p.auth_revision,
+                    p.quota_revision,
+                );
             } else {
                 e.invalidate_included_usage();
             }
@@ -420,6 +437,7 @@ impl Runtime {
                 authorized_targets,
                 attempted_targets: 0,
                 permission: None,
+                prepared: None,
             });
             return Ok(Outcome::Observed(Some(
                 json!({"operation":operation,"quiescent":self.quiescent()}),
@@ -446,12 +464,14 @@ impl Runtime {
                 json!({"operation":operation,"quiescent":self.quiescent(),"stage":stage}),
             ))),
             "_account.abort" => {
-                if !matches!(stage, "fenced" | "checking") {
+                if !matches!(stage, "fenced" | "checking" | "prepared") {
                     return Err(reject("cannot abort after native switch was attempted"));
                 }
                 let mut barrier = self.cutover.lock().unwrap();
                 if barrier.as_ref().is_none_or(|b| {
-                    b.operation != operation || !matches!(b.stage, "fenced" | "checking")
+                    b.operation != operation
+                        || b.attempted_targets != 0
+                        || !matches!(b.stage, "fenced" | "checking" | "prepared")
                 }) {
                     return Err(reject("fence phase changed before abort"));
                 }
@@ -460,7 +480,7 @@ impl Runtime {
                     json!({"operation":operation,"aborted":true}),
                 )))
             }
-            "_account.switch" => {
+            "_account.prepare_switch" => {
                 self.sync_account_notifications(deadline).await?;
                 if !matches!(stage, "fenced" | "blocked") || !self.quiescent() {
                     return Err(reject(
@@ -471,7 +491,7 @@ impl Runtime {
                     .ok_or_else(|| Fault::invalid("native saved login id required"))?;
                 let workspace = bounded(&p["login_ref"]["accountId"], 256)
                     .ok_or_else(|| Fault::invalid("native workspace id required"))?;
-                let mut account = account_fact(&p["account"])?;
+                let account = account_fact(&p["account"])?;
                 // Consume phase before ANY irreversible call. Unknown outcomes stay fenced.
                 {
                     let mut barrier = self.cutover.lock().unwrap();
@@ -518,10 +538,49 @@ impl Runtime {
                     {
                         return Err(reject("native source changed during saved-login preflight"));
                     }
-                    b.stage = "switching"; // Credential effect is consumed before dispatch.
+                    b.stage = "prepared";
+                    let ticket = unique_epoch("prepared");
+                    b.prepared = Some(PreparedSwitch {
+                        ticket: ticket.clone(),
+                        login_ref: (session.to_owned(), workspace.to_owned()),
+                        account,
+                        auth_revision: validated_revision,
+                    });
+                    return Ok(Outcome::Observed(Some(
+                        json!({"operation":operation,"prepared_ticket":ticket}),
+                    )));
+                }
+            }
+            "_account.switch" => {
+                // Every blocking discovery is in prepare_switch. After the callback's
+                // final authority check only local revision/quiescence checks precede IPC.
+                let ticket = bounded(&p["prepared_ticket"], 256)
+                    .ok_or_else(|| reject("native prepared ticket required"))?;
+                let prepared = {
+                    let mut barrier = self.cutover.lock().unwrap();
+                    let b = barrier
+                        .as_mut()
+                        .filter(|b| b.operation == operation && b.stage == "prepared")
+                        .ok_or_else(|| reject("native preparation missing or consumed"))?;
+                    if b.prepared.as_ref().is_none_or(|p| {
+                        p.ticket != ticket
+                            || p.auth_revision != self.auth_revision.load(Ordering::Acquire)
+                    }) || !self.quiescent()
+                    {
+                        return Err(reject(
+                            "native state changed after preparation; no credential effect",
+                        ));
+                    }
+                    b.stage = "switching";
                     b.attempted_targets += 1;
                     b.permission = None;
-                }
+                    b.prepared.take().ok_or_else(unknown)?
+                };
+                let native_session = prepared.login_ref.0;
+                let native_workspace = prepared.login_ref.1;
+                let session = native_session.as_str();
+                let workspace = native_workspace.as_str();
+                let mut account = prepared.account;
                 // Never relabel B notifications as the previous configured account A.
                 *self.launcher_account.lock().unwrap() = None;
                 for (i, slot) in self.slots.iter().enumerate() {
@@ -634,7 +693,13 @@ impl Runtime {
                     // current native login against the pre-effect source or confirmed target.
                     if !matches!(
                         stage,
-                        "fenced" | "checking" | "switched" | "blocked" | "inspected" | "inspecting"
+                        "fenced"
+                            | "checking"
+                            | "prepared"
+                            | "switched"
+                            | "blocked"
+                            | "inspected"
+                            | "inspecting"
                     ) {
                         return Err(reject("restore cannot replay an uncertain switch/resume"));
                     }
@@ -669,6 +734,7 @@ impl Runtime {
                                     b.stage,
                                     "fenced"
                                         | "checking"
+                                        | "prepared"
                                         | "switched"
                                         | "blocked"
                                         | "inspected"

@@ -140,6 +140,49 @@ class SharedPipeline(unittest.TestCase):
         self.assertFalse(any(m=='resource.invoke' and a['args']['name']=='_account.switch' and a['args']['args']['account']['id']=='c' for m,a in core.native.calls))
         self.assertEqual(sum(m=='resource.invoke' and a['args']['name']=='_account.release' for m,a in core.native.calls),2)
 
+    def test_consent_revoked_inside_final_common_lookup_prevents_c(self):
+        core=Pipeline(False,True);original_call=core.call;original_invoke=core.invoke
+        armed=[False];inside=[False];changed=[False]
+        def invoke(name,args=None):
+            if name=='accounts.claim.read' and armed[0]:
+                inside[0]=True
+                try:return original_invoke(name,args)
+                finally:inside[0]=False
+            return original_invoke(name,args)
+        def call(method,params=None):
+            params=params or {}
+            if method=='workspace.get' and params.get('key')==REGISTRY and inside[0] and not changed[0]:
+                core.entries[CONSENT]['value']={'setups':{}};changed[0]=True
+            result=original_call(method,params)
+            if method=='resource.invoke' and params.get('op')=='agent.command' and params['args']['name']=='_account.inspect' and params['resource']=='y':armed[0]=True
+            return result
+        core.invoke=invoke;core.call=call;core.app.handle_blocked('x')
+        self.assertTrue(changed[0]);self.assertEqual(core.sends,[])
+        self.assertFalse(any(m=='resource.invoke' and a['args']['name']=='_account.switch' and a['args']['args']['account']['id']=='c' for m,a in core.native.calls))
+        self.assertEqual(sum(m=='resource.invoke' and a['args']['name']=='_account.release' for m,a in core.native.calls),2)
+
+    def test_quota_invalidated_during_native_resume_never_auto_continues(self):
+        core=Pipeline(True)
+        def hook(op,args):
+            if op=='_account.resume':core.native.quota['b']=False
+        core.native.hook=hook;core.app.handle_blocked('x')
+        self.assertEqual(core.sends,[])
+        self.assertIn('accounts-continuation',core.live)
+        self.assertEqual(sum(m=='resource.invoke' and a['args']['name']=='_account.release' for m,a in core.native.calls),2)
+
+    def test_consent_or_mode_revoked_during_native_discovery_prevents_c(self):
+        for changed in ('consent','mode'):
+            with self.subTest(changed=changed):
+                core=Pipeline(False,True)
+                def hook(op,args):
+                    if op=='_account.prepare_switch' and args['args']['args']['account']['id']=='c':
+                        if changed=='consent':core.entries[CONSENT]['value']={'setups':{}}
+                        else:core.entries[POLICY]['value']['blocked']='notify'
+                core.native.hook=hook;core.app.handle_blocked('x')
+                self.assertEqual(core.sends,[])
+                self.assertFalse(any(m=='resource.invoke' and a['args']['name']=='_account.switch' and a['args']['args']['account']['id']=='c' for m,a in core.native.calls))
+                self.assertEqual(sum(m=='resource.invoke' and a['args']['name']=='_account.release' for m,a in core.native.calls),2)
+
     def test_b_blocked_c_ready_is_one_claim_prefix_and_one_new_turn(self):
         core=self.run_case(False,True)
         self.assertEqual(len(core.sends),1)

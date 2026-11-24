@@ -828,6 +828,12 @@ impl Runtime {
             }
             {
                 let mut endpoint = this.slots[index].endpoint.lock().unwrap();
+                if endpoint.included_usage_revisions().is_some_and(|(auth,quota)|auth!=this.auth_revision.load(Ordering::Acquire) || quota!=this.account_revision.load(Ordering::Acquire)) {
+                    endpoint.invalidate_included_usage();
+                }
+                // Validation before spawn is not an effect guard: notifications may
+                // run before this worker. Recheck the ORIGINAL snapshot at dispatch.
+                if let Err(error)=endpoint.validate(&args) {let _=tx.send(Err(Fault::Reject(error)));return;}
                 let run=if call.method=="turn/steer" {call.params["expectedTurnId"].as_str().map(str::to_owned)}else{None};
                 if let Err(error)=endpoint.reserve_owned_input(&call.delivery,run) {
                     let _=tx.send(Err(Fault::Reject(error)));return;

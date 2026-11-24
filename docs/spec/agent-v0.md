@@ -221,11 +221,15 @@ never clears it. AUTO and OFFER require a complete, epoch-matching, empty invent
 there is no ledger-loss override. Native all-host quiescence also checks it after fencing.
 
 A Codex host with an explicitly declared setup exposes native saved-login cutover through ordinary advertised
-`agent.command` names `_account.list`, `_account.fence`, `_account.status`, `_account.switch`, `_account.inspect`, `_account.resume`,
+`agent.command` names `_account.list`, `_account.fence`, `_account.status`, `_account.prepare_switch`, `_account.switch`, `_account.inspect`, `_account.resume`,
 `_account.restore`, `_account.release`, and `_account.abort`. These native mechanism commands fence all endpoints of that app-server,
 confirm a selected saved login/workspace and resume the exact old thread IDs without `turn/start`. Unknown
 commands/sources/setup facts are not synthesized by other adapters. The fence freezes one to three unique native
-references in the common-authorized order. Each selected target is inspected through native rate-limit reads under
+references in the common-authorized order. `_account.prepare_switch` completes native blocking login/workspace
+discovery and returns an ephemeral native-owned `prepared_ticket`. Only then does the callback obtain the final
+protected common projection and refresh private consent/owner authority. `_account.switch` consumes that exact
+ticket once, checks local auth revision and quiescence, and performs no further blocking discovery before the
+credential IPC. Tickets are not another journal, survive no restart, and never authorize replay. Each selected target is inspected through native rate-limit reads under
 authentication and quota-revision fences. Only explicit false permission permits advancing to the next reference;
 positive percentages or elapsed reset times never authorize model input. Unknown/failed permission reads restore
 and release exact conversations on the independently confirmed current login, with zero automatic continuation.
