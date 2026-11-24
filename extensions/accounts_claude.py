@@ -144,6 +144,12 @@ class ClaudeCutover:
             canonical = {'mode': 'auto', 'principal': None, 'owner_revision': None}
             if authority != canonical and authority != {**canonical, 'background_loss_disclosed': False}:
                 raise VqroError('protected automatic cutover authority is missing; no switch', 'forbidden')
+            allowance=claim.get('max_switches');blocked=claim.get('known_blocked_targets')
+            if (type(allowance) is not int or allowance<1 or not isinstance(blocked,list)
+                    or any(not text(account,64) for account in blocked) or args['account'] in blocked):
+                raise VqroError('protected AUTO allowance or target eligibility unavailable; no switch','offer_required')
+            # No later settings read: this is the current common projection,
+            # checked again immediately before native dispatch in restart().
         else:
             if (not isinstance(authority, dict) or set(authority) != {'mode', 'principal', 'owner_revision', 'background_loss_disclosed'}
                     or authority.get('mode') != 'offer'

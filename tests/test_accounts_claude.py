@@ -34,7 +34,7 @@ class Fake:
                        'kind': 'subscription', 'secret_ref': 'b' * 32, 'host': 'r1'}
         self.registry = {'version': 7, 'value': {'accounts': [self.target]}}
         self.episode = policy.episode(self.source)
-        self.claim = {'state': 'claimed', 'resource': 'r2', 'episode': self.episode, 'host': 'r1',
+        self.claim = {'max_switches':1,'known_blocked_targets':[], 'state': 'claimed', 'resource': 'r2', 'episode': self.episode, 'host': 'r1',
                       'account': 'b', '_account_revision': 7, 'automatic': True,
                       'source_incarnation': 'birth', 'source_epoch': 'e1', 'source_account': 'a',
                       'session': 'native-session', 'native_episode': 'native-result-uuid',
@@ -102,6 +102,28 @@ class CutoverTests(unittest.TestCase):
         with self.assertRaises(VqroError):
             self.run_cutover()
         self.assertEqual(self.ext.native(), [])
+
+    def test_second_protected_read_honors_current_auto_allowance_and_target_blocks(self):
+        for patch in ({'max_switches':0},{'known_blocked_targets':['b']},
+                      {'max_switches':None},{'max_switches':True},{'max_switches':'1'},
+                      {'known_blocked_targets':None},{'known_blocked_targets':'b'},
+                      {'known_blocked_targets':[{}]}):
+            with self.subTest(patch=patch):
+                self.setUp();original=self.ext.invoke;reads=[]
+                def invoke(command,args):
+                    if command=='accounts.claim.read':
+                        reads.append(True)
+                        if len(reads)==2:self.ext.claim.update(patch)
+                    return original(command,args)
+                self.ext.invoke=invoke;self.refused();self.assertEqual(len(reads),2)
+
+    def test_missing_auto_projection_fails_closed_but_owner_offer_is_not_auto_budget(self):
+        self.ext.claim.pop('max_switches');self.ext.claim.pop('known_blocked_targets')
+        self.refused()
+        self.setUp();self.offer_claim()
+        self.ext.claim.update(max_switches=0,known_blocked_targets=['b'])
+        self.run_cutover();self.assertEqual(len(self.ext.native()),1)
+        self.assertTrue(self.ext.native()[0][1]['args']['allow_background_loss'])
 
     def test_exact_target_restart_only_no_claim_selection_or_continuation(self):
         result = self.run_cutover()
