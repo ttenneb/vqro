@@ -15,6 +15,7 @@ pub struct State {
     pub requests: Requests,
     pub startup: Startup,
     pub availability: Availability,
+    pub(crate) work: super::work::Work,
     pub ready: bool,
     pub restart_configured: bool,
     pub session: Option<String>,
@@ -67,6 +68,7 @@ impl State {
             requests: Requests::default(),
             startup: Startup::new(),
             availability: Availability::default(),
+            work: super::work::Work::default(),
             ready: false,
             restart_configured: false,
             session: None,
@@ -293,6 +295,7 @@ impl State {
     /// Only after the runtime has independently observed old-child exit. No requested session is
     /// written as observed; the new child must supply its own native session readback.
     pub fn replace_owned(&mut self, account: Value, generation: u64) {
+        self.work = super::work::Work::default();
         self.reset();
         self.requests = Requests::default();
         self.generation = generation;
@@ -327,6 +330,15 @@ impl State {
         self.outgoing.clear();
         self.availability = Availability::default();
         self.startup = Startup::new();
+        self.work_changes(self.work.rows());
+    }
+    fn work_changes(&mut self, changes: Vec<super::work::Change>) {
+        for change in changes {
+            self.put(change.kind, &change.id, change.value);
+        }
+        if self.work.incomplete {
+            self.incomplete.insert("work".into());
+        }
     }
     fn native_session(&mut self, id: &Value) {
         let Some(id) = id.as_str().filter(|s| !s.is_empty() && s.len() <= 128) else {
@@ -372,15 +384,26 @@ impl State {
         // the previous conversation can still run after a session reset; never drop its level.
         if kind == "system" && frame["subtype"] == "background_tasks_changed" {
             self.background_revision += 1;
-            if frame["tasks"].as_array().is_some_and(Vec::is_empty) {
-                self.background = Some(Vec::new());
+            let (changes, background) = self.work.level(frame);
+            self.work_changes(changes);
+            self.background = background;
+            if self.background.is_some() {
                 self.incomplete.remove("background");
             } else {
-                self.background = None;
                 self.incomplete.insert("background".into());
-                // A level snapshot of existing work is not evidence of a NEW turn. Keep the
-                // limit episode while AUTO waits for that work to end, as common policy requires.
             }
+            // Membership is its own full per-process level, NEVER an edge-derived completion
+            // or evidence of a new foreground turn. Preserve the limit episode independently.
+            return;
+        }
+        if kind == "system"
+            && matches!(
+                frame["subtype"].as_str(),
+                Some("task_started" | "task_progress" | "task_updated" | "task_notification")
+            )
+        {
+            let changes = self.work.event(frame);
+            self.work_changes(changes);
             return;
         }
         // Operation-scoped native consent can settle after the foreground session changed.
