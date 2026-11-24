@@ -126,7 +126,9 @@ One protected claim binds the original native episode, conversation, incarnation
 epoch, source credential and exact prepared membership. A Codex claim can contain
 an ordered bounded `authorized_targets` plan chosen by common policy. The full
 plan reserves hourly slots for **every affected native conversation**. A definite
-attempted prefix refunds unused slots; uncertainty retains the entire reservation.
+attempted prefix refunds unused slots; a definite pre-callback rejection settles
+to zero attempts and refunds every reserved slot while keeping the episode
+tombstone. Uncertainty retains the entire reservation.
 A failed/unknown native effect or input submission is never replayed.
 
 Codex switches only under retained native host fences and inspects B through native

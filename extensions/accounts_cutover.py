@@ -474,6 +474,9 @@ class Cutovers:
         record = value['claims'].get(token)
         if record is None or record['state'] != 'claimed':
             raise VqroError('cutover rejection no longer matches its undispatched claim', 'stale')
+        # A definite rejection before callback dispatch attempted no target.
+        # Settle the reservation, but retain this rejected episode tombstone.
+        record['attempted_targets'] = []
         record['state'] = 'rejected'
         if value['groups'].get(self.group(record)) == token:
             del value['groups'][self.group(record)]
