@@ -385,7 +385,13 @@ impl Shared {
             }
         }
         match effect.op.as_str() {
-            "claude.restart" => self.restart_owned(provider, effect, &native).await,
+            "claude.restart" => {
+                super::restart::on_supported_host(
+                    cfg!(windows),
+                    self.restart_owned(provider, effect, &native),
+                )
+                .await
+            }
             "agent.send" => {
                 // SDK reply timeout starts AFTER send_line's budget/channel wait. Bound the
                 // WHOLE read-only lookup while holding admission, so EOF/signal cannot be

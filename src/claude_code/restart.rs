@@ -1,9 +1,24 @@
 //! Guarded one-child replacement. Configuration is private; public arguments contain no secrets.
 use super::state::State;
-use crate::provider_client::ProviderError;
+use crate::provider_client::{Outcome, ProviderError};
 use serde_json::{Value, json};
 use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
 use tokio::{io::AsyncReadExt, time::Instant};
+
+/// The target OS is supplied by the compiled runtime, never public request arguments.
+/// The effect stays lazy so refusal precedes every helper/secret/stop/spawn operation.
+pub async fn on_supported_host(
+    windows: bool,
+    effect: impl std::future::Future<Output = Result<Outcome, ProviderError>>,
+) -> Result<Outcome, ProviderError> {
+    if windows {
+        return Ok(Outcome::Rejected {
+            kind: "unsupported".into(),
+            message: "not supported on Windows yet".into(),
+        });
+    }
+    effect.await
+}
 
 pub struct Config {
     pub helper: Vec<String>,
@@ -263,6 +278,36 @@ impl Restart {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn windows_refusal_never_polls_helper_secret_stop_or_spawn() {
+        let calls = std::cell::Cell::new(0);
+        let outcome = on_supported_host(true, async {
+            calls.set(calls.get() + 1);
+            Ok(Outcome::Observed(None))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            calls.get(),
+            0,
+            "Windows must not poll any credential effect"
+        );
+        assert_eq!(
+            outcome,
+            Outcome::Rejected {
+                kind: "unsupported".into(),
+                message: "not supported on Windows yet".into()
+            }
+        );
+        let allowed = on_supported_host(false, async {
+            calls.set(calls.get() + 1);
+            Ok(Outcome::Observed(None))
+        })
+        .await
+        .unwrap();
+        assert_eq!(allowed, Outcome::Observed(None));
+        assert_eq!(calls.get(), 1, "other execution hosts dispatch once");
+    }
     fn fixture() -> (State, Value) {
         let mut state = State::new("boot".into());
         state.observe(&crate::native_process::Event::Record(

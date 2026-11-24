@@ -29,7 +29,13 @@ def credential_env(provider, credential_kind):
     raise KeychainError('unsupported')
 
 
+def require_credential_launch_host(credential_kind):
+    if credential_kind == 'claude_subscription' and os.name == 'nt':
+        raise KeychainError('not supported on Windows yet')
+
+
 def launch(handle, provider, argv, *, store, environment=None, execute=os.execvpe, credential_kind='api_key'):
+    require_credential_launch_host(credential_kind)
     valid_handle(handle)
     target_env = credential_env(provider, credential_kind)
     if not isinstance(argv, list) or not 1 <= len(argv) <= 128 or any(
@@ -103,6 +109,7 @@ def main(argv=None, *, store_factory=backend):
     args = parser.parse_args(argv)
     try:
         if args.action == 'launch':
+            require_credential_launch_host(args.kind)
             runtime = args.runtime[1:] if args.runtime[:1] == ['--'] else args.runtime
             launch(args.handle, args.provider, runtime, store=store_factory(), credential_kind=args.kind)
             return 0  # only reached with an injected exec in tests

@@ -13,6 +13,29 @@ import accounts_keychain_helper as helper
 
 
 class HelperTests(unittest.TestCase):
+    def test_windows_subscription_launch_refuses_before_store_or_exec(self):
+        store,execute=Mock(),Mock();store.retrieve.return_value=keys.Secret('synthetic-setup-token')
+        error=None
+        with patch.object(helper.os,'name','nt'):
+            try:helper.launch('a'*32,'anthropic',['synthetic-claude'],store=store,execute=execute,credential_kind='claude_subscription')
+            except keys.KeychainError as caught:error=caught
+        self.assertEqual((store.retrieve.call_count,execute.call_count),(0,0))
+        self.assertIsNotNone(error);self.assertEqual(error.status,'not supported on Windows yet')
+
+    def test_windows_subscription_cli_refuses_before_backend_factory(self):
+        factory=Mock(side_effect=AssertionError('backend must not be constructed'));out,err=io.StringIO(),io.StringIO()
+        with patch.object(helper.os,'name','nt'),contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
+            result=helper.main(['launch','--kind','claude_subscription','--handle','a'*32,'--provider','anthropic','--','synthetic-claude'],store_factory=factory)
+        self.assertEqual(result,1);self.assertEqual(out.getvalue(),'')
+        self.assertEqual(json.loads(err.getvalue()),{'status':'not supported on Windows yet'})
+        factory.assert_not_called()
+
+    def test_windows_api_helper_keeps_existing_non_subscription_behavior(self):
+        store,execute=Mock(),Mock();store.retrieve.return_value=keys.Secret('synthetic-api-only')
+        with patch.object(helper.os,'name','nt'):
+            helper.launch('a'*32,'anthropic',['synthetic-api-runtime'],store=store,execute=execute)
+        store.retrieve.assert_called_once_with('a'*32);execute.assert_called_once()
+
     def test_launch_only_puts_key_in_child_environment(self):
         store = Mock()
         store.retrieve.return_value = keys.Secret('fake-api-key')
@@ -41,7 +64,7 @@ class HelperTests(unittest.TestCase):
         original = {'PATH': '/fake', 'ANTHROPIC_API_KEY': 'ambient-key',
                     'ANTHROPIC_AUTH_TOKEN': 'ambient-bearer', 'CLAUDE_CODE_OAUTH_TOKEN': 'old-token'}
         output, error = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+        with patch.object(helper.os,'name','posix'),contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
             helper.launch('b' * 32, 'anthropic', ['claude', '--resume', 'native-session'],
                           credential_kind='claude_subscription', store=store, environment=original,
                           execute=lambda program, argv, env: seen.append((program, argv, dict(env))))
@@ -74,7 +97,7 @@ class HelperTests(unittest.TestCase):
         store = Mock()
         store.retrieve.return_value = keys.Secret('fake-claude-setup-token')
         execute = Mock(side_effect=OSError('fake-claude-setup-token'))
-        with self.assertRaises(keys.KeychainError) as caught:
+        with patch.object(helper.os,'name','posix'),self.assertRaises(keys.KeychainError) as caught:
             helper.launch('b' * 32, 'anthropic', ['claude'], credential_kind='claude_subscription',
                           store=store, execute=execute)
         self.assertNotIn('fake-claude-setup-token', str(caught.exception))

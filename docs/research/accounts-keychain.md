@@ -7,6 +7,15 @@ implementation or testing. Tests inject subprocess, Win32 DLL, input and exec bo
 **macOS and Windows native interoperability is unverified.** Linux interoperability is
 also not exercised against a real keychain; fake tests prove plumbing, not OS behavior.
 
+## Windows Claude credential refusal
+
+Claude credential-backed restart and helper launch are **not supported on Windows
+yet**. The runtime refuses before polling any restart work, including helper
+preflight, secret lookup, owned stop or replacement spawn. The helper launch also
+refuses before constructing its OS store. There is no retry or ambient-login
+fallback. Linux/macOS credential paths, the API-key helper and ordinary shared-login
+launch are unchanged; this is a refusal, not Windows lifecycle qualification.
+
 ## Contract / use
 
 `store(Secret, handle=optional_preallocated_handle) -> opaque handle`,
