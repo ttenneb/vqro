@@ -130,5 +130,7 @@ class AgentPaneMenu(unittest.TestCase):
         menus = {k: v for k, v in self.agents.declarations().items() if k.startswith('menu/agents.r2.')}
         self.assertFalse(any('input' in m for m in menus.values()))
         self.assertTrue(all(k.rsplit('.', 1)[-1] not in ('send', 'prompt', 'steer', 'follow_up', 'answer') for k in menus))
+        # App/error hints are live content too, never workspace menu mutations.
         self.assertEqual(self.agents.panel(self.r)['menu_context'],
-                         {'agent_working': False, 'agent_queued': False, 'agent_forgettable': False})
+                         {'agent_working': False, 'agent_queued': False, 'agent_forgettable': False,
+                          'agent_error': False, 'agent_app': None})
