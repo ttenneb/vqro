@@ -19,6 +19,7 @@ NO_WINDOW = 0x08000000
 BACKGROUND = {
     ("accounts_keychain.py", "_CommandStore._call"),
     ("pi_bridge/client.py", "PiRpcClient.start"),
+    ("pi_bridge/launch.py", "supports_testing"),
     ("testing_integration.py", "extension_main.start"),
     ("testing_perf.py", "extension_main.start"),
     ("testing_unit.py", "tests_row"),
@@ -69,16 +70,17 @@ def inventory():
     return sites
 
 
-def capture_options(call):
+def capture_options(call, *, filename=None):
     """Evaluate actual expanded kwargs against an inert mocked spawn, never extension entrypoints."""
     keywords = [copy.deepcopy(keyword) if keyword.arg is None else ast.keyword(arg=keyword.arg, value=ast.Constant(None))
                 for keyword in call.keywords]
     expression = ast.fix_missing_locations(ast.Expression(ast.Call(func=ast.Name(id="spawn", ctx=ast.Load()),
                                                                   args=[], keywords=keywords)))
     spawn = mock.Mock()
-    eval(compile(expression, "<background-spawn-keywords>", "eval"), {
-        "spawn": spawn, "background_kwargs": vqro_process.background_kwargs, "group_options": {},
-    })
+    namespace = {"spawn": spawn, "background_kwargs": vqro_process.background_kwargs, "group_options": {}}
+    if filename == "pi_bridge/launch.py":
+        namespace["_background_kwargs"] = vqro_process.background_kwargs
+    eval(compile(expression, "<background-spawn-keywords>", "eval"), namespace)
     return spawn.call_args.kwargs
 
 
@@ -92,6 +94,18 @@ class BackgroundProcessTests(unittest.TestCase):
         self.assertEqual(set(inventory()), BACKGROUND | INTERACTIVE)
         for filename in {filename for filename, _ in BACKGROUND}:
             tree = ast.parse((EXTENSIONS / filename).read_text(encoding="utf-8"))
+            if filename == "pi_bridge/launch.py":
+                loader = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_background_kwargs")
+                expected = ast.parse('''
+source = Path(__file__).resolve().parent.parent / "vqro_process.py"
+spec = importlib.util.spec_from_file_location("_vqro_bridge_process", source)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+return module.background_kwargs()
+''')
+                self.assertEqual([ast.dump(node) for node in loader.body], [ast.dump(node) for node in expected.body],
+                                 "isolated launcher must load only installed vqro_process and return its shared kwargs")
+                continue
             self.assertTrue(any(isinstance(node, ast.ImportFrom) and node.module == "vqro_process"
                                 and any(alias.name == "background_kwargs" for alias in node.names)
                                 for node in tree.body), filename + " must import the shared launch helper")
@@ -102,7 +116,7 @@ class BackgroundProcessTests(unittest.TestCase):
             with platform(windows), mock.patch.object(subprocess, "CREATE_NO_WINDOW", NO_WINDOW, create=True):
                 for key in sorted(BACKGROUND):
                     with self.subTest(windows=windows, site=key):
-                        options = capture_options(sites[key])
+                        options = capture_options(sites[key], filename=key[0])
                         if windows:
                             self.assertEqual(options.get("creationflags"), NO_WINDOW)
                         else:
