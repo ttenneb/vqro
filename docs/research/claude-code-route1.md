@@ -137,6 +137,13 @@ retains a bounded notice naming the reason (task list full, identity unavailable
 A future complete native foreground inventory could support safe clearing, but no such API is assumed here. Nested work under a known background parent
 is not inferred to be root foreground, and unknown ownership is never guessed. Known child/unknown question
 scope survives context-free changed snapshots in both pending and RECENT records until native settlement.
+If a NEW native request cannot be admitted and its identity/scope cannot be remembered at the existing bounds, a bounded scope-history-loss
+marker prevents new context-free questions from becoming root approval forms merely because another request
+settled. Known retained identities and positively reported child context remain separate. No extra identity cache,
+eviction or rearming is introduced. Freeing capacity/ordinary conversation reset does not prove all forgotten
+scope settled: new agent_id-less forms stay unapprovable, restart stays refused, and the pane explains that
+closing/relaunching with a NEW native process is the conservative recovery. No complete native request-scope
+inventory or probe is assumed to clear it automatically.
 No child endpoint/principal/inbox or send/resume/close is invented.
 
 Only successful structured `tool_use_result`, correlated to one observed tool result/name, supplies plan values:

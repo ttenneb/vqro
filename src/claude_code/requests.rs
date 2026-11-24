@@ -66,6 +66,9 @@ pub struct Requests {
     recent: VecDeque<Recent>,
     unsupported_tokens: BTreeMap<String, WriteToken>,
     unsupported_tools: BTreeMap<String, (RequestScope, String)>,
+    // No identity cache can safely recover a dropped scope at both bounds. Refuse new
+    // context-free root approvability for this native process rather than guessing.
+    scope_history_incomplete: bool,
 }
 fn error_response(id: &str) -> Value {
     json!({"type":"control_response","response":{"subtype":"error","request_id":id,
@@ -91,8 +94,12 @@ impl Requests {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    pub fn scope_history_incomplete(&self) -> bool {
+        self.scope_history_incomplete
+    }
     pub fn has_unconfirmed(&self) -> bool {
-        !self.recent.is_empty()
+        self.scope_history_incomplete
+            || !self.recent.is_empty()
             || self.pending.values().any(|p| {
                 p.value["status"] != "pending" && p.value["native"]["waiting"] != "not_waiting"
             })
@@ -105,7 +112,8 @@ impl Requests {
         })
     }
     pub fn root_has_unconfirmed(&self) -> bool {
-        self.recent.iter().any(|r| r.scope == RequestScope::Root)
+        self.scope_history_incomplete
+            || self.recent.iter().any(|r| r.scope == RequestScope::Root)
             || self.pending.values().any(|p| {
                 p.value["child"].is_null()
                     && p.value["native"]["scope_unknown"] != true
@@ -238,6 +246,19 @@ impl Requests {
             None
         };
         let child = child.or(retained_child.as_deref());
+        let known_root = self
+            .native
+            .get(native)
+            .and_then(|id| self.pending.get(id))
+            .is_some_and(|p| {
+                p.value["child"].is_null() && p.value["native"]["scope_unknown"] != true
+            })
+            || self
+                .recent
+                .iter()
+                .any(|r| r.id == native && r.scope == RequestScope::Root);
+        let scope_unknown =
+            scope_unknown || (self.scope_history_incomplete && child.is_none() && !known_root);
         // A live question and identical initialize snapshots are one incarnation even after a
         // response write has an unknown outcome. Only independent settlement/reuse retires it.
         if let Some(old_id) = self.native.get(native).cloned() {
@@ -369,6 +390,9 @@ impl Requests {
             if native.len() <= 4096 {
                 value["native"]["request_id"] = json!(native);
                 let remembered = self.remember_scope(native, request, child, scope_unknown);
+                if !remembered {
+                    self.scope_history_incomplete = true;
+                }
                 // An undeclared user dialog MUST NOT be answered as a user dismissal. The native CLI
                 // discards error replies for it too; local cancellation is not native settlement.
                 if remembered && request["subtype"] != "request_user_dialog" {

@@ -292,6 +292,16 @@ impl State {
                 self.put("notice","foreground-work-loss",json!({"text":format!("restart blocked: foreground work may be running ({reason}). Automatic restart/cutover is refused until this process is replaced another way. Close and relaunch this agent to recover.")}));
             }
         }
+        if self.requests.scope_history_incomplete() {
+            self.incomplete.insert("request_scope".into());
+            if self
+                .journal
+                .entity("notice", "request-scope-loss")
+                .is_none()
+            {
+                self.put("notice","request-scope-loss",json!({"text":"consent blocked: request scope evidence was lost at the request bounds. New forms without known producer context are not approvable. Automatic restart/cutover is refused; close and relaunch this agent to recover."}));
+            }
+        }
         self.changed += 1;
     }
     pub fn initialized(&mut self, data: &Value) {

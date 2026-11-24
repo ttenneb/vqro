@@ -1,5 +1,87 @@
 use super::*;
 #[test]
+fn joint_pending_and_recent_saturation_cannot_rearm_lost_child_as_root() {
+    let mut s = state();
+    start(&mut s);
+    for n in 0..256 {
+        let mut q = question(&format!("recent-{n}"), false);
+        q["request"]["requires_user_interaction"] = json!(true);
+        s.record(&q);
+    }
+    for n in 0..super::super::requests::MAX_PENDING {
+        s.record(&question(&format!("pending-{n}"), false));
+    }
+    assert_eq!(s.requests.len(), 16);
+    let queued = s.outgoing.len();
+    s.record(&question("lost-child-Q", true));
+    assert_eq!(s.requests.len(), 16);
+    assert_eq!(
+        s.outgoing.len(),
+        queued,
+        "failed remember must not write an automatic response"
+    );
+    s.record(&json!({"type":"control_cancel_request","request_id":"pending-0"}));
+    assert_eq!(s.requests.len(), 15);
+    s.record(&question("lost-child-Q", false));
+    let root_form = s.requests.summaries().into_iter().find(|summary| {
+        s.journal
+            .entity("request", summary["request"].as_str().unwrap())
+            .is_some_and(|(_, v)| v["native"]["request_id"] == "lost-child-Q")
+    });
+    assert!(
+        root_form.is_none(),
+        "same unsettled CHILD question lost at BOTH bounds MUST NOT reappear as an approvable ROOT form after unrelated withdrawal"
+    );
+    assert_eq!(s.requests.len(), 15);
+    assert_eq!(s.outgoing.len(), queued);
+    assert!(s.requests.scope_history_incomplete());
+    let existing = s.requests.summaries()[0]["request"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        s.requests
+            .answer(
+                &existing,
+                1,
+                &json!({"action":"submit","content":{"behavior":"deny"}})
+            )
+            .is_ok(),
+        "already retained known-root identity remains valid"
+    );
+    for n in 0..256 {
+        s.record(&json!({"type":"control_cancel_request","request_id":format!("recent-{n}")}));
+    }
+    for n in 0..16 {
+        s.record(&json!({"type":"control_cancel_request","request_id":format!("pending-{n}")}));
+    }
+    s.record(&question("lost-child-Q", false));
+    assert!(
+        s.requests.summaries().is_empty(),
+        "freeing bounds is not settlement of forgotten child scope"
+    );
+    assert!(s.requests.has_unconfirmed());
+    assert!(
+        s.journal.entity("notice", "request-scope-loss").unwrap().1["text"]
+            .as_str()
+            .unwrap()
+            .contains("not approvable")
+    );
+    s.record(&question("fresh-known-child", true));
+    assert_eq!(s.requests.summaries().len(), 1);
+    assert!(
+        s.requests.summaries()[0]["child"].is_string(),
+        "positive native context is not guessed root context"
+    );
+    s.record(&json!({"type":"conversation_reset"}));
+    assert!(s.requests.scope_history_incomplete());
+    s.replace_owned(json!({"id":"B"}), 2);
+    assert!(
+        !s.requests.scope_history_incomplete(),
+        "only a new native process clears lost provenance"
+    );
+}
+#[test]
 fn slice3_recent_child_scope_survives_context_free_changed_unwritten_snapshot() {
     let mut s = state();
     let child = start(&mut s);
