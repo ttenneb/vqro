@@ -454,7 +454,7 @@ fn errors_unknown_reasons_and_native_end_are_not_fabricated_success() {
     assert_eq!(a.completion.as_ref().unwrap()["error"]["message"],"native failure");
     event(&mut a,json!({"type":"agent_start"}));message(&mut a,"unknown","_native_new_reason");event(&mut a,json!({"type":"agent_settled"}));
     assert_eq!(a.completion.as_ref().unwrap()["reason"],"_native_new_reason");
-    let end=Event::Exited(Exit {code:Some(0),success:true});a.signals.observe(&end);a.observe(&end);
+    let end=Event::Exited(Exit {code:Some(0),success:true,observed:true});a.signals.observe(&end);a.observe(&end);
     event(&mut a,json!({"type":"agent_start"}));
     assert_eq!(a.facts("pi","private")["data"]["agent"]["lifecycle"],"ended");assert!(a.run.is_none());
 }

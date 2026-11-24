@@ -25,6 +25,7 @@ fn inner() -> (Arc<Inner>, mpsc::Receiver<Write>) {
     let (exit, _) = watch::channel(Some(Exit {
         code: Some(0),
         success: true,
+        observed: true,
     }));
     let (drained, _) = watch::channel(None);
     (

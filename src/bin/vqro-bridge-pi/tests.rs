@@ -20,7 +20,7 @@ fn configured_account_is_launch_metadata_not_native_auth_state(){
 #[test]
 fn stop_reply_preserves_requested_coverage_without_claiming_wider_effects(){
     let covers=vec![json!("foreground")];
-    for exit in [None,Some(native::Exit {code:Some(0),success:true})]{
+    for exit in [None,Some(native::Exit {code:Some(0),success:true,observed:true})]{
         let result=stop_report(&covers,exit.as_ref());assert_eq!(result["covers"],json!(["foreground"]));
         assert_eq!(result["covers_evidence"],"requested");assert_eq!(result["pending"],"unknown");
     }

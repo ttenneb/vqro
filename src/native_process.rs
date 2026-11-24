@@ -43,7 +43,12 @@ impl std::error::Error for Error {}
 #[derive(Debug, Clone)]
 pub struct Reply { pub success: bool, pub data: Value, pub error: Value }
 #[derive(Debug, Clone)]
-pub struct Exit { pub code: Option<i32>, pub success: bool }
+pub struct Exit {
+    pub code: Option<i32>, pub success: bool,
+    /// True ONLY when the owned child's wait returned a status (including signal termination).
+    /// A wait error or lost observation is unknown, never permission to start a replacement.
+    pub observed: bool,
+}
 #[derive(Debug, Clone)]
 pub enum Event { Record(Value), ProtocolError(String), Exited(Exit) }
 pub type Observe = Arc<dyn Fn(Event) + Send + Sync>;
@@ -99,6 +104,20 @@ struct Inner {
     observe: Observe,
     codec: Arc<dyn Codec>,
 }
+fn exit_from_wait(status: std::io::Result<std::process::ExitStatus>) -> Exit {
+    status.map(|s| Exit { code:s.code(),success:s.success(),observed:true }).unwrap_or(Exit { code:None,success:false,observed:false })
+}
+fn publish_exit(state:&Inner,status:std::io::Result<std::process::ExitStatus>){
+    state.dead.store(true,Ordering::SeqCst);
+    let exit=exit_from_wait(status);
+    (state.observe)(Event::Exited(exit.clone()));
+    state.exit.send_replace(Some(exit));
+}
+
+#[cfg(test)]
+#[path="native_process_exit_tests.rs"]
+mod exit_tests;
+
 impl Inner {
     fn fail_pending(&self, message: &str) {
         for (_, pending) in self.pending.lock().unwrap().drain() {
@@ -201,10 +220,7 @@ impl Process {
                     child.wait().await
                 }
             };
-            state.dead.store(true, Ordering::SeqCst);
-            let exit = status.map(|s| Exit { code:s.code(),success:s.success() }).unwrap_or(Exit { code:None,success:false });
-            (state.observe)(Event::Exited(exit.clone()));
-            state.exit.send_replace(Some(exit));
+            publish_exit(&state,status);
         });
         Ok(Self { inner })
     }
@@ -220,7 +236,7 @@ impl Process {
         let mut exit = self.inner.exit.subscribe();
         loop {
             if let Some(result) = exit.borrow().clone() { return result; }
-            if exit.changed().await.is_err() { return Exit { code:None,success:false }; }
+            if exit.changed().await.is_err() { return Exit { code:None,success:false,observed:false }; }
         }
     }
     /// Reader termination, explicitly distinguishing observed EOF from cutoff/protocol failure.

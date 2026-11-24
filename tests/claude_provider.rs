@@ -578,6 +578,7 @@ async fn normal_publisher_and_acknowledged_shutdown_preserve_blocked_writer_tail
             vqro::native_process::Exit {
                 code: Some(0),
                 success: true,
+                observed: true,
             },
         ));
     shared.wake();
@@ -665,6 +666,7 @@ async fn final_ack_deadline_includes_a_budget_stalled_enqueue() {
             vqro::native_process::Exit {
                 code: Some(0),
                 success: true,
+                observed: true,
             },
         ));
         state.end_ready = true;
@@ -711,6 +713,7 @@ async fn retirement_ack_is_withheld_then_delivered_late_before_final_sync() {
             vqro::native_process::Exit {
                 code: Some(0),
                 success: true,
+                observed: true,
             },
         ));
     shared.wake();
@@ -774,6 +777,7 @@ async fn retirement_ack_never_arrives_is_bounded_and_unconfirmed_not_ended() {
             vqro::native_process::Exit {
                 code: Some(0),
                 success: true,
+                observed: true,
             },
         ));
     shared.wake();

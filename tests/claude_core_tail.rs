@@ -85,6 +85,7 @@ async fn one_core_tail_case() {
             vqro::native_process::Exit {
                 code: Some(0),
                 success: true,
+                observed: true,
             },
         ));
     }
