@@ -87,7 +87,12 @@ class PiResumeRecovery(unittest.TestCase):
     def test_unconfirmed_stop_does_not_offer_a_recovery_launch(self):
         core,journal,frontend,token,app=self.fixture()
         core.resources['r1']['data']['agent']['lifecycle']='live';core.resources['r1']['available']=True
+        core.resources['r1'].pop('exit')
         self.assertEqual(self.actions(core,app),[])
+        with patch('pi.launch') as launch,self.assertRaises(VqroError) as caught:
+            app.recover_pi({'_claim':token})
+        self.assertNotIn('Stopped, not resumed:',str(caught.exception))
+        launch.assert_not_called();self.assertIsNone(journal.lookup(token)['resume_launch'])
         with patch('pi.launch') as launch,self.assertRaises(VqroError):frontend.recover_resume({'_claim':token})
         launch.assert_not_called();self.assertIsNone(journal.lookup(token)['resume_launch'])
 

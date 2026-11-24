@@ -84,12 +84,21 @@ class Accounts:
             raise VqroError('recovery launch is unavailable or already attempted; never retry','conflict')
         rows=self.ext.vqro.call('resource.list',{'id':claim['resource']}).get('resources',[])
         if len(rows)!=1:raise VqroError('original native session reference is unavailable; use native session recovery','unavailable')
-        progress={'stop_requested':True,'stopped':True,'session':claim['session']}
+        old=rows[0];native=policy.facts(old);exited=old.get('exit') or {}
+        stopped=(native.get('lifecycle')=='ended' and exited.get('success') is True
+                 and type(exited.get('code')) is int and exited['code']==0
+                 and old.get('incarnation')==claim['source_incarnation'] and old.get('host')==claim['host']
+                 and native.get('epoch')==claim['source_epoch']
+                 and (native.get('session') or {}).get('id')==claim['session'])
+        progress={'stop_requested':stopped,'stopped':stopped,'session':claim['session']}
         try:
             launched=self.ext.invoke('pi.resume.recover',args)
             progress['resumed']=isinstance(launched,dict) and launched.get('outcome')=='observed'
             result=self.pi.confirm_resume({'account':claim['account'],'_account_revision':claim['_account_revision']},rows[0],claim,launched)
-        except Exception as error:raise self.pi.failure(args,progress,error) from error
+        except Exception as error:
+            failure=self.pi.failure(args,progress,error)
+            if failure is error:raise
+            raise failure from error
         result['notice']='Pi recovered on the intended account; waiting for your next input. No earlier input was replayed.'
         self.ext.notify(result['notice'],'ok')
         return dict(result,**({'client':launched['client']} if isinstance(launched.get('client'),dict) else {}))
