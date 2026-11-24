@@ -45,8 +45,11 @@ export default function accountExtension(pi) {
   // and guard ALL native input sources (including extension-origin new turns)
   // while shutdown settles. No earlier input is ever saved or replayed here.
   pi.on('input', (_event, ctx) => {
-    const bound = !account || loginOnly || (ready && ctx.model?.provider === account.native_provider
-      && ctx.model?.api !== 'pi-virtual');
+    // getFlag is available when native input can run, including an earlier
+    // extension's session_start. Unparsed declared metadata is not normal login.
+    const declared = pi.getFlag('vqro-account') !== undefined;
+    const bound = (!declared && !account) || (ready && (loginOnly || (account
+      && ctx.model?.provider === account.native_provider && ctx.model?.api !== 'pi-virtual')));
     if (failed || !bound) {
       try {ctx.ui.notify('Account setup unavailable; nothing submitted. Inspect Accounts/native status.', 'error');} catch { /* Fail closed without UI. */ }
       return {action: 'handled'};

@@ -21,6 +21,16 @@ function fixture({raw=JSON.stringify(record),login=false,configured=true,model=p
   extension(pi);
   return {context,handlers,commands,providers,notices,get stops(){return stops},get selections(){return selections},setIdle:value=>{idle=value},setPending:value=>{pending=value}};
 }
+// An earlier configured extension may submit from its session_start before
+// our initializer. A declared alias must fence input even before metadata parses.
+const beforeStart=fixture();
+assert.equal(beforeStart.handlers.input({},beforeStart.context).action,'handled');
+assert.equal(beforeStart.context.model.provider,record.provider);
+assert.equal(beforeStart.selections,0);
+const beforeLogin=fixture({login:true});
+assert.equal(beforeLogin.handlers.input({},beforeLogin.context).action,'handled');
+const normalBeforeStart=fixture({raw:null});
+assert.equal(normalBeforeStart.handlers.input({},normalBeforeStart.context).action,'continue');
 const good=fixture();await good.handlers.session_start({},good.context);
 assert.equal(good.context.model.provider,record.native_provider);assert.equal(good.selections,1);assert.equal(good.stops,0);
 assert.equal(good.providers.get(record.native_provider).auth.oauth,nativeOAuth);
