@@ -184,7 +184,27 @@ class PiCutover:
             # accidentally combine an older allowance with a newer positive cap.
         return claim
 
+    def failure(self,args,progress,error):
+        if not progress.get('stop_requested'):return error
+        try:slot=self.ext.invoke('accounts.claim.read',{'claim':args['_claim']}).get('resume_launch')
+        except Exception:slot='unconfirmed'
+        if progress.get('resumed') or isinstance(slot,dict) and slot.get('state')=='observed':
+            prefix='Replacement started; conversation confirmation failed'
+        elif progress.get('stopped') and slot is None:prefix='Stopped, not resumed'
+        elif progress.get('stopped'):prefix='Stopped; replacement launch unconfirmed'
+        else:prefix='Stop outcome unconfirmed; replacement not confirmed'
+        return VqroError(prefix+': '+str(error)+'. Original native session '+str(progress.get('session'))+
+                         ' retained. Open Accounts for recovery status; no prior input was replayed.',getattr(error,'kind','indeterminate'))
+
     def restart(self,args):
+        progress={}
+        try:return self._restart(args,progress)
+        except Exception as error:
+            failure=self.failure(args,progress,error)
+            if failure is error:raise
+            raise failure from error
+
+    def _restart(self,args,progress):
         plan=self.prepare(args)
         if args['automatic'] and not plan['automatic_allowed']:
             raise VqroError('unrecognized Pi native error; owner-click OFFER only','offer_required')
@@ -200,6 +220,7 @@ class PiCutover:
                  'guard':{'session':native['session']['id']},'name':COMMAND,
                  'args':json.dumps({'session':native['session']['id'],'provider':model['native']['provider'],
                                     'model':model['id'],'error_timestamp':record['timestamp'],'file':history_file(native)},separators=(',',':'))}
+        progress.update(stop_requested=True,session=native['session']['id'])
         stopped=self.ext.vqro.call('resource.invoke',{'resource':source['id'],'op':'agent.command','args':request})
         if not isinstance(stopped,dict) or stopped.get('outcome') not in ('accepted','observed','dispatched'):
             raise VqroError('native Pi quiescent stop unconfirmed; do not retry','indeterminate')
@@ -212,8 +233,9 @@ class PiCutover:
                 raise VqroError('old Pi exit evidence unavailable; no replacement started','indeterminate')
             ended=rows[0];old=policy.facts(ended);exit_info=ended.get('exit')
             if old.get('lifecycle')=='ended':
-                if not isinstance(exit_info,dict) or exit_info.get('success') is not True or exit_info.get('code')!=0:
+                if not isinstance(exit_info,dict) or exit_info.get('success') is not True or type(exit_info.get('code')) is not int or exit_info['code']!=0:
                     raise VqroError('old Pi did not confirm successful native shutdown; no replacement started','indeterminate')
+                progress['stopped']=True
                 break
             if time.monotonic()>=deadline:
                 raise VqroError('old Pi is still settling; no replacement started; never replay','indeterminate')
@@ -221,6 +243,11 @@ class PiCutover:
         # Exactly one public frontend launch request. Common owns the only
         # protected intent and any NEW continuation; this callback sends none.
         launched=self.ext.invoke('pi.resume',{'_claim':args['_claim']})
+        progress['resumed']=isinstance(launched,dict) and launched.get('outcome')=='observed'
+        return self.confirm_resume(args,source,plan,launched)
+
+    def confirm_resume(self,args,source,plan,launched):
+        native=policy.facts(source);model=native['session']['model']
         rid=launched.get('agent') if isinstance(launched,dict) else None
         if not bounded(rid) or launched.get('outcome')!='observed':
             raise VqroError('Pi replacement start unconfirmed; do not retry','indeterminate')

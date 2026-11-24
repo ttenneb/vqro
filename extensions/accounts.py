@@ -39,7 +39,9 @@ class Accounts:
         self.wake = threading.Event()
         for name, method, title in [('claim.read',self.read_claim,'Read acknowledged account cutover claim'),
                 ('claim.resume.consume',self.consume_resume,'Consume acknowledged Pi resume launch'),
+                ('claim.resume.validate',self.validate_resume,'Validate acknowledged Pi resume launch'),
                 ('claim.resume.result',self.resume_result,'Record Pi resume launch result'),
+                ('recover.pi',self.recover_pi,'Resume stopped Pi on the intended account'),
                 ('policy',self.configure_policy,'Account capacity strategies'),
                 ('offer',self.offer,'Continue this conversation on another account'), ('restart',self.restart,'Continue on another account'),
                 ('restart.confirm',self.confirm_restart,'Confirm Claude background-loss warning'),
@@ -63,9 +65,34 @@ class Accounts:
         """Read the acknowledged intent; no native effects or independent claims."""
         return self.cutovers.lookup(args.get('claim'))
 
-    def consume_resume(self,args):
-        if not isinstance(args,dict) or set(args)!={'claim'}:raise VqroError('only the claim reference is accepted','invalid')
-        return self.cutovers.consume_resume(args['claim'])
+    def resume_admission(self,args,*,consume):
+        if not isinstance(args,dict) or set(args) not in ({'claim'},{'claim','recovery'}) \
+                or 'recovery' in args and args['recovery'] is not True:
+            raise VqroError('only the claim reference and explicit recovery flag are accepted','invalid')
+        method=self.cutovers.consume_resume if consume else self.cutovers.validate_resume
+        return method(args['claim'],recovery=args.get('recovery') is True)
+
+    def validate_resume(self,args):return self.resume_admission(args,consume=False)
+
+    def consume_resume(self,args):return self.resume_admission(args,consume=True)
+
+    def recover_pi(self,args):
+        if not isinstance(args,dict) or set(args)!={'_claim'}:raise VqroError('only the recovery claim is accepted','invalid')
+        self.cutovers.authorization(False)
+        claim=self.cutovers.lookup(args['_claim'])
+        if claim['runtime']!='pi' or claim['state']!='unknown' or claim['resume_launch'] is not None:
+            raise VqroError('recovery launch is unavailable or already attempted; never retry','conflict')
+        rows=self.ext.vqro.call('resource.list',{'id':claim['resource']}).get('resources',[])
+        if len(rows)!=1:raise VqroError('original native session reference is unavailable; use native session recovery','unavailable')
+        progress={'stop_requested':True,'stopped':True,'session':claim['session']}
+        try:
+            launched=self.ext.invoke('pi.resume.recover',args)
+            progress['resumed']=isinstance(launched,dict) and launched.get('outcome')=='observed'
+            result=self.pi.confirm_resume({'account':claim['account'],'_account_revision':claim['_account_revision']},rows[0],claim,launched)
+        except Exception as error:raise self.pi.failure(args,progress,error) from error
+        result['notice']='Pi recovered on the intended account; waiting for your next input. No earlier input was replayed.'
+        self.ext.notify(result['notice'],'ok')
+        return dict(result,**({'client':launched['client']} if isinstance(launched.get('client'),dict) else {}))
 
     def resume_result(self,args):
         if not isinstance(args,dict) or set(args)!={'claim','observed'} or type(args['observed']) is not bool:
@@ -98,6 +125,21 @@ class Accounts:
                      if pi_error(row) or policy.blocked(row,limit_only=True)][:64]
         items.extend({'text':('Choose account for '+label(rid)+' (human-judged)' if is_pi else 'Fresh-work options for '+label(rid)),
                       'command':'accounts.offer','args':{'resource':rid}} for rid,is_pi in stopped)
+        recovery,_=self.cutovers.read()
+        by_id={row['id']:row for row in rows}
+        for token,claim in recovery['claims'].items():
+            if claim['runtime']!='pi' or claim['state']!='unknown':continue
+            items.append({'type':'text','style':'warn','text':'Pi resume failed; retained native session '+label(claim['session'])+' · '+label(claim['source_history'] or '')})
+            with self.ext.cache_lock:old=self.ext.resources.get(claim['resource']) or {}
+            exited=old.get('exit') or {}
+            stopped=(policy.facts(old).get('lifecycle')=='ended' and exited.get('success') is True
+                     and type(exited.get('code')) is int and exited['code']==0)
+            if stopped and claim['resume_launch'] is None and claim['_account_revision']==revision and claim['account'] in by_id:
+                items.append({'text':'Resume conversation on '+label(by_id[claim['account']]['label']),
+                              'command':'accounts.recover.pi','args':{'_claim':token},
+                              'description':'Owner recovery uses the original unused launch slot once; sends no input.'})
+            else:
+                items.append({'type':'text','style':'warn','text':'No retry offered: stop unconfirmed, launch already attempted/unknown, or account metadata changed. Start a new agent explicitly if needed.'})
         for runtime in SELECTORS:
             items.append({'type':'text','style':'bold','text':runtime})
             items.append({'text':'Shared runtime login', 'command':COMMANDS[runtime], 'args':{'account':'normal'}})

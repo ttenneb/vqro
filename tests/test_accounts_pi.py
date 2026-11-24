@@ -131,6 +131,7 @@ class PiPrepare(unittest.TestCase):
             return original_call(method,params)
         def invoke(name,args=None):
             if name=='accounts.claim.read':return copy.deepcopy(claim)
+            if name=='accounts.claim.resume.validate':return {'validated':True}
             if name=='accounts.claim.resume.consume':
                 if claim.get('resume_launch') is not None:raise VqroError('already consumed','conflict')
                 claim['resume_launch']={'state':'claimed'};return {'consumed':True}

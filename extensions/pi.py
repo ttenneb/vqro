@@ -34,7 +34,7 @@ def runtimes(value):
 class Pi:
     def __init__(self, ext):
         self.ext = ext
-        for name, fn, title in [("new", self.new, "New Pi agent"), ("resume", self.resume, "Resume acknowledged Pi account cutover"), ("resume.prepare", self.prepare_resume, "Validate Pi resume before stopping"), ("settings", self.settings, "Pi runtime settings"),
+        for name, fn, title in [("new", self.new, "New Pi agent"), ("resume", self.resume, "Resume acknowledged Pi account cutover"), ("resume.prepare", self.prepare_resume, "Validate Pi resume before stopping"), ("resume.recover", self.recover_resume, "Recover stopped Pi on the intended account"), ("settings", self.settings, "Pi runtime settings"),
                                 ("configure", self.configure, "Configure Pi runtime argv")]:
             ext.command("pi."+name, title)(self.guarded(fn))
         def initialize():
@@ -117,12 +117,12 @@ class Pi:
                 testing_notice(self.ext, "testing plugin loading unconfirmed for this RPC launch (NOT VERIFIED); no launch retry")
         return answer
 
-    def _resume_parameters(self,args,*,require_exit):
+    def _resume_parameters(self,args,*,require_exit,recovery=False):
         """Shared read-only admission for pre-stop preparation and real resume."""
         if not isinstance(args,dict) or set(args)!={'_claim'}:
             raise VqroError('Pi resume requires only its protected claim reference','invalid')
         claim=self.ext.invoke('accounts.claim.read',{'claim':args['_claim']})
-        if not isinstance(claim,dict) or claim.get('state')!='claimed' or claim.get('runtime')!='pi':
+        if not isinstance(claim,dict) or claim.get('state')!=('unknown' if recovery else 'claimed') or claim.get('runtime')!='pi':
             raise VqroError('acknowledged Pi restart claim required','forbidden')
         rows=self.ext.vqro.call('resource.list',{'id':claim['resource']}).get('resources',[])
         if len(rows)!=1: raise VqroError('old Pi process evidence unavailable','indeterminate')
@@ -162,6 +162,9 @@ class Pi:
                 'argv':[*runtime.get('bridge_argv',default_bridge()),'--',*native_argv],'env':env}
         cwd=session.get('cwd') or source.get('cwd')
         if isinstance(cwd,str) and cwd:params['cwd']=cwd
+        admission=self.ext.invoke('accounts.claim.resume.validate',{'claim':args['_claim'],**({'recovery':True} if recovery else {})})
+        if not isinstance(admission,dict) or admission.get('validated') is not True:
+            raise VqroError('protected Pi resume admission is unconfirmed','unavailable')
         return params
 
     def prepare_resume(self,args):
@@ -170,8 +173,14 @@ class Pi:
 
     def resume(self,args):
         """Finish one admitted restart only after confirmed graceful old exit."""
-        params=self._resume_parameters(args,require_exit=True)
-        consumed=self.ext.invoke('accounts.claim.resume.consume',{'claim':args['_claim']})
+        return self._launch_resume(args,recovery=False)
+
+    def recover_resume(self,args):
+        return self._launch_resume(args,recovery=True)
+
+    def _launch_resume(self,args,*,recovery):
+        params=self._resume_parameters(args,require_exit=True,recovery=recovery)
+        consumed=self.ext.invoke('accounts.claim.resume.consume',{'claim':args['_claim'],**({'recovery':True} if recovery else {})})
         if not isinstance(consumed,dict) or consumed.get('consumed') is not True:
             raise VqroError('Pi resume launch consumption unconfirmed; do not launch','indeterminate')
         try:

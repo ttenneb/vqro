@@ -3,11 +3,12 @@
   "summary":"Launch Pi RPC agents and configure their runtime arguments.",
   "description":"Adds New Pi agent and Pi runtime settings. New agents run through a bridge in a backend-owned terminal; no prompt is sent automatically. Turn it off to remove these launch/settings controls, not existing Pi processes. Agent controls are provided separately by the agents extension.",
   "requires":{"protocol":1,"client_features":["items","input","menu"]},
-  "provides":["command/pi.resume.prepare","command/pi.resume","command/pi.new","command/pi.settings","command/pi.configure","view/pi-runtimes","view/pi-settings","view/accounts-choice-pi-new","doc/settings/pi","doc/settings/agents",
+  "provides":["command/pi.resume.recover","command/pi.resume.prepare","command/pi.resume","command/pi.new","command/pi.settings","command/pi.configure","view/pi-runtimes","view/pi-settings","view/accounts-choice-pi-new","doc/settings/pi","doc/settings/agents",
               "ability/vqro.agents","view/agent-*"],
   "needs":[{"cap":"ability/vqro.terminals","suggest":"herdr","why":"Pi agents run in a backend terminal"}],
   "works_with":[{"cap":"command/accounts.claim.read","suggest":"accounts","without":"Protected same-conversation resume is unavailable"},
                 {"cap":"command/accounts.claim.resume.consume","suggest":"accounts","without":"Resume refuses before native launch"},
+                {"cap":"command/accounts.claim.resume.validate","suggest":"accounts","without":"Resume prevalidation refuses before stopping"},
                 {"cap":"command/accounts.claim.resume.result","suggest":"accounts","without":"Resume result remains uncertain; launch is never replayed"},
                 {"cap":"doc/settings/accounts-policy","suggest":"accounts","without":"New named-account choices default to ask"},
                 {"cap":"doc/settings/accounts","suggest":"accounts","without":"Shared native login and configuration remain unchanged"},
@@ -16,5 +17,5 @@
                 {"cap":"command/agents.show","suggest":"agents","without":"A new agent opens as its bridge terminal, not an agent panel"},
                 {"cap":"command/tabs.show","suggest":"tabs","without":"A new agent is not opened in a tab"}],
   "settings_command":"pi.settings",
-  "contributes":{"commands":["pi.resume.prepare","pi.resume","pi.new","pi.settings","pi.configure"],"keys":["Prefix a: new Pi agent"],"menu_items":["New Pi agent (the +◆ tab-bar button)"],"panels":["Pi runtimes"],"settings":["doc/settings/pi"]}
+  "contributes":{"commands":["pi.resume.recover","pi.resume.prepare","pi.resume","pi.new","pi.settings","pi.configure"],"keys":["Prefix a: new Pi agent"],"menu_items":["New Pi agent (the +◆ tab-bar button)"],"panels":["Pi runtimes"],"settings":["doc/settings/pi"]}
 }

@@ -590,18 +590,29 @@ class Cutovers:
         record['state'] = 'native_ready' if observed else 'unknown'
         self.write(value, revision)
 
-    def consume_resume(self,token):
-        """One owner-journal launch intent; never a second/private replay ledger."""
+    def _resume_admission(self,token,*,recovery):
+        """Shared read-only admission for preparation and atomic launch consumption."""
         caller=self.ext.caller() or {};principal=caller.get('principal')
         value,revision=self.read();record=value['claims'].get(token)
-        if record is None or record['runtime']!='pi' or record['state']!='claimed' or record['resume_launch'] is not None:
+        if record is None or record['runtime']!='pi' or record['state']!=('unknown' if recovery else 'claimed') or record['resume_launch'] is not None:
             raise VqroError('Pi resume launch already attempted or not authorized; never replay','conflict')
-        if record['automatic']:
+        if recovery:
+            self.authorization(False)  # A fresh owner action, never AUTO or a rearmed slot.
+        elif record['automatic']:
             if principal!='extension:accounts':raise VqroError('Pi resume requires the authenticated accounts invocation','forbidden')
         else:
             validate_claim_authority(self.ext,record,False)
             if principal!=record['authorization']['principal']:
                 raise VqroError('Pi resume caller does not match the recorded owner invocation','forbidden')
+        return value,revision,record,principal
+
+    def validate_resume(self,token,*,recovery=False):
+        self._resume_admission(token,recovery=recovery)
+        return {'validated':True}
+
+    def consume_resume(self,token,*,recovery=False):
+        """Consume the original slot once; NEVER reset an attempted/unknown launch."""
+        value,revision,record,principal=self._resume_admission(token,recovery=recovery)
         record['resume_launch']={'state':'claimed','principal':principal}
         self.write(value,revision)
         return {'consumed':True}

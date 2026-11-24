@@ -204,6 +204,19 @@ strategies** command now opens Accounts when invoked without save arguments.
 model/history/principal, runtime argv and original backend checks before quiesce.
 `pi.resume` repeats the same admission after confirmed old exit, then consumes its
 once-only launch intent. Preparation is not a promise of future backend acceptance.
+The same protected launch admission (including caller authority and unused slot)
+is checked read-only before stopping, then checked again by the consuming CAS.
+
+Post-stop failures report their known phase and retained native session reference.
+Accounts offers **Resume conversation on B** only for a failed Pi claim whose old
+exit is confirmed and whose original `resume_launch` slot is still unused. This is
+a fresh owner action, through `pi.resume.recover`, on the intended account B; it
+runs the same native guards and consumes that SAME slot once. It sends no input,
+creates no new switch claim, resets no budget/clock, and does not clear the failed
+switch fence. An attempted or UNKNOWN launch never gets a retry action. Session
+history is never read, rewritten or replayed by this workflow; recovery reuses its
+original native file reference. If native evidence/configuration is unavailable,
+recovery refuses plainly; the human may start new work explicitly from Accounts.
 
 Claude AUTO requires latest idle native episode, a complete empty vqro-owned input
 ledger, and a complete empty native background level at both checks. Native queue

@@ -31,7 +31,8 @@ class ResumeConsumption(unittest.TestCase):
         def invoke(name,args=None):
             if name=='pi.resume.prepare':return frontend.prepare_resume(args)
             if name=='accounts.claim.read':return journal.lookup(args['claim'])
-            if name=='accounts.claim.resume.consume':return journal.consume_resume(args['claim'])
+            if name=='accounts.claim.resume.validate':return journal.validate_resume(args['claim'],recovery=args.get('recovery') is True)
+            if name=='accounts.claim.resume.consume':return journal.consume_resume(args['claim'],recovery=args.get('recovery') is True)
             if name=='accounts.claim.resume.result':journal.resume_result(args['claim'],args['observed']);return {'recorded':True}
             return original(name,args)
         core.invoke=invoke
@@ -100,6 +101,27 @@ class ResumeConsumption(unittest.TestCase):
         with patch('pi.launch') as launch,self.assertRaises(VqroError):
             PiCutover(core).restart(dict(setup.args(False),_claim=token))
         self.assertEqual(stops,[]);self.assertTrue(source['available']);launch.assert_not_called()
+
+    def test_wrong_auto_invocation_refuses_before_stopping(self):
+        core,journal,frontend,token=self.fixture()
+        source=core.resources['r1'];source['available']=True;source.pop('exit');source['data']['agent']['lifecycle']='live'
+        core.caller_record={'principal':'owner','initiator':'owner'}
+        setup=PiPrepare();setup.setUp()
+        with patch('pi.launch') as launch,self.assertRaises(VqroError) as caught:
+            PiCutover(core).restart(dict(setup.args(),_claim=token))
+        self.assertEqual(caught.exception.kind,'forbidden');launch.assert_not_called()
+        self.assertFalse(any(method=='resource.invoke' for method,_ in core.calls))
+        self.assertTrue(source['available'])
+
+    def test_used_launch_slot_refuses_before_stopping(self):
+        core,journal,frontend,token=self.fixture()
+        source=core.resources['r1'];source['available']=True;source.pop('exit');source['data']['agent']['lifecycle']='live'
+        value,revision=journal.read();value['claims'][token]['resume_launch']={'state':'unknown','principal':'extension:accounts'}
+        journal.write(value,revision);setup=PiPrepare();setup.setUp()
+        with patch('pi.launch') as launch,self.assertRaises(VqroError):
+            PiCutover(core).restart(dict(setup.args(),_claim=token))
+        launch.assert_not_called();self.assertFalse(any(method=='resource.invoke' for method,_ in core.calls))
+        self.assertTrue(source['available'])
 
     def test_display_fence_is_separate_from_shared_native_membership(self):
         core,journal,frontend,token=self.fixture(automatic=False)
@@ -199,9 +221,9 @@ class ResumeConsumption(unittest.TestCase):
             if getattr(local,'consuming',False) and not getattr(local,'waited',False):
                 local.waited=True;barrier.wait(timeout=5)
             return result
-        def consuming(value):
+        def consuming(value,**kwargs):
             local.consuming=True
-            try:return consume(value)
+            try:return consume(value,**kwargs)
             finally:local.consuming=False
         journal.read=raced_read;journal.consume_resume=consuming
         def run():
