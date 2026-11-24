@@ -17,11 +17,14 @@ use tokio::time::Instant;
 
 pub struct Shared {
     pub state: Mutex<State>,
-    process: Mutex<Option<Process>>,
+    process: Mutex<Option<(u64, Process)>>,
+    restart_config: Mutex<Option<Arc<super::restart::Config>>>,
+    lifetime: Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
     pub changed: Notify,
     outgoing: Notify,
     effects: tokio::sync::Mutex<()>,
     generation: AtomicU64,
+    restart_in_progress: std::sync::atomic::AtomicBool,
     viewers: AtomicUsize,
     viewers_changed: Notify,
     retirement_failed: std::sync::atomic::AtomicBool,
@@ -31,6 +34,18 @@ pub struct Shared {
     pub name: String,
     pub instance: String,
 }
+#[cfg(test)]
+#[path = "runtime_restart_tests.rs"]
+mod restart_tests;
+
+struct RestartGuard<'a>(&'a Shared);
+impl Drop for RestartGuard<'_> {
+    fn drop(&mut self) {
+        self.0.restart_in_progress.store(false, Ordering::SeqCst);
+        self.0.wake();
+    }
+}
+
 fn rejected(kind: &str, message: &str) -> Result<Outcome, ProviderError> {
     Ok(Outcome::Rejected {
         kind: kind.into(),
@@ -65,10 +80,13 @@ impl Shared {
         Arc::new(Self {
             state: Mutex::new(State::new(boot)),
             process: Mutex::new(None),
+            restart_config: Mutex::new(None),
+            lifetime: Mutex::new(None),
             changed: Notify::new(),
             outgoing: Notify::new(),
             effects: tokio::sync::Mutex::new(()),
             generation: AtomicU64::new(1),
+            restart_in_progress: std::sync::atomic::AtomicBool::new(false),
             viewers: AtomicUsize::new(0),
             viewers_changed: Notify::new(),
             retirement_failed: std::sync::atomic::AtomicBool::new(false),
@@ -79,8 +97,44 @@ impl Shared {
             instance,
         })
     }
+    pub fn restarting(&self) -> bool {
+        self.restart_in_progress.load(Ordering::SeqCst)
+    }
     pub fn process(&self) -> Option<Process> {
-        self.process.lock().unwrap().clone()
+        self.process
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(generation, _)| *generation == self.generation.load(Ordering::SeqCst))
+            .map(|(_, process)| process.clone())
+    }
+    pub fn configure_restart(&self, config: super::restart::Config) -> Result<(), &'static str> {
+        config.validate()?;
+        *self.restart_config.lock().unwrap() = Some(Arc::new(config));
+        let mut state = self.state.lock().unwrap();
+        state.restart_configured = true;
+        state.refresh();
+        Ok(())
+    }
+    pub fn set_lifetime(&self, lifetime: tokio::sync::watch::Receiver<bool>) {
+        *self.lifetime.lock().unwrap() = Some(lifetime);
+    }
+    fn ending(&self) -> bool {
+        self.lifetime
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|life| *life.borrow() || life.has_changed().is_err())
+    }
+    async fn lifetime_ending(&self) {
+        let receiver = self.lifetime.lock().unwrap().clone();
+        if let Some(mut receiver) = receiver {
+            if !*receiver.borrow() {
+                let _ = receiver.changed().await;
+            }
+        } else {
+            std::future::pending::<()>().await;
+        }
     }
     pub fn facts(&self) -> Value {
         self.state.lock().unwrap().facts(&self.name, &self.instance)
@@ -114,22 +168,35 @@ impl Shared {
             Arc::new(ClaudeCodec),
             Arc::new(move |event| {
                 if let Some(shared) = weak.upgrade() {
-                    if shared.generation.load(Ordering::SeqCst) != generation {
-                        return;
-                    }
-                    shared.state.lock().unwrap().observe(&event);
-                    shared.wake();
+                    shared.observe_native(generation, &event);
                 }
             }),
         )
         .await?;
-        *self.process.lock().unwrap() = Some(process.clone());
+        *self.process.lock().unwrap() = Some((generation, process.clone()));
+        self.wake();
         Ok(process)
     }
+    fn observe_native(&self, generation: u64, event: &crate::native_process::Event) {
+        let mut state = self.state.lock().unwrap();
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        state.observe(event);
+        drop(state);
+        self.wake();
+    }
     pub async fn initialize(self: Arc<Self>) {
+        let generation = self.generation.load(Ordering::SeqCst);
         let Some(native) = self.process() else {
             return;
         };
+        if !self.initialize_primary(&native, generation).await {
+            return;
+        }
+        self.probe_background(&native, generation).await;
+    }
+    async fn initialize_primary(&self, native: &Process, generation: u64) -> bool {
         // No prompt, model request, transcript scan, custom system prompt or settings-source override.
         let result = native
             .call(
@@ -138,8 +205,11 @@ impl Shared {
                 Duration::from_secs(15),
             )
             .await;
-        let probe = {
+        let ready = {
             let mut state = self.state.lock().unwrap();
+            if self.generation.load(Ordering::SeqCst) != generation {
+                return false;
+            }
             match result {
                 Ok(reply) if reply.success => state.initialized(&reply.data),
                 _ => {
@@ -148,9 +218,18 @@ impl Shared {
                     state.refresh();
                 }
             }
-            state.literal_supported() && !self.background_probe.swap(true, Ordering::SeqCst)
+            state.ready
         };
         self.wake();
+        ready
+    }
+    async fn probe_background(&self, native: &Process, generation: u64) {
+        let probe = {
+            let state = self.state.lock().unwrap();
+            self.generation.load(Ordering::SeqCst) == generation
+                && state.literal_supported()
+                && !self.background_probe.swap(true, Ordering::SeqCst)
+        };
         if probe {
             // The pinned native protocol emits a COMPLETE background level behind repeated
             // initialize, even when empty. Until that FRAME arrives, background remains unknown.
@@ -172,11 +251,20 @@ impl Shared {
             let changed = self.outgoing.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let response = self.state.lock().unwrap().outgoing.pop_front();
+            let slot = self.process.lock().unwrap().clone();
+            let Some((generation, native)) = slot else {
+                changed.await;
+                continue;
+            };
+            let response = {
+                let mut state = self.state.lock().unwrap();
+                if self.generation.load(Ordering::SeqCst) == generation {
+                    state.outgoing.pop_front()
+                } else {
+                    None
+                }
+            };
             if let Some(response) = response {
-                let Some(native) = self.process() else {
-                    break;
-                };
                 if native
                     .notify_guarded(
                         "control_response",
@@ -188,6 +276,9 @@ impl Shared {
                     .is_err()
                 {
                     let mut state = self.state.lock().unwrap();
+                    if self.generation.load(Ordering::SeqCst) != generation {
+                        continue;
+                    }
                     state.incomplete.insert("requests".into());
                     state.refresh();
                     drop(state);
@@ -237,6 +328,7 @@ impl Shared {
             }
         }
         match effect.op.as_str() {
+            "claude.restart" => self.restart_owned(provider, effect, &native).await,
             "agent.send" => {
                 let owner = provider
                     .call("workspace.get", json!({"key":"doc/principals/owner"}))
@@ -364,6 +456,157 @@ impl Shared {
                 }
             }
             _ => rejected("unsupported", "agent operation is not declared"),
+        }
+    }
+    async fn restart_owned(
+        self: &Arc<Self>,
+        provider: &Provider,
+        effect: &EffectRequest,
+        native: &Process,
+    ) -> Result<Outcome, ProviderError> {
+        let request = match super::restart::Restart::parse(&effect.args) {
+            Ok(v) => v,
+            Err(e) => return rejected("invalid", e),
+        };
+        let config = match self.restart_config.lock().unwrap().clone() {
+            Some(v) => v,
+            None => return rejected("unsupported", "private restart helper is not configured"),
+        };
+        let host = provider.registration()["host"].as_str(); // authenticated registration, same binding as snapshot.providers[name].host
+        {
+            let state = self.state.lock().unwrap();
+            if let Err(e) = request.guard(&state, host) {
+                return rejected("stale", e);
+            }
+        }
+        self.restart_in_progress.store(true, Ordering::SeqCst);
+        let _restarting = RestartGuard(self);
+        self.wake();
+        let preflight = tokio::select! {biased;_=self.lifetime_ending()=>return rejected("unavailable","bridge lifetime ended before owned stop"),result=config.preflight(&request,effect.deadline)=>result};
+        if preflight.is_err() {
+            return rejected(
+                "unavailable",
+                "private preflight not confirmed ready; old process unchanged",
+            );
+        }
+        {
+            let mut state = self.state.lock().unwrap();
+            if let Err(e) = request.guard(&state, host) {
+                return rejected("stale", e);
+            }
+            if self.ending() {
+                return rejected("unavailable", "bridge lifetime ended before owned stop");
+            }
+            if Instant::now() >= effect.deadline {
+                return rejected("timeout", "deadline before owned stop");
+            }
+            // The admission mutex is held by invoke. Recheck-and-stop while holding the same state
+            // lock as native observations; consume the episode before any later retry can reuse it.
+            state.availability.invalidate_episode();
+            state.ready = false;
+            state.refresh();
+            native.stop();
+        }
+        self.wake();
+        if tokio::time::timeout_at(
+            effect.deadline.min(Instant::now() + Duration::from_secs(5)),
+            native.exited(),
+        )
+        .await
+        .is_err()
+        {
+            return Err(ProviderError::new(
+                "backend",
+                "old owned exit unconfirmed; no new exec and no retry",
+            ));
+        }
+        if self.ending() {
+            return Err(ProviderError::new(
+                "backend",
+                "old process stopped; bridge lifetime ended, no replacement",
+            ));
+        }
+        let tail = tokio::time::timeout_at(
+            effect.deadline.min(Instant::now() + Duration::from_secs(2)),
+            native.drained(),
+        )
+        .await;
+        let generation = {
+            let mut state = self.state.lock().unwrap();
+            let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+            state.replace_owned(request.account_value(), generation);
+            if !matches!(tail, Ok(crate::native_process::Drain::Eof)) {
+                state.incomplete.insert("prior_native_tail".into());
+            }
+            generation
+        };
+        self.background_probe.store(false, Ordering::SeqCst);
+        self.spawned.store(false, Ordering::SeqCst);
+        self.wake();
+        if self.ending() {
+            return Err(ProviderError::new(
+                "backend",
+                "old process stopped; bridge lifetime ended, no replacement",
+            ));
+        }
+        if Instant::now() >= effect.deadline {
+            return Err(ProviderError::new(
+                "backend",
+                "old owned process stopped; deadline before replacement, no retry",
+            ));
+        }
+        let launch = config.launch(&request);
+        let next = self
+            .spawn_native(&launch, &config.cwd, &config.environment)
+            .await
+            .map_err(|_| {
+                ProviderError::new(
+                    "backend",
+                    "old process stopped; replacement launch not confirmed, no retry",
+                )
+            })?;
+        let initialized = tokio::select! {result=tokio::time::timeout_at(effect.deadline,self.initialize_primary(&next,generation))=>result.unwrap_or(false),_=self.lifetime_ending()=>{next.stop();false}};
+        if !initialized {
+            return Err(ProviderError::new(
+                "backend",
+                "replacement control initialization not confirmed; no retry or input replay",
+            ));
+        }
+        // Best-effort metadata level only, bounded by the SAME effect deadline. No extra task or
+        // supervisor survives the request; unknown background still refuses future default restart.
+        tokio::select! {_=tokio::time::timeout_at(effect.deadline,self.probe_background(&next,generation))=>{},_=self.lifetime_ending()=>{next.stop();return Err(ProviderError::new("backend","bridge lifetime ended after replacement start"));}};
+        if self.ending() {
+            next.stop();
+            return Err(ProviderError::new(
+                "backend",
+                "bridge lifetime ended after replacement start",
+            ));
+        }
+        let data = {
+            let state = self.state.lock().unwrap();
+            if !state.ready
+                || !next.alive()
+                || state
+                    .session
+                    .as_deref()
+                    .is_some_and(|id| id != request.session)
+            {
+                return Err(ProviderError::new(
+                    "backend",
+                    "replacement refused initialization/resume or observed a different session",
+                ));
+            }
+            let mut data = json!({"started":true,"requested_session":request.session,"resume_confirmed":state.session.as_deref()==Some(request.session.as_str()),"account":request.target,"epoch":state.epoch()});
+            if let Some(session) = &state.session {
+                data["session"] = json!(session);
+            }
+            data
+        };
+        self.wake();
+        if data["resume_confirmed"] == true {
+            Ok(Outcome::Observed(Some(data)))
+        } else {
+            Ok(Outcome::Accepted(Some(data)))
         }
     }
     pub fn open(self: &Arc<Self>, open: crate::provider_client::OpenRequest) {

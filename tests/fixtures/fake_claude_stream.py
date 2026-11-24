@@ -5,6 +5,12 @@ import os
 import sys
 
 SESSION = "synthetic-session-1"
+RESUME = sys.argv[sys.argv.index('--resume')+1] if '--resume' in sys.argv else None
+INIT_SESSION = os.environ.get('FAKE_CLAUDE_INIT_SESSION')
+if RESUME and INIT_SESSION == 'same':
+    SESSION = RESUME
+elif RESUME and INIT_SESSION == 'wrong':
+    SESSION = 'synthetic-wrong-session'
 COUNT = 0
 ACTIVE = None
 PENDING = {}
@@ -98,6 +104,9 @@ def receive_control(frame):
     request_id = frame["request_id"]
     if request["subtype"] == "initialize":
         INITIALIZED += 1
+        if RESUME and INIT_SESSION in ('same', 'wrong') and INITIALIZED == 1:
+            emit({'type':'system','subtype':'init','uuid':'synthetic-resume-init','session_id':SESSION,
+                  'model':'synthetic-model','tools':[],'slash_commands':[],'skills':[],'mcp_servers':[],'plugins':[]})
         control(request_id, {"claude_code_version": os.environ.get("FAKE_CLAUDE_VERSION", "2.1.329"),
                              "commands": [], "agents": [], "models": [], "output_styles": [], "capabilities": []})
         if INITIALIZED > 1:

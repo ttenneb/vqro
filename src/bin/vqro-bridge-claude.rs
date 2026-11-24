@@ -21,6 +21,9 @@ struct Args {
     /// Explicit single-endpoint launcher tag; never a native tool-env standing claim.
     #[arg(long)]
     endpoint_principal: Option<String>,
+    /// Private execution-host interpreter/helper argv as a JSON array; no public secret resolver.
+    #[arg(long)]
+    restart_helper: Option<String>,
     #[arg(last = true, required = true)]
     native: Vec<String>,
 }
@@ -101,6 +104,7 @@ async fn run(args: Args) -> Result<()> {
     let argv = launch::controlled(args.native).map_err(anyhow::Error::msg)?;
     let mut life = lifetime()?;
     let shared = Shared::new(boot, name.clone(), instance.clone());
+    shared.set_lifetime(life.clone());
     let account = launcher_account::parse(std::env::var("VQRO_ACCOUNT").ok().as_deref())
         .map_err(anyhow::Error::msg)?;
     {
@@ -111,13 +115,37 @@ async fn run(args: Args) -> Result<()> {
     let env: HashMap<_, _> = std::env::vars().collect();
     // A restart/resume must not request the native interrupted-turn rescue path. A later explicit
     // continuation is a NEW attributed delivery, never an automatic replay of old user content.
-    let native = shared
+    if let Some(helper) = args.restart_helper {
+        let helper: Vec<String> =
+            serde_json::from_str(&helper).context("invalid private restart helper argv")?;
+        shared
+            .configure_restart(vqro::claude_code::restart::Config {
+                helper,
+                native: argv.clone(),
+                cwd: cwd.clone(),
+                environment: env.clone(),
+            })
+            .map_err(anyhow::Error::msg)?;
+    }
+    shared
         .spawn_native(&argv, &cwd, &env)
         .await
         .context("cannot launch explicit native Claude executable")?;
     let outgoing = tokio::spawn(shared.clone().drain_outgoing());
     let mut failures = 0u32;
-    while native.alive() && !*life.borrow() {
+    while (shared.restarting() || shared.process().is_some_and(|native| native.alive()))
+        && !*life.borrow()
+    {
+        let changed = shared.changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        if shared.restarting() {
+            tokio::select! {_=changed=>{},_=life.changed()=>break};
+            continue;
+        }
+        let Some(native) = shared.process() else {
+            break;
+        };
         let mut config = Config::new(
             &name,
             &instance,
@@ -143,6 +171,9 @@ async fn run(args: Args) -> Result<()> {
         };
         let connected = tokio::select! {result=connect=>Some(result),_=life.changed()=>None,_=native.exited()=>None};
         let Some(connected) = connected else {
+            if shared.restarting() && !*life.borrow() {
+                continue;
+            }
             break;
         };
         match connected {
@@ -159,10 +190,24 @@ async fn run(args: Args) -> Result<()> {
                         let initialize = tokio::spawn(shared.clone().initialize());
                         let mut ending = false;
                         loop {
+                            let changed = shared.changed.notified();
+                            tokio::pin!(changed);
+                            changed.as_mut().enable();
+                            if shared.restarting() {
+                                tokio::select! {
+                                    request=requests.recv()=>match request{Some(request)=>shared.serve_request(&provider,request).await,None=>break},
+                                    _=changed=>{},
+                                    _=life.changed()=>{if let Some(active)=shared.process(){active.stop();let _=tokio::time::timeout(Duration::from_secs(5),active.exited()).await;ending=true;}break;}
+                                }
+                                continue;
+                            }
+                            let Some(active) = shared.process() else {
+                                break;
+                            };
                             tokio::select! {
                                 request=requests.recv()=>match request{Some(request)=>shared.serve_request(&provider,request).await,None=>break},
-                                _=native.exited()=>{ending=true;break;},
-                                _=life.changed()=>{native.stop();let _=tokio::time::timeout(Duration::from_secs(5),native.exited()).await;ending=true;break;},
+                                _=active.exited()=>{if shared.restarting()||shared.process().is_some_and(|current|current.alive()){continue;}ending=true;break;},
+                                _=life.changed()=>{active.stop();let _=tokio::time::timeout(Duration::from_secs(5),active.exited()).await;ending=true;break;},
                             }
                         }
                         publish.abort();
@@ -185,24 +230,33 @@ async fn run(args: Args) -> Result<()> {
             Err(error) => {
                 failures += 1;
                 if matches!(error.kind.as_str(), "forbidden" | "invalid" | "unsupported") {
-                    native.stop();
+                    if let Some(current) = shared.process() {
+                        current.stop();
+                    }
                     break;
                 }
             }
         }
         if failures >= 10 {
-            native.stop();
+            if let Some(current) = shared.process() {
+                current.stop();
+            }
             break;
         }
-        if native.alive() && !*life.borrow() {
-            tokio::select! {_=tokio::time::sleep(Duration::from_millis(250))=>{},_=life.changed()=>break,_=native.exited()=>break}
+        if let Some(current) = shared
+            .process()
+            .filter(|current| current.alive() && !*life.borrow())
+        {
+            tokio::select! {_=tokio::time::sleep(Duration::from_millis(250))=>{},_=life.changed()=>break,_=current.exited()=>break}
         }
     }
-    if *life.borrow() {
-        native.stop();
+    if let Some(current) = shared.process() {
+        if *life.borrow() {
+            current.stop();
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(5), current.exited()).await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), current.drained()).await;
     }
-    let _ = tokio::time::timeout(Duration::from_secs(5), native.exited()).await;
-    let _ = tokio::time::timeout(Duration::from_secs(2), native.drained()).await;
     outgoing.abort();
     Ok(())
 }

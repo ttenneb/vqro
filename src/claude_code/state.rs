@@ -16,6 +16,7 @@ pub struct State {
     pub startup: Startup,
     pub availability: Availability,
     pub ready: bool,
+    pub restart_configured: bool,
     pub session: Option<String>,
     retired_session: Option<String>,
     pub completion: Option<Value>,
@@ -67,6 +68,7 @@ impl State {
             startup: Startup::new(),
             availability: Availability::default(),
             ready: false,
+            restart_configured: false,
             session: None,
             retired_session: None,
             completion: None,
@@ -142,6 +144,9 @@ impl State {
             caps["agent.send"] = json!({"modes":{"admit":{}},"content":{"types":["text"],"shape":"ordered","max_bytes":65536},
                 "literal":"always","origin":[{"as":"user","role":"user"},{"as":"attributed_user","role":"user","frame":"sender_header"}],
                 "correlation":"acceptance","handled":"none","keys":null,"guards":{"session":"adapter","run":"none"},"receipts":{"retain":256}});
+        }
+        if self.restart_configured && (upper || (self.ready && self.literal_supported())) {
+            caps["claude.restart"] = json!({"v":0,"session":"resume","background":"refuse_unless_explicit_loss","allow_background_loss":true});
         }
         caps
     }
@@ -277,6 +282,26 @@ impl State {
             .filter(|s| s.len() <= 128)
             .map(str::to_owned);
         self.startup.initialize(data);
+        self.refresh();
+    }
+    pub fn background_known_empty(&self) -> bool {
+        self.background_revision > 0 && self.background.as_ref().is_some_and(Vec::is_empty)
+    }
+    /// Only after the runtime has independently observed old-child exit. No requested session is
+    /// written as observed; the new child must supply its own native session readback.
+    pub fn replace_owned(&mut self, account: Value, generation: u64) {
+        self.reset();
+        self.requests = Requests::default();
+        self.generation = generation;
+        self.ready = false;
+        self.exit = None;
+        self.end_ready = false;
+        self.version = None;
+        self.native_caps.clear();
+        self.background = None;
+        self.background_revision = 0;
+        self.account = Some(account);
+        self.incomplete.clear();
         self.refresh();
     }
     fn reset(&mut self) {

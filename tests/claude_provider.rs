@@ -9,6 +9,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHal
 use tokio::sync::mpsc::UnboundedReceiver;
 use vqro::claude_code::runtime::Shared;
 use vqro::provider_client::{Config, Provider, Request};
+#[path = "claude_provider/restart.rs"]
+mod restart;
 struct Core {
     r: BufReader<ReadHalf<DuplexStream>>,
     w: WriteHalf<DuplexStream>,
@@ -128,7 +130,7 @@ async fn registered_with_timeout(
     let register = core.recv().await;
     assert_eq!(register["method"], "provider.register");
     assert_eq!(register["params"]["role"], "runtime");
-    core.reply(&register,json!({"provider":"claude-fixture","generation":7,"limits":{"stream_window_bytes":262144,"max_record_bytes":1048576}})).await;
+    core.reply(&register,json!({"provider":"claude-fixture","generation":7,"host":"r/fixture","limits":{"stream_window_bytes":262144,"max_record_bytes":1048576}})).await;
     let (p, rx) = connect.await.unwrap().unwrap();
     let sync_provider = p.clone();
     let facts = shared.facts();

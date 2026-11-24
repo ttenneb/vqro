@@ -118,13 +118,16 @@ rights, proves no tool-process attribution and does not declare `agent.tool_prin
 their own standing/evidence (§2.4). Coordination already reads this endpoint fact separately from the core's
 terminal-launch `resource.principal` marker; neither should be guessed when absent.
 
-**Optional configured account.** `data.agent.account? {id, label, provider?, kind, sources}` names the account/profile
+**Optional configured account.** `data.agent.account? {id, label?, provider?, kind, sources}` names the account/profile
 selected by the launcher, not an authenticated user, verified subscription, billing result or remaining allowance.
 `id` is an opaque launcher-registry identifier (1–64 characters), distinct from a provider's native account/workspace
-ID; `label` is a printable display name (1–128 characters), and optional `provider` is the configured provider ID
+ID; `label`, when known, is a printable display name (1–128 characters), and optional `provider` is the configured provider ID
 (1–64 characters). `kind` is the configured `subscription | api_key` choice, open for forward compatibility: unknown
 kinds render as unknown, not subscription. `sources` maps each supplied field (`id`, `label`, `provider`, `kind`) to
-its evidence source; launcher-configured fields carry `"vqro:launcher"`. These fields are launch configuration, not
+its evidence source; launcher-configured fields carry `"vqro:launcher"`. An explicit backend-owned restart may
+publish only known configured fields (`id`, `provider`, `kind`) with source `"vqro:restart"` and omit an unknown label.
+Clients resolve a display label from the accounts registry by id rather than carrying the previous account's label
+or inventing a target label. These fields are selected configuration, not
 native authentication readback, and do not change when someone signs in/out inside the runtime. A consumer must not
 use them as proof of live credential identity or entitlement. No token, credential, native profile contents or
 profile path belongs in this fact. The bundled launchers pass only this bounded metadata to their bridges; an

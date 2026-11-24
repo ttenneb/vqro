@@ -3,6 +3,7 @@ pub mod availability;
 pub mod contract;
 pub mod launch;
 pub mod requests;
+pub mod restart;
 pub mod runtime;
 pub mod startup;
 pub mod state;
