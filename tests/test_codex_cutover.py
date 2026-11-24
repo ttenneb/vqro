@@ -71,7 +71,7 @@ class Ext:
                 if self.quota.get(ident) is True:send['native_included_usage']=True
                 else:send.pop('native_included_usage',None)
             return {'outcome':'observed','data':{'quiescent':True,'operation':args['args']['args'].get('operation'),
-                'account_confirmed':True,'resumed':True,'released':self.released,'account':account,
+                'account_confirmed':True,'resumed':True,'released':self.released,'aborted':True,'account':account,
                 'prepared_ticket':'prepared-'+args['resource']+'-'+str(self.counter),
                 'admissions':[{'session':'thread-'+args['resource'],'epoch':'resumed-'+args['resource'],'caps_rev':1,'expires_at_ms':int(time.time()*1000)+30000}] if op=='_account.release' and self.quota.get(ident) is True else [],
                 'ordinary_usage_allowed':self.quota.get(ident),'observed_at_ms':int(time.time()*1000),'reset_at_ms':None,'source':'codex.account/rateLimits',
@@ -284,6 +284,23 @@ class Tests(unittest.TestCase):
                 names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
                 self.assertEqual(names.count('_account.restore'),2);self.assertEqual(names.count('_account.release'),2)
                 self.assertNotIn('_account.abort',names)
+    def test_zero_effect_after_final_authority_refusal_requires_all_abort_acks(self):
+        for uncertain_abort in (False,True):
+            with self.subTest(uncertain_abort=uncertain_abort):
+                ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p)
+                def hook(op,_):
+                    if op=='_account.prepare_switch':ext.consent={'setups':{}}
+                    if uncertain_abort and op=='_account.abort':raise VqroError('unknown local abort','indeterminate')
+                ext.hook=hook
+                if uncertain_abort:
+                    with self.assertRaises(VqroError):c.cutover(args)
+                else:
+                    result=c.cutover(args)
+                    self.assertEqual(result['outcome'],'rejected');self.assertEqual(result['attempted_targets'],[])
+                    self.assertFalse(result['fenced']);self.assertFalse(result['continuation_allowed'])
+                names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
+                self.assertNotIn('_account.switch',names);self.assertEqual(names.count('_account.abort'),2)
+                self.assertNotIn('_account.resume',names)
     def test_prepare_is_readonly_and_native_episode_not_commonhash(self):
         ext=Ext();p=Cutover(ext).prepare(self.args())
         self.assertEqual(p['native_episode'],'native-turn');self.assertEqual(len(p['affected']),2)
@@ -314,8 +331,9 @@ class Tests(unittest.TestCase):
     def test_auto_requires_explicit_setup_consent_manual_offer_does_not(self):
         ext=Ext();ext.consent={'setups':{}};c=Cutover(ext)
         p=c.prepare(self.args());self.assertFalse(p['automatic_allowed'])
-        with self.assertRaises(VqroError) as error:c.cutover(self.claimed(ext,p))
-        self.assertEqual(error.exception.kind,'offer_required')
+        result=c.cutover(self.claimed(ext,p))
+        self.assertEqual(result['outcome'],'rejected');self.assertEqual(result['attempted_targets'],[])
+        self.assertFalse(result['fenced']);self.assertEqual(result['reason'],'offer_required')
         self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
         p=c.prepare(dict(self.args(),automatic=False));self.assertFalse(p['automatic_allowed'])
     def test_group_fenced_before_switches_and_never_sends_continuation(self):
@@ -436,7 +454,8 @@ class Tests(unittest.TestCase):
         self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
     def test_notify_policy_revocation_prevents_any_native_restart(self):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p);ext.policy['blocked']='notify'
-        with self.assertRaises(VqroError):c.cutover(args)
+        result=c.cutover(args)
+        self.assertEqual(result['outcome'],'rejected');self.assertEqual(result['attempted_targets'],[]);self.assertFalse(result['fenced'])
         self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
     def test_policy_revocation_during_readonly_native_discovery_aborts_before_switch(self):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p)

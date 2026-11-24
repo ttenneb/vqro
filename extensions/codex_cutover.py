@@ -335,7 +335,10 @@ class Cutover:
         if not text(args.get('_claim')): fail('a durable common claim is required', 'forbidden')
         prepared = self._prepare(args)
         claim = self.ext.vqro.call('command.invoke', {'name': 'accounts.claim.read', 'args': {'claim': args['_claim']}})
-        plan = self._validate_claim(args,prepared,claim)
+        try:plan = self._validate_claim(args,prepared,claim)
+        except VqroError as error:
+            if error.kind=='offer_required':return self._zero_effect_result(error.kind)
+            raise
         rows = {r['id']: r for r in self.resources()}
         hosts = {}
         for member in prepared['affected']:
@@ -363,7 +366,8 @@ class Cutover:
                         if attempted:
                             cleaning=True
                             return self._walk_result(self._restore_revoked(fenced,hosts,payload,prepared,issue),attempted,blocked,'offer')
-                        fail('protected switch authority changed before dispatch','stale')
+                        cleaning=True
+                        return self._abort_unattempted(fenced,payload,issue)
                     if not dispatched:attempted.append(target['id'])
                     dispatched = True
                     preparing=False
@@ -427,6 +431,20 @@ class Cutover:
         if disposition=='ready' and any('admission_caps_rev' not in member for member in result['affected']):disposition='offer'
         if not issue and self._walk_issue(args,claim,plan,final_index):result.update(restored_only=True,continuation_allowed=False)
         return self._walk_result(result,attempted,blocked,disposition)
+
+    @staticmethod
+    def _zero_effect_result(reason):
+        return dict(outcome='rejected',attempted_targets=[],fenced=False,continuation_allowed=False,reason=reason)
+
+    def _abort_unattempted(self,fenced,payload,reason):
+        failed=False
+        for row,_ in fenced:
+            try:
+                result=self._invoke(row,'_account.abort',payload)
+                if result.get('aborted') is not True:failed=True
+            except Exception:failed=True
+        if failed:fail('local fence cleanup unconfirmed; no zero-effect release acknowledgement','indeterminate')
+        return self._zero_effect_result(reason)
 
     def _effect_issue(self,args,claim,target_index):
         try:
