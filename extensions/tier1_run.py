@@ -12,6 +12,7 @@ inert, and one line says why: the human is never blocked. Stdlib only; no state 
 """
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -94,7 +95,10 @@ def main(argv):
     if why:
         print(f"vqro tier1: starting {command[0]} without its inbox plugin: {why}.", file=sys.stderr, flush=True)
     try:
-        os.execvpe(command[0], command, env)
+        # Windows execvpe forwards raw strings to CRT, unlike Popen's argv
+        # encoding. Keep the explicit executable and POSIX argv unchanged.
+        encoded = [subprocess.list2cmdline([argument]) for argument in command] if os.name == 'nt' else command
+        os.execvpe(command[0], encoded, env)
     except OSError as error:
         print(f"vqro tier1: cannot start {command[0]}: {error}", file=sys.stderr)
         return 127

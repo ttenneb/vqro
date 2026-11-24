@@ -215,4 +215,3 @@ class ClaudeCutover:
         if 'session' in data:
             member['session'] = data['session']  # native observation only, never requested-session substitution
         return {**result, **member, 'affected': [member], 'notice': notice}
-

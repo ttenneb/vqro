@@ -87,8 +87,11 @@ identity. Cross-runtime account IDs refuse in registry selection.
 
 Tier1 Claude named binding is an approved follow-up; its ordinary shared-login
 launch remains (`tests/test_tier1.py::test_claude_launch_wires_hooks_for_that_launch_only`).
-The standalone keychain helper remains unchanged. Credential entry/sign-in is a
-separate explicit action, not evidence that a subsequent launcher binds it.
+The standalone keychain helper retains API-key operations and was extended with
+an explicit Claude subscription-token kind; it is not wired into named new
+launches. Its execution-host exec boundary preserves Windows CRT arguments.
+Credential entry/sign-in is a separate explicit action, not evidence that a
+subsequent launcher binds it.
 
 `pi.resume` is not a free-form new launcher: it accepts only an acknowledged
 subscription claim, consumes the protected launch intent once, and requires exact

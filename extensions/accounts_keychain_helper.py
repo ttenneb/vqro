@@ -9,6 +9,7 @@ import argparse
 import getpass
 import json
 import os
+import subprocess
 import sys
 import uuid
 import warnings
@@ -40,7 +41,10 @@ def launch(handle, provider, argv, *, store, environment=None, execute=os.execvp
     secret = store.retrieve(handle)
     env[target_env] = secret.reveal()
     try:
-        execute(argv[0], argv, env)  # exactly once; no shell exports or core env RPC
+        # CRT exec joins raw elements on Windows; encode each argument exactly
+        # once, preserving the explicit program and the original POSIX argv.
+        encoded = [subprocess.list2cmdline([argument]) for argument in argv] if os.name == 'nt' else argv
+        execute(argv[0], encoded, env)  # exactly once; no shell exports or core env RPC
     except OSError:
         raise KeychainError('unavailable') from None
     finally:
