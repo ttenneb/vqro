@@ -131,7 +131,10 @@ loses known direct-root foreground evidence, a bounded sticky witness still bloc
 It clears only with a NEW owned native process: a background-only level or one unmatched terminal cannot prove
 that every omitted foreground task ended. Same-process conversation reset does not clear it. Terminal/run/alias
 history is retained rather than evicted and silently reopened by late frames; this may conservatively require
-closing/relaunching the bridge after foreground overflow, not an automatic probe or retry. Nested work under a known background parent
+closing/relaunching the bridge after foreground overflow, not an automatic probe or retry. Once tripped,
+automatic restart/cutover for that agent is refused until its process is replaced another way; the agent pane
+retains a bounded notice naming the reason (task list full, identity unavailable or generation unknown).
+A future complete native foreground inventory could support safe clearing, but no such API is assumed here. Nested work under a known background parent
 is not inferred to be root foreground, and unknown ownership is never guessed. Known child/unknown question
 scope survives context-free changed snapshots in both pending and RECENT records until native settlement.
 No child endpoint/principal/inbox or send/resume/close is invented.

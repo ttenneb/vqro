@@ -283,6 +283,15 @@ impl State {
         if self.restart_configured && self.journal.entity("notice", "restart-lifetime").is_none() {
             self.put("notice","restart-lifetime",json!({"text":"During restart, EOF or a handled signal waits behind earlier admitted effects, then stops the current owned child. Each effect has its absolute deadline; preflight is limited to 35 s. Stop is not immediate under contention; OS spawn cannot be pre-empted. After end publication, no new input or child is dispatched."}));
         }
+        if let Some(reason) = self.work.foreground_loss_reason() {
+            if self
+                .journal
+                .entity("notice", "foreground-work-loss")
+                .is_none()
+            {
+                self.put("notice","foreground-work-loss",json!({"text":format!("restart blocked: foreground work may be running ({reason}). Automatic restart/cutover is refused until this process is replaced another way. Close and relaunch this agent to recover.")}));
+            }
+        }
         self.changed += 1;
     }
     pub fn initialized(&mut self, data: &Value) {

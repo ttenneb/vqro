@@ -28,7 +28,7 @@ pub struct Work {
     pub incomplete: bool,
     // Lost permission evidence is not merely display truncation. No complete foreground
     // inventory exists here: retain this bounded witness until a NEW native process.
-    unrepresented_root_foreground: bool,
+    unrepresented_root_foreground: Option<&'static str>,
 }
 pub fn native_id(value: &Value) -> Option<&str> {
     value
@@ -227,11 +227,17 @@ impl Work {
             && (frame["task_type"] == "local_agent" || frame["subagent_type"].is_string());
         let Some(native) = native_id(&frame["task_id"]) else {
             self.incomplete = true;
-            self.unrepresented_root_foreground |= known_root_foreground;
+            if known_root_foreground {
+                self.unrepresented_root_foreground
+                    .get_or_insert("foreground identity unavailable");
+            }
             return vec![];
         };
         if !self.ensure(native) {
-            self.unrepresented_root_foreground |= known_root_foreground;
+            if known_root_foreground {
+                self.unrepresented_root_foreground
+                    .get_or_insert("task list full");
+            }
             return vec![];
         }
         let run = frame.get("run_id").and_then(native_id).map(str::to_owned);
@@ -242,6 +248,10 @@ impl Work {
             }
         }
         if old.is_some() && run.is_none() {
+            if known_root_foreground {
+                self.unrepresented_root_foreground
+                    .get_or_insert("foreground generation unknown");
+            }
             let row = self.tasks.get_mut(native).unwrap();
             cut(&mut row.value);
             if row.child.is_some() {
@@ -555,8 +565,11 @@ impl Work {
         })
     }
     /// Only positively known DIRECT root foreground work. Never guess unknown/nested ownership.
-    pub fn root_foreground_active(&self) -> bool {
+    pub fn foreground_loss_reason(&self) -> Option<&'static str> {
         self.unrepresented_root_foreground
+    }
+    pub fn root_foreground_active(&self) -> bool {
+        self.unrepresented_root_foreground.is_some()
             || self.tasks.values().any(|row| {
                 !row.terminal
                     && row.value["native"]["is_backgrounded"] == false

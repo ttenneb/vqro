@@ -380,6 +380,15 @@ mod tests {
         }
         assert_eq!(state.background, Some(vec![]));
         assert_eq!(state.status(), "idle");
+        let notice = state
+            .journal
+            .entity("notice", "foreground-work-loss")
+            .unwrap()
+            .1;
+        let text = notice["text"].as_str().unwrap();
+        assert!(text.contains("restart blocked: foreground work may be running (task list full)"));
+        assert!(text.contains("replaced another way"));
+        assert!(text.len() < 512);
         state.observe(&crate::native_process::Event::Record(
             json!({"type":"system","subtype":"background_tasks_changed","tasks":[]}),
         ));
@@ -420,6 +429,32 @@ mod tests {
                 .guard(&state, Some("r/host"))
                 .is_ok()
         );
+    }
+    #[test]
+    fn missing_run_foreground_evidence_cannot_reuse_a_terminal_row_as_quiescence() {
+        for run in [None, Some("x".repeat(129))] {
+            let (mut state, mut args) = fixture();
+            state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_notification","task_id":"same-task","run_id":"1","status":"completed"})));
+            let mut frame = json!({"type":"system","subtype":"task_started","task_id":"same-task","task_type":"local_agent","subagent_type":"worker","spawn_depth":1,"is_backgrounded":false});
+            if let Some(run) = run {
+                frame["run_id"] = json!(run);
+            }
+            state.observe(&crate::native_process::Event::Record(frame));
+            for loss in [false, true] {
+                args["allow_background_loss"] = json!(loss);
+                assert!(
+                    Restart::parse(&args)
+                        .unwrap()
+                        .guard(&state, Some("r/host"))
+                        .is_err(),
+                    "missing/unrepresentable run cannot prove a positively known foreground start is a late terminal run"
+                );
+            }
+            assert_eq!(
+                state.work.foreground_loss_reason(),
+                Some("foreground generation unknown")
+            );
+        }
     }
     #[test]
     fn background_override_defaults_false_and_bypasses_only_background() {
