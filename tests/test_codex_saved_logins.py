@@ -1,7 +1,9 @@
 """Saved-login registration uses public primitives and synthetic native replies only."""
 import copy
+import json
 from pathlib import Path
 import sys
+import traceback
 import unittest
 from unittest.mock import patch
 
@@ -51,6 +53,12 @@ class SavedLoginTests(unittest.TestCase):
         self.invoke('accounts.codex.logins.list',self.selection())
         return copy.deepcopy([i['args'] for i in self.core.live[VIEW]['items'] if i.get('command')=='accounts.codex.logins.add'][index])
     def save(self,args):return self.invoke('accounts.codex.logins.add',dict(args,text='My second account'))
+    def test_manifest_declares_the_picker_commands_and_view(self):
+        manifest=json.loads((Path(__file__).resolve().parents[1]/'extensions/manifests/accounts.json').read_text())
+        for name in self.core.handlers:
+            if name.startswith('accounts.codex.logins'):
+                self.assertIn('command/'+name,manifest['provides']);self.assertIn(name,manifest['contributes']['commands'])
+        self.assertIn('view/'+VIEW,manifest['provides'])
     def test_accounts_has_add_and_explicit_refresh_actions(self):
         self.app.show({})
         texts=[i.get('text') for i in self.core.live['accounts']['items']]
@@ -79,6 +87,7 @@ class SavedLoginTests(unittest.TestCase):
         args=self.selection();self.core.fail=True
         with self.assertRaises(VqroError) as raised:self.invoke('accounts.codex.logins.list',args)
         self.assertNotIn('DO-NOT-ECHO',str(raised.exception));self.assertNotIn('DO-NOT-ECHO',str(self.core.live))
+        self.assertNotIn('DO-NOT-ECHO',''.join(traceback.format_exception(raised.exception)))
         self.assertEqual(len([1 for m,_ in self.core.calls if m=='resource.invoke']),1)
         self.assertEqual(snapshot(self.core)[0],[])
     def test_nonobserved_listing_cannot_register(self):

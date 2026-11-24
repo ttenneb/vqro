@@ -73,7 +73,7 @@ class SavedLogins:
                 'args':{'v':0,'epoch':selection['epoch'],'caps_rev':selection['caps_rev'],'name':'_account.list','args':{}},'deadline_ms':5000})
         except VqroError:
             # Do not echo native error payloads or retry a runtime operation.
-            fail('Codex saved-login listing unavailable; no registration made. Refresh explicitly.','unavailable')
+            raise VqroError('Codex saved-login listing unavailable; no registration made. Refresh explicitly.','unavailable') from None
         if not isinstance(result,dict) or result.get('outcome')!='observed' or not isinstance(result.get('data'),dict):
             fail('Codex saved-login listing unconfirmed; no registration made.','unavailable')
         rows=result['data'].get('logins')
