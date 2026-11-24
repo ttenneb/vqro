@@ -1,4 +1,4 @@
-"""Accounts are non-secret launcher metadata; fake profiles/core only."""
+"""Accounts select credentials over one shared setup; fake paths/core only."""
 import json
 from pathlib import Path
 import sys
@@ -7,7 +7,7 @@ from unittest.mock import patch
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / 'extensions'), str(Path(__file__).resolve().parent)]
 from agent_fixture import FakeCore
 from vqro_ext import VqroError
-import account_profiles as profiles
+import account_credentials as profiles
 from accounts import Accounts
 from pi import Pi
 from codex import Codex
@@ -19,7 +19,9 @@ class AccountTests(unittest.TestCase):
 
     def add(self, runtime='pi', **extra):
         row = {'id': 'work', 'label': 'Work', 'runtime': runtime, 'provider': 'anthropic' if runtime == 'claude' else 'openai-codex',
-               'kind': 'subscription', 'profile': '/fake profiles/work', **extra}
+               'kind': 'subscription', **({'native_provider': 'vqro-account-work'} if runtime == 'pi' else
+               {'login_ref':{'sessionId':'saved-work','accountId':'native-work'}} if runtime=='codex' else
+               {'host':'r1','secret_ref':'a'*32}), **extra}
         self.core.handlers['accounts.add'](row)
         return row
 
@@ -30,7 +32,7 @@ class AccountTests(unittest.TestCase):
         with patch.object(Path, 'open', side_effect=AssertionError('profile content must never be opened')):
             self.add()
             rows = profiles.registry(self.core)
-        self.assertEqual(rows[0]['profile'], '/fake profiles/work')
+        self.assertEqual(rows[0]['native_provider'], 'vqro-account-work')
         self.assertEqual(self.spawns(), [])
         for field in ('token', 'api_key', 'auth', 'env'):
             with self.subTest(field=field), self.assertRaises(VqroError):
@@ -52,7 +54,8 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(self.spawns(), [])
         answer = pi.new({'account':'work','cwd':'/fake project'})
         spawn = self.spawns()[0]
-        self.assertEqual(spawn['env']['PI_CODING_AGENT_DIR'], '/fake profiles/work')
+        self.assertNotIn('PI_CODING_AGENT_DIR', spawn['env'])
+        self.assertEqual(json.loads(spawn['env']['VQRO_PI_ACCOUNT'])['native_provider'], 'vqro-account-work')
         fact = json.loads(spawn['env']['VQRO_ACCOUNT'])
         self.assertEqual(fact['id'], 'work')
         self.assertNotIn('profile', fact)
@@ -63,9 +66,16 @@ class AccountTests(unittest.TestCase):
     def test_codex_choice_maps_codex_home_no_credential_lookup(self):
         self.add('codex')
         codex = Codex(self.core)
-        with patch.object(Path, 'open', side_effect=AssertionError('no profile reads')):
+        original=self.core.call
+        def native_binding(method,params=None):
+            if method=='resource.invoke' and params.get('op')=='agent.command':
+                name=params['args']['name']
+                if name=='_account.list':return {'outcome':'observed','data':{'logins':[{'sessionId':'saved-work','accountId':'native-work','active':True}]}}
+                if name=='_account.bind':return {'outcome':'observed','data':{'account_confirmed':True}}
+            return original(method,params)
+        with patch.object(Path, 'open', side_effect=AssertionError('no profile reads')),patch.object(self.core,'call',side_effect=native_binding):
             codex.new({'account':'work'})
-        self.assertEqual(self.spawns()[0]['env']['CODEX_HOME'], '/fake profiles/work')
+        self.assertNotIn('CODEX_HOME', self.spawns()[0]['env'])
         self.assertEqual(len(self.spawns()), 1)
 
     def test_bad_or_cross_program_account_never_spawns(self):
@@ -89,12 +99,20 @@ class AccountTests(unittest.TestCase):
         for runtime,(selector,prefix) in expected.items():
             core = FakeCore('accounts'); Accounts(core)
             core.handlers['accounts.add']({'id':'work','label':'Work','runtime':runtime,'kind':'subscription',
-                                           'profile':'/fake profiles/$(literal)'})
+                                           **({'provider':'openai-codex','native_provider':'vqro-account-work'} if runtime=='pi' else
+                                              {'login_ref':{'sessionId':'saved-work','accountId':'native-work'}} if runtime=='codex' else
+                                              {'host':'r1','secret_ref':'a'*32})})
             core.handlers['accounts.sign_in']({'account':'work'})
             spawns = [p for m,p in core.calls if m=='resource.spawn']
             self.assertEqual(len(spawns),1)
             self.assertEqual(spawns[0]['argv'][:len(prefix)], prefix)
-            self.assertEqual(spawns[0]['env'][selector], '/fake profiles/$(literal)')
+            self.assertNotIn(selector, spawns[0]['env'])
+            self.assertNotIn('VQRO_ACCOUNT', spawns[0]['env'])
+            self.assertNotIn('VQRO_PI_ACCOUNT', spawns[0]['env'])
+            if runtime=='pi':
+                argv = spawns[0]['argv']
+                self.assertIn('--vqro-account-login', argv)
+                self.assertEqual(json.loads(argv[argv.index('--vqro-account') + 1])['native_provider'], 'vqro-account-work')
             self.assertFalse(spawns[0].get('bridge',False))
             self.assertFalse(any(m in ('resource.invoke','terminal.input') for m,p in core.calls))
 
@@ -103,11 +121,11 @@ class AccountTests(unittest.TestCase):
         f=fixture.Tier1Tests(); f.setUp()
         try:
             f.configure(claude=['/opt/claude'],hook=str(f.hook))
-            Accounts(f.core).add({'id':'work','label':'Work','runtime':'claude','kind':'subscription','profile':'/fake/claude-work'})
+            Accounts(f.core).add({'id':'work','label':'Work','runtime':'claude','kind':'subscription','host':'r1','secret_ref':'a'*32})
             self.assertIn('popup', f.launch('claude')['client'])
             self.assertEqual(f.spawns(), [])
             f.launch('claude',account='work')
-            self.assertEqual(f.spawns()[0]['env']['CLAUDE_CONFIG_DIR'],'/fake/claude-work')
+            self.assertNotIn('CLAUDE_CONFIG_DIR', f.spawns()[0]['env'])
             self.assertEqual(f.core.value('doc/agents/terminals/r1')['account']['id'],'work')
         finally: f.tearDown()
 
@@ -186,7 +204,7 @@ class AccountTests(unittest.TestCase):
 
     def test_registry_bounds_and_literal_paths(self):
         for bad in ('', '~/profile', 'relative/profile', '/path\x00bad'):
-            with self.subTest(profile=bad), self.assertRaises(VqroError): self.add(profile=bad)
+            with self.subTest(native_provider=bad), self.assertRaises(VqroError): self.add(native_provider=bad)
         with self.assertRaises(VqroError): self.add(kind='oauth_token')
         self.assertEqual(self.spawns(), [])
 

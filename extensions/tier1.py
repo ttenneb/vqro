@@ -30,7 +30,7 @@ from vqro_ext import Extension, VqroError
 from pi_testing import testing_args, testing_environment
 from vqro_display import label
 from vqro_process import background_kwargs
-from account_profiles import choose as choose_account, environment as account_environment, provider_argv, fact as account_fact, require_fresh
+from account_credentials import choose as choose_account, environment as account_environment, provider_argv, fact as account_fact, require_fresh
 
 HERE = Path(__file__).resolve().parent
 RUN = HERE / "tier1_run.py"

@@ -1,5 +1,6 @@
 """Capacity policy with fake core/profiles only; no native/auth/model calls."""
 import copy
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -8,7 +9,7 @@ sys.path[:0]=[str(Path(__file__).resolve().parents[1]/'extensions'),str(Path(__f
 from agent_fixture import FakeCore
 from vqro_ext import VqroError
 from accounts import Accounts
-import account_profiles as profiles
+import account_credentials as profiles
 import accounts_policy as policy
 
 NOW=200_000
@@ -22,11 +23,50 @@ def resource(rid, account, used=None, *, blocked=False, reason='quota', epoch='e
                               'observed_at_ms':at,'resets_at_ms':reset,'source':'rpc:fixture'}]
     return {'id':rid,'kind':'agent','available':True,'incarnation':'i1','data':{'agent':facts}}
 
+SESSION='01234567-89ab-4cde-8fab-0123456789ab'
+
+
+def pi_source(core, rid, account, **kwargs):
+    """Synthetic native Pi facts, never a history-file read."""
+    row=resource(rid,account,blocked=True,**kwargs)
+    row.update(host='terminal-'+rid,provider='pi-runtime-'+rid)
+    core.providers[row['provider']]={'role':'runtime','host':row['host'],'capabilities':{'agent.command':{}}}
+    native=row['data']['agent']
+    native.update(state='idle',queue=[],tool_principal='p:original-work',
+        session={'id':SESSION,'native':{'file':'/synthetic/native-history.jsonl'},
+                 'model':{'id':'gpt-6-luna','native':{'provider':account['native_provider'],'api':'openai-codex-responses'}}},
+        completion={'reason':'error','error':{'message':'You have hit your ChatGPT usage limit.'},
+                    'native':{'stopReason':'error','timestamp':NOW,'error_message_complete':True}},
+        commands=[{'name':'vqro-account-quiesce'}])
+    native['caps'].update(rev=1,**{'agent.command':{},'agent':{'tool_principal':'env'}})
+    if kwargs.get('reason')=='auth':native.pop('completion')
+    core.resources[rid]=row
+    return row
+
+
 class Core(FakeCore):
     def __init__(self):
         super().__init__('accounts');self.op_entry=None;self.launches=[];self.op_version=0
         self.fail_register=False;self.fail_claim_after=False;self.fail_launch=False
+        self.resumes=[];self.stops=[];self.sends=[]
     def call(self, method, params):
+        if method=='resource.invoke' and params.get('op')=='agent.command':
+            self.calls.append((method,copy.deepcopy(params)));self.stops.append(copy.deepcopy(params))
+            row=self.resources[params['resource']];native=row['data']['agent'];wire=params['args']
+            if wire['guard']!={'session':native['session']['id']} or wire['v']!=0 \
+                    or wire['caps_rev']!=native['caps']['rev'] or wire['epoch']!=native['epoch'] \
+                    or wire['name']!='vqro-account-quiesce' or native['state']!='idle' or native['queue']!=[]:
+                raise VqroError('native work/session fence changed','stale')
+            expected={'session':native['session']['id'],'provider':native['session']['model']['native']['provider'],
+                      'model':native['session']['model']['id'],'file':native['session']['native']['file'],
+                      'error_timestamp':native['completion']['native']['timestamp']}
+            if json.loads(wire['text'])!=expected:raise VqroError('native resume/error fence changed','stale')
+            row['available']=False;row['exit']={'code':0,'success':True}
+            row['data']['agent']['lifecycle']='ended'
+            return {'outcome':'observed'}
+        if method=='resource.invoke' and params.get('op')=='agent.send':
+            self.calls.append((method,copy.deepcopy(params)));self.sends.append(copy.deepcopy(params))
+            return {'outcome':'accepted'}
         if not method.startswith('operational.'): return super().call(method,params)
         self.calls.append((method,copy.deepcopy(params)))
         if method=='operational.register':
@@ -37,11 +77,38 @@ class Core(FakeCore):
             op=params['ops'][0]
             if op['expect'] != (self.op_entry or {}).get('version',0): raise VqroError('changed','conflict')
             self.op_version+=1;self.op_entry={'version':self.op_version,'value':copy.deepcopy(op['value'])}
-            if self.fail_claim_after:
+            if self.fail_claim_after and op['value'].get('claims'):
                 self.fail_claim_after=False;raise VqroError('adopted, durability unknown','durability_unconfirmed')
             return {'changes':[{'key':op['key'],'version':self.op_version}]}
         raise AssertionError(method)
     def invoke(self, name, args=None):
+        if name in self.handlers:
+            self.calls.append((name,copy.deepcopy(args)))
+            return self.handlers[name](args)
+        if name=='pi.resume':
+            # Real Pi preparation/restart and common claims/authority are not mocked.
+            # Fake only the public native exit/start boundary; never open history.
+            from accounts_cutover import Cutovers
+            claim=self.handlers['accounts.claim.read']({'claim':args['_claim']})
+            source=self.resources[claim['resource']]
+            Cutovers(self).validate(args['_claim'],source,claim['native_episode'])
+            rows,revision=profiles.snapshot(self)
+            target=next(row for row in rows if row['id']==claim['account'])
+            if revision!=claim['_account_revision'] or source.get('exit')!={'code':0,'success':True} \
+                    or source['available'] is not False or source['data']['agent']['lifecycle']!='ended':
+                raise VqroError('native exit or account changed','stale')
+            self.resumes.append(copy.deepcopy(args))
+            if self.fail_launch:raise VqroError('unknown native restart outcome','indeterminate')
+            rid='resumed-'+str(len(self.resumes));row=copy.deepcopy(source)
+            row.update(id=rid,host='terminal-'+rid,provider='pi-runtime-'+rid,available=True)
+            row.pop('exit',None);native=row['data']['agent']
+            native.update(epoch='resumed-epoch-'+str(len(self.resumes)),lifecycle='live',completion=None,
+                          availability={'state':'available'},account=profiles.fact(target))
+            native['session']['model']['native']['provider']=target['native_provider']
+            native['caps']['agent.send']={'modes':{'start':{}},'origin':[{'as':'attributed_user'}]}
+            self.resources[rid]=row
+            self.providers[row['provider']]={'role':'runtime','host':row['host'],'capabilities':{'agent.command':{}}}
+            return {'outcome':'observed','agent':rid,'host':row['host']}
         if name in ('pi.new','codex.new','tier1.claude'):
             self.launches.append((name,copy.deepcopy(args)))
             if self.fail_launch: raise VqroError('unknown outcome','indeterminate')
@@ -54,13 +121,17 @@ class CapacityPolicy(unittest.TestCase):
         self.a=self.add('a');self.b=self.add('b');self.c=self.add('c',runtime='claude')
         self.clock=patch('accounts_policy.now_ms',return_value=NOW);self.clock.start();self.addCleanup(self.clock.stop)
     def add(self, ident, runtime='pi', kind='subscription'):
-        row={'id':ident,'label':ident.upper(),'runtime':runtime,'kind':kind,'profile':'/fake/'+ident}
+        row={'id':ident,'label':ident.upper(),'runtime':runtime,'kind':kind}
+        if kind=='api_key':row.update(provider='openai',secret_ref='d'*32,host='terminal-old')
+        elif runtime=='pi':row.update(provider='openai-codex',native_provider='vqro-account-'+ident)
+        elif runtime=='codex':row['login_ref']={'sessionId':'saved-'+ident,'accountId':'native-'+ident}
+        else:row.update(secret_ref='c'*32,host='terminal-old')
         self.accounts.add(row);return row
     def settings(self, **value):
         self.core.apply([{'op':'set','key':policy.POLICY,'value':dict(policy.DEFAULTS,**value)}], 'fake policy')
     def choose(self): return profiles.choose(self.core,{},'pi','pi.new')
     def blocked(self, **kwargs):
-        self.core.resources['old']=resource('old',self.a,blocked=True,**kwargs)
+        pi_source(self.core,'old',self.a,**kwargs)
     def test_fresh_launchers_refuse_resume_or_prompt_argv_before_spawn(self):
         from pi import Pi
         from codex import Codex
@@ -90,6 +161,8 @@ class CapacityPolicy(unittest.TestCase):
         self.settings(blocked='auto_restart');self.blocked();self.core.resources['target']=resource('target',self.b,10)
         self.core.op_entry={'version':1,'value':{'attempts':{'old':'unsupported future row'},'children':[],'hosts':[],'uncertain':{}}}
         self.accounts.handle_blocked('old');self.assertEqual(self.core.launches,[])
+        self.assertEqual(self.core.resumes,[]);self.assertEqual(self.core.stops,[])
+        self.assertEqual(self.core.sends,[])
 
     def test_implicit_new_agent_choices_do_not_use_api_key_profiles_without_opt_in(self):
         paid=self.add('paid',kind='api_key')
@@ -124,11 +197,14 @@ class CapacityPolicy(unittest.TestCase):
         incomplete['data']['agent']['incomplete']=[]
         self.assertEqual(policy.capacities([incomplete],[self.b])['b'],90)
 
-    def test_auto_restart_does_not_use_incomplete_limit_set(self):
+    def test_auto_accepts_unknown_capacity_without_fabricating_positive_headroom(self):
         self.settings(blocked='auto_restart');self.blocked()
         self.core.resources['target']=resource('target',self.b,10)
         self.core.resources['target']['data']['agent']['incomplete']=['usage_limits']
-        self.accounts.handle_blocked('old');self.assertEqual(self.core.launches,[])
+        self.assertIsNone(policy.capacities(list(self.core.resources.values()),[self.b])['b'])
+        self.accounts.handle_blocked('old')
+        self.assertEqual(len(self.core.resumes),1);self.assertEqual(len(self.core.sends),1)
+        self.assertEqual(self.core.launches,[])
 
     def test_capacity_picker_does_not_drop_a_stale_restrictive_window(self):
         self.settings(new_agents='most_remaining_capacity');self.blocked()
@@ -145,44 +221,57 @@ class CapacityPolicy(unittest.TestCase):
         with patch.object(self.core,'apply',side_effect=fail_cursor),self.assertRaises(VqroError):self.choose()
         self.assertEqual(self.core.launches,[])
 
-    def test_manual_offer_is_deliberately_empty_and_claim_is_not_workspace_history(self):
+    def test_manual_offer_preserves_session_never_copies_input_and_claim_is_not_history(self):
         self.settings(blocked='offer_restart');self.blocked()
-        self.core.resources['old']['data']['agent']['queue']={'follow_up':[{'text':'fake original input'}]}
-        original=copy.deepcopy(self.core.resources['old'])
+        native=self.core.resources['old']['data']['agent']
+        native['queue']=[{'text':'must not copy'}]
         reply=self.accounts.offer({'resource':'old'})
         options=[row for row in self.core.live[reply['client']['popup']['view']]['items'] if row.get('command')=='accounts.restart']
+        with self.assertRaises(VqroError):self.accounts.restart(options[0]['args'])
+        self.assertEqual(native['queue'],[{'text':'must not copy'}])
+        self.assertEqual(self.core.stops,[]);self.assertEqual(self.core.resumes,[])
+        self.assertEqual(self.core.op_entry['value']['claims'],{})
+        native['queue']=[]  # explicit fixture recovery, never automatic input replay
         self.accounts.restart(dict(options[0]['args'],text='must not copy',session='old-session',model='old-model'))
-        self.assertEqual(set(self.core.launches[0][1]),{'account','_account_revision','fresh'})
-        self.assertEqual(self.core.resources['old'],original)
+        self.assertEqual(set(self.core.resumes[0]),{'_claim'})
+        self.assertEqual(self.core.resources['resumed-1']['data']['agent']['session']['id'],SESSION)
+        self.assertEqual(self.core.sends,[]);self.assertEqual(self.core.launches,[])
+        self.assertNotIn('must not copy',str(self.core.stops)+str(self.core.resumes))
         self.assertFalse(any(op['key'].startswith('doc/accounts/blocked') for txn in self.core.transactions for op in txn))
         registrations=[params for method,params in self.core.calls if method=='operational.register']
-        self.assertEqual(registrations,[{'name':'accounts','bytes':128*1024}])
+        self.assertTrue(registrations)
+        self.assertTrue(all(row=={'name':'accounts','bytes':128*1024} for row in registrations))
 
     def test_automatic_runtime_ambiguity_and_resume_configuration_fail_before_claim(self):
         self.settings(blocked='auto_restart');self.blocked();self.core.resources['target']=resource('target',self.b,10)
         variants=[{'name':'one','argv':['pi1','--mode','rpc']},{'name':'two','argv':['pi1','--mode','rpc']}]
-        self.core.apply([{'op':'set','key':'doc/settings/pi','value':{'runtimes':variants}}],'fake variants')
-        self.accounts.handle_blocked('old');self.assertEqual(self.core.launches,[]);self.assertIsNone(self.core.op_entry)
-        self.core.apply([{'op':'set','key':'doc/settings/pi','value':{'runtimes':[{'name':'one','argv':['pi1','--continue']}]}}],'fake resume')
-        self.accounts.handle_blocked('old');self.assertEqual(self.core.launches,[]);self.assertIsNone(self.core.op_entry)
+        for configured in (variants,[{'name':'one','argv':['pi1','--continue']}]):
+            self.core.apply([{'op':'set','key':'doc/settings/pi','value':{'runtimes':configured}}],'fake invalid runtime')
+            self.accounts.handle_blocked('old')
+            self.assertEqual(self.core.resumes,[]);self.assertEqual(self.core.stops,[])
+            self.assertEqual(self.core.op_entry['value']['claims'],{})
 
-    def test_returning_to_an_old_native_epoch_does_not_repeat_its_fresh_launch(self):
-        self.settings(blocked='auto_restart');self.blocked();self.core.resources['target']=resource('target',self.b,10)
-        self.accounts.handle_blocked('old');self.assertEqual(len(self.core.launches),1)
-        self.core.resources['old']['data']['agent']['epoch']='e2'
-        self.accounts.handle_blocked('old');self.assertEqual(len(self.core.launches),2)
-        self.core.resources['old']['data']['agent']['epoch']='e1'
-        self.accounts.handle_blocked('old');self.assertEqual(len(self.core.launches),2)
+    def test_same_native_error_cannot_repeat_even_when_adapter_epoch_returns(self):
+        self.settings(blocked='auto_restart');self.blocked()
+        original=copy.deepcopy(self.core.resources['old'])
+        self.accounts.handle_blocked('old');self.assertEqual(len(self.core.resumes),1)
+        for epoch in ('e2','e1'):
+            self.core.resources['old']=copy.deepcopy(original)
+            self.core.resources['old']['data']['agent']['epoch']=epoch
+            self.accounts.handle_blocked('old')
+        self.assertEqual(len(self.core.resumes),1);self.assertEqual(len(self.core.sends),1)
 
     def test_source_change_after_durable_claim_prevents_launch(self):
         self.settings(blocked='auto_restart');self.blocked();self.core.resources['target']=resource('target',self.b,10)
         call=self.core.call
         def change_source(method,params):
             result=call(method,params)
-            if method=='operational.apply':self.core.resources['old']['data']['agent']['epoch']='changed-after-claim'
+            if method=='operational.apply' and params['ops'][0]['value'].get('claims'):
+                self.core.resources['old']['data']['agent']['epoch']='changed-after-claim'
             return result
         with patch.object(self.core,'call',side_effect=change_source):self.accounts.handle_blocked('old')
-        self.assertEqual(self.core.launches,[]);self.assertIsNotNone(self.core.op_entry)
+        self.assertEqual(self.core.resumes,[]);self.assertIsNotNone(self.core.op_entry)
+        self.assertTrue(self.core.op_entry['value']['claims'])
 
     def test_unrelated_resource_updates_do_not_reschedule_limit_work(self):
         self.blocked();self.accounts.changed('resource',{'id':'old'});self.assertEqual(self.accounts.pending,{'old'})
@@ -201,9 +290,9 @@ class CapacityPolicy(unittest.TestCase):
         self.accounts.changed('resource',{'id':'target'});self.assertEqual(self.accounts.pending,{'old'})
         self.accounts.pending.clear();self.accounts.observations.clear()
         native=self.core.resources['old']['data']['agent']
-        native['caps']['agent.availability']={'reasons':[]}
+        completion=native.pop('completion');native['caps']['agent.availability']={'reasons':[]}
         self.accounts.changed('resource',{'id':'old'});self.assertEqual(self.accounts.pending,set())
-        native['caps']['agent.availability']={'reasons':['quota']}
+        native['completion']=completion;native['caps']['agent.availability']={'reasons':['quota']}
         self.accounts.changed('resource',{'id':'old'});self.assertEqual(self.accounts.pending,{'old'})
 
     def test_fresh_flag_survives_runtime_picker(self):
@@ -222,6 +311,7 @@ class CapacityPolicy(unittest.TestCase):
         account,popup=self.choose();self.assertIsNone(account);self.assertIn('popup',popup['client'])
         self.blocked();self.accounts.handle_blocked('old');self.accounts.handle_blocked('old')
         self.assertEqual(len(self.core.launches),0)
+        self.assertEqual(self.core.resumes,[]);self.assertEqual(self.core.sends,[])
         self.assertEqual(len([text for text,_ in self.core.notices if 'limit' in text.lower()]),1)
     def test_most_remaining_uses_restrictive_reported_window(self):
         self.settings(new_agents='most_remaining_capacity')
@@ -249,7 +339,7 @@ class CapacityPolicy(unittest.TestCase):
     def test_known_blocked_account_is_not_implicitly_selected(self):
         self.settings(new_agents='round_robin');self.blocked()
         self.assertEqual(self.choose()[0]['id'],'b')
-    def test_offer_is_fresh_empty_work_and_stale_source_is_refused(self):
+    def test_offer_same_conversation_refuses_stale_source_before_any_effect(self):
         self.settings(blocked='offer_restart');self.blocked()
         self.accounts.handle_blocked('old');self.assertEqual(self.core.launches,[])
         answer=self.accounts.offer({'resource':'old'})
@@ -258,47 +348,81 @@ class CapacityPolicy(unittest.TestCase):
         self.assertTrue(options)
         args=options[0]['args'];self.core.resources['old']['data']['agent']['epoch']='changed'
         with self.assertRaises(VqroError):self.accounts.restart(args)
-        self.assertEqual(self.core.launches,[])
+        self.assertEqual(self.core.launches,[]);self.assertEqual(self.core.resumes,[])
+        self.assertEqual(self.core.stops,[]);self.assertEqual(self.core.sends,[])
     def test_auto_restart_claim_survives_extension_restart_and_never_replays_source_input(self):
         self.settings(blocked='auto_restart');self.blocked()
-        self.core.resources['target']=resource('target',self.b,10)
-        self.accounts.handle_blocked('old');self.assertEqual(len(self.core.launches),1)
-        command,args=self.core.launches[0];self.assertEqual(command,'pi.new')
-        self.assertEqual(set(args),{'account','_account_revision','fresh'})
-        self.assertTrue(args['fresh']);self.assertEqual(args['account'],'b')
-        self.assertEqual(self.core.resources['old']['data']['agent']['epoch'],'e1')
-        Accounts(self.core).handle_blocked('old');self.assertEqual(len(self.core.launches),1)
-        self.assertFalse(any(m in ('resource.kill','resource.invoke','agent.send') for m,p in self.core.calls))
-    def test_uncertain_claim_or_spawn_is_never_retried(self):
-        self.settings(blocked='auto_restart');self.blocked();self.core.resources['target']=resource('target',self.b,10)
-        self.core.fail_claim_after=True
-        self.accounts.handle_blocked('old');self.assertEqual(self.core.launches,[])
-        Accounts(self.core).handle_blocked('old');self.assertEqual(self.core.launches,[])
-        self.core.resources['old']['data']['agent']['epoch']='e2';self.core.fail_launch=True
-        self.core.resources['other']=resource('other',self.c,10)  # original target remains uncertain
-        self.accounts.handle_blocked('old');self.assertEqual(len(self.core.launches),1)
-        Accounts(self.core).handle_blocked('old');self.assertEqual(len(self.core.launches),1)
-    def test_auto_created_agents_do_not_form_restart_chains(self):
-        self.settings(blocked='auto_restart');self.blocked();self.core.resources['target']=resource('target',self.b,10)
-        self.accounts.handle_blocked('old')
-        self.core.resources['fresh-1']=resource('fresh-1',self.b,blocked=True)
-        self.core.resources['other']=resource('other',self.c,1)
-        self.accounts.handle_blocked('fresh-1');self.assertEqual(len(self.core.launches),1)
-    def test_auth_block_unknown_capacity_and_missing_protected_store_never_auto_launch(self):
-        self.settings(blocked='auto_restart');self.blocked(reason='auth')
-        self.core.resources['target']=resource('target',self.b,10)
-        self.accounts.handle_blocked('old');self.assertEqual(self.core.launches,[])
-        self.blocked();del self.core.resources['target']
-        self.accounts.handle_blocked('old');self.assertEqual(self.core.launches,[])
-        self.core.resources['target']=resource('target',self.b,10);self.core.fail_register=True
-        self.accounts.handle_blocked('old');self.assertEqual(self.core.launches,[])
-    def test_cross_provider_fresh_restart_and_api_key_overflow_opt_in(self):
+        original=copy.deepcopy(self.core.resources['old'])
+        self.core.resources['old']['data']['agent']['old_input']='NEVER REPLAY THIS'
+        self.accounts.handle_blocked('old');self.assertEqual(len(self.core.resumes),1)
+        new=self.core.resources['resumed-1']['data']['agent']
+        self.assertEqual(new['session']['id'],SESSION);self.assertEqual(new['account']['id'],'b')
+        self.assertEqual(len(self.core.sends),1);wire=self.core.sends[0]['args']
+        self.assertEqual(wire['origin']['kind'],'tool');self.assertEqual(wire['guard'],{'session':SESSION})
+        self.assertEqual(wire['content'],[{'type':'text','text':policy.CONTINUATION_TEXT}])
+        self.assertNotIn('NEVER REPLAY THIS',str(wire))
+        self.core.resources['old']=original
+        Accounts(self.core).handle_blocked('old');self.assertEqual(len(self.core.resumes),1)
+        self.assertEqual(len(self.core.sends),1);self.assertEqual(self.core.launches,[])
+    def test_uncertain_claim_or_native_restart_is_never_retried(self):
+        for stage in ('claim','restart'):
+            with self.subTest(stage=stage):
+                self.core=Core();self.accounts=Accounts(self.core)
+                self.a=self.add('a');self.b=self.add('b')
+                self.settings(blocked='auto_restart');self.blocked()
+                original=copy.deepcopy(self.core.resources['old'])
+                self.core.fail_claim_after=stage=='claim';self.core.fail_launch=stage=='restart'
+                self.accounts.handle_blocked('old');expected=0 if stage=='claim' else 1
+                self.assertEqual(len(self.core.resumes),expected)
+                self.core.resources['old']=original
+                Accounts(self.core).handle_blocked('old')
+                self.assertEqual(len(self.core.resumes),expected);self.assertEqual(self.core.sends,[])
+    def test_new_episodes_switch_same_conversation_up_to_hourly_budget_not_a_child_chain(self):
         self.settings(blocked='auto_restart');self.blocked()
-        api=self.add('paid',runtime='codex',kind='api_key')
-        self.core.resources['paid']=resource('paid',api,0)
-        self.accounts.handle_blocked('old');self.assertEqual(self.core.launches,[])
-        self.settings(blocked='auto_restart',api_key_overflow=True)
-        self.accounts.handle_blocked('old');self.assertEqual(self.core.launches[0][0],'codex.new')
-        self.assertEqual(self.core.launches[0][1]['account'],'paid')
+        for ident in ('d','e','f'):self.add(ident)
+        source='old'
+        for count in range(1,5):
+            if count>1:
+                native=self.core.resources[source]['data']['agent']
+                native['completion']={'reason':'error','error':{'message':'You have hit your ChatGPT usage limit.'},
+                    'native':{'stopReason':'error','timestamp':NOW+count,'error_message_complete':True}}
+                native['availability']={'state':'blocked','reason':'quota'}
+            self.accounts.handle_blocked(source)
+            self.assertEqual(len(self.core.resumes),min(count,3))
+            self.assertEqual(len(self.core.sends),min(count,3))
+            if count<=3:source='resumed-'+str(count)
+        self.assertEqual(self.core.launches,[])
+        self.assertTrue(all(row['args']['guard']=={'session':SESSION} for row in self.core.sends))
+    def test_auth_block_and_missing_protected_store_never_auto_restart(self):
+        self.settings(blocked='auto_restart');self.blocked(reason='auth')
+        self.accounts.handle_blocked('old');self.assertEqual(self.core.resumes,[])
+        self.blocked();self.core.fail_register=True
+        self.accounts.handle_blocked('old');self.assertEqual(self.core.resumes,[])
+        self.assertEqual(self.core.sends,[])
+    def test_source_and_known_blocked_credential_aliases_are_not_alternatives(self):
+        self.settings(blocked='auto_restart');self.blocked()
+        self.accounts.add(dict(self.a,id='alias-a',label='Alias A'))
+        self.accounts.add(dict(self.b,id='alias-b',label='Alias B'))
+        source=self.core.resources['old']
+        candidates,_,_,_=self.accounts.alternatives(source,policy.settings(self.core))
+        self.assertEqual([row['id'] for row in candidates],['b'])
+        self.core.resources['target']=resource('target',self.b,100)
+        candidates,_,_,_=self.accounts.alternatives(source,policy.settings(self.core))
+        self.assertEqual(candidates,[])
+        self.accounts.handle_blocked('old')
+        self.assertEqual(self.core.resumes,[]);self.assertEqual(self.core.sends,[])
+
+    def test_cross_runtime_and_api_key_accounts_never_become_same_session_targets(self):
+        self.settings(blocked='auto_restart');self.blocked()
+        api=self.add('paid',runtime='pi',kind='api_key');codex=self.add('codex',runtime='codex')
+        rows,_=profiles.snapshot(self.core)
+        self.core.apply([{'op':'set','key':profiles.SETTINGS,'value':{'accounts':[row for row in rows if row['id']!='b']}}],'remove Pi subscription alternative')
+        for overflow in (False,True):
+            self.settings(blocked='auto_restart',api_key_overflow=overflow)
+            candidates,_,_,_=self.accounts.alternatives(self.core.resources['old'],policy.settings(self.core))
+            self.assertEqual(candidates,[]);self.accounts.handle_blocked('old')
+        self.assertIsNone(profiles.selection_problem(api));self.assertIsNone(profiles.selection_problem(codex))
+        self.assertEqual(self.core.resumes,[]);self.assertEqual(self.core.launches,[])
+        self.assertEqual(self.core.sends,[])
 
 if __name__=='__main__':unittest.main()

@@ -12,7 +12,7 @@ class StopWorker(BaseException):
     pass
 
 class LateCapacityValidation(unittest.TestCase):
-    def test_expiry_during_each_final_blocking_read_consumes_without_launch(self):
+    def test_expiry_during_final_blocking_reads_becomes_unknown_not_positive_or_blocked(self):
         for read in ('runtime','policy'):
             for deadline in ('age','reset'):
                 with self.subTest(read=read,deadline=deadline),patch('accounts_policy.now_ms',return_value=NOW) as clock:
@@ -20,12 +20,12 @@ class LateCapacityValidation(unittest.TestCase):
                     limits=core.resources['target']['data']['agent']['usage_limits'][0]
                     if deadline=='age':limits['observed_at_ms']=NOW-policy.MAX_AGE_MS+1
                     else:limits['resets_at_ms']=NOW+1
-                    call=core.call;after_runtime=False;advanced=False;late_reads=[]
+                    call=core.call;after_runtime=False;advanced=False
                     def delay_validation(method,params):
                         nonlocal after_runtime,advanced
-                        if advanced and method in ('workspace.get','resource.list'):late_reads.append(method)
                         result=call(method,params)
-                        if core.op_entry is not None and method=='workspace.get':
+                        claimed=core.op_entry and core.op_entry['value'].get('claims')
+                        if claimed and method=='workspace.get':
                             if params.get('key')=='doc/settings/pi':
                                 after_runtime=True
                                 if read=='runtime':clock.return_value=NOW+2;advanced=True
@@ -33,13 +33,34 @@ class LateCapacityValidation(unittest.TestCase):
                                 clock.return_value=NOW+2;advanced=True
                         return result
                     with patch.object(core,'call',side_effect=delay_validation):accounts.handle_blocked('old')
-                    self.assertTrue(advanced);self.assertEqual(core.launches,[])
-                    self.assertIn(policy.episode(core.resources['old']),core.op_entry['value']['attempts'])
-                    if read=='policy':self.assertEqual(late_reads,[])  # local check, not another blocking-read loop
+                    self.assertTrue(advanced)
+                    self.assertIsNone(policy.capacities([core.resources['target']],[b])['b'])
+                    self.assertEqual(len(core.resumes),1);self.assertEqual(len(core.sends),1)
+                    self.assertEqual(len(core.op_entry['value']['claims']),1)
+                    self.assertEqual(core.launches,[])
         with patch('accounts_policy.now_ms',return_value=NOW):
             core,accounts,a,b,_=admission.CapacityAdmission().fixture()
             core.resources['target']['data']['agent']['usage_limits'][0]['observed_at_ms']=NOW-policy.MAX_AGE_MS+1
-            accounts.handle_blocked('old');self.assertEqual(len(core.launches),1)
+            accounts.handle_blocked('old');self.assertEqual(len(core.resumes),1)
+
+    def test_policy_and_hourly_zero_revoked_during_final_read_prevent_native_effects(self):
+        for change in ('notify','zero_budget'):
+            with self.subTest(change=change),patch('accounts_policy.now_ms',return_value=NOW):
+                core,accounts,a,b,configured=admission.CapacityAdmission().fixture()
+                call=core.call;after_runtime=False;revoked=False
+                def revoke(method,params):
+                    nonlocal after_runtime,revoked
+                    claimed=core.op_entry and core.op_entry['value'].get('claims')
+                    if claimed and method=='workspace.get':
+                        if params.get('key')=='doc/settings/pi':after_runtime=True
+                        elif params.get('key')==policy.POLICY and after_runtime and not revoked:
+                            revoked=True
+                            changed={'blocked':'notify'} if change=='notify' else {'auto_cutover_max_per_hour':0}
+                            core.apply([{'op':'set','key':policy.POLICY,'value':dict(configured,**changed)}],'late policy revocation')
+                    return call(method,params)
+                with patch.object(core,'call',side_effect=revoke):accounts.handle_blocked('old')
+                self.assertTrue(revoked);self.assertEqual(len(core.op_entry['value']['claims']),1)
+                self.assertEqual(core.stops,[]);self.assertEqual(core.resumes,[]);self.assertEqual(core.sends,[])
 
     def test_overflow_notify_and_logging_failures_do_not_kill_or_strand_worker(self):
         core,accounts,a,b,_=admission.CapacityAdmission().fixture()

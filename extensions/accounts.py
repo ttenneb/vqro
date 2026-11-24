@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Replaceable account registry and native sign-in UI. Never opens a profile or credential store."""
 import json
+import hashlib
 from pathlib import Path
 import sys
 import threading
 import uuid
 import accounts_policy as policy
+from accounts_cutover import Cutovers
+from accounts_claude import ClaudeCutover, eligible_episode as claude_episode
+from accounts_pi import PiCutover, eligible_error as pi_error
+from accounts_dispatch import Dispatch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
-from account_profiles import SETTINGS, SELECTORS, MAX_ACCOUNTS, snapshot, validate, environment, provider_argv, login_environment, native_login_argv, require_fresh
+from account_credentials import SETTINGS, SELECTORS, MAX_ACCOUNTS, snapshot, validate, native_registration, migrate, environment, provider_argv, login_environment, native_login_argv, require_fresh, selection_problem, credential_identity, distinct_accounts, eligible_alternatives
 from agent_launch import runtimes, valid_argv
 
 COMMANDS = {'pi':'pi.new', 'codex':'codex.new', 'claude':'tier1.claude'}
@@ -18,7 +23,11 @@ COMMANDS = {'pi':'pi.new', 'codex':'codex.new', 'claude':'tier1.claude'}
 class Accounts:
     def __init__(self, ext):
         self.ext = ext
-        self.effects = policy.Effects(ext)
+        ext.retrying(lambda: migrate(ext))
+        self.cutovers = Cutovers(ext)
+        self.claude = ClaudeCutover(ext)
+        self.pi = PiCutover(ext)
+        self.dispatch = Dispatch(self)
         self.seen = {}
         self.pending = set()
         self.observations = {}
@@ -26,19 +35,30 @@ class Accounts:
         self.warned_overflow = False
         self.pending_lock = threading.Lock()
         self.wake = threading.Event()
-        for name, method, title in [('policy',self.configure_policy,'Account capacity strategies'),
-                ('offer',self.offer,'Fresh-work restart options'), ('restart',self.restart,'Start fresh work on another account'),
+        for name, method, title in [('claim.read',self.read_claim,'Read acknowledged account cutover claim'),
+                ('policy',self.configure_policy,'Account capacity strategies'),
+                ('offer',self.offer,'Continue this conversation on another account'), ('restart',self.restart,'Continue on another account'),
+                ('restart.confirm',self.confirm_restart,'Confirm Claude background-loss warning'),
+                ('continuation.confirm',self.confirm_continuation,'Continue after unreadable Codex usage'),
+                ('prepare.claude',self.prepare_claude,'Prepare same-conversation Claude restart'),
                 ('show',self.show,'Accounts'), ('add',self.add,'Add runtime account'),
                 ('remove',self.remove,'Remove account metadata'), ('sign_in',self.sign_in,'Sign in with native runtime')]:
             ext.command('accounts.'+name,title)(method)
         ext.contribute({'view/accounts':{'kind':'panel','title':'Accounts','items':[]},
-                        'view/accounts-restarts':{'kind':'panel','title':'Fresh work (never move a conversation)','items':[]},
+                        'view/accounts-restarts':{'kind':'panel','title':'Continue this conversation','items':[]},
+                        'view/accounts-restart-warning':{'kind':'panel','title':'Claude background-loss warning','items':[]},
+                        'view/accounts-continuation':{'kind':'panel','title':'Confirm continuation','items':[]},
                         'menu/accounts':{'where':'status','label':'accounts','command':'accounts.show','order':55}})
         ext.on_event(self.changed)
 
+    def read_claim(self, args):
+        """Read the acknowledged intent; no native effects or independent claims."""
+        return self.cutovers.lookup(args.get('claim'))
+
     def show(self, args):
         rows, revision = snapshot(self.ext)
-        items = [{'type':'text','text':'Runtime-owned logins. vqro stores only labels and literal profile paths; no login state is inspected.'}]
+        primary = {credential_identity(row): row['id'] for row in distinct_accounts(rows)}
+        items = [{'type':'text','text':'One shared runtime setup. Accounts select credentials only; Pi owns native provider-alias login and refresh in one shared auth store. vqro never opens credential files.'}]
         entry=self.ext.vqro.call('workspace.get',{'key':policy.POLICY})
         try: configured=policy.validate_settings(entry['value'] if entry else {})
         except VqroError:
@@ -46,29 +66,40 @@ class Accounts:
             items.append({'type':'text','style':'warn','text':'Unrecognized account policy: using ask + notify, no API-key overflow. Saving replaces the invalid policy.'})
         for field,title,choices in [('new_agents','New agents',['ask','most_remaining_capacity','round_robin']),
                 ('blocked','When quota/rate limited',['notify','offer_restart','auto_restart']),
-                ('api_key_overflow','Allow automatic API-key profiles',[False,True])]:
+                ('api_key_overflow','Allow automatic API-key accounts',[False,True]),
+                ('auto_cutover_max_per_hour','Automatic cutovers per agent per rolling hour (0 = offer)',list(range(11))) ]:
             items.append({'type':'select','text':title,'value':configured[field], 'command':'accounts.policy',
                           'args':{'field':field,'expect':entry['version'] if entry else 0},
                           'options':[{'label':str(value).replace('_',' '),'value':value} for value in choices]})
-        items.append({'type':'text','style':'dim','text':'Capacity = fresh reported percentage headroom, not entitlement. Automatic restart creates ONE empty agent, never transfers history/input. API-key overflow is off by default.'})
+        items.append({'type':'text','style':'dim','text':'Capacity = fresh reported percentage headroom, not entitlement. Automatic cutover restarts on the other account; the same conversation continues with one NEW vqro-labelled turn, never earlier input. API-key overflow is off by default.'})
+        items.append({'type':'text','style':'dim','text':label(configured['continuation_text'])})
+        items.append({'text':'Edit automatic continuation text','input':'Literal new-turn text (4096 UTF-8 bytes maximum)',
+                      'command':'accounts.policy','args':{'field':'continuation_text','expect':entry['version'] if entry else 0}})
         with self.ext.cache_lock:
             blocked_ids=[rid for rid,row in self.ext.resources.items() if policy.blocked(row,limit_only=True)][:64]
         items.extend({'text':'Fresh-work options for '+label(rid),'command':'accounts.offer','args':{'resource':rid}} for rid in blocked_ids)
         for runtime in SELECTORS:
             items.append({'type':'text','style':'bold','text':runtime})
-            items.append({'text':'Use my normal login', 'command':COMMANDS[runtime], 'args':{'account':'normal'}})
-            items.append({'text':'Sign in… (normal '+runtime+')', 'command':'accounts.sign_in',
+            items.append({'text':'Shared runtime login', 'command':COMMANDS[runtime], 'args':{'account':'normal'}})
+            items.append({'text':'Sign in… (shared '+runtime+' login)', 'command':'accounts.sign_in',
                           'args':{'account':'normal','runtime':runtime}})
             for row in rows:
                 if row['runtime'] != runtime: continue
                 items.append({'type':'text','text':label(row['label']+' · '+row.get('provider',runtime)+' · '+row['kind'])})
-                items.append({'text':'New agent on '+label(row['label']), 'command':COMMANDS[runtime],
-                              'args':{'account':row['id'],'_account_revision':revision}})
-                items.append({'text':'Sign in…', 'description':'Pi: use /login in the native terminal' if runtime=='pi' else 'Native browser/device flow',
-                              'command':'accounts.sign_in', 'args':{'account':row['id'],'_account_revision':revision}})
+                problem = selection_problem(row)
+                if problem:
+                    items.append({'type':'text','style':'warn','text':'Invalid / not selectable: '+problem})
+                else:
+                    canonical = primary[credential_identity(row)]
+                    if canonical != row['id']:
+                        items.append({'type':'text','style':'dim','text':'Alias of '+canonical+'; same credential reference, never an independent alternative.'})
+                    items.append({'text':'New agent on '+label(row['label']), 'command':COMMANDS[runtime],
+                                  'args':{'account':row['id'],'_account_revision':revision}})
+                    items.append({'text':'Sign in…', 'description':'Pi: use /login in the native terminal' if runtime=='pi' else 'Native browser/device flow',
+                                  'command':'accounts.sign_in', 'args':{'account':row['id'],'_account_revision':revision}})
                 items.append({'text':'Remove account metadata', 'command':'accounts.remove',
                               'args':{'account':row['id'],'expect':revision}, 'style':'dim'})
-        items.append({'text':'Add account…', 'input':'JSON {id,label,runtime,provider?,kind,profile}; metadata only, never tokens',
+        items.append({'text':'Add account…', 'input':'JSON {id,label,runtime,provider?,kind,native_provider?|login_ref?|secret_ref?,host?}; opaque references, never tokens',
                       'command':'accounts.add'})
         self.ext.publish('accounts',{'title':'Accounts','requires':['menu','input'],'items':items})
         return {'client':{'popup':{'view':'accounts','width':90}}}
@@ -76,12 +107,12 @@ class Accounts:
     def add(self, args):
         try: row = json.loads(args['text']) if 'text' in args else args
         except (ValueError,TypeError): raise VqroError('enter a metadata-only account JSON object','invalid') from None
-        account = validate(row)
+        account = validate(native_registration(validate(row)))
         rows, revision = snapshot(self.ext)
         if len(rows) >= MAX_ACCOUNTS: raise VqroError('accounts registry is full','overloaded')
         if any(r['id']==account['id'] for r in rows): raise VqroError('account id already exists','conflict')
         self.ext.apply([{'op':'set','key':SETTINGS,'expect':revision,'value':{'accounts':rows+[account]}}], 'accounts: add metadata')
-        self.ext.notify('Account metadata saved; use Sign in… to open the runtime. No profile or credential was read.','ok')
+        self.ext.notify('Account metadata saved; use Sign in… to open the runtime. No credential file was read.','ok')
         return {'client':{'close':True}}
 
     def remove(self, args):
@@ -91,7 +122,7 @@ class Accounts:
         remaining = [r for r in rows if r['id'] != args.get('account')]
         if len(remaining)==len(rows): raise VqroError('account metadata not found','not_found')
         self.ext.apply([{'op':'set','key':SETTINGS,'expect':revision,'value':{'accounts':remaining}}], 'accounts: remove metadata only')
-        self.ext.notify('Account metadata removed. Native profiles/logins and running agents are unchanged.','ok')
+        self.ext.notify('Account metadata removed. Native credential files/logins and running agents are unchanged.','ok')
         return {'client':{'close':True}}
 
     def native_argv(self, runtime, launcher=None):
@@ -113,20 +144,28 @@ class Accounts:
 
     def sign_in(self, args):
         rows, revision = snapshot(self.ext)
-        if '_account_revision' in args and args['_account_revision'] != revision:
+        if '_account_revision' in args and (type(args['_account_revision']) is not int or args['_account_revision'] != revision):
             raise VqroError('account registry changed; reopen Accounts before signing in','stale')
         account = None
         if args.get('account')=='normal': runtime=args.get('runtime')
         else:
             account=next((r for r in rows if r['id']==args.get('account')),None)
             if account is None: raise VqroError('account metadata not found','not_found')
+            problem = selection_problem(account)
+            if problem: raise VqroError('account is not selectable: '+problem, 'invalid')
             runtime=account['runtime']
             if account['kind']=='api_key':
                 raise VqroError('API-key import is not implemented; configure keys only through the native runtime, never Accounts','unsupported')
         if runtime not in SELECTORS: raise VqroError('choose a native program','invalid')
         native, env = self.native_argv(runtime,args.get('launcher'))
         argv = provider_argv(native,account)
-        params={'argv':argv,'name':runtime+'-sign-in-'+uuid.uuid4().hex[:12], 'env':environment(account, env)}
+        if runtime == 'pi' and account:
+            if not account.get('native_provider') or not account.get('provider'):
+                raise VqroError('Pi account needs an explicit base provider and native alias before sign-in', 'unavailable')
+            metadata = {key:account[key] for key in ('id','label','provider','native_provider')}
+            argv += ['-e', str(Path(__file__).resolve().parent / 'pi_accounts' / 'index.mjs'),
+                     '--vqro-account', json.dumps(metadata,ensure_ascii=False,separators=(',',':')), '--vqro-account-login']
+        params={'argv':argv,'name':runtime+'-sign-in-'+uuid.uuid4().hex[:12], 'env':env}
         # No terminal input, shell, auth inspection or retry. A native runtime may open its own browser.
         result=self.ext.vqro.call('resource.spawn',params)
         host=(result.get('resource') or {}).get('id') if isinstance(result,dict) else None
@@ -145,24 +184,59 @@ class Accounts:
             raise VqroError('account policy changed; reopen Accounts','stale')
         if not isinstance(args.get('field'),str) or args['field'] not in policy.DEFAULTS:
             raise VqroError('unknown account policy field','invalid')
-        value=policy.validate_settings(dict(policy.effective(entry['value'] if entry else {}), **{args['field']:args.get('value')}))
+        selected=args.get('text',args.get('value')) if args['field']=='continuation_text' else args.get('value')
+        value=policy.validate_settings(dict(policy.effective(entry['value'] if entry else {}), **{args['field']:selected}))
         self.ext.apply([{'op':'set','key':policy.POLICY,'expect':revision,'value':value}], 'accounts: capacity policy')
         return self.show({})
 
+    @staticmethod
+    def actionable(row):
+        return policy.blocked(row,limit_only=True) or claude_episode(row,automatic=False) is not None or bool(pi_error(row))
+
     def source(self,rid):
         rows=self.ext.vqro.call('resource.list',{'id':rid}).get('resources',[])
-        if len(rows)!=1 or not policy.blocked(rows[0],limit_only=True):
-            raise VqroError('source is no longer a live quota/rate-limited agent','stale')
-        policy.episode(rows[0])  # require an observed incarnation and native epoch
+        if len(rows)!=1 or not self.actionable(rows[0]):
+            raise VqroError('source has no current eligible native limit/error episode','stale')
+        policy.episode(rows[0])
         return rows[0]
+
+    def continuation_offer(self,claim,target):
+        self.ext.publish('accounts-continuation',{'title':'Continue on '+label(target['label']),'requires':['menu'],'items':[
+            {'type':'text','text':'Switched to account '+label(target['label'])+'; its usage could not be read. Continue?'},
+            {'type':'text','text':'One NEW visible vqro/tool turn on the original conversation. No native switch or earlier input replay.'},
+            {'text':'Continue','command':'accounts.continuation.confirm','args':{'claim':claim}}]})
+        self.ext.notify('Switched to account '+label(target['label'])+'; usage could not be read. Owner continuation choice available.','warn')
+
+    def confirm_continuation(self,args):
+        if not isinstance(args,dict) or set(args)!={'claim'}:raise VqroError('only the same claim reference is accepted','invalid')
+        return self.dispatch.confirm_continuation(args['claim'])
+
+    def prepare_claude(self,args):
+        if type(args.get('automatic')) is not bool: raise VqroError('automatic must be boolean','invalid')
+        source,host=self.claude.source(args.get('resource'),args.get('episode'),False)
+        if args['automatic'] and claude_episode(source,automatic=True) is None:
+            raise VqroError('native background work is not proven empty; owner warning required','offer_required')
+        native=policy.facts(source)
+        self.claude.target(args,policy.configured_id(source),host)
+        affected={'resource':source['id'],'host':host,'session':native['session']['id'],
+                  'epoch':native['epoch'],'incarnation':source['incarnation'],'account':args['account']}
+        revision=hashlib.sha256(json.dumps([affected,native.get('_claude'),native.get('background'),
+                  native.get('incomplete')],sort_keys=True).encode()).hexdigest()
+        return {'setup_id':'claude:'+source['id'],'membership_revision':revision,'affected':[affected],
+                'native_episode':claude_episode(source,automatic=args['automatic']),'automatic_allowed':True}
 
     def alternatives(self,source,configured):
         rows,revision=snapshot(self.ext)
         observed=policy.resources(self.ext)
-        blocked_ids={policy.configured_id(row) for row in observed if policy.blocked(row)}
-        candidates=[row for row in rows if row['id']!=policy.configured_id(source) and row['id'] not in blocked_ids
-                    and (row['kind']!='api_key' or configured['api_key_overflow'])]
-        return candidates,revision,policy.capacities(observed,candidates),observed
+        self.cutovers.observe_limits(observed,rows)
+        blocked_ids=self.cutovers.blocked_accounts(rows)
+        source_row=next((row for row in rows if row['id']==policy.configured_id(source)),None)
+        runtime=source_row['runtime'] if source_row else ('claude' if claude_episode(source,automatic=False) else 'pi' if pi_error(source) else None)
+        # API-key accounts remain launchable, but same-conversation API-key cutover is not yet supported.
+        candidates=[row for row in eligible_alternatives(rows, policy.configured_id(source), blocked_ids, False)
+                    if runtime is not None and row['runtime']==runtime]
+        identities={row['id']:credential_identity(row) for row in rows}
+        return candidates,revision,policy.capacities(observed,candidates,credential_identities=identities),observed
 
     def notify_once(self,source,mode,text):
         key=(source['id'],policy.episode(source),mode)
@@ -175,116 +249,73 @@ class Accounts:
         source=self.source(args.get('resource'))
         candidates,revision,scores,_=self.alternatives(source,policy.settings(self.ext))
         token=policy.episode(source)
-        items=[{'type':'text','text':'ONE new empty agent. The blocked conversation stays where it is; no prompt, history, queue, model choice or session ID is copied.'}]
+        items=[{'type':'text','text':'Continue the same native conversation. Earlier input is never replayed. AUTO submits one NEW visible vqro/tool continuation; an owner choice waits for your explicit next turn.'},
+               {'type':'text','text':'Continuing a conversation on an API-key account: not yet. API-key accounts remain available for new launches.'}]
         for target in candidates:
             score=scores.get(target['id'])
-            items.append({'text':'Fresh '+target['runtime']+' on '+label(target['label']),
-                          'description':('Reported headroom '+str(round(score,1))+'%' if score is not None else 'Capacity unknown/incomparable')+'; launcher defaults',
+            items.append({'text':'Continue on '+label(target['label']),
+                          'description':('Reported headroom '+str(round(score,1))+'%' if score is not None else 'Capacity unknown/incomparable')+'; native same-conversation restart',
                           'command':'accounts.restart','args':{'resource':source['id'],'episode':token,
                                                                'account':target['id'],'_account_revision':revision}})
         if not candidates: items.append({'type':'text','text':'No configured alternative allowed by this policy. Native login and API-key setup are separate, explicit actions.'})
-        self.ext.publish('accounts-restarts',{'title':'Fresh work, not a conversation migration','requires':['menu'],'items':items})
+        self.ext.publish('accounts-restarts',{'title':'Continue this conversation','requires':['menu'],'items':items})
         return {'client':{'popup':{'view':'accounts-restarts','width':90}}}
 
     def restart(self,args):
         source=self.source(args.get('resource'))
-        if args.get('episode')!=policy.episode(source): raise VqroError('blocked agent changed; reopen fresh-work options','stale')
+        self.cutovers.authorization(False)
+        if args.get('episode')!=policy.episode(source): raise VqroError('native episode changed; reopen continuation options','stale')
         candidates,revision,_,_=self.alternatives(source,policy.settings(self.ext))
         if type(args.get('_account_revision')) is not int or args['_account_revision']!=revision:
-            raise VqroError('account registry changed; reopen fresh-work options','stale')
+            raise VqroError('account registry changed; reopen continuation options','stale')
         target=next((row for row in candidates if row['id']==args.get('account')),None)
         if target is None: raise VqroError('alternative is no longer allowed','stale')
-        return self.launch_fresh(source,target,revision)
+        if target['runtime']=='claude':
+            authority=self.cutovers.authorization(False)
+            native=claude_episode(source,automatic=False)
+            wire={key:args[key] for key in ('resource','episode','account','_account_revision')}
+            wire.update(warning_version=1,native_episode=native,owner_revision=authority['owner_revision'])
+            self.ext.publish('accounts-restart-warning',{'title':'Confirm Claude restart','requires':['menu'],'items':[
+                {'type':'text','text':'Background work may be lost when restarting Claude. Earlier input is never replayed.','style':'warn'},
+                {'text':'I understand: continue on '+label(target['label']),'command':'accounts.restart.confirm','args':wire}]})
+            return {'client':{'popup':{'view':'accounts-restart-warning','width':90}}}
+        return self.dispatch.execute(source,target,revision,automatic=False)
 
-    def automatic_argv(self,runtime):
-        key={'pi':'doc/settings/pi','codex':'doc/settings/codex','claude':'doc/settings/tier1'}[runtime]
-        entry=self.ext.vqro.call('workspace.get',{'key':key});value=entry['value'] if entry else None
-        if runtime=='claude': argv=value.get('claude',['claude']) if isinstance(value,dict) else ['claude']
-        else:
-            default=[{'name':runtime,'argv':['pi1','--mode','rpc'] if runtime=='pi' else ['codex','app-server','--stdio']}]
-            options=runtimes(value if value is not None else {'runtimes':default})
-            if len(options)!=1: raise VqroError('choose a runtime executable explicitly before fresh work','unavailable')
-            argv=options[0]['argv']
-        require_fresh(runtime,argv)
-        return argv
-
-    def launch_fresh(self,source,target,revision,automatic=False):
-        def permitted(configured):
-            return (not automatic or configured['blocked']=='auto_restart') \
-                and (target['kind']!='api_key' or configured['api_key_overflow'])
-        if not permitted(policy.settings(self.ext)):
-            raise VqroError('fresh-work policy changed; no launch','stale')
-        token=policy.episode(source)
-        self.effects.claim(source,token,target)  # acknowledged protected CAS BEFORE any launcher command
-        # Recheck the native source. A failed/stale check consumes this claim; never retry it automatically.
-        current=self.source(source['id'])
-        if policy.episode(current)!=token: raise VqroError('source changed after fresh-launch claim; no launch','stale')
-        candidates,current_revision,scores,observations=self.alternatives(current,policy.settings(self.ext))
-        selected=next((row for row in candidates if row['id']==target['id']),None)
-        if current_revision!=revision or selected!=target:
-            raise VqroError('target/registry changed after fresh-launch claim; claim consumed, no launch','stale')
-        if automatic:
-            headroom=scores.get(target['id'])
-            if headroom is None or headroom<=0:
-                raise VqroError('target capacity is no longer fresh/known/positive; claim consumed, no launch','stale')
-            provider_argv(self.automatic_argv(target['runtime']),target)
-        # Last policy read follows the potentially delayed claim AND fresh observation/runtime reads.
-        # This is not an atomic native quota reservation; later native changes remain possible.
-        if not permitted(policy.settings(self.ext)):
-            raise VqroError('fresh-work policy changed after claim; claim consumed, no launch','stale')
-        if automatic:
-            # Frozen reports retain their age/reset deadlines. Recheck with the LOCAL clock
-            # after the last blocking read; no RPC/reread loop and no native quota reservation.
-            headroom=policy.capacities(observations,[target]).get(target['id'])
-            if headroom is None or headroom<=0:
-                raise VqroError('target report expired during final validation; claim consumed, no launch','stale')
-        try:
-            result=self.ext.invoke(COMMANDS[target['runtime']],{'account':target['id'],'_account_revision':revision,'fresh':True})
-        except VqroError:
-            self.ext.notify('Fresh launch outcome unconfirmed. Do not repeat it automatically; old conversation untouched.','warn')
-            raise
-        try: self.effects.finish(source,token,target,result)
-        except VqroError:
-            self.ext.notify('Fresh launch result could not be journaled; the original claim remains. No automatic retry.','warn')
-        self.ext.notify('Fresh launch '+str(result.get('outcome','unconfirmed'))+'. No source input/history was copied; inspect the new native session.','info')
-        return result
+    def confirm_restart(self,args):
+        authority=self.cutovers.authorization(False)
+        if type(args.get('warning_version')) is not int or args['warning_version']!=1 \
+                or type(args.get('owner_revision')) is not int or args['owner_revision']!=authority['owner_revision']:
+            raise VqroError('owner warning changed; reopen continuation options','stale')
+        source=self.source(args.get('resource'))
+        if args.get('episode')!=policy.episode(source): raise VqroError('native episode changed','stale')
+        candidates,revision,_,_=self.alternatives(source,policy.settings(self.ext))
+        target=next((row for row in candidates if row['id']==args.get('account') and row['runtime']=='claude'),None)
+        if target is None or type(args.get('_account_revision')) is not int or revision!=args['_account_revision'] \
+                or args.get('native_episode')!=claude_episode(source,automatic=False):
+            raise VqroError('warning no longer names this native episode/account','stale')
+        return self.dispatch.execute(source,target,revision,automatic=False,background_loss_disclosed=True,
+                                     expected_native_episode=args['native_episode'])
 
     def handle_blocked(self,rid):
         source=None
         try:
             source=self.source(rid);configured=policy.settings(self.ext);mode=configured['blocked']
-            message='Agent '+label(rid)+' is blocked by a native quota/rate limit. Old conversation untouched.'
+            message='Agent '+label(rid)+' reported a native limit/error episode. Earlier input is never replayed.'
             if mode=='notify': return self.notify_once(source,mode,message)
             if mode=='offer_restart':
                 self.offer({'resource':rid})
-                return self.notify_once(source,mode,message+' Open Accounts for explicit fresh-work options.')
+                return self.notify_once(source,mode,message+' Open Accounts to continue on another account.')
             candidates,revision,scores,_=self.alternatives(source,configured)
-            candidates=[row for row in candidates if scores.get(row['id']) is not None and scores[row['id']]>0]
-            if not policy.configured_id(source) or not candidates:
-                return self.notify_once(source,mode,message+' No known positive reported alternative; no automatic launch.')
-            journal,_=self.effects.read()
-            if policy.episode(source) in journal['attempts']: return
-            if self.effects.suppressed(journal,source):
-                return self.notify_once(source,mode,message+' Automatic fresh-launch chain suppressed; choose new work manually.')
-            candidates=[row for row in candidates if row['id'] not in journal['uncertain']]
-            if not candidates: return self.notify_once(source,mode,message+' Alternative launch outcomes are uncertain; no automatic retry.')
-            programs={};launchable=[]
-            for target in candidates:
-                runtime=target['runtime']
-                if runtime not in programs:
-                    try: programs[runtime]=self.automatic_argv(runtime)
-                    except VqroError: programs[runtime]=None
-                if programs[runtime] is None: continue
-                try: provider_argv(programs[runtime],target)
-                except VqroError: continue
-                launchable.append(target)
-            if not launchable:
-                return self.notify_once(source,mode,message+' Fresh runtime executable/options need explicit selection; no automatic launch.')
-            target=max(launchable,key=lambda row:scores[row['id']])
-            self.launch_fresh(source,target,revision,automatic=True)
+            if not candidates or configured['auto_cutover_max_per_hour']==0:
+                self.offer({'resource':rid})
+                return self.notify_once(source,mode,message+' No eligible AUTO target or hourly allowance; owner choice available.')
+            target=max(candidates,key=lambda row:(scores.get(row['id']) is not None,scores.get(row['id']) or 0))
+            self.dispatch.execute(source,target,revision,automatic=True)
         except VqroError as error:
-            # No replay, even after durability_unconfirmed/indeterminate. Do not echo native error bodies.
-            text='Account fresh-work policy took no further action ('+str(error.kind)+'); inspect Accounts/native status.'
+            # Busy prepare owns no intent; native work-level changes schedule reprepare.
+            # Never replay dispatched restarts or turns, even after uncertain outcomes.
+            if source is not None and error.kind=='offer_required': self.offer({'resource':rid})
+            text='Account continuation took no further action ('+str(error.kind)+'); inspect Accounts/native status.'
             if source is not None: self.notify_once(source,'error:'+str(error.kind),text)
             elif error.kind!='stale': self.ext.notify(text,'warn')
 
@@ -305,15 +336,17 @@ class Accounts:
                 declared=caps.get('agent.availability') if isinstance(caps,dict) else None
                 signature=[row.get('incarnation'),native.get('epoch'),row.get('available'),native.get('lifecycle'),
                            policy.configured_id(row),availability.get('state'),availability.get('reason'),
-                           limits,native.get('incomplete'),declared]
+                           limits,native.get('incomplete'),declared,native.get('state'),native.get('queue'),
+                           native.get('background'),native.get('_claude'),native.get('session'),native.get('completion'),
+                           availability.get('native')]
                 if self.observations.get(rid)==signature: return
                 if len(self.observations)>=256: self.observations.pop(next(iter(self.observations)))
                 self.observations[rid]=signature
                 cached=self.ext.value(policy.POLICY,{})
                 if not (isinstance(cached,dict) and cached.get('blocked')=='auto_restart' and limits):
-                    ids=[rid] if policy.blocked(row,limit_only=True) else []
-                else: ids=[key for key,value in self.ext.resources.items() if policy.blocked(value,limit_only=True)]
-            else: ids=[key for key,value in self.ext.resources.items() if policy.blocked(value,limit_only=True)]
+                    ids=[rid] if self.actionable(row) else []
+                else: ids=[key for key,value in self.ext.resources.items() if self.actionable(value)]
+            else: ids=[key for key,value in self.ext.resources.items() if self.actionable(value)]
         with self.pending_lock:
             fresh=[rid for rid in ids if rid not in self.pending]
             room=64-len(self.pending)

@@ -1,11 +1,11 @@
 {
   "name":"accounts", "title":"Runtime accounts", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"runtime",
-  "summary":"Choose runtime-owned profiles and opt-in fresh-work capacity policy without reading credentials.",
-  "description":"A replaceable metadata-only account registry for Pi, Codex and Claude Code. Native sign-in opens a backend terminal; each runtime owns its profile, credentials and refresh. vqro never scans or reads profile contents, stores tokens, claims authentication success or replays input. Normal login leaves native defaults unchanged. Disabling this UI does not stop agents or remove native logins.",
+  "summary":"Credential-only accounts over a shared runtime setup, with opt-in capacity policy.",
+  "description":"A replaceable credential-reference registry for Pi, Codex and Claude Code. Accounts never select configuration folders. Native runtimes own subscription login, credential files and refresh; vqro never reads or stores subscription tokens, claims authentication success or replays input. API keys remain in the execution-host keychain helper. Disabling this UI does not stop agents or remove native logins.",
   "requires":{"protocol":1,"client_features":["items","menu","input"]},
-  "provides":["command/accounts.show","command/accounts.add","command/accounts.remove","command/accounts.sign_in","command/accounts.policy","command/accounts.offer","command/accounts.restart","view/accounts","view/accounts-restarts","doc/settings/accounts","doc/settings/accounts-policy"],
+  "provides":["command/accounts.continuation.confirm","view/accounts-continuation","command/accounts.prepare.claude","command/accounts.prepare.pi","command/accounts.cutover.pi","command/accounts.restart.confirm","view/accounts-restart-warning","command/accounts.cutover.claude","command/accounts.claim.read","command/accounts.show","command/accounts.add","command/accounts.remove","command/accounts.sign_in","command/accounts.policy","command/accounts.offer","command/accounts.restart","view/accounts","view/accounts-restarts","doc/settings/accounts","doc/settings/accounts-policy"],
   "needs":[{"cap":"ability/vqro.terminals","suggest":"herdr","why":"Native sign-in needs a backend terminal"}],
-  "works_with":[{"cap":"ability/vqro.operational-domains@1","without":"Fresh-restart effects refuse without protected claims; selection and notifications still work"},
+  "works_with":[{"cap":"ability/vqro.operational-domains@1","without":"Same-conversation restart effects refuse without protected claims; selection and notifications still work"},
                 {"cap":"doc/settings/pi","suggest":"pi","without":"Native Pi sign-in uses its documented default argv"},
                 {"cap":"doc/settings/codex","suggest":"codex","without":"Native Codex sign-in uses its documented default argv"},
                 {"cap":"doc/settings/tier1","suggest":"tier1","without":"Native Claude sign-in uses its documented default argv"},
@@ -14,5 +14,5 @@
                 {"cap":"command/tier1.claude","suggest":"tier1","without":"Claude account launches are unavailable"},
                 {"cap":"command/tabs.show","suggest":"tabs","without":"Native sign-in terminal remains available in the resource picker"}],
   "settings_command":"accounts.show",
-  "contributes":{"commands":["accounts.show","accounts.add","accounts.remove","accounts.sign_in","accounts.policy","accounts.offer","accounts.restart"],"panels":["Accounts","Fresh-work options"],"settings":["doc/settings/accounts","doc/settings/accounts-policy"]}
+  "contributes":{"commands":["accounts.continuation.confirm","accounts.prepare.claude","accounts.prepare.pi","accounts.cutover.pi","accounts.restart.confirm","accounts.cutover.claude","accounts.claim.read","accounts.show","accounts.add","accounts.remove","accounts.sign_in","accounts.policy","accounts.offer","accounts.restart"],"panels":["Accounts","Continue this conversation","Claude background-loss warning"],"settings":["doc/settings/accounts","doc/settings/accounts-policy"]}
 }

@@ -8,11 +8,12 @@ from unittest.mock import patch
 sys.path[:0]=[str(Path(__file__).resolve().parents[1]/'extensions'),str(Path(__file__).resolve().parent)]
 from agent_fixture import FakeCore
 from accounts import Accounts
-import account_profiles as profiles
+import account_credentials as profiles
 import tier1_run
 from vqro_ext import VqroError
 
-ROW={'id':'fake','label':'Fake','runtime':'codex','kind':'subscription','profile':'/fake/profile'}
+ROW={'id':'fake','label':'Fake','runtime':'codex','kind':'subscription',
+     'login_ref':{'sessionId':'saved-fake','accountId':'native-fake'}}
 
 class AccountsSecondary(unittest.TestCase):
     def test_explicit_null_provider_is_rejected_before_registry_ui_or_bridge_fact(self):
@@ -49,16 +50,16 @@ class AccountsSecondary(unittest.TestCase):
         self.assertEqual(profiles.native_login_argv('codex',['node','/fake/codex.js','--profile','fake','app-server','--stdio']),
                          ['node','/fake/codex.js','--profile','fake','login'])
 
-    def test_tier1_native_exec_strips_internal_fact_but_keeps_selected_profile(self):
+    def test_tier1_native_exec_strips_internal_fact_but_keeps_shared_configuration(self):
         marker=json.dumps(profiles.fact(profiles.validate(ROW)))
         for runtime,selector in profiles.SELECTORS.items():
             with self.subTest(runtime=runtime),patch.dict(tier1_run.os.environ,
-                    {'VQRO_ACCOUNT':marker,selector:'/fake/selected-profile'},clear=True), \
+                    {'VQRO_ACCOUNT':marker,selector:'/fake/shared-configuration'},clear=True), \
                     patch.object(tier1_run.os,'execvpe') as execute,patch('sys.stderr',new_callable=io.StringIO):
                 tier1_run.main(['--',runtime])
                 program,argv,env=execute.call_args[0]
                 self.assertEqual(program,runtime);self.assertEqual(argv,[runtime])
                 self.assertNotIn('VQRO_ACCOUNT',env)
-                self.assertEqual(env[selector],'/fake/selected-profile')
+                self.assertEqual(env[selector],'/fake/shared-configuration')
 
 if __name__=='__main__':unittest.main()

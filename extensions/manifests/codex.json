@@ -6,7 +6,7 @@
   "provides":["command/codex.new","command/codex.settings","command/codex.configure","command/codex.cutover.settings","command/codex.cutover.consent","command/accounts.prepare.codex","command/accounts.cutover.codex","view/codex-cutover-settings","doc/settings/codex-cutover","view/codex-runtimes","view/codex-settings","view/accounts-choice-codex-new","doc/settings/codex","ability/vqro.agents","view/agent-*"],
   "needs":[{"cap":"ability/vqro.terminals","suggest":"herdr","why":"Codex runs in a backend-owned terminal through vqro-bridge-codex"}],
   "works_with":[{"cap":"command/accounts.claim.read","suggest":"accounts","without":"Automatic cutover is unavailable; no native login switch occurs"},{"cap":"doc/settings/accounts-policy","suggest":"accounts","without":"New named-account choices default to ask"},
-                {"cap":"doc/settings/accounts","suggest":"accounts","without":"Native default login/profile remains unchanged"},
+                {"cap":"doc/settings/accounts","suggest":"accounts","without":"Shared native login and configuration remain unchanged"},
                 {"cap":"command/coord.request_route","suggest":"coord","without":"The created agent remains available through human Control; request route configuration is reported unconfirmed, never replayed"},
                 {"cap":"command/coord.inbox.window","suggest":"coord","without":"Request route initialization is unconfirmed; native spawn is never retried"},
                 {"cap":"command/agents.show","suggest":"agents","without":"A created agent opens as its bridge terminal"},
