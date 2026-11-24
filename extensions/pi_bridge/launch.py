@@ -139,7 +139,13 @@ def negotiated(arguments, binary=None):
 
 def main():
     binary = "vqro-bridge-pi"
-    arguments = sys.argv[1:]
+    arguments = list(sys.argv[1:])
+    prefix = arguments[:arguments.index('--')] if '--' in arguments else arguments
+    if os.environ.get('VQRO_PI_ACCOUNT') and not any(value == '--account-extension' or value.startswith('--account-extension=') for value in prefix):
+        # Required named-account binding resolves on the execution host; normal
+        # login adds no mandatory flag to an older bridge's optional-testing path.
+        plugin = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'pi_accounts', 'index.mjs')
+        arguments = ['--account-extension', plugin, *arguments]
     before = arguments[:arguments.index("--")] if "--" in arguments else arguments
     requested = any(arg == "--testing-plugin" or arg.startswith("--testing-plugin=") for arg in before)
     target = None

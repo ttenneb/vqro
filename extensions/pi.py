@@ -10,7 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from pi_testing import testing_notice, testing_environment, rpc_testing_args
 from vqro_display import label
-from account_profiles import choose as choose_account, environment as account_environment, provider_argv, runtime_environment, require_fresh
+from account_credentials import choose as choose_account, environment as account_environment, provider_argv, runtime_environment, require_fresh, snapshot, selection_problem
+from accounts_pi import history_file, membership_revision
+import accounts_policy as policy
 from agent_launch import initialize_request_route, launch, launch_cwd, runtimes as validate_runtimes, valid_argv
 
 SETTINGS = "doc/settings/pi"
@@ -32,7 +34,7 @@ def runtimes(value):
 class Pi:
     def __init__(self, ext):
         self.ext = ext
-        for name, fn, title in [("new", self.new, "New Pi agent"), ("settings", self.settings, "Pi runtime settings"),
+        for name, fn, title in [("new", self.new, "New Pi agent"), ("resume", self.resume, "Resume acknowledged Pi account cutover"), ("settings", self.settings, "Pi runtime settings"),
                                 ("configure", self.configure, "Configure Pi runtime argv")]:
             ext.command("pi."+name, title)(self.guarded(fn))
         def initialize():
@@ -114,6 +116,55 @@ class Pi:
             if not fact or fact.get("state") != "loaded":
                 testing_notice(self.ext, "testing plugin loading unconfirmed for this RPC launch (NOT VERIFIED); no launch retry")
         return answer
+
+    def resume(self,args):
+        """Finish one admitted lifecycle restart; no prompt/history or credential reads.
+
+        The old process already exited gracefully. This completes that lifecycle;
+        common rechecks CURRENT policy/authority before any NEW continuation.
+        """
+        if not isinstance(args,dict) or set(args)!={'_claim'}:
+            raise VqroError('Pi resume requires only its protected claim reference','invalid')
+        claim=self.ext.invoke('accounts.claim.read',{'claim':args['_claim']})
+        if not isinstance(claim,dict) or claim.get('state')!='claimed' or claim.get('runtime')!='pi':
+            raise VqroError('acknowledged Pi restart claim required','forbidden')
+        rows=self.ext.vqro.call('resource.list',{'id':claim['resource']}).get('resources',[])
+        if len(rows)!=1: raise VqroError('old Pi process evidence unavailable','indeterminate')
+        source=rows[0];native=policy.facts(source);session=native.get('session') or {};exited=source.get('exit') or {}
+        expected={'host':source.get('host'),'source_incarnation':source.get('incarnation'),
+                  'source_epoch':native.get('epoch'),'source_account':policy.configured_id(source),'session':session.get('id'),
+                  'source_history':history_file(native),'source_principal':native.get('tool_principal')}
+        if any(claim.get(key)!=value for key,value in expected.items()) or native.get('lifecycle')!='ended' \
+                or exited.get('success') is not True or type(exited.get('code')) is not int or exited['code']!=0:
+            raise VqroError('old Pi did not prove matching successful graceful exit','indeterminate')
+        self.ext.fresh()
+        if not isinstance(claim['source_principal'],str) or not claim['source_principal'] or claim['source_principal']==self.ext.owner():
+            raise VqroError('original non-owner tool principal is unavailable; never invent a fresh work scope','forbidden')
+        accounts,revision=snapshot(self.ext)
+        target=next((row for row in accounts if row['id']==claim['account']),None)
+        if revision!=claim['_account_revision'] or target is None or selection_problem(target) or target['runtime']!='pi' or target['kind']!='subscription':
+            raise VqroError('Pi target credential reference changed','stale')
+        entry=self.ext.vqro.call('workspace.get',{'key':SETTINGS})
+        options=runtimes(entry['value'] if entry else DEFAULTS)
+        if len(options)!=1: raise VqroError('shared Pi runtime is ambiguous','stale')
+        model=session.get('model') or {};runtime=options[0]
+        if membership_revision(claim['affected'],claim['native_episode'],entry['version'] if entry else 0,
+                model,claim['source_history'],claim['source_principal'])!=claim['membership_revision']:
+            raise VqroError('Pi native model/history/shared runtime changed','stale')
+        require_fresh('pi',runtime['argv'])
+        native_argv=[*provider_argv(runtime['argv'],target),'--session',claim['source_history'],'--model',model['id']]
+        if isinstance(model.get('effort'),str):native_argv+=['--thinking',model['effort']]
+        hosts=self.ext.vqro.call('resource.list',{'id':claim['host']}).get('resources',[])
+        if len(hosts)!=1 or not isinstance(hosts[0].get('provider'),str):
+            raise VqroError('original execution backend is unavailable; no relocation','unavailable')
+        env=account_environment(target,runtime_environment('pi',runtime))
+        env['VQRO_PRINCIPAL']=claim['source_principal']
+        params={'bridge':True,'provider':hosts[0]['provider'],'name':'pi-resume-'+uuid.uuid4().hex[:12],
+                'argv':[*runtime.get('bridge_argv',default_bridge()),'--',*native_argv],'env':env}
+        cwd=session.get('cwd') or source.get('cwd')
+        if isinstance(cwd,str) and cwd:params['cwd']=cwd
+        return launch(self.ext,params,brand='Pi resume',initialize_route=self.initialize_request_route,
+                      show_terminal=self.terminal,expected_agents=1)
 
     def initialize_request_route(self, agent):
         # Preserve Pi's return shape while sharing the actual-caller default mechanism.

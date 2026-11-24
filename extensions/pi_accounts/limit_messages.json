@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "notice": "Explicit human-approved Pi-only exception: these tightly bounded native-error message matches are inference, NOT native quota classification. Anything else requires an owner click.",
+  "entries": [
+    {
+      "id": "codex-native-usage-renderer-v1",
+      "provider": "openai-codex",
+      "matcher": "fullmatch",
+      "pattern": "You have hit your ChatGPT usage limit(?: \\([a-z0-9_-]{1,32} plan\\))?\\.(?: Try again in ~[0-9]{1,10} min\\.)?",
+      "sources": ["@earendil-works/pi-ai@1.5.2/dist/api/openai-codex-responses.js:1246-1267 (native parseErrorResponse friendlyMessage renderer; emitted by catch at347-351)"],
+      "examples": ["You have hit your ChatGPT usage limit.", "You have hit your ChatGPT usage limit (pro plan). Try again in ~42 min."]
+    },
+    {
+      "id": "anthropic-native-sdk429-rate-limit-v1",
+      "provider": "anthropic",
+      "matcher": "anthropic_sdk429_json",
+      "sources": ["https://platform.claude.com/docs/en/api/errors (HTTP429 rate_limit_error and documented error object)", "@anthropic-ai/sdk@0.129.0/core/error.mjs:17-32,35-65 (exact status + JSON.stringify(error) error-message renderer)", "@earendil-works/pi-ai@1.5.2/dist/api/anthropic-messages.js:879-902 (native errorMessage preservation)"],
+      "examples": ["429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Request rate limit reached\"},\"request_id\":\"req_fake\"}"]
+    }
+  ]
+}

@@ -3,15 +3,15 @@
   "summary":"Launch Pi RPC agents and configure their runtime arguments.",
   "description":"Adds New Pi agent and Pi runtime settings. New agents run through a bridge in a backend-owned terminal; no prompt is sent automatically. Turn it off to remove these launch/settings controls, not existing Pi processes. Agent controls are provided separately by the agents extension.",
   "requires":{"protocol":1,"client_features":["items","input","menu"]},
-  "provides":["command/pi.new","command/pi.settings","command/pi.configure","view/pi-runtimes","view/pi-settings","view/accounts-choice-pi-new","doc/settings/pi","doc/settings/agents",
+  "provides":["command/pi.resume","command/pi.new","command/pi.settings","command/pi.configure","view/pi-runtimes","view/pi-settings","view/accounts-choice-pi-new","doc/settings/pi","doc/settings/agents",
               "ability/vqro.agents","view/agent-*"],
   "needs":[{"cap":"ability/vqro.terminals","suggest":"herdr","why":"Pi agents run in a backend terminal"}],
   "works_with":[{"cap":"doc/settings/accounts-policy","suggest":"accounts","without":"New named-account choices default to ask"},
-                {"cap":"doc/settings/accounts","suggest":"accounts","without":"Native default login/profile remains unchanged"},
+                {"cap":"doc/settings/accounts","suggest":"accounts","without":"Shared native login and configuration remain unchanged"},
                 {"cap":"command/coord.request_route","suggest":"coord","without":"A spawned agent keeps human request fallback; initialization failure never replays spawn"},
                 {"cap":"command/coord.inbox.window","suggest":"coord","without":"Request route initialization is unconfirmed; native spawn is never retried"},
                 {"cap":"command/agents.show","suggest":"agents","without":"A new agent opens as its bridge terminal, not an agent panel"},
                 {"cap":"command/tabs.show","suggest":"tabs","without":"A new agent is not opened in a tab"}],
   "settings_command":"pi.settings",
-  "contributes":{"commands":["pi.new","pi.settings","pi.configure"],"keys":["Prefix a: new Pi agent"],"menu_items":["New Pi agent (the +◆ tab-bar button)"],"panels":["Pi runtimes"],"settings":["doc/settings/pi"]}
+  "contributes":{"commands":["pi.resume","pi.new","pi.settings","pi.configure"],"keys":["Prefix a: new Pi agent"],"menu_items":["New Pi agent (the +◆ tab-bar button)"],"panels":["Pi runtimes"],"settings":["doc/settings/pi"]}
 }

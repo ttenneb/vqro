@@ -13,6 +13,9 @@ mod views;
 mod origins;
 mod startup;
 mod testing;
+mod account_alias;
+#[cfg(test)]
+mod error_episode_tests;
 #[path="../launcher_account/mod.rs"]
 mod launcher_account;
 use std::collections::HashMap;
@@ -35,6 +38,7 @@ struct Args {
     #[arg(long)] instance:Option<String>,
     #[arg(long)] cwd:Option<std::path::PathBuf>,
     #[arg(long)] testing_plugin:Option<std::path::PathBuf>,
+    #[arg(long)] account_extension:Option<std::path::PathBuf>,
     #[arg(last=true,required=true)] native:Vec<String>,
 }
 struct Shared {agent:Mutex<Agent>,fallback:panel::Fallback,connected:std::sync::atomic::AtomicBool,native:OnceLock<Native>,starts:OnceLock<Starts>,changed:Notify,metadata_refresh:Notify,cwd:String,provider_name:String,instance:String,ui_slots:Arc<tokio::sync::Semaphore>}
@@ -103,6 +107,8 @@ async fn main()->Result<()> {
     let version_argv=args.native.clone();
     let expanders_on=launch_may_transform(&args.native);
     let mut argv=controlled(args.native)?;
+    let alias_metadata=std::env::var("VQRO_PI_ACCOUNT").ok();
+    let expected_alias=account_alias::attach(&mut argv,args.account_extension.as_deref(),alias_metadata.as_deref())?;
     let testing_plugin = match args.testing_plugin {
         Some(path) => {
             let admitted = vqro::paths::extensions_dir().and_then(|root|
@@ -134,9 +140,10 @@ async fn main()->Result<()> {
     let _=shared.native.set(native.clone());let _=shared.starts.set(Starts::new(native.clone(),signals));
     if shared.fallback.enabled(){tokio::spawn(monitor(shared.clone()));}
     let startup=native.call("get_state",json!({}),Duration::from_secs(5)).await;
-    if !matches!(startup,Ok(ref reply) if reply.success && reply.data.is_object()) {
+    if !matches!(startup,Ok(ref reply) if reply.success && reply.data.is_object()
+        && account_alias::ready(expected_alias.as_deref(),&reply.data)) {
         native.stop();let _=tokio::time::timeout(Duration::from_secs(2),native.exited()).await;
-        anyhow::bail!("native Pi did not report startup state");
+        anyhow::bail!("native Pi did not confirm startup/account binding; no agent endpoint registered");
     }
     // Real Pi uses a commands/models container, older fixtures may return the array directly.
     match native.call("get_commands",json!({}),Duration::from_secs(3)).await {

@@ -118,7 +118,7 @@ rights, proves no tool-process attribution and does not declare `agent.tool_prin
 their own standing/evidence (§2.4). Coordination already reads this endpoint fact separately from the core's
 terminal-launch `resource.principal` marker; neither should be guessed when absent.
 
-**Optional configured account.** `data.agent.account? {id, label?, provider?, kind, sources}` names the account/profile
+**Optional configured account.** `data.agent.account? {id, label?, provider?, kind, sources}` names the credential registration
 selected by the launcher, not an authenticated user, verified subscription, billing result or remaining allowance.
 `id` is an opaque launcher-registry identifier (1–64 characters), distinct from a provider's native account/workspace
 ID; `label`, when known, is a printable display name (1–128 characters), and optional `provider` is the configured provider ID
@@ -131,17 +131,32 @@ or inventing a target label. These fields are selected configuration, not
 native authentication readback, and do not change when someone signs in/out inside the runtime. A consumer must not
 use them as proof of live credential identity or entitlement. No token, credential, native profile contents or
 profile path belongs in this fact. The bundled launchers pass only this bounded metadata to their bridges; an
-implicit **Use my normal login** launch omits the account fact because its actual account/kind was not inspected.
+unselected **Shared runtime login** launch omits the account fact because its actual account/kind was not inspected.
 Usage-limit observations may reference this configured `account.id` without equating it with a native account ID.
 Tier-1 terminals retain the same configured metadata in their launcher declaration; they do not thereby become
-agent-v0 structured endpoints. Registry, account choice, profile selectors and native sign-in UI are replaceable
-extension policy, not core authentication or a runtime-account-switching capability.
+agent-v0 structured endpoints. Registry, credential choice and native sign-in UI are replaceable
+extension policy, not core authentication or proof of a runtime-account-switching capability. Account selection
+never selects a different configuration folder: runtime settings, skills, extensions, plugins and history stay shared.
 
 **Optional view facts.** All fields below are optional; absent means unknown, never zero, empty or inferred.
 Adapters publish only what the runtime reports, including estimates labelled as such by the runtime:
 - `session.cwd?`: string, as reported by the runtime, not the viewer's or bridge process's working directory.
-- `session.model? {id, label?, effort?}`: read-only facts. Changing it still uses `agent.configure` on an advertised
-  config option with `category: "model"`; a fact is not a write interface.
+- `session.native?`: experimental producer-specific, read-only metadata. Pi's `file?` preserves its public native
+  history-file reference as an opaque execution-host argument, never transcript bytes or a configuration selector.
+  Absent means native persisted-history resume is unproved; consumers must not guess a path from a session ID.
+- `tool_principal?`: experimental nonsecret logical tool-work principal, reported only when the producer's
+  `caps.agent.tool_principal: "env"` proof succeeds. It is not an authentication token or owner grant. A guarded
+  lifecycle restart may preserve this work identity; unknown identity must not silently become a fresh job scope.
+- `session.model? {id, label?, effort?, native?}`: read-only facts. Changing it still uses `agent.configure` on an advertised
+  config option with `category: "model"`; a fact is not a write interface. The experimental `native` object preserves
+  bounded producer-specific model metadata; unknown fields are ignored, never interpreted as capabilities. Pi reports
+  its exact native `provider` and `api` strings here, allowing its integration to refuse private virtual-route aliasing.
+- Pi may additionally preserve `completion.native? {stopReason, timestamp, error_message_complete}` for a completed
+  native assistant error: the original native stop reason/request timestamp and whether the displayed error message
+  was retained without truncation. Absence means unknown. These are **not** quota classification or current blocked
+  availability. Pi-only account policy may apply its explicitly human-approved, versioned exact-message inference
+  table, labelled as inference in the pane; common policy must not classify error text. These experimental native
+  metadata fields do not authorize effects or promise native restart/resume.
 - `usage? {context?: {used?, window, limit?}, tokens?: {input, output, cache_read?, cache_write?},
   cost?: {amount, currency, basis: "reported" | "estimated", plan?}, at_ms?}`. Unavailable sections are omitted;
   consumers preserve the currency and basis and never invent cost from token counts or pricing tables. A runtime

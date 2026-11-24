@@ -69,7 +69,7 @@ pub struct Agent {
     open:Vec<(Value,Value,String)>,starting:bool,
     position:u64,serial:u64,epoch_number:u64,instance:String,boot:String,
     pub session:Option<Value>,pub session_pending:bool,pub run:Option<String>,pub completion:Option<Value>,
-    reason:String,error:Option<String>,exit:Option<Exit>,caps:Value,
+    reason:String,error:Option<String>,native_error:Option<Value>,exit:Option<Exit>,caps:Value,
     launch_cwd:Option<String>,usage:Option<Value>,usage_revision:u64,
     startup:super::startup::Startup,
     /// Whether Pi may run input expanders/transformers (extensions, prompt templates). Always true for a bridge launch:
@@ -84,7 +84,7 @@ impl Agent {
         let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entities:ENTITY_COUNT,max_entity_bytes:ENTITY_TOTAL,snapshot_buffer_bytes:1024*1024,..Default::default()});
         journal.set_coverage(Coverage::Tail);
         let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,account:None,testing_plugin:None,tool_principal_env:false,view:None,view_error:None,configuration:Default::default(),commands:Default::default(),availability:None,origins:Default::default(),start_origin:None,current_origin:None,requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),open:Vec::new(),starting:false,
-            position:0,serial:0,epoch_number:1,instance,boot,session:None,session_pending:false,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null,launch_cwd:None,startup:Default::default(),expanders_on:true,usage:None,usage_revision:0};
+            position:0,serial:0,epoch_number:1,instance,boot,session:None,session_pending:false,run:None,completion:None,reason:"unknown".into(),error:None,native_error:None,exit:None,caps:Value::Null,launch_cwd:None,startup:Default::default(),expanders_on:true,usage:None,usage_revision:0};
         agent.refresh();agent
     }
     pub fn with_cwd(instance:String,signals:Arc<Signals>,cwd:String)->Self{let mut agent=Self::new(instance,signals);agent.startup.cwd(&cwd);agent.publish_startup();if cwd.len()<=4096{agent.launch_cwd=Some(cwd);}else{agent.incomplete.insert("session.cwd".into());}agent}
@@ -160,7 +160,8 @@ impl Agent {
                 // only the command-bearing ones: "may" with incomplete names; launched without them: "none".
                 "input_transform":if self.expanders_on{json!({"state":"may","names":self.startup.extension_paths(),"names_complete":false})}else{json!({"state":"none"})},
                 "host":{"id":format!("{}.child",self.boot),"provider":provider,"instance":self.instance,"incarnation":"","kind":"process","owns_lifecycle":true},
-                "session":if self.session_pending {None}else{self.session.as_ref()},"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":self.queue,"requests":self.request_summaries(),"background":null,
+                "session":if self.session_pending {None}else{self.session.as_ref()},
+                "tool_principal":if self.tool_principal_env{std::env::var("VQRO_PRINCIPAL").ok()}else{None},"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":self.queue,"requests":self.request_summaries(),"background":null,
                 "config":self.configuration.options(),"commands":self.commands.facts(),"usage":if self.session_pending || self.configuration.pending{None}else{self.usage.as_ref()},"incomplete":self.incomplete,
                 "items":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"coverage":self.journal.coverage().as_str()}},"views":self.view.iter().collect::<Vec<_>>(),"view_error":self.view_error}});
         if let Some(account)=&self.account{facts["data"]["agent"]["account"]=account.clone();}
@@ -177,7 +178,7 @@ impl Agent {
     pub fn startup_failed(&mut self,fields:&[&str]){self.startup.failed(fields);self.publish_startup();}
     pub fn new_session_epoch(&mut self){
         self.invalidate_usage();
-        self.cancel_requests("epoch_changed");self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.availability=None;self.open.clear();self.origins.reset();self.start_origin=None;self.current_origin=None;self.run=None;self.completion=None;
+        self.cancel_requests("epoch_changed");self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.availability=None;self.open.clear();self.origins.reset();self.start_origin=None;self.current_origin=None;self.run=None;self.completion=None;self.native_error=None;
         self.publish_startup(); // same process, same native reports: the new epoch carries them again
     }
     pub fn ensure_session_epoch(&mut self,prior:&str){if self.epoch()==prior{self.new_session_epoch();if let Some(session)=self.session.clone(){self.store("session","current",session,false);}self.refresh();}}
@@ -354,6 +355,14 @@ impl Agent {
             if message["role"]=="assistant" {
                 self.reason=match message["stopReason"].as_str().unwrap_or("unknown") {"stop"=>"end_turn","length"=>"max_tokens","aborted"=>"cancelled",other=>other}.into();
                 self.error=message["errorMessage"].as_str().map(|s|s.chars().take(1024).collect());
+                // Factual native error witness only. NO quota/rate classification:
+                // the Pi policy extension owns the human-approved inference table.
+                self.native_error=if message["stopReason"]=="error" {
+                    message["timestamp"].as_u64().filter(|stamp|*stamp<=9_007_199_254_740_991).map(|stamp|json!({
+                        "stopReason":"error","timestamp":stamp,
+                        "error_message_complete":message["errorMessage"].as_str().is_some_and(|text|text.chars().count()<=1024)
+                    }))
+                }else{None};
             }
             self.open.retain(|(_,_,open)|*open!=id);
             if self.current_origin.as_ref().is_some_and(|(bound,_,_)|*bound==id){self.current_origin=None;}
@@ -430,10 +439,20 @@ impl Agent {
                         if self.session.as_ref().is_some_and(|session|session["id"]!=id) {self.new_session_epoch();}
                         if new_session && record["data"]["messageCount"].as_u64()==Some(0){self.incomplete.remove("items");self.journal.set_coverage(Coverage::AllRetained);}
                         let mut session=json!({"id":id});
+                        if let Some(file)=record["data"]["sessionFile"].as_str().filter(|file|!file.is_empty() && file.len()<=4096 && !file.chars().any(char::is_control)) {
+                            session["native"]=json!({"file":file});
+                        }
                         if let Some(title)=record["data"]["sessionName"].as_str().filter(|s|s.len()<=512){session["title"]=json!(title);}
                         else if !record["data"]["sessionName"].is_null(){self.incomplete.insert("session.title".into());}
                         if let Some(model)=record["data"]["model"]["id"].as_str().filter(|s|s.len()<=256){
                             session["model"]=json!({"id":model});
+                            let mut native_model=serde_json::Map::new();
+                            for field in ["provider","api"] {
+                                if let Some(value)=record["data"]["model"][field].as_str().filter(|value|!value.is_empty() && value.len()<=128) {
+                                    native_model.insert(field.into(),json!(value));
+                                }
+                            }
+                            if !native_model.is_empty(){session["model"]["native"]=Value::Object(native_model);}
                             if let Some(label)=record["data"]["model"]["name"].as_str().filter(|s|s.len()<=512){session["model"]["label"]=json!(label);}
                             if let Some(effort)=record["data"]["thinkingLevel"].as_str().filter(|s|s.len()<=64){session["model"]["effort"]=json!(effort);}
                         }
@@ -443,11 +462,12 @@ impl Agent {
                         self.store("session","current",self.session.clone().unwrap(),false);
                     }else{self.incomplete.insert("session".into());}
                 }
-                Some("agent_start") if self.exit.is_none()=>{if self.run.is_none(){self.run=Some(self.next("run"));self.reason="unknown".into();self.error=None;}},
+                Some("agent_start") if self.exit.is_none()=>{if self.run.is_none(){self.run=Some(self.next("run"));self.reason="unknown".into();self.error=None;self.native_error=None;}},
                 Some("agent_settled") if self.exit.is_none()=>{
                     // A successful completion is also a native clear.
                     if record["aborted"]!=true && self.reason=="end_turn" && self.availability.as_ref().is_some_and(|a|a["state"]=="blocked"){self.availability=Some(json!({"state":"available"}));}
-                    if let Some(run)=self.run.take(){let reason=if record["aborted"]==true{"cancelled"}else{&self.reason};self.completion=Some(json!({"id":run,"reason":reason,"error":self.error.as_ref().map(|message|json!({"message":message}))}));}
+                    if let Some(run)=self.run.take(){let reason=if record["aborted"]==true{"cancelled"}else{&self.reason};self.completion=Some(json!({"id":run,"reason":reason,"error":self.error.as_ref().map(|message|json!({"message":message})),
+                        "native":if reason=="error"{self.native_error.as_ref()}else{None}}));}
                 }
                 Some("message_start")=>{
                     // An ignored toolResult start must not mark the next record as a start.
