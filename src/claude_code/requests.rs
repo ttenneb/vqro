@@ -53,12 +53,17 @@ fn request_scope(child: Option<&str>) -> RequestScope {
         .map(|id| RequestScope::Child(id.into()))
         .unwrap_or(RequestScope::Root)
 }
+struct Recent {
+    id: String,
+    hash: u64,
+    scope: RequestScope,
+}
 #[derive(Default)]
 pub struct Requests {
     serial: u64,
     pending: BTreeMap<String, Pending>,
     native: HashMap<String, String>,
-    recent: VecDeque<(String, u64)>,
+    recent: VecDeque<Recent>,
     unsupported_tokens: BTreeMap<String, WriteToken>,
     unsupported_tools: BTreeMap<String, (RequestScope, String)>,
 }
@@ -100,12 +105,13 @@ impl Requests {
         })
     }
     pub fn root_has_unconfirmed(&self) -> bool {
-        self.pending.values().any(|p| {
-            p.value["child"].is_null()
-                && p.value["native"]["scope_unknown"] != true
-                && p.value["status"] != "pending"
-                && p.value["native"]["waiting"] != "not_waiting"
-        })
+        self.recent.iter().any(|r| r.scope == RequestScope::Root)
+            || self.pending.values().any(|p| {
+                p.value["child"].is_null()
+                    && p.value["native"]["scope_unknown"] != true
+                    && p.value["status"] != "pending"
+                    && p.value["native"]["waiting"] != "not_waiting"
+            })
     }
     pub fn summaries(&self) -> Vec<Value> {
         self.pending
@@ -119,11 +125,15 @@ impl Requests {
     }
     fn remember(&mut self, native: &str, request: &Value) -> bool {
         // Never evict an unsettled tombstone and thereby replay an unknown cancellation.
-        if self.recent.len() >= RECENT && !self.recent.iter().any(|(id, _)| id == native) {
+        if self.recent.len() >= RECENT && !self.recent.iter().any(|r| r.id == native) {
             return false;
         }
-        self.recent.retain(|(id, _)| id != native);
-        self.recent.push_back((native.into(), fingerprint(request)));
+        self.recent.retain(|r| r.id != native);
+        self.recent.push_back(Recent {
+            id: native.into(),
+            hash: fingerprint(request),
+            scope: RequestScope::Root,
+        });
         self.unsupported_tools.remove(native);
         if let Some(tool) = request["tool_use_id"].as_str().filter(|s| s.len() <= 4096) {
             self.unsupported_tools
@@ -141,12 +151,16 @@ impl Requests {
         if !self.remember(native, request) {
             return false;
         }
-        if let Some((scope, _)) = self.unsupported_tools.get_mut(native) {
-            *scope = if unknown {
-                RequestScope::Unknown
-            } else {
-                request_scope(child)
-            };
+        let scope = if unknown {
+            RequestScope::Unknown
+        } else {
+            request_scope(child)
+        };
+        if let Some(recent) = self.recent.iter_mut().find(|r| r.id == native) {
+            recent.scope = scope.clone();
+        }
+        if let Some((stored, _)) = self.unsupported_tools.get_mut(native) {
+            *stored = scope;
         }
         true
     }
@@ -173,7 +187,7 @@ impl Requests {
             if let Some(token) = self.unsupported_tokens.remove(native) {
                 token.cancel_before_write();
             }
-            self.recent.retain(|(id, _)| id != native);
+            self.recent.retain(|r| r.id != native);
             self.unsupported_tools.remove(native);
             if let Some(id) = self.native.remove(native) {
                 if let Some(mut pending) = self.pending.remove(&id) {
@@ -245,7 +259,7 @@ impl Requests {
         if self
             .recent
             .iter()
-            .any(|(id, hash)| id == native && *hash == fingerprint)
+            .any(|r| r.id == native && r.hash == fingerprint)
         {
             return result;
         }
@@ -494,7 +508,7 @@ impl Requests {
                 token.cancel_before_write();
             }
             self.unsupported_tools.remove(&native);
-            self.recent.retain(|(id, _)| id != &native);
+            self.recent.retain(|r| r.id != native);
         }
         let ids: Vec<_> = self
             .pending

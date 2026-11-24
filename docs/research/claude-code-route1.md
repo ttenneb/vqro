@@ -111,14 +111,19 @@ identity. Native/helper/model execution is still synthetic qualification only.
 ## Native children, execution work and plans
 
 Pinned SDK0.3.329/CLI2.1.329 supplies per-process background membership levels and separate task lifecycle edges.
-Membership replaces only the background witness; leaving a level does NOT complete a task. Native run ids are
+Membership replaces only the background witness; leaving a level does NOT complete a task. Positive live work
+not covered by that witness revokes its completeness (including a stale empty level); only a fresh native full
+level restores it. Known older/same-terminal run edges do not reopen work, and the edge never invents a complete
+membership set or rewrites the parent's rate episode. Native run ids are
 ordered only within their task; older runs cannot overwrite a later run. Conflicting terminal evidence is
 unknown/incomplete. A backgrounded `main-session` task is not fabricated as a child.
 
 Positive producer `agent_id` or an unambiguous observed spawn `tool_use_id` binds scoped child messages/tools/requests.
 Unknown or over-bound scope is omitted/incomplete, never root content or an approvable root form. Child UUIDs/tool
 ids cannot update root receipts, session, foreground availability or tool/consent identity. Consent settlement
-is scope-specific; context-free snapshots retain the positively known scope of a live native question. Root phase
+is scope-specific; RECENT tombstones retain their own scope, so known-root unknown consent still makes root
+phase unknown while known-child tombstones stay outside it. A permission body's documented agent_id wins
+over extra wrapper metadata; context-free snapshots retain the positively known scope of a live native question. Root phase
 ignores child questions, but restart separately refuses ANY unresolved native consent, preserving its safety fence.
 No child endpoint/principal/inbox or send/resume/close is invented.
 

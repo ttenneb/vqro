@@ -46,6 +46,18 @@ fn full_level_is_independent_membership_not_terminal_evidence() {
     assert!(bg.is_none());
 }
 #[test]
+fn permission_body_scope_cannot_be_overridden_by_extra_wrapper_metadata() {
+    let mut w = Work::default();
+    let (child,_,_)=w.scope(&json!({"type":"control_request","agent_id":"wrapper","request":{"agent_id":"native-permission-owner"}}));
+    assert_eq!(
+        child,
+        w.tasks
+            .get("native-permission-owner")
+            .and_then(|t| t.child.clone()),
+        "documented permission body agent_id, not extra wrapper metadata, owns the question"
+    );
+}
+#[test]
 fn scopes_use_positive_producer_or_unambiguous_native_tool_correlation() {
     let mut w = Work::default();
     w.event(&started("a", "1"));

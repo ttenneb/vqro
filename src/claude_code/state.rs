@@ -408,6 +408,13 @@ impl State {
             )
         {
             let changes = self.work.event(frame);
+            if self
+                .work
+                .uncovers_background(frame, self.background.as_ref())
+            {
+                self.background = None;
+                self.incomplete.insert("background".into());
+            }
             self.work_changes(changes);
             return;
         }

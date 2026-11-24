@@ -1,5 +1,29 @@
 use super::*;
 #[test]
+fn known_root_unsupported_tombstone_keeps_root_unknown_but_child_does_not() {
+    let mut root = state();
+    let mut q = question("root-unconfirmed", false);
+    q["request"]["requires_user_interaction"] = json!(true);
+    root.record(&q);
+    assert!(root.requests.has_unconfirmed());
+    assert_eq!(
+        root.status(),
+        "unknown",
+        "known ROOT unsupported/possible-write tombstone MUST retain unknown parent phase"
+    );
+    let mut child = state();
+    start(&mut child);
+    let mut q = question("child-unconfirmed", true);
+    q["request"]["requires_user_interaction"] = json!(true);
+    child.record(&q);
+    assert!(child.requests.has_unconfirmed());
+    assert_eq!(
+        child.status(),
+        "idle",
+        "only known child tombstones are outside root phase"
+    );
+}
+#[test]
 fn structured_plan_output_is_correlated_and_input_intent_is_not_projected() {
     let mut s = state();
     s.record(&json!({"type":"assistant","uuid":"p1","message":{"content":[{"type":"tool_use","id":"p-tool","name":"TodoWrite","input":{"todos":[{"content":"intent"}]}}]}}));

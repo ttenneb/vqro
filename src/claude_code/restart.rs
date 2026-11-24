@@ -258,6 +258,55 @@ mod tests {
         (state, args)
     }
     #[test]
+    fn positive_background_edge_revokes_stale_empty_restart_witness() {
+        let (mut state, args) = fixture();
+        let request = Restart::parse(&args).unwrap();
+        assert!(request.guard(&state, Some("r/host")).is_ok());
+        let episode = state.availability.limit_episode.clone();
+        state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_started","task_id":"new-bg","run_id":"1","task_type":"local_agent","subagent_type":"worker","is_backgrounded":true})));
+        assert!(
+            request.guard(&state, Some("r/host")).is_err(),
+            "positive new background task MUST revoke stale known-empty restart authorization until a fresh full level"
+        );
+        assert!(state.background.is_none());
+        assert_eq!(
+            state.availability.limit_episode, episode,
+            "child activity must not rewrite root rate/turn evidence"
+        );
+        state.observe(&crate::native_process::Event::Record(
+            json!({"type":"system","subtype":"background_tasks_changed","tasks":[]}),
+        ));
+        assert!(
+            request.guard(&state, Some("r/host")).is_ok(),
+            "only fresh native full membership can restore known empty"
+        );
+    }
+    #[test]
+    fn covered_level_and_late_terminal_edges_do_not_fabricate_new_background_work() {
+        let (mut state, args) = fixture();
+        let request = Restart::parse(&args).unwrap();
+        let start = json!({"type":"system","subtype":"task_started","task_id":"a","run_id":"1","task_type":"local_agent","is_backgrounded":true});
+        state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a","run_id":"1","task_type":"local_agent"}]})));
+        state.observe(&crate::native_process::Event::Record(start.clone()));
+        assert!(
+            state.background.is_some(),
+            "level-before-start is covered, not a contradiction"
+        );
+        state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_notification","task_id":"a","run_id":"1","status":"completed"})));
+        state.observe(&crate::native_process::Event::Record(
+            json!({"type":"system","subtype":"background_tasks_changed","tasks":[]}),
+        ));
+        state.observe(&crate::native_process::Event::Record(start.clone()));
+        assert!(
+            request.guard(&state, Some("r/host")).is_ok(),
+            "same observed terminal run cannot reopen work"
+        );
+        let mut newer = start;
+        newer["run_id"] = json!("2");
+        state.observe(&crate::native_process::Event::Record(newer));
+        assert!(request.guard(&state, Some("r/host")).is_err());
+    }
+    #[test]
     fn background_override_defaults_false_and_bypasses_only_background() {
         let (mut state, mut args) = fixture();
         let ordinary = Restart::parse(&args).unwrap();

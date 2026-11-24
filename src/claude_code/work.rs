@@ -143,10 +143,15 @@ impl Work {
     }
     /// A producer's agent_id is observation identity, NEVER a send destination API.
     pub fn scope(&mut self, frame: &Value) -> (Option<String>, Vec<Change>, bool) {
-        let agent = frame
-            .get("agent_id")
-            .filter(|v| !v.is_null())
-            .or_else(|| frame["request"].get("agent_id").filter(|v| !v.is_null()));
+        let wrapper = frame.get("agent_id").filter(|v| !v.is_null());
+        let permission = frame["request"].get("agent_id").filter(|v| !v.is_null());
+        // can_use_tool's documented producer identity is IN its permission body. Extra wrapper
+        // metadata must not override that authoritative native question context.
+        let agent = if frame["type"] == "control_request" {
+            permission.or(wrapper)
+        } else {
+            wrapper.or(permission)
+        };
         let parent_value = frame.get("parent_tool_use_id").filter(|v| !v.is_null());
         let parent = parent_value.and_then(native_id);
         if parent_value.is_some() && parent.is_none() {
@@ -498,6 +503,45 @@ impl Work {
             self.incomplete = true;
         }
         (changes, complete.then_some(background))
+    }
+    /// Positive/possibly-background live work revokes a snapshot that does not cover it.
+    /// This is NOT a synthesized membership set: only a later native level restores completeness.
+    pub fn uncovers_background(&self, frame: &Value, background: Option<&Vec<Value>>) -> bool {
+        let direct = frame
+            .get("is_backgrounded")
+            .or_else(|| frame["patch"].get("is_backgrounded"));
+        let id = native_id(&frame["task_id"]);
+        let row = id.and_then(|id| self.tasks.get(id));
+        let run = frame.get("run_id").and_then(native_id);
+        if let (Some(row), Some(run)) = (row, run) {
+            if let Some(current) = row.run.as_deref() {
+                if run < current || (run == current && row.terminal) {
+                    return false;
+                }
+            }
+        }
+        let bg = direct.or_else(|| row.and_then(|row| row.value["native"].get("is_backgrounded")));
+        if bg == Some(&Value::Bool(false)) {
+            return false;
+        }
+        let active = direct == Some(&Value::Bool(true))
+            || matches!(
+                frame["subtype"].as_str(),
+                Some("task_started" | "task_progress")
+            )
+            || matches!(
+                frame["patch"]["status"].as_str(),
+                Some("pending" | "running" | "paused")
+            );
+        if !active {
+            return false;
+        }
+        !background.is_some_and(|rows| {
+            rows.iter().any(|row| {
+                id.is_some_and(|id| row["native"]["task_id"].as_str() == Some(id))
+                    && run.is_none_or(|run| row["native"]["run_id"] == run)
+            })
+        })
     }
     pub fn cancel_target(&self, kind: &str, id: &str) -> Option<&str> {
         self.tasks
