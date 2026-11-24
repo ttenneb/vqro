@@ -63,6 +63,17 @@ There is no retry after the resolved ordinary exec. This is lookup consistency, 
 Mocked Windows controls cover cwd shadow vs PATH, .exe/.cmd and PATHEXT order, conservative ambiguity; POSIX
 controls preserve PATH-only/no-suffix behaviour. No native Windows process is used for these controls.
 
+## Windows optional-argument encoding boundary
+
+On Windows the host wrapper encodes EVERY argv element at the execv/execvp boundary using subprocess.list2cmdline
+per argument, including ordinary argv. This preserves decoded argument values under MSVCRT whitespace, quote and
+backslash rules; it adds no shell. Spaced installed paths are supported rather than silently split or disabled.
+An unrepresentable added token (embedded NUL) omits the testing field, attempts one best-effort NOT VERIFIED
+warning, skips the probe for that field, and still reaches one ordinary launch. Ordinary runtime input is already
+NUL-rejected by the launcher/OS, not silently dropped here. POSIX argv is unchanged. Independent CRT-reader
+controls roundtrip spaces/tabs, quotes with backslashes, trailing backslashes, apostrophes, empty values and
+ordinary argv, plus the NUL-field fallback. No native Windows execution is inferred.
+
 ## Platform review boundary
 
 Admission uses host paths; canonicalization and Pi's reported path spelling must agree. Shared Rust/legacy bridge

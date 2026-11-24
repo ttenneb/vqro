@@ -20,6 +20,36 @@ from pi_testing import rpc_testing_args
 from testing_unit import setup_status
 
 
+def crt_split(command):
+    """Independent MSVCRT whitespace/quote/backslash reader for encoded-boundary controls."""
+    result, index = [], 0
+    while index < len(command):
+        while index < len(command) and command[index] in " \t":
+            index += 1
+        if index == len(command):
+            break
+        value, quoted = [], False
+        while index < len(command) and (quoted or command[index] not in " \t"):
+            slashes = 0
+            while index < len(command) and command[index] == chr(92):
+                slashes += 1
+                index += 1
+            if index < len(command) and command[index] == '"':
+                value.extend(chr(92) * (slashes // 2))
+                if slashes % 2:
+                    value.append('"')
+                else:
+                    quoted = not quoted
+                index += 1
+            else:
+                value.extend(chr(92) * slashes)
+                if index < len(command) and (quoted or command[index] not in " \t"):
+                    value.append(command[index])
+                    index += 1
+        result.append("".join(value))
+    return result
+
+
 class RpcTestingTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="rpc-testing-")
@@ -258,6 +288,56 @@ class RpcTestingTests(unittest.TestCase):
 
     def test_posix_does_not_expand_windows_suffixes(self):
         self._assert_main_lookup(False, ["cwd/vqro-bridge-pi", "tools/vqro-bridge-pi.exe", "tools/vqro-bridge-pi.cmd"], None)
+
+    def _assert_optional_crt_guard(self, value, windows, omitted):
+        launch._HELP.clear(); launch._HELP_REASONS.clear(); launch._WARNED.clear()
+        binary = self.executable("print('fixture')\n")
+        process = Mock(returncode=0, stdout=io.BytesIO(b"--testing-plugin\n"))
+        prefix = ["--cwd", "ordinary bridge path with spaces"]
+        native = ["pi", "ordinary native space", 'ordinary"quote', "ordinary\\\\trailing\\\\"]
+        args = [*prefix, "--testing-plugin", value, "--", *native]
+        expected = [*prefix, "--", *native] if omitted else args
+        with patch.object(launch.os, "name", "nt" if windows else "posix"), \
+                patch.object(launch, "exec_target", return_value=binary), \
+                patch.object(launch, "_background_kwargs", return_value={}), \
+                patch.object(launch.subprocess, "Popen", return_value=process) as popen, \
+                patch.object(launch.sys, "argv", ["launch.py", *args]), \
+                patch.object(launch.os, "execv") as execute, \
+                contextlib.redirect_stderr(io.StringIO()) as notices, contextlib.redirect_stdout(io.StringIO()) as stdout:
+            launch.main()
+            self.assertEqual(launch.negotiated(args, binary), expected)
+        execute.assert_called_once()
+        self.assertEqual(execute.call_args.args[0], binary)
+        encoded = execute.call_args.args[1]
+        if windows:
+            self.assertEqual(crt_split(" ".join(encoded)), ["vqro-bridge-pi", *expected])
+            self.assertIn('"ordinary native space"', encoded)
+        else:
+            self.assertEqual(encoded, ["vqro-bridge-pi", *expected])
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(notices.getvalue().count("NOT VERIFIED"), 1 if omitted else 0)
+        if omitted:
+            popen.assert_not_called()
+        else:
+            popen.assert_called_once()
+
+    def test_windows_crt_encoding_roundtrips_spaced_quoted_empty_and_backslash_values(self):
+        for value in ('C:\\Users\\First Last\\plugin.ts', 'C:\\safe\\a\\"quote\\plugin.ts', 'C:\\space dir\\', 'tab\tpath', ''):
+            with self.subTest(value=value):
+                self._assert_optional_crt_guard(value, True, False)
+
+    def test_windows_embedded_nul_omits_only_optional_field_and_launches_once(self):
+        self._assert_optional_crt_guard("bad\0plugin", True, True)
+
+    def test_windows_apostrophe_and_unquoted_backslashes_are_literal_without_a_shell(self):
+        for value in ("C:\\safe\\O'Brien\\plugin.ts", "C:\\safe\\trailing\\"):
+            with self.subTest(value=value):
+                self._assert_optional_crt_guard(value, True, False)
+
+    def test_posix_optional_and_ordinary_arguments_are_unchanged_by_crt_guard(self):
+        for value in ('space path', 'quote"and\\slashes\\', ''):
+            with self.subTest(value=value):
+                self._assert_optional_crt_guard(value, False, False)
 
     def executable(self, body):
         path = self.root / "bridge"

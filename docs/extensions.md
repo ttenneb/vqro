@@ -99,7 +99,9 @@ and prompt-template flags remain refused. Only `VQRO_TESTING_SOCKET` and `VQRO_T
 native protected-name allowlist. The existing unrelated environment policy is unchanged. The isolated host wrapper
 probes the PATH-selected bridge's `--help` once per path/mtime, with a two-second execution and bounded output.
 Probe and ordinary exec use the same explicit target, without Windows cwd/PATHEXT expansion; uncertain selection
-omits the field and preserves ordinary lookup. An older
+omits the field and preserves ordinary lookup. On Windows every exec argv element is CRT-encoded, preserving
+spaces/quotes/backslashes literally; an unrepresentable added field (e.g. NUL) is omitted with NOT VERIFIED.
+There is no shell or retry; POSIX argv is unchanged. An older
 bridge that does not advertise the field gets a single ordinary launch without the field, never a retry.
 The warning is attempted once, best-effort; failed stderr write/flush cannot veto launch, claim delivery or use
 protocol stdout. Unknown configured `bridge_argv` launchers also stay unhooked/NOT VERIFIED rather than receiving an

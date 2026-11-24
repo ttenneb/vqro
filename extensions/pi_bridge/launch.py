@@ -119,8 +119,14 @@ def negotiated(arguments, binary=None):
         index = before.index("--")
         before, separator, after = before[:index], ["--"], before[index + 1:]
     index = next((i for i, arg in enumerate(before) if arg == "--testing-plugin" or arg.startswith("--testing-plugin=")), None)
-    if index is not None and not supports_testing(binary):
+    if index is not None:
         width = 1 if "=" in before[index] else 2
+        added = before[index:index + width]
+        unrepresentable = os.name == "nt" and (len(added) != width or any("\0" in arg for arg in added))
+        if unrepresentable:
+            _HELP_REASONS[binary] = "optional testing argv cannot be represented by Windows CRT; testing field omitted"
+        if not unrepresentable and supports_testing(binary):
+            return [*before, *separator, *after]
         del before[index:index + width]
         if binary not in _WARNED:
             _WARNED.add(binary)
@@ -144,6 +150,9 @@ def main():
             pass  # Ambiguous selection cannot authorize a help probe or an optional field.
     try:
         argv = [binary, *negotiated(arguments, target)]
+        if os.name == "nt":
+            # execv/execvp pass raw strings to CRT, unlike subprocess.Popen's argv encoding.
+            argv = [subprocess.list2cmdline([argument]) for argument in argv]
         if target is None:
             os.execvp(binary, argv)  # Original lookup, no optional field, no speculative probe.
         else:
