@@ -105,9 +105,14 @@ class Accounts:
                     canonical = primary[credential_identity(row)]
                     if canonical != row['id']:
                         items.append({'type':'text','style':'dim','text':'Alias of '+canonical+'; same credential reference, never an independent alternative.'})
-                    items.append({'text':'New agent on '+label(row['label']), 'command':COMMANDS[runtime],
-                                  'args':{'account':row['id'],'_account_revision':revision}})
-                    items.append({'text':'Sign in…', 'description':'Pi: use /login in the native terminal' if runtime=='pi' else 'Native browser/device flow',
+                    if row['kind']=='api_key' or runtime=='claude':
+                        items.append({'type':'text','style':'warn','text':
+                            'API-key accounts: launching is not available yet; the keychain entry is kept' if row['kind']=='api_key'
+                            else 'account choice is not available for this launcher yet'})
+                    else:
+                        items.append({'text':'New agent on '+label(row['label']), 'command':COMMANDS[runtime],
+                                      'args':{'account':row['id'],'_account_revision':revision}})
+                    items.append({'text':'Sign in…', 'description':'Execution-host keychain entry' if row['kind']=='api_key' else 'Pi: use /login in the native terminal' if runtime=='pi' else 'Native browser/device flow',
                                   'command':'accounts.sign_in', 'args':{'account':row['id'],'_account_revision':revision}})
                 items.append({'text':'Remove account metadata', 'command':'accounts.remove',
                               'args':{'account':row['id'],'expect':revision}, 'style':'dim'})

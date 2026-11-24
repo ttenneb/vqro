@@ -106,6 +106,8 @@ class Tier1:
         account, popup = choose_account(self.ext, args, runtime, 'tier1.'+runtime)
         if popup: return popup
         argv = provider_argv(argv, account)
+        if runtime=='claude' and account is not None:
+            raise VqroError('account choice is not available for this launcher yet','unsupported')
         nonce, principal = uuid.uuid4().hex, "p:" + uuid.uuid4().hex
         if runtime == "claude":
             hook = find_hook(settings.get("hook") if isinstance(settings, dict) else None)

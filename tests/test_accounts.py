@@ -120,12 +120,15 @@ class AccountTests(unittest.TestCase):
         import test_tier1 as fixture
         f=fixture.Tier1Tests(); f.setUp()
         try:
-            f.configure(claude=['/opt/claude'],hook=str(f.hook))
-            Accounts(f.core).add({'id':'work','label':'Work','runtime':'claude','kind':'subscription','host':'r1','secret_ref':'a'*32})
-            self.assertIn('popup', f.launch('claude')['client'])
+            # The same fact invariant applies to the supported native-bound Pi
+            # route; named Claude is separately tested as an explicit refusal.
+            f.configure(pi=['pi1'])
+            Accounts(f.core).add({'id':'work','label':'Work','runtime':'pi','kind':'subscription',
+                                  'provider':'anthropic','native_provider':'vqro_work'})
+            self.assertIn('popup', f.launch('pi')['client'])
             self.assertEqual(f.spawns(), [])
-            f.launch('claude',account='work')
-            self.assertNotIn('CLAUDE_CONFIG_DIR', f.spawns()[0]['env'])
+            f.launch('pi',account='work')
+            self.assertNotIn('PI_CODING_AGENT_DIR', f.spawns()[0]['env'])
             self.assertEqual(f.core.value('doc/agents/terminals/r1')['account']['id'],'work')
         finally: f.tearDown()
 

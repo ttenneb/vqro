@@ -63,6 +63,39 @@ Wiring the helper into named launches (execution host and native auth precedence
 is an approved post-release follow-up, not part of this slice. **Continuing a conversation on an API-key account: not yet.**
 They are not same-session cutover targets in this slice.
 
+## Named-launch binding audit
+
+Named launch is allowed only where the launcher binds the credential route;
+metadata alone never authorizes fallback to the shared native login. This table
+covers every registry-consuming agent launcher (`pi.new`, `codex.new`, and the two
+`tier1` launchers). Raw backend spawn is not a named-account launcher. Normal
+`account: normal` launches keep the shared native setup and do not claim a named
+identity. Cross-runtime account IDs refuse in registry selection.
+
+| Launcher | Runtime | Account kind | Bound / refused | Evidence |
+|---|---|---|---|---|
+| `pi.new` | Pi | subscription | Bound by host bridge's shipped account extension and explicit flag | `tests/test_accounts_login_swap.py::test_launch_passes_only_auth_reference_and_keeps_shared_runtime_settings`; `src/bin/vqro-bridge-pi/account_alias.rs::explicit_shipped_extension_carries_metadata_only` |
+| `pi.new` | Pi | API key | Refused before launch; entry kept | `tests/test_accounts_route_integration.py::test_unbound_named_api_key_launch_refuses_instead_of_shared_login_fallback` |
+| `codex.new` | Codex | subscription | Bound to exact native login reference; current native login readback required | `tests/test_codex_launcher.py::test_shared_login_maps_active_a_without_selecting_inactive_b`; `test_inactive_launch_selection_is_refused_before_empty_thread_or_prompt` |
+| `codex.new` | Codex | API key | Refused before launch; entry kept | `tests/test_accounts_route_integration.py::test_unbound_named_api_key_launch_refuses_instead_of_shared_login_fallback` |
+| `tier1.pi` | Pi | subscription | Bound by same shipped account extension before pull plugin, explicit `--vqro-account` | `tests/test_tier1.py::test_named_pi_launch_loads_native_alias_before_pull_with_explicit_flag`; `tests/pi_account_alias.mjs` |
+| `tier1.pi` | Pi | API key | Refused before spawn; entry kept | `tests/test_accounts_route_integration.py::test_unbound_named_api_key_launch_refuses_instead_of_shared_login_fallback` |
+| `tier1.claude` | Claude | subscription | Refused before hook creation/spawn: “account choice is not available for this launcher yet” | `tests/test_tier1.py::test_named_claude_subscription_refuses_before_any_hook_or_spawn` |
+| `tier1.claude` | Claude | API key | Refused before spawn; entry kept | `tests/test_accounts_route_integration.py::test_unbound_named_api_key_launch_refuses_instead_of_shared_login_fallback` |
+
+Tier1 Claude named binding is an approved follow-up; its ordinary shared-login
+launch remains (`tests/test_tier1.py::test_claude_launch_wires_hooks_for_that_launch_only`).
+The standalone keychain helper remains unchanged. Credential entry/sign-in is a
+separate explicit action, not evidence that a subsequent launcher binds it.
+
+`pi.resume` is not a free-form new launcher: it accepts only an acknowledged
+subscription claim, consumes the protected launch intent once, and requires exact
+native session/file/model/account/backend/work-principal readback. API-key resume
+is unsupported. See `tests/test_pi_resume_consumption.py` and
+`tests/test_accounts_pi.py::test_resume_requires_positive_exact_logical_work_principal_readback`.
+The table records code/argv/environment and fake-control evidence, not live native
+authentication, billing or cross-account interoperability certification.
+
 ## Capacity strategies
 
 `doc/settings/accounts-policy` contains `new_agents`, `blocked`,

@@ -143,6 +143,16 @@ class Tier1Tests(unittest.TestCase):
         self.assertEqual(declared["app"], "pi")
         self.assertFalse(list((self.state / "tier1").glob("*.json")), "no per-launch file for Pi")
 
+    def test_named_claude_subscription_refuses_before_any_hook_or_spawn(self):
+        from test_account_credential_routes import row
+        account=row()
+        self.core.apply([{'op':'set','key':'doc/settings/accounts','value':{'accounts':[account]}}],'metadata')
+        with patch('tier1.find_hook') as hook,self.assertRaises(VqroError) as caught:
+            self.launch('claude',account=account['id'])
+        self.assertEqual(caught.exception.kind,'unsupported')
+        self.assertEqual(str(caught.exception),'account choice is not available for this launcher yet')
+        hook.assert_not_called();self.assertEqual(self.spawns(),[])
+
     def test_named_pi_launch_loads_native_alias_before_pull_with_explicit_flag(self):
         from test_accounts_pi import PiPrepare
         fixture=PiPrepare();fixture.setUp();account=fixture.b
