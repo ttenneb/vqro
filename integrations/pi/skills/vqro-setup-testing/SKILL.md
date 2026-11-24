@@ -34,9 +34,12 @@ The backend's actual finish assessment remains authoritative; this wording does 
 - Performance is recommended only for rendering, input, streams, publishing or startup changes; use downtime/background. It never blocks completion.
 - Do not launch paid/model calls or blindly replay a check after a lost response. Inspect existing evidence first.
 
-The terminal (tier1) Pi plugin observes setup changes and can run Unit deterministically without an AI call.
-RPC Pi bridges do not support this first slice; RPC support is a required follow-up, not a dropped requirement.
-While an RPC Pi launcher is enabled, show: NOT VERIFIED: rule not active for vqro-launched Pi agents yet.
-An unsupported notice is not testing-hook coverage.
+The terminal (tier1) Pi plugin and a negotiated RPC launch can observe setup changes and run Unit without an AI call.
+RPC support requires that launch's bridge-confirmed plugin/skill registration paths, not argv or environment alone.
+Only that confirmed launch's scoped assessment can remove its RPC caveat; older, unsupported, unavailable or
+unconfirmed launches stay NOT VERIFIED. Global/unscoped status retains the caveat and individual launch states:
+NOT VERIFIED: rule not active for vqro-launched Pi agents yet.
+Do not turn one confirmed launch into a global coverage claim. Registration is not loaded-byte or skill-body
+attestation, and an unsupported notice is not testing-hook coverage.
 This is cooperative policy, not a security boundary or a physical veto on prose claims of “done.”
 Do not alter the separate inbox-pull plugin or its acknowledgements to implement this rule.

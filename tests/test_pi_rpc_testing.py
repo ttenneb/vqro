@@ -8,6 +8,8 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import Mock, patch
+import subprocess
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
 from pi_bridge.testing import Plugin, controlled
@@ -29,6 +31,7 @@ class RpcTestingTests(unittest.TestCase):
         self.skill.write_text("skill")
         self.plugin.write_text("plugin")
         launch._HELP.clear()
+        launch._HELP_REASONS.clear()
         launch._WARNED.clear()
 
     def rows(self):
@@ -111,6 +114,44 @@ class RpcTestingTests(unittest.TestCase):
         self.assertFalse(status["rpc_testing"]["verified"])
         self.assertIn("lookup unavailable", status["rpc_testing"]["lookup_error"])
         self.assertIn(RPC_RULE_NOTICE, status["not_verified_reasons"])
+
+    def _assert_cleanup_failure_does_not_veto_main(self, kill_error):
+        binary = self.executable("print('fixture help')\n")
+        process = Mock(returncode=None, stdout=io.BytesIO())
+        process.wait.side_effect = [subprocess.TimeoutExpired([binary, "--help"], 2),
+                                    subprocess.TimeoutExpired([binary, "--help"], 1)]
+        if kill_error:
+            process.kill.side_effect = OSError("fixture kill denied")
+        reader = Mock()
+        reader.is_alive.return_value = False
+        args = ["--testing-plugin", str(self.plugin), "--", "pi", "--mode", "rpc"]
+        # No actual process or Windows API is used. Exercise the real main/negotiation/cache path.
+        with patch.object(launch.shutil, "which", return_value=binary), \
+                patch.object(launch, "_background_kwargs", return_value={"creationflags": 1234}), \
+                patch.object(launch.subprocess, "Popen", return_value=process) as popen, \
+                patch.object(launch.threading, "Thread", return_value=reader), \
+                patch.object(launch.sys, "argv", ["launch.py", *args]), \
+                patch.object(launch.os, "execvp") as execute, contextlib.redirect_stderr(io.StringIO()) as notices:
+            launch.main()
+            execute.assert_called_once_with("vqro-bridge-pi", ["vqro-bridge-pi", "--", "pi", "--mode", "rpc"])
+            self.assertEqual(launch.negotiated(args), ["--", "pi", "--mode", "rpc"])
+        popen.assert_called_once()
+        self.assertEqual(popen.call_args.kwargs["creationflags"], 1234, "probe must use shared background flags")
+        self.assertEqual(process.wait.call_count, 2)
+        process.kill.assert_called_once()
+        self.assertEqual(set(launch._HELP.values()), {False}, "cleanup failure must be negative-cached")
+        warning = notices.getvalue()
+        self.assertEqual(warning.count("NOT VERIFIED"), 1)
+        self.assertIn("reap unconfirmed", warning)
+        self.assertNotIn("reaped", warning)
+        if kill_error:
+            self.assertIn("kill failed; cleanup unconfirmed", warning)
+
+    def test_hanging_help_and_kill_oserror_still_launch_once_without_testing(self):
+        self._assert_cleanup_failure_does_not_veto_main(kill_error=True)
+
+    def test_hanging_help_and_second_wait_timeout_still_launch_once_without_testing(self):
+        self._assert_cleanup_failure_does_not_veto_main(kill_error=False)
 
     def executable(self, body):
         path = self.root / "bridge"

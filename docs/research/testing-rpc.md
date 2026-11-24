@@ -19,6 +19,15 @@ native `-e`, and outside-plugin refusal without a launch veto. Optional actual-P
 inventory/state reads in a private HOME/agent/temp root: no prompt, credentials or model request. These are distinct
 proofs, not a claim that the model-free double is the actual Pi runtime or that Windows execution was qualified.
 
+## Optional help failure is not a launch veto
+
+All help-probe failures, including kill/reap/stream cleanup failures, record a negative capability cache entry.
+The one warning names failure/uncertainty without claiming an unreaped child was reaped. Negotiation then omits
+only the optional field and performs one ordinary launch; no work is replayed. Fake-process controls call the
+actual main/negotiation seam for both a hanging probe with kill OSError and a second wait timeout. The probe uses
+the installed shared background-process helper via an explicit trusted path, not a project/PYTHONPATH import;
+Windows background creation flags are applied at this boundary rather than assumed inherited.
+
 ## Deferred by explicit parent ruling: existing HC passthrough
 
 No HC filter tightening is included. The pre-existing filters in:
