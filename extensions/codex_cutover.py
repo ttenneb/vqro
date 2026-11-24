@@ -398,12 +398,12 @@ class Cutover:
         return self._walk_result(result,attempted,blocked,disposition)
 
     def _walk_issue(self,args,claim,plan,target_index=None):
-        issue=self._authority_issue(claim)
-        if issue:return issue
         try:
-            # Complete blocking registry validation BEFORE the final protected
-            # policy/allowance projection; never mix an old allowance with a new cap.
+            # Registry reads can block: refresh private consent/owner authority
+            # afterwards, then consume the final protected policy/allowance view.
             if self._authorized_plan(claim)!=plan:return 'unconfirmed'
+            issue=self._authority_issue(claim)
+            if issue:return issue
             current=self.ext.vqro.call('command.invoke',{'name':'accounts.claim.read','args':{'claim':args['_claim']}})
             if not self._same_claim(claim,current) or not self._common_view_valid(current):return 'unconfirmed'
             if target_index is not None and not self._common_target_allowed(current,target_index):return 'disabled'

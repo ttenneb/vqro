@@ -212,6 +212,22 @@ class Tests(unittest.TestCase):
         self.assertTrue(changed[0]);self.assertEqual(result['attempted_targets'],['b'])
         self.assertTrue(result['restored_only']);self.assertFalse(result['continuation_allowed'])
         self.assertFalse(any(m=='resource.invoke' and a['args']['name']=='_account.switch' and a['args']['args']['account']['id']=='c' for m,a in ext.calls))
+    def registry_revocation_control(self,changed):
+        ext,c,args=self.walk();original=ext.call;armed=[False];revoked=[False]
+        def call(method,arguments):
+            if method=='workspace.get' and arguments['key']=='doc/settings/accounts' and armed[0] and not revoked[0]:
+                if changed=='consent':ext.consent={'setups':{}}
+                else:ext.policy['blocked']='notify'
+                revoked[0]=True
+            result=original(method,arguments)
+            if method=='resource.invoke' and arguments['args']['name']=='_account.inspect' and arguments['resource']=='y':armed[0]=True
+            return result
+        ext.call=call;result=c.cutover(args)
+        self.assertTrue(revoked[0]);self.assertEqual(result['attempted_targets'],['b'])
+        self.assertTrue(result['restored_only']);self.assertFalse(result['continuation_allowed'])
+        self.assertFalse(any(m=='resource.invoke' and a['args']['name']=='_account.switch' and a['args']['args']['account']['id']=='c' for m,a in ext.calls))
+    def test_registry_read_revocation_refreshes_private_consent_before_c(self):self.registry_revocation_control('consent')
+    def test_registry_read_revocation_refreshes_policy_before_c(self):self.registry_revocation_control('policy')
     def test_prepare_is_readonly_and_native_episode_not_commonhash(self):
         ext=Ext();p=Cutover(ext).prepare(self.args())
         self.assertEqual(p['native_episode'],'native-turn');self.assertEqual(len(p['affected']),2)
