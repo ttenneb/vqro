@@ -766,8 +766,21 @@ A route-1 Claude bridge may declare `claude.restart` for its one owned process. 
 execution-host operation, not a native Claude account-switch API or a stable cross-runtime v0 module.
 It uses `resource.invoke` on that endpoint with
 `{v:0,epoch,session,account,episode,target:{account,ref,host,revision},allow_background_loss?:false}`.
-`ref` is an opaque host-keychain handle, never a token. `host` is the authenticated runtime
-provider's `provider.host`, not the native process's `data.agent.host`. Under admission fencing the
+`ref` is an opaque host-keychain handle, never a token. Credential `target.host` is the backend
+provider name (one backend provider per execution host), NOT the per-agent runtime host resource ID.
+Resolve authenticated runtime `provider.host` through exact `resource.list`: its immutable host
+resource's `provider` is the backend execution domain. Never use `data.agent.host` or guess a machine
+from paths. Routing/claim hosts remain the per-agent IDs. Named initial launch pins `resource.spawn.provider`
+to the credential backend and checks the authenticated host mapping before helper lookup; legacy
+per-agent credential-host registrations refuse with re-registration guidance, never automatic remapping.
+Named helper-selected startup and each owned replacement publish nonsecret
+`_claude.credential_binding:{account,host,ref,epoch}` for that process. This is the configured reference,
+not authenticated native identity. It must match the current epoch/account; registry rebindings do not
+reattribute the old child's limits or usage to a new reference. Cutover refuses a rebound/ambiguous source;
+conversation charges, episode tombstones and existing exclusion clocks are not reset by relabeling.
+Windows does not declare `claude.restart`; named credential startup refuses before bootstrap/helper work,
+while the existing defensive restart refusal and shared-login launch remain.
+Under admission fencing the
 adapter compares the exact source epoch, observed session, configured account and latest native
 limit episode; it stops only its child, observes exit, and invokes its configured private helper once
 with `claude --resume <exact session>`. Unknown effects never authorize retry, fallback or replay.

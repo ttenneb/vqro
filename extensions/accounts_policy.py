@@ -5,6 +5,7 @@ import json
 import math
 import time
 from vqro_ext import VqroError
+from account_credentials import credential_identity
 
 POLICY='doc/settings/accounts-policy'
 CURSORS='doc/accounts/round-robin/'
@@ -91,12 +92,25 @@ def number(value):
     except OverflowError: return False
 
 
+def reported_credential(resource, identities):
+    """A running Claude child keeps its selected route even if its registry ID is rebound."""
+    identity=identities.get(configured_id(resource))
+    if '_claude' in facts(resource) or (identity is not None and identity[0]=='claude'):
+        from accounts_claude import configured_account
+        bound=configured_account(resource)
+        return credential_identity(bound) if bound is not None else None
+    return identity
+
+
 def capacities(rows, candidates, *, credential_identities=None):
     """Minimum fresh reported percentage headroom, NOT an availability/entitlement guarantee.
     Positive counts without a denominator are incomparable and never ranked as percentages.
     """
     ids={a['id'] for a in candidates};representatives={}
-    identities=credential_identities or {}
+    identities=dict(credential_identities or {})
+    for candidate in candidates:
+        if candidate.get('runtime')=='claude' and candidate['id'] not in identities:
+            identities[candidate['id']]=credential_identity(candidate)
     for candidate in candidates:
         identity=identities.get(candidate['id'])
         if identity is not None: representatives.setdefault(identity,candidate['id'])
@@ -104,11 +118,21 @@ def capacities(rows, candidates, *, credential_identities=None):
         identity=identities.get(ident)
         return representatives.get(identity,ident) if identity is not None else ident
     groups={canonical(ident) for ident in ids}
-    samples={ident:{} for ident in groups};clock=now_ms();unknown=set()
+    samples={ident:{} for ident in groups};clock=now_ms();unknown=set();blocked_ids=set()
     for resource in rows:
         native_ident=configured_id(resource);ident=canonical(native_ident)
-        if ident not in groups or not live(resource): continue
-        native=facts(resource);incomplete=native.get('incomplete',[])
+        if not live(resource):continue
+        native=facts(resource)
+        identity=identities.get(native_ident)
+        if '_claude' in native or (identity is not None and identity[0]=='claude'):
+            actual=reported_credential(resource,identities)
+            if actual is None:
+                if ident in groups:unknown.add(ident)
+                continue
+            ident=representatives.get(actual)
+        if ident not in groups:continue
+        if blocked(resource):blocked_ids.add(ident)
+        incomplete=native.get('incomplete',[])
         if not isinstance(incomplete,list) or any(not isinstance(field,str) or field=='usage_limits'
                 or field.startswith(('usage_limits.','usage_limits[')) for field in incomplete):
             unknown.add(ident)  # cut constraints are unknown, never a positive partial subset
@@ -134,7 +158,6 @@ def capacities(rows, candidates, *, credential_identities=None):
             elif observed==old[0]:
                 samples[ident][key]=(observed,None if headroom is None or old[1] is None else min(headroom,old[1]))
     result={}
-    blocked_ids={canonical(configured_id(row)) for row in rows if blocked(row)}
     for ident,windows in samples.items():
         values=[sample[1] for sample in windows.values()]
         result[ident]=min(values) if values and None not in values and ident not in blocked_ids|unknown else None
@@ -146,20 +169,22 @@ def pick_new(ext, candidates, runtime, *, credential_identities=None):
     if mode=='ask': return None
     try: observed=resources(ext)
     except VqroError: return None  # no cached/guessed capacity fallback
-    blocked_ids={configured_id(row) for row in observed if blocked(row)}
+    identities=credential_identities if credential_identities is not None else {row['id']:credential_identity(row) for row in candidates}
+    blocked_ids={configured_id(row) for row in observed if blocked(row) and '_claude' not in facts(row)
+                 and not (identities.get(configured_id(row)) and identities[configured_id(row)][0]=='claude')}
     eligible=[row for row in candidates if row['id'] not in blocked_ids
               and (row['kind']!='api_key' or configured['api_key_overflow'])]
-    if credential_identities is not None:
-        blocked_credentials={credential_identities[ident] for ident in blocked_ids
-                             if credential_identities.get(ident) is not None}
+    if identities is not None:
+        blocked_credentials={identity for row in observed if blocked(row)
+                             if (identity:=reported_credential(row,identities)) is not None}
         distinct=[];seen=set()
         for row in eligible:
-            identity=credential_identities.get(row['id'])
+            identity=identities.get(row['id'])
             if identity is None or identity in blocked_credentials or identity in seen: continue
             seen.add(identity);distinct.append(row)
         eligible=distinct
     if mode=='most_remaining_capacity':
-        scores=capacities(observed,eligible,credential_identities=credential_identities)
+        scores=capacities(observed,eligible,credential_identities=identities)
         eligible=[row for row in eligible if scores.get(row['id']) is not None and scores[row['id']]>0]
         return max(eligible,key=lambda row:scores[row['id']]) if eligible else None
     if not eligible: return None

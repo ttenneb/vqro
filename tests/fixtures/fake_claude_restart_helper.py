@@ -27,10 +27,15 @@ if args.action=='check':
     if os.environ.get('FAKE_RESTART_PREFLIGHT')=='oversized':
         print('x'*2048);sys.exit(0)
     print(json.dumps({'status':'ready'}));sys.exit(0)
-assert runtime and '--resume' in runtime
-assert runtime[-2]=='--resume' and runtime[-1]
+assert runtime
+resumed='--resume' in runtime
+if resumed:
+    assert runtime[-2]=='--resume' and runtime[-1]
+else:
+    assert os.environ.get('FAKE_RESTART_ALLOW_INITIAL')=='1', 'initial helper launch requires explicit fixture opt-in'
 if os.environ.get('FAKE_RESTART_LAUNCH')=='refuse':
     sys.exit(1)
 environment=dict(os.environ)
-environment['FAKE_CLAUDE_INIT_SESSION']=environment.get('FAKE_RESTART_SESSION','same')
+if resumed:
+    environment['FAKE_CLAUDE_INIT_SESSION']=environment.get('FAKE_RESTART_SESSION','same')
 os.execvpe(runtime[0],runtime,environment)

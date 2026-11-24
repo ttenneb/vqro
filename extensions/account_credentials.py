@@ -64,6 +64,26 @@ def selection_problem(row):
     return None
 
 
+def credential_backend(ext, host):
+    """Credential host is a backend execution domain, never a runtime's terminal id."""
+    provider = ext.providers.get(host) if isinstance(host, str) and 0 < len(host) <= 128 else None
+    if not isinstance(provider, dict) or provider.get('role') != 'backend':
+        raise VqroError('re-register: host must be the backend name', 'unsupported')
+    if provider.get('state') != 'connected':
+        raise VqroError('credential execution backend is unavailable; no fallback', 'unavailable')
+    return host
+
+
+def execution_backend(ext, runtime_host):
+    # runtime_host comes from authenticated runtime registration, not native child metadata.
+    rows = ext.vqro.call('resource.list', {'id': runtime_host}).get('resources', [])
+    if (not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict)
+            or rows[0].get('id') != runtime_host or rows[0].get('available') is not True
+            or rows[0].get('state') != 'live' or rows[0].get('host') is not None):
+        raise VqroError('authenticated runtime host resource is unavailable', 'stale')
+    return credential_backend(ext, rows[0].get('provider'))
+
+
 def credential_identity(row, *, legacy_provider=False):
     """Known reference equality only; never an authenticated-account assertion.
 

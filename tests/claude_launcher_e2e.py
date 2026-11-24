@@ -46,14 +46,36 @@ class ClaudeLaunch(E2E):
         runtime = {'name': 'synthetic', 'argv': [str(peer)], 'bridge_argv': [str(self.args.bridge)],
                    'bridge_env': {'FAKE_CLAUDE_LOG': str(ledger), 'CLAUDE_CODE_RESUME_INTERRUPTED_TURN': '1'}}
         helper_log=self.root/'synthetic-helper.jsonl'
+        launch_args={'runtime':'synthetic','cwd':str(self.root/'work')}
         if self.args.restart_fixture:
-            account={'id':'synthetic-A','label':'Synthetic A','kind':'subscription','provider':'anthropic'}
-            account['sources']={key:'vqro:launcher' for key in account}
-            runtime['bridge_argv']=['/usr/bin/env','VQRO_ACCOUNT='+json.dumps(account),str(self.args.bridge)]
-            runtime['bridge_env'].update(FAKE_RESTART_LOG=str(helper_log),FAKE_RESTART_SESSION='same')
+            backends=[name for name,row in self.snapshot()['providers'].items()
+                      if row.get('role')=='backend' and row.get('state')=='connected' and 'terminal.spawn' in row.get('capabilities',{})]
+            assert len(backends)==1,backends
+            backend=backends[0]
+            account={'id':'synthetic-A','label':'Synthetic A','runtime':'claude','kind':'subscription','provider':'anthropic',
+                     'secret_ref':'a'*32,'host':backend}
+            self.call('workspace.apply',{'ops':[{'op':'set','key':'doc/settings/accounts','value':{'accounts':[account]}}],
+                                         'note':'Synthetic named credential reference; no real keychain'})
+            runtime['bridge_env'].update(FAKE_RESTART_LOG=str(helper_log),FAKE_RESTART_SESSION='same',FAKE_RESTART_ALLOW_INITIAL='1')
+            launch_args['account']='synthetic-A'
         self.call('workspace.apply', {'ops': [{'op': 'set', 'key': 'doc/settings/claude-code', 'value': {'runtimes': [runtime]}}],
                                      'note': 'Synthetic native executable only'})
-        launched = self.call('command.invoke', {'name': 'claude-code.new', 'args': {'runtime': 'synthetic', 'cwd': str(self.root / 'work')}})
+        if self.args.restart_fixture:
+            # Raw private bootstrap with a deliberately wrong execution domain: no helper/native
+            # process may run before the core-authenticated host mapping has been checked.
+            wrong_helper=self.root/'wrong-helper.jsonl';wrong_native=self.root/'wrong-native.jsonl'
+            wrong_metadata={key:account[key] for key in ('id','label','provider','kind')}
+            wrong_metadata['sources']={key:'vqro:launcher' for key in wrong_metadata}
+            principal='p:synthetic-wrong-host'
+            wrong=self.call('resource.spawn',{'provider':backend,'bridge':True,'argv':[
+                str(self.args.bridge),'--endpoint-principal',principal,'--restart-helper',json.dumps(['/usr/bin/python3',str(self.root/'ext/accounts_keychain_helper.py')]),
+                '--launch-credential',json.dumps({'account':'synthetic-A','ref':'a'*32,'host':'different-execution-backend'}),'--',str(peer)],
+                'env':{'VQRO_PRINCIPAL':principal,'VQRO_ACCOUNT':json.dumps(wrong_metadata),'FAKE_RESTART_LOG':str(wrong_helper),'FAKE_CLAUDE_LOG':str(wrong_native)}})
+            wrong_host=wrong['resource']['id']
+            self.wait(lambda:self.resource(wrong_host)['state']=='finished','wrong backend refused before helper')
+            assert not wrong_helper.exists() and not wrong_native.exists(),'wrong backend must dispatch neither check nor launch'
+            self.log.append({'wrong_backend_refused':wrong_host,'helper_calls':0,'native_calls':0})
+        launched = self.call('command.invoke', {'name': 'claude-code.new', 'args': launch_args})
         assert launched.get('agent') and launched['outcome'] == 'observed', launched
         assert launched['request_route'] == {'configured': 'human', 'route': 'human', 'confirmed': True}, launched
         rid, host = launched['agent'], launched['host']
@@ -107,7 +129,7 @@ class ClaudeLaunch(E2E):
             self.wait(lambda:self.resource(rid)['data']['agent'].get('availability',{}).get('native',{}).get('subscription_limit') is True,'native terminal subscription witness')
             before=self.resource(rid)['data']['agent']
             restart_args={'v':0,'epoch':before['epoch'],'session':before['session']['id'],'account':'synthetic-A',
-                'episode':before['availability']['native']['episode'],'target':{'account':'synthetic-B','ref':'0123456789abcdef0123456789abcdef','host':provider['host'],'revision':3}}
+                'episode':before['availability']['native']['episode'],'target':{'account':'synthetic-B','ref':'0123456789abcdef0123456789abcdef','host':backend,'revision':3}}
             restarted=self.call('resource.invoke',{'resource':rid,'op':'claude.restart','args':restart_args})
             assert restarted['data']['started'] is True and restarted['data']['resume_confirmed'] is True,restarted
             assert restarted['data']['session']==restart_args['session'] and restarted['data']['epoch']!=restart_args['epoch'],restarted
@@ -119,7 +141,11 @@ class ClaudeLaunch(E2E):
             pids=[row['pid'] for row in entries if 'pid' in row];assert len(pids)==2,pids
             self.tracked.append(identity(pids[-1]))
             checks=[json.loads(line) for line in helper_log.read_text().splitlines()]
-            assert [row['action'] for row in checks]==['check','launch'],checks
+            assert [row['action'] for row in checks]==['check','launch','check','launch'],checks
+            assert [row['handle'] for row in checks]==['a'*32,'a'*32,'0123456789abcdef0123456789abcdef','0123456789abcdef0123456789abcdef'],checks
+            assert '--resume' not in checks[1]['runtime'],checks
+            assert checks[1]['runtime'][0]==str(peer) and checks[-1]['runtime'][0]==str(peer),checks
+            assert 'a'*32 not in str(checks[-1]['runtime']) and str(self.root/'ext/accounts_keychain_helper.py') not in checks[-1]['runtime'],checks
             assert checks[-1]['runtime'][-2:]==['--resume',restart_args['session']],checks
             assert len([row for row in entries if row.get('in',{}).get('type')=='user'])==3,'adapter must not replay/continue'
             # A NEW visible input is explicit test/caller work, not a restart side effect. It proves

@@ -577,7 +577,25 @@ impl Shared {
             Some(v) => v,
             None => return rejected("unsupported", "private restart helper is not configured"),
         };
-        let host = provider.registration()["host"].as_str(); // authenticated registration, same binding as snapshot.providers[name].host
+        let Some(runtime_host) = provider.registration()["host"].as_str() else {
+            return rejected("unavailable", "authenticated runtime host unavailable");
+        };
+        let resources = match provider
+            .call("resource.list", json!({"id":runtime_host}))
+            .await
+        {
+            Ok(value) => value,
+            Err(_) => {
+                return rejected(
+                    "unavailable",
+                    "authenticated backend host facts unavailable",
+                );
+            }
+        };
+        let host = match super::launch::execution_backend(runtime_host, &resources) {
+            Ok(value) => Some(value),
+            Err(error) => return rejected("stale", error),
+        };
         {
             let state = self.state.lock().unwrap();
             if let Err(e) = request.guard(&state, host) {
@@ -641,6 +659,11 @@ impl Shared {
             let mut state = self.state.lock().unwrap();
             let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
             state.replace_owned(request.account_value(), generation);
+            state.configured_binding = Some(super::launch::Credential {
+                account: request.target.clone(),
+                host: request.host.clone(),
+                reference: request.reference.clone(),
+            });
             if !matches!(tail, Ok(crate::native_process::Drain::Eof)) {
                 state.incomplete.insert("prior_native_tail".into());
             }

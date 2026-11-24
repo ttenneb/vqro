@@ -8,7 +8,7 @@ import threading
 import uuid
 import accounts_policy as policy
 from accounts_cutover import Cutovers
-from accounts_claude import ClaudeCutover, eligible_episode as claude_episode
+from accounts_claude import ClaudeCutover, eligible_episode as claude_episode, configured_account as claude_configured_account
 from accounts_pi import PiCutover, eligible_error as pi_error, native_error_episode, error_inference, displayed_error_binding
 from accounts_dispatch import Dispatch
 from accounts_codex_logins import SavedLogins
@@ -174,12 +174,12 @@ class Accounts:
                     canonical = primary[credential_identity(row)]
                     if canonical != row['id']:
                         items.append({'type':'text','style':'dim','text':'Alias of '+canonical+'; same credential reference, never an independent alternative.'})
-                    if row['kind']=='api_key' or runtime=='claude':
+                    if row['kind']=='api_key':
                         items.append({'type':'text','style':'warn','text':
-                            'API-key accounts: launching is not available yet; the keychain entry is kept' if row['kind']=='api_key'
-                            else 'account choice is not available for this launcher yet'})
+                            'API-key accounts: launching is not available yet; the keychain entry is kept'})
                     else:
-                        items.append({'text':'New agent on '+label(row['label']), 'command':COMMANDS[runtime],
+                        items.append({'text':'New agent on '+label(row['label']),
+                                      'command':'claude-code.new' if runtime=='claude' else COMMANDS[runtime],
                                       'args':{'account':row['id'],'_account_revision':revision}})
                     items.append({'text':'Sign in…', 'description':'Execution-host keychain entry' if row['kind']=='api_key' else 'Pi: use /login in the native terminal' if runtime=='pi' else 'Native browser/device flow',
                                   'command':'accounts.sign_in', 'args':{'account':row['id'],'_account_revision':revision}})
@@ -314,7 +314,7 @@ class Accounts:
         if args['automatic'] and claude_episode(source,automatic=True) is None:
             raise VqroError('native background work is not proven empty; owner warning required','offer_required')
         native=policy.facts(source)
-        self.claude.target(args,policy.configured_id(source),host)
+        self.claude.target(args,policy.configured_id(source),host,claude_configured_account(source))
         affected={'resource':source['id'],'host':host,'session':native['session']['id'],
                   'epoch':native['epoch'],'incarnation':source['incarnation'],'account':args['account']}
         revision=hashlib.sha256(json.dumps([affected,native.get('_claude'),native.get('background'),
@@ -328,8 +328,12 @@ class Accounts:
         self.cutovers.observe_limits(observed,rows)
         blocked_ids=self.cutovers.blocked_accounts(rows)
         source_row=next((row for row in rows if row['id']==policy.configured_id(source)),None)
+        if '_claude' in policy.facts(source) or (source_row and source_row['runtime']=='claude'):
+            bound=claude_configured_account(source)
+            if bound is None or source_row is None or credential_identity(bound)!=credential_identity(source_row):
+                raise VqroError('Claude source registration is missing or rebound; restore the running child binding or launch a newly bound agent', 'stale')
         runtime=source_row['runtime'] if source_row else ('claude' if claude_episode(source,automatic=False) else 'pi' if pi_error(source) else None)
-        # API-key keychain helpers remain; named launch binding and same-conversation cutover are unavailable.
+        # API-key keychain helpers remain, but their named launch/cutover paths are unavailable.
         candidates=[row for row in eligible_alternatives(rows, policy.configured_id(source), blocked_ids, False)
                     if runtime is not None and row['runtime']==runtime]
         identities={row['id']:credential_identity(row) for row in rows}

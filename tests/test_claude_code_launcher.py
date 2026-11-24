@@ -31,6 +31,7 @@ class FakeExtension:
         self.vqro = FakeCore(rows)
         self.notices = []
         self.panels = []
+        self.providers = {'backend': {'role':'backend','state':'connected','capabilities':{'terminal.spawn':{'env':True}}}}
 
     def notify(self, text, style):
         self.notices.append((text, style))
@@ -102,7 +103,47 @@ class ClaudeCodeLauncherTests(unittest.TestCase):
         self.assertFalse(Path(helper[1]).exists())
         self.assertEqual(argv[at+2:],['--','claude'])
 
-    def test_unbound_named_account_kinds_refuse_before_any_backend_launch(self):
+    def test_named_subscription_pins_backend_and_passes_only_private_reference(self):
+        account={'id':'a','label':'A','runtime':'claude','provider':'anthropic','kind':'subscription',
+                 'secret_ref':'a'*32,'host':'backend'}
+        obj=launcher([{'name':'native','argv':['claude','--model','synthetic-model']}])
+        with patch.object(MODULE,'choose_account',return_value=(account,None)), \
+             patch.object(MODULE,'launch_cwd',return_value=None), \
+             patch.object(MODULE,'launch',return_value={'agent':'r1','host':'new-terminal'}) as launch:
+            obj.new({'account':'a','provider':'untrusted-other-backend','host':'old-terminal'})
+        launch.assert_called_once()
+        params=launch.call_args.args[1];argv=params['argv']
+        self.assertEqual(params['provider'],'backend')
+        at=argv.index('--launch-credential')
+        self.assertEqual(json.loads(argv[at+1]),{'account':'a','ref':'a'*32,'host':'backend'})
+        self.assertLess(at,argv.index('--'))
+        self.assertEqual(argv[argv.index('--')+1:],['claude','--model','synthetic-model'])
+        self.assertEqual(json.loads(params['env']['VQRO_ACCOUNT'])['id'],'a')
+        self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN',params['env'])
+        self.assertNotIn('secret_ref',params['env']['VQRO_ACCOUNT'])
+
+    def test_disconnected_named_backend_never_falls_back_to_another_backend(self):
+        account={'id':'a','label':'A','runtime':'claude','provider':'anthropic','kind':'subscription',
+                 'secret_ref':'a'*32,'host':'backend'}
+        obj=launcher([{'name':'native','argv':['claude']}])
+        obj.ext.providers['backend']['state']='disconnected'
+        obj.ext.providers['other']={'role':'backend','state':'connected'}
+        with patch.object(MODULE,'choose_account',return_value=(account,None)), \
+             patch.object(MODULE,'launch_cwd',return_value=None),patch.object(MODULE,'launch') as launch:
+            with self.assertRaises(MODULE.VqroError):obj.new({'account':'a'})
+        launch.assert_not_called()
+
+    def test_per_agent_host_registration_refuses_with_re_register_guidance(self):
+        account={'id':'a','label':'A','runtime':'claude','provider':'anthropic','kind':'subscription',
+                 'secret_ref':'a'*32,'host':'old-terminal'}
+        obj=launcher([{'name':'native','argv':['claude']}])
+        with patch.object(MODULE,'choose_account',return_value=(account,None)), \
+             patch.object(MODULE,'launch_cwd',return_value=None),patch.object(MODULE,'launch') as launch:
+            with self.assertRaisesRegex(MODULE.VqroError,'re-register: host must be the backend name'):
+                obj.new({'account':'a'})
+        launch.assert_not_called()
+
+    def test_api_key_and_unbound_subscription_refuse_before_any_backend_launch(self):
         for kind in ('subscription','api_key'):
             with self.subTest(kind=kind):
                 obj=launcher([{'name':'native','argv':['claude']}])
@@ -111,7 +152,7 @@ class ClaudeCodeLauncherTests(unittest.TestCase):
                     with self.assertRaises(MODULE.VqroError) as caught:obj.new({'account':'named'})
                 launch.assert_not_called();self.assertEqual(caught.exception.kind,'unsupported')
                 self.assertIn('launching is not available yet' if kind=='api_key' else
-                              'account choice is not available for this launcher yet',str(caught.exception))
+                              're-register: host must be the backend name',str(caught.exception))
 
     def test_account_popup_returns_before_any_backend_effect(self):
         obj = launcher([{'name': 'native', 'argv': ['claude']}])

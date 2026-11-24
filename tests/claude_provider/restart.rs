@@ -111,7 +111,7 @@ async fn fixture(
 }
 fn args(shared: &Shared) -> Value {
     let s = shared.state.lock().unwrap();
-    json!({"v":0,"epoch":s.epoch(),"session":s.session,"account":"A","episode":s.availability.limit_episode.as_ref().unwrap()["episode"],"target":{"account":"B","ref":"0123456789abcdef0123456789abcdef","host":"r/fixture","revision":3}})
+    json!({"v":0,"epoch":s.epoch(),"session":s.session,"account":"A","episode":s.availability.limit_episode.as_ref().unwrap()["episode"],"target":{"account":"B","ref":"0123456789abcdef0123456789abcdef","host":"fixture-backend","revision":3}})
 }
 fn lines(path: &std::path::Path) -> Vec<Value> {
     std::fs::read_to_string(path)
@@ -127,6 +127,21 @@ async fn stop(shared: &Shared) {
             .await
             .unwrap();
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_per_agent_credential_host_never_dispatches_helper_or_stop() {
+    let (_root, shared, _guard, provider, mut requests, mut core, _log, helpers) = fixture("same", true).await;
+    let old = shared.process().unwrap();
+    let mut before = args(&shared);
+    before["target"]["host"] = json!("r/fixture");
+    let reply = core.invoke(&shared, &provider, &mut requests, "claude.restart", before.clone()).await;
+    assert_ne!(reply["result"]["data"]["started"], true);
+    assert!(old.alive());
+    assert_eq!(shared.state.lock().unwrap().epoch(), before["epoch"].as_str().unwrap());
+    assert!(lines(&helpers).is_empty());
+    stop(&shared).await;
+    provider.close();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -149,6 +164,8 @@ async fn restart_confirms_native_session_without_replaying_input() {
     assert_eq!(reply["result"]["data"]["session"], before["session"]);
     assert_ne!(reply["result"]["data"]["epoch"], before["epoch"]);
     assert_eq!(reply["result"]["data"]["account"], "B");
+    assert_eq!(shared.facts()["data"]["agent"]["_claude"]["credential_binding"],
+        json!({"account":"B","host":"fixture-backend","ref":"0123456789abcdef0123456789abcdef","epoch":reply["result"]["data"]["epoch"]}));
     assert!(!old.alive());
     let h = lines(&helpers);
     assert_eq!(h.len(), 2);

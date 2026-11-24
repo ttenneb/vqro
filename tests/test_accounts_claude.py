@@ -15,11 +15,14 @@ class Fake:
     def __init__(self):
         self.handlers = {}
         self.vqro = self
-        self.providers = {'runtime': {'role': 'runtime', 'host': 'r1', 'capabilities': {'claude.restart': {}}}}
+        self.providers = {'runtime': {'role': 'runtime', 'host': 'r1', 'capabilities': {'claude.restart': {}}},
+                          'backend': {'role': 'backend', 'state': 'connected'}}
+        self.host_resource = {'id':'r1','kind':'terminal','provider':'backend','instance':'backend-instance','state':'live','available':True}
         self.source = {'id': 'r2', 'kind': 'agent', 'incarnation': 'birth', 'provider': 'runtime',
                        'host': 'r1', 'available': True, 'data': {'agent': {
                            'v': 0, 'lifecycle': 'live', 'state': 'idle', 'queue': None, 'epoch': 'e1',
-                           '_claude': {'input_ledger': {'v': 0, 'source': 'vqro-ledger', 'epoch': 'e1',
+                           '_claude': {'credential_binding': {'account':'a','host':'backend','ref':'a'*32,'epoch':'e1'},
+                                       'input_ledger': {'v': 0, 'source': 'vqro-ledger', 'epoch': 'e1',
                                                        'complete': True, 'pending': 0},
                                        'background_level': {'v': 0, 'source': 'native:background_tasks_changed',
                                                             'process_incarnation': 'child-1', 'revision': 1,
@@ -31,8 +34,9 @@ class Fake:
                                'subscription_limit': True, 'episode': 'native-result-uuid',
                                'session_id': 'native-session', 'terminal_reason': 'blocking_limit'}}}}}
         self.target = {'id': 'b', 'label': 'Account B', 'runtime': 'claude', 'provider': 'anthropic',
-                       'kind': 'subscription', 'secret_ref': 'b' * 32, 'host': 'r1'}
-        self.registry = {'version': 7, 'value': {'accounts': [self.target]}}
+                       'kind': 'subscription', 'secret_ref': 'b' * 32, 'host': 'backend'}
+        self.source_account = dict(self.target,id='a',label='Account A',secret_ref='a'*32)
+        self.registry = {'version': 7, 'value': {'accounts': [self.source_account,self.target]}}
         self.episode = policy.episode(self.source)
         self.claim = {'blocked_mode':'auto_restart','max_switches':1,'known_blocked_targets':[], 'state': 'claimed', 'resource': 'r2', 'episode': self.episode, 'host': 'r1',
                       'account': 'b', '_account_revision': 7, 'automatic': True,
@@ -68,7 +72,8 @@ class Fake:
         if self.mutate:
             self.mutate(method, params)
         if method == 'resource.list':
-            return {'resources': [copy.deepcopy(self.source)]}
+            row = self.host_resource if params.get('id') == 'r1' else self.source
+            return {'resources': [copy.deepcopy(row)]}
         if method == 'workspace.get':
             if params['key']==policy.POLICY:return {'version':1,'value':copy.deepcopy(self.policy)}
             return copy.deepcopy(self.owner if params['key'] == 'doc/principals/owner' else self.registry)
@@ -142,13 +147,56 @@ class CutoverTests(unittest.TestCase):
         self.run_cutover();self.assertEqual(len(self.ext.native()),1)
         self.assertTrue(self.ext.native()[0][1]['args']['allow_background_loss'])
 
+    def test_configured_binding_must_be_complete_and_match_this_child_epoch_and_account(self):
+        private=self.ext.source['data']['agent']['_claude'];original=copy.deepcopy(private['credential_binding'])
+        for binding in (None,{},dict(original,epoch='old-epoch'),dict(original,account='other'),
+                        dict(original,ref='raw-value'),dict(original,host=''),dict(original,unexpected=True)):
+            private['credential_binding']=binding
+            self.assertIsNone(eligible_episode(self.ext.source))
+            self.refused()
+        private['credential_binding']=original
+        self.ext.source['data']['agent']['incomplete']=['_claude.credential_binding']
+        self.refused()
+
+    def test_coherent_binding_and_registry_rewrite_between_source_reads_still_refuses(self):
+        reads=[]
+        def changed(method,args):
+            if method=='resource.list' and args.get('id')=='r2':
+                reads.append(True)
+                if len(reads)==2:
+                    self.ext.source['data']['agent']['_claude']['credential_binding']['ref']='c'*32
+                    self.ext.source_account['secret_ref']='c'*32
+        self.ext.mutate=changed
+        self.refused()
+        self.assertEqual(len(reads),2)
+
+    def test_source_label_change_does_not_rebind_the_configured_credential(self):
+        self.ext.source_account['label']='Renamed A'
+        self.assertTrue(self.run_cutover()['process_started'])
+
+    def test_authenticated_host_resource_must_name_the_same_available_backend(self):
+        original=copy.deepcopy(self.ext.host_resource)
+        self.ext.providers['other']={'role':'backend','state':'connected'}
+        for patch in ({'provider':'other'},{'id':'different-terminal'},{'available':False},{'state':'finished'},{'host':'nested-runtime-host'}):
+            self.ext.host_resource=dict(original,**patch)
+            self.refused()
+        self.ext.host_resource=original
+        self.ext.providers['backend']['state']='disconnected'
+        self.refused()
+
+    def test_legacy_per_agent_credential_host_refused_not_silently_remapped(self):
+        self.ext.target['host']='r1'
+        with self.assertRaisesRegex(VqroError,'re-register: host must be the backend name'):
+            self.run_cutover()
+        self.assertEqual(self.ext.native(),[])
+
     def test_exact_target_restart_only_no_claim_selection_or_continuation(self):
         result = self.run_cutover()
         method, params = self.ext.native()[0]
         self.assertEqual((method, params['resource'], params['op']), ('resource.invoke', 'r2', 'claude.restart'))
         self.assertEqual({k: params['args'][k] for k in ('epoch', 'session', 'account', 'episode')},
                          {'epoch': 'e1', 'session': 'native-session', 'account': 'a', 'episode': 'native-result-uuid'})
-        self.assertEqual(params['args']['target'], {'account': 'b', 'ref': 'b' * 32, 'host': 'r1', 'revision': 7})
+        self.assertEqual(params['args']['target'], {'account': 'b', 'ref': 'b' * 32, 'host': 'backend', 'revision': 7})
         self.assertIs(params['args']['allow_background_loss'], False)
         self.assertEqual((result['session'], result['account'], result['epoch']), ('native-session', 'b', 'e2'))
         self.assertTrue(result['process_started'])
@@ -210,7 +258,7 @@ class CutoverTests(unittest.TestCase):
     def test_final_source_incomplete_lifecycle_never_dispatches(self):
         reads = []
         def changed(method, args):
-            if method == 'resource.list':
+            if method == 'resource.list' and args.get('id') == self.ext.source['id']:
                 reads.append(method)
                 if len(reads) == 2:
                     self.ext.source['data']['agent']['incomplete'] = ['lifecycle']
@@ -279,7 +327,7 @@ class CutoverTests(unittest.TestCase):
     def test_coherent_native_process_replacement_between_source_reads_never_dispatches(self):
         reads = []
         def changed(method, args):
-            if method == 'resource.list':
+            if method == 'resource.list' and args.get('id') == self.ext.source['id']:
                 reads.append(method)
                 if len(reads) == 2:
                     facts = self.ext.source['data']['agent']
@@ -292,7 +340,7 @@ class CutoverTests(unittest.TestCase):
     def test_background_revision_can_advance_within_the_same_native_process(self):
         reads = []
         def changed(method, args):
-            if method == 'resource.list':
+            if method == 'resource.list' and args.get('id') == self.ext.source['id']:
                 reads.append(method)
                 if len(reads) == 2:
                     self.ext.source['data']['agent']['_claude']['background_level']['revision'] += 1
@@ -312,7 +360,7 @@ class CutoverTests(unittest.TestCase):
             self.ext.calls.clear()
             reads = []
             def changed(method, args):
-                if method == 'resource.list':
+                if method == 'resource.list' and args.get('id') == self.ext.source['id']:
                     reads.append(method)
                     if len(reads) == 2:
                         facts = self.ext.source['data']['agent']
@@ -348,7 +396,7 @@ class CutoverTests(unittest.TestCase):
     def test_new_running_turn_before_second_source_check_prevents_dispatch(self):
         reads = []
         def changed(method, args):
-            if method == 'resource.list':
+            if method == 'resource.list' and args.get('id') == self.ext.source['id']:
                 reads.append(method)
                 if len(reads) == 2:
                     self.ext.source['data']['agent']['state'] = 'running'
@@ -496,12 +544,12 @@ class CutoverTests(unittest.TestCase):
             if remove:
                 self.ext.target.pop(remove)
             rows, _ = registry_snapshot(self.ext)
-            self.assertEqual(rows[0], self.ext.target, 'safe metadata remains displayable')
+            self.assertEqual(next(row for row in rows if row['id']=='b'), self.ext.target, 'safe metadata remains displayable')
             self.refused()
 
     def test_known_source_credential_alias_is_not_another_account(self):
-        alias = dict(self.ext.target, id='a', label='Same token under another label')
-        self.ext.registry['value']['accounts'].append(alias)
+        self.ext.source_account['secret_ref']=self.ext.target['secret_ref']
+        self.ext.source['data']['agent']['_claude']['credential_binding']['ref']=self.ext.target['secret_ref']
         self.refused()
 
     def test_api_billing_and_nonopaque_refs_refused(self):
@@ -514,7 +562,7 @@ class CutoverTests(unittest.TestCase):
     def test_claim_or_registry_change_on_final_read_prevents_dispatch(self):
         seen = []
         def mutate(method, params):
-            if method == 'resource.list':
+            if method == 'resource.list' and params.get('id') == self.ext.source['id']:
                 seen.append(method)
                 if len(seen) == 2:
                     self.ext.source['data']['agent']['epoch'] = 'newer'

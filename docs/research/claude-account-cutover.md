@@ -1,7 +1,7 @@
 # Automatic per-agent Claude account cutover
 
-**vqro switches automatically by restarting the agent on the other account; the
-conversation continues.** Accounts owns selection, one protected cutover claim and
+**vqro can restart only the selected agent with another configured credential and
+request its original conversation.** Accounts owns selection, one protected cutover claim and
 one NEW visible vqro-labelled AUTO continuation turn. It never resends old input.
 NOTIFY never restarts anything. OFFER restarts only after the authenticated current
 workspace owner clicks the explicit choice and does not send that continuation. The callback described here restarts
@@ -9,16 +9,17 @@ only the selected endpoint through the route-1 adapter; it is not another superv
 
 ## Integration status
 
-This slice implements the callback, host-helper credential mode and fake boundary
-regressions. Native `claude.restart` is a required separate route-1 adapter seam.
-The callback fails closed when the agent/provider do not declare it; fake tests do
-not certify native process restart, subscription acceptance or session readback.
+This slice integrates named headless helper startup, the callback, source-reference
+binding and native `claude.restart`, including synthetic owned-process and whole-CLI
+A→B regressions. The callback fails closed when the agent/provider do not declare
+the operation. Fake tests do not certify real credential acceptance, billing or
+native cross-account session readback.
 The pinned Claude SDK does not establish a complete known-empty native queue witness;
 route-1 therefore keeps `queue:null`. The approved AUTO eligibility seam instead uses
 vqro's own epoch-bound input ledger and a complete native background level, below.
 User-only queued counts, partial interrupt receipts and idle alone are never replaced
-with native `[]`. Actual producer/restart integration and runtime qualification remain
-separate from this callback's fake tests.
+with native `[]`. Runtime/authentication qualification remains separate from the
+synthetic producer/restart integration tests.
 No real keychain, Claude login, transcript or model request is used by the tests.
 
 ## Credential boundary
@@ -38,6 +39,19 @@ only on the execution host and setting `CLAUDE_CODE_OAUTH_TOKEN` in the directly
 executed Claude child. No secret value goes through `resource.spawn.env`, public
 RPC or the bridge. Existing API-key mode remains distinct and is not an automatic
 fallback from subscriptions. This slice adds no provider refresh-token ownership.
+
+## Named headless startup and process-scoped reference
+
+`claude-code.new` pins `resource.spawn.provider` to the registered backend name.
+The runtime authenticates its allocated host and verifies that exact host resource's
+provider before helper preflight. Only child startup argv wraps the helper; saved
+canonical native argv never contains A's helper, so B cannot nest/reapply A.
+The bridge publishes `_claude.credential_binding:{account,host,ref,epoch}` for the
+selected child. This configured reference is not an authenticated native identity.
+Old-child limits/percentages stay attached to the old reference after registry
+rebinding; a rebound source refuses cutover, without resetting charges, clocks or
+tombstones. On Windows, named credential startup refuses before bootstrap/helper
+work and `claude.restart` is not declared; ordinary shared login is unchanged.
 
 ## Callback and ownership
 
@@ -69,10 +83,16 @@ before that human click; no caller-supplied boolean supplies authority. No NOTIF
 alone owns cross-epoch native-episode dedup and the rolling-hour automatic budget.
 Repeated events/uncertain dispatches are never automatically replayed by the caller.
 
-Registry `host` equals the source runtime provider's authenticated core-published
-`provider.host` AND the agent's top-level `host`. It is not `data.agent.host`, which
-may identify a native child/server. The exact binding is revalidated before the
-native operation. No handle is exported to another execution host.
+Registry/credential `host` is the **backend provider name**, the keychain execution
+domain (one backend provider per host, `docs/spec/provider-v0.md`), NOT the per-agent
+runtime host resource ID. The runtime's authenticated `provider.host` must still
+match the agent's top-level `host`; an exact public `resource.list` lookup of that
+immutable resource supplies its owning backend `provider`. Match credential `host`
+to THAT backend. It is never inferred from `data.agent.host`, which may identify a
+native child/server. Routing/claim member hosts stay per-agent. Revalidate before
+the native operation; legacy per-agent-host registrations refuse with explicit
+re-registration guidance, without silently remapping references or clearing claims.
+No handle is exported to another execution host.
 
 ## Provider-specific native operation
 
@@ -82,7 +102,7 @@ This is a coordinated route-1 extension seam, not a stable cross-runtime standar
 {"resource":"r2","op":"claude.restart","args":{
   "v":0,"epoch":"e1","session":"native-session","account":"a","allow_background_loss":false,
   "episode":"<native ended limit result UUID>",
-  "target":{"account":"b","ref":"<opaque32hex>","host":"r1","revision":7}
+  "target":{"account":"b","ref":"<opaque32hex>","host":"backend-name","revision":7}
 }}
 ```
 

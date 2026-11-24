@@ -54,8 +54,15 @@ Manual Codex registrations can still use the native saved-login reference:
 {"id":"capacity-b","label":"Capacity B","runtime":"codex","kind":"subscription","login_ref":{"sessionId":"native-saved-session-id","accountId":"native-account-id"}}
 ```
 
-Claude uses a same-execution-host opaque credential reference (`host`, plus a
-32-character hexadecimal `secret_ref`) through its approved native host helper.
+Claude subscriptions use an execution-host keychain reference: `host` is the
+**backend provider name** (one backend provider per execution host), plus a
+32-character hexadecimal `secret_ref`. It is NOT an agent ID, the agent's runtime
+provider name, its top-level `host` terminal ID, or native child metadata.
+Use `vqro call resource.list '{}'` to find a terminal's `provider`; an agent's
+`host` identifies the terminal row to inspect. `workspace.snapshot.providers` also
+lists connected providers with `role: "backend"`. Mint/store the token on THAT
+backend's machine. Old per-agent-host registrations refuse with
+`re-register: host must be the backend name`; nothing silently migrates them.
 No subscription token is returned through workspace metadata or command replies.
 Native credential ownership and refresh are not emulated by the common policy.
 
@@ -89,8 +96,7 @@ The standalone execution-host keychain helper and explicit `api_key_overflow`
 setting remain. Named API-key launches currently refuse before spawn: their
 execution-host/native credential binding is not verified; they never fall back to
 the shared login. API-key accounts: launching is not available yet; the keychain entry is kept.
-Wiring the helper into named launches (execution host and native auth precedence)
-is an approved post-release follow-up, not part of this slice. **Continuing a conversation on an API-key account: not yet.**
+API-key named-launch binding remains a separate follow-up. **Continuing a conversation on an API-key account: not yet.**
 They are not same-session cutover targets in this slice.
 
 ## Named-launch binding audit
@@ -108,8 +114,8 @@ identity. Cross-runtime account IDs refuse in registry selection.
 | `pi.new` | Pi | API key | Refused before launch; entry kept | `tests/test_accounts_route_integration.py::test_unbound_named_api_key_launch_refuses_instead_of_shared_login_fallback` |
 | `codex.new` | Codex | subscription | Bound to exact native login reference; current native login readback required | `tests/test_codex_launcher.py::test_shared_login_maps_active_a_without_selecting_inactive_b`; `test_inactive_launch_selection_is_refused_before_empty_thread_or_prompt` |
 | `codex.new` | Codex | API key | Refused before launch; entry kept | `tests/test_accounts_route_integration.py::test_unbound_named_api_key_launch_refuses_instead_of_shared_login_fallback` |
-| `claude-code.new` | Claude | subscription | Refused before backend launch; shared native login remains available | `tests/test_claude_code_launcher.py::test_unbound_named_account_kinds_refuse_before_any_backend_launch` |
-| `claude-code.new` | Claude | API key | Refused before launch; entry kept | `tests/test_claude_code_launcher.py::test_unbound_named_account_kinds_refuse_before_any_backend_launch` |
+| `claude-code.new` | Claude | subscription | Backend pinned by name; authenticated host resource checked before private helper preflight/child-only launch | `tests/test_claude_code_launcher.py::test_named_subscription_pins_backend_and_passes_only_private_reference`; `tests/claude_launcher_e2e.py --restart-fixture`; `src/claude_code/restart.rs::canonical_native_never_captures_a_helper_or_nests_it_on_restart_b` |
+| `claude-code.new` | Claude | API key | Refused before launch; entry kept | `tests/test_claude_code_launcher.py::test_api_key_and_unbound_subscription_refuse_before_any_backend_launch` |
 | `tier1.pi` | Pi | subscription | Bound by same shipped account extension before pull plugin, explicit `--vqro-account` | `tests/test_tier1.py::test_named_pi_launch_loads_native_alias_before_pull_with_explicit_flag`; `tests/pi_account_alias.mjs` |
 | `tier1.pi` | Pi | API key | Refused before spawn; entry kept | `tests/test_accounts_route_integration.py::test_unbound_named_api_key_launch_refuses_instead_of_shared_login_fallback` |
 | `tier1.claude` | Claude | subscription | Refused before hook creation/spawn: “account choice is not available for this launcher yet” | `tests/test_tier1.py::test_named_claude_subscription_refuses_before_any_hook_or_spawn` |
@@ -117,10 +123,15 @@ identity. Cross-runtime account IDs refuse in registry selection.
 
 Tier1 Claude named binding is an approved follow-up; its ordinary shared-login
 launch remains (`tests/test_tier1.py::test_claude_launch_wires_hooks_for_that_launch_only`).
-The standalone keychain helper retains API-key operations and was extended with
-an explicit Claude subscription-token kind; it is not wired into named new
-launches. Its execution-host exec boundary preserves Windows CRT arguments.
-Credential entry/sign-in is a separate explicit action, not evidence that a
+The execution-host helper retains API-key operations, and its explicit Claude
+subscription-token kind now binds headless named launches. It reads the token
+privately and execs ONLY the Claude child with `CLAUDE_CODE_OAUTH_TOKEN`; the bridge
+never receives the retrieved token. Initial startup wraps canonical Claude argv
+once; restart stores that canonical argv separately and wraps it with B's helper
+reference, never A's wrapper. Claude credential-backed launch and restart refuse
+on Windows before bootstrap/helper lookup or process replacement; `claude.restart`
+is not declared there. The existing API-key helper retains Windows CRT argument
+handling. Credential entry/sign-in is a separate explicit action, not evidence that a
 subsequent launcher binds it.
 
 `pi.resume` is not a free-form new launcher: it accepts only an acknowledged
@@ -130,6 +141,37 @@ is unsupported. See `tests/test_pi_resume_consumption.py` and
 `tests/test_accounts_pi.py::test_resume_requires_positive_exact_logical_work_principal_readback`.
 The table records code/argv/environment and fake-control evidence, not live native
 authentication, billing or cross-account interoperability certification.
+
+## Starting named Claude Code agents
+
+Named Claude credential launch/cutover is **not supported on Windows yet**; ordinary
+shared-login launch is unchanged. On a supported execution host, use native `claude setup-token` for each account,
+then run `python3 /absolute/path/accounts_keychain_helper.py store --kind claude_subscription`
+in a terminal and paste the token at its hidden prompt. A successful stdout
+`{"handle":"..."}` supplies `secret_ref`; never paste the token into Accounts,
+settings, commands or an agent message. The default installed helper is
+`~/.local/share/vqro/extensions/accounts_keychain_helper.py` on that host. An
+unavailable host, interpreter, helper or keychain refuses without an ambient-login
+fallback. Absolute interpreter/helper paths must exist on the selected backend;
+vqro does not copy credentials or infer remote paths.
+
+Add A and B through **Accounts → Add account…**, using different registration IDs
+and the handles returned by their successful stores, both with the backend name
+in `host`. Start A with `vqro run claude-code.new '{"account":"claude-a"}'`, or select
+A in the headless Claude Code launcher's account picker. This publishes the
+**configured registration reference**, not an authenticated account identity.
+`Sign in…` remains native shared `claude auth login`; it does not update a stored
+setup-token reference. Native-TUI `tier1.claude` named launches remain refused:
+its hooks do not share this authenticated, child-only headless launch mechanism.
+
+Cutover resolves the runtime's authenticated host resource back to its backend
+provider before matching credential `host`. Routing/claim member hosts stay the
+per-agent resource IDs. Backend binding never clears existing conversation
+hourly charges, episode tombstones, unknown reservations or continuation receipts.
+The token is kept in the system keychain and passed to the Claude process only in
+its environment when vqro starts it; it is never written to files, logs, workspace
+data or command lines, but programs running as your user (or an administrator) can
+read a running process's environment.
 
 ## Capacity strategies
 

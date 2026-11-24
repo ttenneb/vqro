@@ -1,4 +1,5 @@
-//! Explicit native Claude stream-json bridge. No inference prompt, auth lookup or input replay at startup.
+//! Explicit native Claude stream-json bridge. Named credentials resolve only in private helper children.
+//! No inference prompt or input replay at startup.
 #[path = "launcher_account/mod.rs"]
 mod launcher_account;
 use anyhow::{Context, Result};
@@ -24,8 +25,39 @@ struct Args {
     /// Private execution-host interpreter/helper argv as a JSON array; no public secret resolver.
     #[arg(long)]
     restart_helper: Option<String>,
+    /// Private named subscription descriptor; only an opaque keychain reference, never a token.
+    #[arg(long)]
+    launch_credential: Option<String>,
     #[arg(last = true, required = true)]
     native: Vec<String>,
+}
+fn runtime_config(shared: &Shared, name: &str, instance: &str, credential: &str) -> Config {
+    let mut config = Config::new(name, instance, shared.state.lock().unwrap().provider_caps());
+    config.role = "runtime".into();
+    config.token = Some(credential.into());
+    config.max_effect_ids = 2048;
+    config.max_in_flight = 32;
+    config.max_item_streams = 4;
+    config.max_streams = 1;
+    config.call_timeout = Duration::from_secs(5);
+    config.software =
+        serde_json::json!({"name":"vqro-bridge-claude","version":env!("CARGO_PKG_VERSION")});
+    config
+}
+async fn connect_provider(
+    endpoint: &str,
+    config: Config,
+) -> std::result::Result<
+    (
+        Provider,
+        tokio::sync::mpsc::UnboundedReceiver<vqro::provider_client::Request>,
+    ),
+    vqro::provider_client::ProviderError,
+> {
+    let io = vqro::transport::connect(endpoint).await.map_err(|_| {
+        vqro::provider_client::ProviderError::new("unavailable", "core endpoint unavailable")
+    })?;
+    Provider::connect(io, config).await
 }
 fn fresh() -> Result<String> {
     let mut bytes = [0u8; 16];
@@ -77,6 +109,8 @@ async fn main() {
     }
 }
 async fn run(args: Args) -> Result<()> {
+    launch::credential_host_supported(args.launch_credential.is_some(), cfg!(windows))
+        .map_err(anyhow::Error::msg)?;
     let endpoint = std::env::var("VQRO_SOCKET")
         .context("VQRO_SOCKET is required; launch as a runtime bridge")?;
     let mut credential =
@@ -115,6 +149,12 @@ async fn run(args: Args) -> Result<()> {
     shared.set_lifetime(life.clone());
     let account = launcher_account::parse(std::env::var("VQRO_ACCOUNT").ok().as_deref())
         .map_err(anyhow::Error::msg)?;
+    let initial = args
+        .launch_credential
+        .as_deref()
+        .map(|raw| launch::Credential::parse(raw, account.as_ref()))
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
     {
         let mut state = shared.state.lock().unwrap();
         state.account = account;
@@ -123,20 +163,54 @@ async fn run(args: Args) -> Result<()> {
     let env: HashMap<_, _> = std::env::vars().collect();
     // A restart/resume must not request the native interrupted-turn rescue path. A later explicit
     // continuation is a NEW attributed delivery, never an automatic replay of old user content.
-    if let Some(helper) = args.restart_helper {
+    let private_config = if let Some(helper) = args.restart_helper {
         let helper: Vec<String> =
             serde_json::from_str(&helper).context("invalid private restart helper argv")?;
+        let config = vqro::claude_code::restart::Config {
+            helper,
+            native: argv.clone(),
+            cwd: cwd.clone(),
+            environment: env.clone(),
+        };
         shared
-            .configure_restart(vqro::claude_code::restart::Config {
-                helper,
-                native: argv.clone(),
-                cwd: cwd.clone(),
-                environment: env.clone(),
-            })
+            .configure_restart(config.clone())
             .map_err(anyhow::Error::msg)?;
-    }
+        Some(config)
+    } else {
+        None
+    };
+    let mut first_connection = None;
+    let startup_argv = if let Some(initial) = initial {
+        let config = private_config
+            .as_ref()
+            .context("named Claude launch requires the private helper")?;
+        // Authenticate the newly allocated backend host BEFORE any credential lookup.
+        let connected = tokio::select! {biased;_=life.changed()=>anyhow::bail!("bridge lifetime ended before named launch"),result=connect_provider(&endpoint,runtime_config(&shared,&name,&instance,&credential))=>result};
+        let (provider, requests) =
+            connected.map_err(|_| anyhow::anyhow!("named Claude host registration unavailable"))?;
+        let setup = async {
+            let host = provider.registration()["host"].as_str().context("authenticated runtime host unavailable")?;
+            let resources = provider.call("resource.list", serde_json::json!({"id":host})).await.map_err(|_| anyhow::anyhow!("authenticated launch host facts unavailable"))?;
+            initial.verify_host(host, &resources).map_err(anyhow::Error::msg)?;
+            tokio::select! {biased;_=life.changed()=>anyhow::bail!("bridge lifetime ended before named launch"),result=config.preflight_reference(&initial.reference,tokio::time::Instant::now()+Duration::from_secs(35))=>result.map_err(|_|anyhow::anyhow!("named Claude credential preflight unavailable; no native launch"))?};
+            config.initial_launch(&initial.reference).map_err(anyhow::Error::msg)
+        }.await;
+        let startup = match setup {
+            Ok(value) => value,
+            Err(error) => {
+                provider.close();
+                return Err(error);
+            }
+        };
+        shared.state.lock().unwrap().configured_binding = Some(initial);
+        first_connection = Some((provider, requests));
+        startup
+    } else {
+        argv.clone()
+    };
+    // Only the child startup argv is wrapped. Restart config retains canonical native argv.
     shared
-        .spawn_native(&argv, &cwd, &env)
+        .spawn_native(&startup_argv, &cwd, &env)
         .await
         .context("cannot launch explicit native Claude executable")?;
     let outgoing = tokio::spawn(shared.clone().drain_outgoing());
@@ -154,30 +228,15 @@ async fn run(args: Args) -> Result<()> {
         let Some(native) = shared.process() else {
             break;
         };
-        let mut config = Config::new(
-            &name,
-            &instance,
-            shared.state.lock().unwrap().provider_caps(),
+        let connect = connect_provider(
+            &endpoint,
+            runtime_config(&shared, &name, &instance, &credential),
         );
-        config.role = "runtime".into();
-        config.token = Some(credential.clone());
-        config.max_effect_ids = 2048;
-        config.max_in_flight = 32;
-        config.max_item_streams = 4;
-        config.max_streams = 1;
-        config.call_timeout = Duration::from_secs(5);
-        config.software =
-            serde_json::json!({"name":"vqro-bridge-claude","version":env!("CARGO_PKG_VERSION")});
-        let connect = async {
-            let io = vqro::transport::connect(&endpoint).await.map_err(|_| {
-                vqro::provider_client::ProviderError::new(
-                    "unavailable",
-                    "core endpoint unavailable",
-                )
-            })?;
-            Provider::connect(io, config).await
+        let connected = if let Some(first) = first_connection.take() {
+            Some(Ok(first))
+        } else {
+            tokio::select! {result=connect=>Some(result),_=life.changed()=>None,_=native.exited()=>None}
         };
-        let connected = tokio::select! {result=connect=>Some(result),_=life.changed()=>None,_=native.exited()=>None};
         let Some(connected) = connected else {
             if shared.restarting() && !*life.borrow() {
                 continue;

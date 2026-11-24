@@ -83,7 +83,10 @@ impl Core {
         shared.serve_request(provider, request).await;
         loop {
             let frame = self.recv().await;
-            if frame["method"] == "workspace.get" {
+            if frame["method"] == "resource.list" {
+                assert_eq!(frame["params"]["id"], "r/fixture");
+                self.reply(&frame, json!({"resources":[{"id":"r/fixture","provider":"fixture-backend","instance":"backend-instance","host":null,"state":"live","available":true}]})).await;
+            } else if frame["method"] == "workspace.get" {
                 assert_eq!(frame["params"]["key"], "doc/principals/owner");
                 self.reply(&frame, json!({"value":"owner"})).await;
             } else if frame["method"] == "stream.data" {

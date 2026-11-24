@@ -348,7 +348,12 @@ class Cutovers:
         by_id={row['id']:row for row in accounts}
         for resource in observed:
             account=by_id.get(configured_id(resource));native=facts(resource)
-            if account is None or resource.get('kind')!='agent' or resource.get('available') is not True or native.get('lifecycle')!='live':continue
+            if resource.get('kind')!='agent' or resource.get('available') is not True or native.get('lifecycle')!='live':continue
+            if '_claude' in native or (account and account['runtime']=='claude'):
+                from accounts_claude import configured_account
+                account=configured_account(resource)
+                if account is None:continue  # never attribute an old child to a rebound/unknown row
+            if account is None:continue
             availability=native.get('availability');reported=availability.get('native') if isinstance(availability,dict) else None
             reported=reported if isinstance(reported,dict) else {}
             limited=blocked(resource,limit_only=True) or (reported.get('subscription_limit') is True

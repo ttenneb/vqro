@@ -20,6 +20,7 @@ pub async fn on_supported_host(
     effect.await
 }
 
+#[derive(Clone)]
 pub struct Config {
     pub helper: Vec<String>,
     pub native: Vec<String>,
@@ -41,14 +42,17 @@ impl Config {
         {
             return Err("restart helper requires bounded private absolute interpreter/helper argv");
         }
+        if self.native.starts_with(&self.helper) {
+            return Err("canonical native argv must not contain a credential helper wrapper");
+        }
         Ok(())
     }
-    fn helper_args(&self, action: &str, request: &Restart) -> Vec<String> {
+    fn helper_args(&self, action: &str, reference: &str) -> Vec<String> {
         let mut args = self.helper.clone();
         args.extend([
             action.into(),
             "--handle".into(),
-            request.reference.clone(),
+            reference.into(),
             "--provider".into(),
             "anthropic".into(),
             "--kind".into(),
@@ -57,15 +61,36 @@ impl Config {
         args
     }
     pub fn launch(&self, request: &Restart) -> Vec<String> {
-        let mut args = self.helper_args("launch", request);
+        let mut args = self.helper_args("launch", &request.reference);
         args.push("--".into());
         args.extend(self.native.clone());
         args.extend(["--resume".into(), request.session.clone()]);
         args
     }
+    pub fn initial_launch(&self, reference: &str) -> Result<Vec<String>, &'static str> {
+        self.validate()?;
+        if reference.len() != 32
+            || !reference
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("initial credential requires an opaque keychain handle");
+        }
+        let mut args = self.helper_args("launch", reference);
+        args.push("--".into());
+        args.extend(self.native.clone());
+        Ok(args)
+    }
     pub async fn preflight(
         &self,
         request: &Restart,
+        deadline: Instant,
+    ) -> Result<(), ProviderError> {
+        self.preflight_reference(&request.reference, deadline).await
+    }
+    pub async fn preflight_reference(
+        &self,
+        reference: &str,
         deadline: Instant,
     ) -> Result<(), ProviderError> {
         let deadline = deadline.min(Instant::now() + Duration::from_secs(35));
@@ -75,7 +100,7 @@ impl Config {
                 "private preflight deadline before dispatch; no owned stop dispatched",
             ));
         }
-        let argv = self.helper_args("check", request);
+        let argv = self.helper_args("check", reference);
         let mut command = crate::program::background_command(&argv[0]);
         command
             .args(&argv[1..])
@@ -786,6 +811,80 @@ mod tests {
         assert_eq!(&argv[at + 1..argv.len() - 2], native.as_slice());
         assert_eq!(&argv[argv.len() - 2..], ["--resume", "native-session"]);
         assert!(!argv.iter().any(|s| s == "--bare" || s == "--fork-session"));
+    }
+    #[test]
+    fn canonical_native_never_captures_a_helper_or_nests_it_on_restart_b() {
+        let (_, args) = fixture();
+        let mut a = Restart::parse(&args).unwrap();
+        a.reference = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
+        let helper = vec![
+            std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            2
+        ];
+        let canonical = vec!["claude".into(), "--model".into(), "original-model".into()];
+        let config = Config {
+            helper: helper.clone(),
+            native: canonical.clone(),
+            cwd: PathBuf::new(),
+            environment: HashMap::new(),
+        };
+        let wrapped_a = config.initial_launch(&a.reference).unwrap();
+        assert!(!wrapped_a.iter().any(|arg| arg == "--resume"));
+        let nested = Config {
+            helper,
+            native: wrapped_a,
+            cwd: PathBuf::new(),
+            environment: HashMap::new(),
+        };
+        assert!(
+            nested.validate().is_err(),
+            "saving A's helper as canonical native argv would reapply A after B"
+        );
+        let mut b = a;
+        b.reference = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
+        let wrapped_b = config.launch(&b);
+        assert!(
+            !wrapped_b
+                .iter()
+                .any(|arg| arg == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(
+            wrapped_b
+                .iter()
+                .filter(|arg| arg.as_str() == "launch")
+                .count(),
+            1
+        );
+        let at = wrapped_b.iter().position(|arg| arg == "--").unwrap();
+        assert_eq!(
+            &wrapped_b[at + 1..wrapped_b.len() - 2],
+            canonical.as_slice()
+        );
+        assert_eq!(config.native, canonical);
+    }
+    #[test]
+    fn configured_binding_is_process_scoped_and_is_never_authenticated_identity() {
+        let (mut state, _) = fixture();
+        state.configured_binding = Some(super::super::launch::Credential {
+            account: "A".into(),
+            host: "backend-A".into(),
+            reference: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        });
+        let binding =
+            state.facts("fixture", "instance")["data"]["agent"]["_claude"]["credential_binding"]
+                .clone();
+        assert_eq!(
+            binding,
+            json!({"account":"A","host":"backend-A","ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","epoch":state.epoch()})
+        );
+        state.replace_owned(json!({"id":"B"}), 2);
+        assert!(
+            state.credential_binding().is_none(),
+            "old A binding must not survive owned replacement"
+        );
     }
     #[test]
     fn owned_replacement_advances_epoch_and_does_not_fake_requested_session() {

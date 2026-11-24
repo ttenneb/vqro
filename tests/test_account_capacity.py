@@ -17,6 +17,9 @@ NOW=200_000
 def resource(rid, account, used=None, *, blocked=False, reason='quota', epoch='e1', at=NOW, reset=NOW+30_000):
     facts={'v':0,'epoch':epoch,'lifecycle':'live','account':profiles.fact(account),
            'caps':{'agent.availability':{'reasons':['quota','rate_limited','auth']}}}
+    if account.get('runtime')=='claude' and account.get('kind')=='subscription' and account.get('secret_ref') and account.get('host'):
+        facts['_claude']={'credential_binding':{'account':account['id'],'host':account['host'],
+                                              'ref':account['secret_ref'],'epoch':epoch}}
     if blocked: facts['availability']={'state':'blocked','reason':reason}
     if used is not None:
         facts['usage_limits']=[{'scope':{'kind':'account','account':account['id']},'used_percent':used,

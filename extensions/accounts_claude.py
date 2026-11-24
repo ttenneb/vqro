@@ -9,7 +9,7 @@ import re
 
 import accounts_policy as policy
 from accounts_cutover import validate_offer_policy_after_owner
-from account_credentials import credential_identity, selection_problem, snapshot as account_snapshot
+from account_credentials import credential_identity, selection_problem, snapshot as account_snapshot, credential_backend, execution_backend
 from vqro_display import label
 from vqro_ext import VqroError
 
@@ -28,6 +28,23 @@ def evidence_complete(facts, required):
                    or path.startswith((mark + '.', mark + '[')) for mark in markers for path in required)
 
 
+def configured_account(row):
+    """Frozen configured credential for this child, not its authenticated identity."""
+    facts = policy.facts(row)
+    private = facts.get('_claude')
+    binding = private.get('credential_binding') if isinstance(private, dict) else None
+    required = ('v', 'lifecycle', 'epoch', 'account.id', '_claude.credential_binding')
+    if (not policy.live(row) or not evidence_complete(facts, required) or not isinstance(binding, dict)
+            or set(binding) != {'account', 'host', 'ref', 'epoch'}
+            or not text(binding.get('account'), 128) or binding['account'] != policy.configured_id(row)
+            or not text(binding.get('host'), 128) or not text(binding.get('epoch'))
+            or binding['epoch'] != facts.get('epoch') or not isinstance(binding.get('ref'), str)
+            or re.fullmatch('[0-9a-f]{32}', binding['ref']) is None):
+        return None
+    return {'id': binding['account'], 'label': binding['account'], 'runtime': 'claude',
+            'provider': 'anthropic', 'kind': 'subscription', 'host': binding['host'], 'secret_ref': binding['ref']}
+
+
 def eligible_episode(row, automatic=True):
     """Pure scheduler predicate: return the current native limit UUID or None.
 
@@ -42,13 +59,13 @@ def eligible_episode(row, automatic=True):
     if type(automatic) is not bool or not isinstance(row, dict) or row.get('kind') != 'agent' or not policy.live(row):
         return None
     facts = policy.facts(row)
-    required = ('v', 'lifecycle', 'state', '_claude.input_ledger', 'host.incarnation',
+    required = ('v', 'lifecycle', 'state', '_claude.input_ledger', '_claude.credential_binding', 'host.incarnation',
                 'session.id', 'epoch', 'account.id', 'caps.' + OP,
                 'availability.native.subscription_limit', 'availability.native.episode',
                 'availability.native.session_id', 'availability.native.terminal_reason')
     if automatic:
         required += ('background', '_claude.background_level')
-    if not evidence_complete(facts, required) or facts.get('state') != 'idle':
+    if not evidence_complete(facts, required) or facts.get('state') != 'idle' or configured_account(row) is None:
         return None
     native_host = facts.get('host')
     if not isinstance(native_host, dict) or not text(native_host.get('incarnation')):
@@ -106,7 +123,7 @@ class ClaudeCutover:
             raise VqroError('Claude execution host is not authenticated for restart; no switch', 'unsupported')
         return copy.deepcopy(row), host
 
-    def target(self, args, source_account, host):
+    def target(self, args, source_account, host, source_binding):
         rows, revision = account_snapshot(self.ext)
         if type(args.get('_account_revision')) is not int or revision != args['_account_revision']:
             raise VqroError('account registry changed; no switch', 'stale')
@@ -114,14 +131,19 @@ class ClaudeCutover:
         if len(selected) != 1:
             raise VqroError('Claude target account is missing or ambiguous; no switch', 'invalid')
         row = selected[0]
+        credential_backend(self.ext, row.get('host'))
+        backend = execution_backend(self.ext, host)
         if selection_problem(row):
             raise VqroError('Claude target credential route is incomplete or conflicting; no switch', 'unsupported')
         source_row = next((entry for entry in rows if entry['id'] == source_account), None)
-        if source_row is not None and credential_identity(row) == credential_identity(source_row):
+        if (source_binding is None or source_binding['host'] != backend or source_row is None
+                or credential_identity(source_row) != credential_identity(source_binding)):
+            raise VqroError('Claude source registration was rebound while its child runs; restore its binding or launch a newly bound agent', 'stale')
+        if credential_identity(row) == credential_identity(source_binding):
             raise VqroError('Claude target is a known alias of the source credential; no switch', 'invalid')
         if (not text(row.get('id'), 64) or row['id'] == source_account or row.get('runtime') != 'claude'
                 or row.get('provider', 'anthropic') != 'anthropic' or row.get('kind') != 'subscription'
-                or row.get('host') != host or not isinstance(row.get('secret_ref'), str)
+                or row.get('host') != backend or not isinstance(row.get('secret_ref'), str)
                 or re.fullmatch('[0-9a-f]{32}', row['secret_ref']) is None or not text(row.get('label'), 160)):
             raise VqroError('Claude target needs a same-host subscription keychain reference; no switch', 'unsupported')
         # Only the nonsecret fields understood by the native operation cross this boundary.
@@ -179,17 +201,18 @@ class ClaudeCutover:
                     'native_process_incarnation': facts['host']['incarnation'],
                     'session': facts['session']['id'], 'account': policy.configured_id(source),
                     'episode': facts['availability']['native']['episode']}
-        target = self.target(args, expected['account'], host)
+        binding = configured_account(source)
+        target = self.target(args, expected['account'], host, binding)
         self.claimed(args, host, expected)
         current, current_host = self.source(args['resource'], args['episode'], args['automatic'])
         current_facts = policy.facts(current)
-        if (current_host != host or current['incarnation'] != expected['incarnation']
+        if (configured_account(current) != binding or current_host != host or current['incarnation'] != expected['incarnation']
                 or current_facts['host']['incarnation'] != expected['native_process_incarnation']
                 or current_facts.get('session') != facts['session']
                 or policy.configured_id(current) != expected['account']
                 or current_facts['availability']['native']['episode'] != expected['episode']):
             raise VqroError('Claude source/session changed after claim; no switch', 'stale')
-        if self.target(args, expected['account'], host) != target:
+        if self.target(args, expected['account'], host, binding) != target:
             raise VqroError('Claude target changed after claim; no switch', 'stale')
         self.claimed(args, host, expected)
         # One attempt. Native admission owns the atomic epoch/session/account/child fence.
@@ -197,7 +220,7 @@ class ClaudeCutover:
         native_args = {key: expected[key] for key in ('epoch', 'session', 'account', 'episode')}
         native_args.update(v=0, allow_background_loss=not args['automatic'],
                            target={'account': target['id'], 'ref': target['secret_ref'],
-                                      'host': host, 'revision': args['_account_revision']})
+                                      'host': target['host'], 'revision': args['_account_revision']})
         result = self.ext.vqro.call('resource.invoke', {'resource': args['resource'], 'op': OP, 'args': native_args})
         data = result.get('data') if isinstance(result, dict) else None
         if (not isinstance(data, dict) or result.get('outcome') not in ('accepted', 'observed')

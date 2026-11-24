@@ -11,7 +11,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
-from account_credentials import choose as choose_account, environment as account_environment, runtime_environment, require_fresh
+from account_credentials import choose as choose_account, environment as account_environment, runtime_environment, require_fresh, credential_backend
 from agent_launch import initialize_request_route, launch, launch_cwd, runtimes as validate_runtimes
 SETTINGS = 'doc/settings/claude-code'
 DEFAULTS = {'runtimes': [{'name': 'claude', 'argv': ['claude']}]}
@@ -21,14 +21,17 @@ def runtimes(value):
     return validate_runtimes(value, brand='Claude Code')
 
 
-def bridge_argv(runtime, principal):
+def bridge_argv(runtime, principal, account=None):
     # Resolve execution-host paths, never helper argv supplied by a command caller.
-    # Do not preflight at launch: unavailable helpers must refuse only restart.
+    # Shared login needs no helper; named startup checks it only after backend authentication.
     helper = [str(Path(sys.executable).resolve()),
               str(Path(__file__).resolve().with_name('accounts_keychain_helper.py'))]
+    initial = [] if account is None else ['--launch-credential', json.dumps(
+        {'account': account['id'], 'ref': account['secret_ref'], 'host': account['host']},
+        ensure_ascii=False, separators=(',', ':'))]
     return [*runtime.get('bridge_argv', ['vqro-bridge-claude']), '--endpoint-principal', principal,
             '--restart-helper', json.dumps(helper, ensure_ascii=False, separators=(',', ':')),
-            '--', *runtime['argv']]
+            *initial, '--', *runtime['argv']]
 
 
 class ClaudeCode:
@@ -78,14 +81,17 @@ class ClaudeCode:
         if popup:
             return popup
         if account is not None:
-            raise VqroError('API-key accounts: launching is not available yet; the keychain entry is kept'
-                            if account['kind']=='api_key' else 'account choice is not available for this launcher yet','unsupported')
+            if account['kind'] == 'api_key':
+                raise VqroError('API-key accounts: launching is not available yet; the keychain entry is kept', 'unsupported')
+            credential_backend(self.ext, account.get('host'))
         principal = 'p:' + uuid.uuid4().hex
         env = account_environment(account, runtime_environment('claude', runtime))
         env['VQRO_PRINCIPAL'] = principal
         params = {'bridge': True, 'name': 'claude-code-bridge-' + uuid.uuid4().hex[:12],
-                  'argv': bridge_argv(runtime, principal),
+                  'argv': bridge_argv(runtime, principal, account),
                   'env': env}
+        if account is not None:
+            params['provider'] = account['host']  # exact backend; never fall back to the default
         if cwd:
             params['cwd'] = cwd
         result = launch(self.ext, params, brand='Claude',
@@ -121,7 +127,7 @@ class ClaudeCode:
 
 
 def main():
-    ext = Extension('claude-code', event_types=['entries', 'resource'])
+    ext = Extension('claude-code', event_types=['entries', 'resource', 'provider'])
     ClaudeCode(ext)
     ext.run()
 

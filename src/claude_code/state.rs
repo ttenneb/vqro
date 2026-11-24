@@ -34,6 +34,8 @@ pub struct State {
     pub inputs: BTreeMap<String, (String, String)>,
     pub outgoing: VecDeque<super::requests::Outbound>,
     pub account: Option<Value>,
+    /// Configured route for THIS owned child; not an authenticated provider identity.
+    pub configured_binding: Option<super::launch::Credential>,
     pub principal: Option<String>,
     pub generation: u64,
     pub changed: u64,
@@ -88,6 +90,7 @@ impl State {
             inputs: BTreeMap::new(),
             outgoing: VecDeque::new(),
             account: None,
+            configured_binding: None,
             principal: None,
             generation: 1,
             changed: 0,
@@ -186,6 +189,12 @@ impl State {
     pub fn caps_rev(&self) -> u64 {
         self.caps_rev
     }
+    pub fn credential_binding(&self) -> Option<Value> {
+        self.configured_binding.as_ref().map(|binding| {
+            json!({"account":binding.account,
+            "host":binding.host,"ref":binding.reference,"epoch":self.epoch()})
+        })
+    }
     pub fn facts(&self, provider: &str, instance: &str) -> Value {
         let state = self.status();
         let mut caps = self.declarations(false);
@@ -198,7 +207,7 @@ impl State {
                     "incarnation":self.generation.to_string(),"kind":"process","owns_lifecycle":true},
                 "session":self.session.as_ref().map(|id|json!({"id":id})),"epoch":self.epoch(),"caps":caps,
                 "completion":self.completion,"availability":self.availability.value(),"requests":self.requests.summaries(),
-                "queue":null,"background":self.background,"_claude":{"input_ledger":self.input_ledger(),"background_level":{"v":0,"source":if self.background_revision>0{Some("native:background_tasks_changed")}else{None},"process_incarnation":self.generation.to_string(),"revision":self.background_revision,"complete":self.background.is_some()}}, "config":[],"commands":[],"account":self.account,"incomplete":self.incomplete,
+                "queue":null,"background":self.background,"_claude":{"credential_binding":self.credential_binding(),"input_ledger":self.input_ledger(),"background_level":{"v":0,"source":if self.background_revision>0{Some("native:background_tasks_changed")}else{None},"process_incarnation":self.generation.to_string(),"revision":self.background_revision,"complete":self.background.is_some()}}, "config":[],"commands":[],"account":self.account,"incomplete":self.incomplete,
                 "items":{"retain_bytes":RETAIN,"entities":512,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"coverage":"tail"}}}});
         if let Some(principal) = &self.principal {
             facts["data"]["agent"]["principal"] = json!(principal);
@@ -343,6 +352,7 @@ impl State {
         self.background = None;
         self.background_revision = 0;
         self.account = Some(account);
+        self.configured_binding = None;
         self.incomplete.clear();
         self.refresh();
     }
