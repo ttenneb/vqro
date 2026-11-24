@@ -3,8 +3,8 @@
   "summary":"Installed-setup health, current evidence and an opt-in completion rule.",
   "description":"Checks observed status, metadata, launch paths, logs and installed offline tests. Versioned setup identity, observed generations and recorded receipts back an opt-in Unit completion rule, owner exceptions and integration skip explanations. Publishes NOT VERIFIED and a Testing settings page when evidence is absent or stale. The rule defaults off. The CLI remains available if the extension is off; this is cooperative policy, not a prose veto or universal runtime guard.",
   "requires":{"protocol":1,"client_features":["items","chips"]},
-  "provides":["command/test.unit","command/test.unit.show","command/test.setup.status","command/test.setup.skip","command/test.setup.accept","view/test-unit.report","data/testing.status","data/settings.page.testing","doc/settings/testing.require_unit"],
+  "provides":["command/test.unit","command/test.unit.show","command/test.setup.status","command/test.setup.policy","command/test.setup.skip","command/test.setup.accept","view/test-unit.report","data/testing.status","data/settings.page.testing","doc/settings/testing.require_unit"],
   "works_with":[{"cap":"command/test.integration","suggest":"test-integration","without":"Integration evidence is unavailable; an explicit skip explanation is required when Unit is required."},
                 {"cap":"command/test.perf","suggest":"test-perf","without":"Performance evidence is unavailable; recommendations never gate completion."}],
-  "contributes":{"commands":["test.unit","test.unit.show","test.setup.status","test.setup.skip","test.setup.accept"],"panels":["Unit health report","Testing"],"menu_items":["Testing status"],"settings":["doc/settings/testing.require_unit (default false)"]}
+  "contributes":{"commands":["test.unit","test.unit.show","test.setup.status","test.setup.policy","test.setup.skip","test.setup.accept"],"panels":["Unit health report","Testing"],"menu_items":["Testing status"],"settings":["doc/settings/testing.require_unit (default false)"]}
 }

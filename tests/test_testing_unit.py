@@ -468,6 +468,62 @@ class HealthChecks(unittest.TestCase):
         self.assertEqual(json.loads(stdout.getvalue())["source"], "offline")
         self.assertFalse((self.state / "test-unit").exists())
 
+    def test_testing_policy_page_distinguishes_on_off_unknown_and_unavailable(self):
+        for value, expected in ((True, "on"), (False, "off"), ("false", "unknown"), (None, "unknown"), (0, "unknown")):
+            with self.subTest(value=value):
+                status = unit.error_status("fixture", {"entries": {unit.POLICY_KEY: {"value": value}}})
+                page = unit.setup_page(status)
+                row = next(item for item in page["items"] if item.get("command") == "test.setup.policy")
+                self.assertEqual(row["text"], "Require a Unit check before setup changes finish")
+                self.assertEqual(row["detail"], expected)
+                self.assertEqual(row["args"], {"on": expected != "on"})
+                if expected == "unknown":
+                    self.assertEqual(row["type"], "item")
+                    self.assertEqual(row["style"], "warn")
+                    self.assertNotIn("checked", row, "unknown must not appear as an unchecked OFF box")
+                    self.assertEqual([action["args"] for action in row["menu"]], [{"on": True}, {"on": False}])
+                    self.assertTrue(any("Unit policy: unknown" in item.get("text", "") for item in page["items"]))
+                else:
+                    self.assertEqual(row["type"], "toggle")
+                    self.assertIs(row["checked"], value)
+        unavailable = unit.setup_page(unit.error_status("snapshot unavailable"))
+        row = next(item for item in unavailable["items"] if item.get("command") == "test.setup.policy")
+        self.assertEqual((row["type"], row["detail"]), ("item", "unknown"))
+        self.assertTrue(any("ON asks for fresh Unit evidence" in item.get("text", "") for item in unavailable["items"]))
+
+    def test_policy_command_sets_only_boolean_entry_with_cas_on_command_thread(self):
+        handlers = {}
+        ext = Mock()
+        ext.info = {"server": "vqro", "version": "fixture-v1", "state_dir": str(self.state)}
+        ext.vqro = self.client
+        ext.value.side_effect = lambda key, default=None: self.snapshot["entries"].get(key, {}).get("value", default)
+        ext.version.side_effect = lambda key: self.snapshot["entries"].get(key, {}).get("version", 0)
+        ext.retrying.side_effect = lambda fn: fn()
+        thread = threading.get_ident()
+        def apply(ops, note):
+            self.assertEqual(threading.get_ident(), thread, "do not lose SDK invocation attribution in a worker")
+            for op in ops:
+                self.snapshot["entries"][op["key"]] = {"version": op["expect"] + 1, "value": op["value"]}
+            return {"txn": "fixture"}
+        ext.apply.side_effect = apply
+        def command(name, title):
+            def register(fn):
+                handlers[name] = fn
+                return fn
+            return register
+        ext.command.side_effect = command
+        with patch("vqro_ext.Extension", return_value=ext), patch.dict(os.environ, {"VQRO_EXTENSIONS_DIR": str(self.extensions)}):
+            unit.extension_main()
+            for on, expected_version in ((True, 0), (False, 1)):
+                result = handlers["test.setup.policy"]({"on": on})
+                self.assertEqual(result["policy_state"], "on" if on else "off")
+                self.assertEqual(ext.apply.call_args.args[0], [{"op": "set", "key": unit.POLICY_KEY, "value": on, "expect": expected_version}])
+            calls = ext.apply.call_count
+            for invalid in ({}, {"on": "false"}, {"on": 1}, {"on": None}):
+                with self.subTest(args=invalid), self.assertRaisesRegex(Exception, "on must be a boolean"):
+                    handlers["test.setup.policy"](invalid)
+            self.assertEqual(ext.apply.call_count, calls)
+
     def test_extension_commands_publish_and_save_only_when_asked(self):
         handlers = {}
         ext = Mock()

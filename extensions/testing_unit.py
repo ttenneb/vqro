@@ -350,8 +350,22 @@ def status_segment(status):
 
 def setup_page(status):
     segment = notice(status)
+    policy = status.get("policy_state")
+    if policy not in ("on", "off"):
+        policy = "unknown"
+    switch = {"type": "toggle" if policy != "unknown" else "item",
+              "text": "Require a Unit check before setup changes finish", "detail": policy,
+              "command": "test.setup.policy", "args": {"on": policy != "on"}}
+    if policy == "unknown":
+        switch.update(style="warn", description="Current value is unknown; activate for ON or use the row menu for OFF.",
+                      menu=[{"label": "Turn rule ON", "command": "test.setup.policy", "args": {"on": True}},
+                            {"label": "Turn rule OFF", "command": "test.setup.policy", "args": {"on": False}}])
+    else:
+        switch["checked"] = policy == "on"
     items = [{"type": "text", "text": segment["label"], "style": segment["style"]},
-             {"type": "text", "text": f"Unit policy: {status.get('policy_state') or ('on' if status['require_unit'] else 'off')} · finish evidence: {'accepted' if status['finish_ok'] else 'not verified'}"},
+             {"type": "text", "text": f"Unit policy: {policy} · finish evidence: {'accepted' if status['finish_ok'] else 'not verified'}"},
+             switch,
+             {"type": "text", "text": "ON asks for fresh Unit evidence before finishing; Integration needs a receipt or a stated skip.", "style": "dim"},
              {"type": "text", "text": f"Generation {status['generation']} · setup {status['setup_id'] or 'unknown'}", "style": "dim"}]
     for suite in ("unit", "integration", "performance"):
         result = status[suite]
@@ -423,6 +437,18 @@ def extension_main():
         if isinstance(args.get("rpc_principal"), str):
             return setup_status(state_dir, extensions_dir, client=ext.vqro, hello=ext.info, rpc_principal=args["rpc_principal"])
         return status
+
+    @ext.command("test.setup.policy", "Set the Unit completion rule (args: on boolean)")
+    def policy(args):
+        on = args.get("on")
+        if type(on) is not bool:
+            raise VqroError("on must be a boolean", "invalid")
+        def save():
+            # Stay on the command thread: Extension.apply carries the invoker's proof/undo scope.
+            return ext.apply([{"op": "set", "key": POLICY_KEY, "value": on, "expect": ext.version(POLICY_KEY)}],
+                             "testing: require Unit " + ("on" if on else "off"))
+        ext.retrying(save)
+        return refresh()
 
     @ext.command("test.setup.skip", "Explain omitted integration evidence (args: suite, reason)")
     def skip(args):

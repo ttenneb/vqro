@@ -86,7 +86,11 @@ checks for behaviour. Use the separate performance report for repeated timing an
 
 The completion rule is **off by default**: `doc/settings/testing.require_unit` is an optional boolean workspace
 entry, treated as false when absent. Only arm it deliberately after a clean setup check. Arming is itself a setup
-change: record fresh Unit evidence and attach Integration or explain its omission afterwards. This extension does
+change: record fresh Unit evidence and attach Integration or explain its omission afterwards. Settings > Testing
+has the checkbox “Require a Unit check before setup changes finish”; `test.setup.policy {on: true|false}` changes
+that same entry with the invoker's attribution, so the invoker's ordinary undo reverts it. Any participant may
+change it. An unknown/malformed value is labelled unknown, not shown as an unchecked OFF box; activate for ON
+or use its row menu to choose OFF explicitly. This extension does
 not prevent prose such as “done”, add a Pi runtime veto, or enforce policy for every runtime. Participating
 plugins and explicit finish tools may use its deterministic assessment; this is cooperative workflow policy,
 not a security boundary. Terminal (tier1) Pi and the negotiated default RPC launcher can load the plugin explicitly.
