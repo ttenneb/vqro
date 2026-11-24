@@ -21,6 +21,16 @@ def runtimes(value):
     return validate_runtimes(value, brand='Claude Code')
 
 
+def bridge_argv(runtime, principal):
+    # Resolve execution-host paths, never helper argv supplied by a command caller.
+    # Do not preflight at launch: unavailable helpers must refuse only restart.
+    helper = [str(Path(sys.executable).resolve()),
+              str(Path(__file__).resolve().with_name('accounts_keychain_helper.py'))]
+    return [*runtime.get('bridge_argv', ['vqro-bridge-claude']), '--endpoint-principal', principal,
+            '--restart-helper', json.dumps(helper, ensure_ascii=False, separators=(',', ':')),
+            '--', *runtime['argv']]
+
+
 class ClaudeCode:
     def __init__(self, ext):
         self.ext = ext
@@ -71,7 +81,7 @@ class ClaudeCode:
         env = account_environment(account, runtime_environment('claude', runtime))
         env['VQRO_PRINCIPAL'] = principal
         params = {'bridge': True, 'name': 'claude-code-bridge-' + uuid.uuid4().hex[:12],
-                  'argv': [*runtime.get('bridge_argv', ['vqro-bridge-claude']), '--endpoint-principal', principal, '--', *runtime['argv']],
+                  'argv': bridge_argv(runtime, principal),
                   'env': env}
         if cwd:
             params['cwd'] = cwd

@@ -1,5 +1,6 @@
 """Headless launcher policy with fake public primitives only; no backend/CLI/auth/profile IO."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import sys
@@ -57,12 +58,49 @@ class ClaudeCodeLauncherTests(unittest.TestCase):
         self.assertTrue(params['bridge'])
         self.assertEqual(params['env']['VQRO_PRINCIPAL'], two['principal'])
         self.assertNotIn('VQRO_ACCOUNT', params['env'])
-        self.assertEqual(params['argv'], ['vqro-bridge-claude', '--endpoint-principal', two['principal'], '--', 'claude'])
+        expected_helper=[str(Path(sys.executable).resolve()),str((EXT/'accounts_keychain_helper.py').resolve())]
+        self.assertEqual(params['argv'], ['vqro-bridge-claude', '--endpoint-principal', two['principal'],
+                         '--restart-helper',json.dumps(expected_helper,ensure_ascii=False,separators=(',',':')),'--','claude'])
         self.assertNotIn('--bare', params['argv'])
         self.assertNotIn('--resume', params['argv'])
         self.assertEqual(params['cwd'], '/synthetic/work')
         self.assertEqual(launch.call_args.kwargs['expected_agents'], 1)
         self.assertEqual([method for method, _ in obj.ext.vqro.calls], ['workspace.get', 'workspace.get'])
+
+    def test_private_restart_helper_preserves_native_options_and_ignores_public_helper_args(self):
+        prefix=['/synthetic/custom bridge']
+        native=['claude','--model','synthetic-model']
+        obj=launcher([{'name':'native','argv':native,'bridge_argv':prefix}])
+        with patch.object(MODULE,'choose_account',return_value=(None,None)), \
+             patch.object(MODULE,'launch_cwd',return_value=None), \
+             patch.object(MODULE,'launch',return_value={'agent':'r1','host':'r2'}) as launch:
+            obj.new({'restart_helper':['untrusted-executable','untrusted-helper'],
+                     'helper':['other-untrusted-executable']})
+        argv=launch.call_args.args[1]['argv'];at=argv.index('--restart-helper')
+        self.assertEqual(argv[:1],prefix)
+        helper=json.loads(argv[at+1])
+        self.assertEqual(helper,[str(Path(sys.executable).resolve()),str((EXT/'accounts_keychain_helper.py').resolve())])
+        self.assertTrue(all(Path(value).is_absolute() for value in helper))
+        self.assertEqual(argv[at+2:],['--',*native])
+        self.assertEqual(argv.count('--restart-helper'),1)
+        self.assertNotIn('untrusted-executable',str(argv))
+        self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN',str(argv))
+        self.assertEqual(prefix,['/synthetic/custom bridge']);self.assertEqual(native,['claude','--model','synthetic-model'])
+
+    def test_missing_private_helper_does_not_refuse_initial_launch_or_guess_another_helper(self):
+        missing=EXT/'not-installed'/'claude_code.py'
+        obj=launcher([{'name':'native','argv':['claude']}])
+        with patch.object(MODULE,'__file__',str(missing)), \
+             patch.object(MODULE,'choose_account',return_value=(None,None)), \
+             patch.object(MODULE,'launch_cwd',return_value=None), \
+             patch.object(MODULE,'launch',return_value={'agent':'r1','host':'r2'}) as launch:
+            obj.new({})
+        launch.assert_called_once()
+        argv=launch.call_args.args[1]['argv'];at=argv.index('--restart-helper')
+        helper=json.loads(argv[at+1])
+        self.assertEqual(helper[1],str(missing.with_name('accounts_keychain_helper.py').resolve()))
+        self.assertFalse(Path(helper[1]).exists())
+        self.assertEqual(argv[at+2:],['--','claude'])
 
     def test_account_popup_returns_before_any_backend_effect(self):
         obj = launcher([{'name': 'native', 'argv': ['claude']}])
