@@ -341,18 +341,22 @@ class Cutovers:
     def known_blocked(self,account):
         return account['id'] in self.blocked_accounts([account])
 
+    @staticmethod
+    def source_account(resource,accounts):
+        registered=next((row for row in accounts if row['id']==configured_id(resource)),None)
+        if '_claude' in facts(resource) or (registered and registered['runtime']=='claude'):
+            from accounts_claude import configured_account
+            return configured_account(resource)  # frozen process reference, never mutable registry identity
+        return registered
+
     def observe_limits(self,observed,accounts):
         value,revision=self.read();now=self.clock();changed=False
         if type(now) not in (int,float) or not math.isfinite(now) or now<0:
             raise VqroError('local time unavailable; refuse AUTO','unavailable')
-        by_id={row['id']:row for row in accounts}
         for resource in observed:
-            account=by_id.get(configured_id(resource));native=facts(resource)
+            native=facts(resource)
             if resource.get('kind')!='agent' or resource.get('available') is not True or native.get('lifecycle')!='live':continue
-            if '_claude' in native or (account and account['runtime']=='claude'):
-                from accounts_claude import configured_account
-                account=configured_account(resource)
-                if account is None:continue  # never attribute an old child to a rebound/unknown row
+            account=self.source_account(resource,accounts)
             if account is None:continue
             availability=native.get('availability');reported=availability.get('native') if isinstance(availability,dict) else None
             reported=reported if isinstance(reported,dict) else {}
@@ -462,11 +466,21 @@ class Cutovers:
         if automatic and continuation_parent is None and credential_key(target) in value['blocks'] and block_active(value['blocks'][credential_key(target)],now):
             raise VqroError('target is known blocked; never auto ping-pong','offer_required')
         accounts,current_revision=account_snapshot(self.ext)
+        # ALL plans, including Claude's singleton, must reject ambiguity before any
+        # source block/intent commit. A later Dispatch rejection cannot undo false evidence.
+        if current_revision!=registry_revision:raise VqroError('authorized target registry changed','stale')
+        by_id={account['id']:account for account in accounts}
+        current_target=by_id.get(target['id'])
+        if current_target is None or credential_key(current_target)!=credential_key(target):
+            raise VqroError('target credential route changed before claim','stale')
+        origin=self.source_account(source,accounts)
+        registered_origin=by_id.get(configured_id(source))
+        if target['runtime']=='claude' and (origin is None or origin.get('runtime')!='claude' or registered_origin is None
+                or credential_key(origin)!=credential_key(registered_origin)):
+            raise VqroError('Claude source credential binding changed before claim','stale')
         if len(targets)>1:
-            by_id={account['id']:account for account in accounts}
-            source_row=by_id.get(configured_id(source));source_key=credential_key(source_row) if source_row else None
+            source_key=credential_key(origin) if origin else None
             keys={source_key} if source_key else set()
-            if current_revision!=registry_revision:raise VqroError('authorized target registry changed','stale')
             for identifier in targets:
                 account=by_id.get(identifier)
                 key=credential_key(account) if account is not None else None
@@ -474,7 +488,6 @@ class Cutovers:
                         or key is None or key in keys or key in value['blocks'] and block_active(value['blocks'][key],now):
                     raise VqroError('authorized target is blocked, ambiguous or aliases an earlier target','offer_required')
                 keys.add(key)
-        origin=next((account for account in accounts if account['id']==configured_id(source)),None)
         if automatic and origin is not None:
             resets=[]
             for limit in facts(source).get('usage_limits') or []:

@@ -780,6 +780,12 @@ reattribute the old child's limits or usage to a new reference. Cutover refuses 
 conversation charges, episode tombstones and existing exclusion clocks are not reset by relabeling.
 Windows does not declare `claude.restart`; named credential startup refuses before bootstrap/helper work,
 while the existing defensive restart refusal and shared-login launch remain.
+The whole admitted authenticated-host lookup is bounded by the absolute effect deadline,
+including SDK pre-send byte-budget waiting. Expiry refuses before helper/owned-stop effects and
+releases admission so EOF/signal lifetime publication cannot be stranded behind that read-only RPC.
+Common checks the current registry revision for singleton as well as multi-target claims, validates
+the frozen source/target route before committing any source block, and keeps original evidence
+clocks, existing unknown reservations and rejected tombstones on ambiguity.
 Under admission fencing the
 adapter compares the exact source epoch, observed session, configured account and latest native
 limit episode; it stops only its child, observes exit, and invokes its configured private helper once

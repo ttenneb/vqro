@@ -21,7 +21,8 @@ class CutoverAuthority(unittest.TestCase):
         affected = dict(member(), epoch=epoch)
         plan = {'setup_id': 'shared-setup', 'membership_revision': 'members-1',
                 'native_episode': episode, 'affected': [affected]}
-        target = {'id': 'b', 'label': 'B', 'runtime': 'codex', 'kind': 'subscription'}
+        target = {'id': 'b', 'label': 'B', 'runtime': 'codex', 'kind': 'subscription',
+                  'login_ref': {'sessionId':'login-b','accountId':'account-b'}}
         return journal.claim(row, target, 7, plan, automatic, 'One NEW turn.')
 
     def complete(self, journal, token):
@@ -34,7 +35,8 @@ class CutoverAuthority(unittest.TestCase):
         row=source();row['id']='r'+leader;row['data']['agent']['session']['id']='session-'+leader
         affected=[dict(member(),resource='r'+value,session='session-'+value) for value in sessions]
         plan={'setup_id':'shared-setup','membership_revision':'members-1','native_episode':episode,'affected':affected}
-        target={'id':'b','label':'B','runtime':'codex','kind':'subscription'}
+        target={'id':'b','label':'B','runtime':'codex','kind':'subscription',
+                'login_ref':{'sessionId':'login-b','accountId':'account-b'}}
         return journal.claim(row,target,7,plan,True,'One NEW turn.'),row
 
     def finish_group(self,journal,token):
@@ -87,9 +89,13 @@ class CutoverAuthority(unittest.TestCase):
     def test_background_warning_is_protected_owner_offer_only(self):
         core, journal, _ = self.fixture()
         target={'id':'b','label':'B','runtime':'claude','kind':'subscription','host':'synthetic-host','secret_ref':'b'*32}
-        core.entries['doc/settings/accounts']['value']['accounts'][1]=target
+        origin=dict(target,id='a',label='A',secret_ref='a'*32)
+        core.entries['doc/settings/accounts']['value']['accounts']=[origin,target]
+        bound_source=source();bound_source.update(kind='agent',available=True)
+        bound_source['data']['agent'].update(lifecycle='live',_claude={'credential_binding':{
+            'account':'a','host':'synthetic-host','ref':'a'*32,'epoch':'epoch-1'}})
         plan={'setup_id':'shared-setup','membership_revision':'members-1','native_episode':'turn-1','affected':[member()]}
-        token=journal.claim(source(),target,7,plan,False,'One NEW turn.',background_loss_disclosed=True)
+        token=journal.claim(bound_source,target,7,plan,False,'One NEW turn.',background_loss_disclosed=True)
         self.assertEqual(journal.lookup(token)['authorization'],
                          {'mode':'offer','principal':'owner','owner_revision':1,'background_loss_disclosed':True})
         with self.assertRaises(VqroError):journal.authorization(True,background_loss_disclosed=True)
