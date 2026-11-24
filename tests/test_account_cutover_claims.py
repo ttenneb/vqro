@@ -42,7 +42,11 @@ class CutoverClaims(unittest.TestCase):
     def fixture(self):
         core = Core()
         core.entries['doc/settings/accounts-policy']['value']['continuation_text'] = 'Continue new work.'
-        return core, Cutovers(core), {'id': 'b', 'runtime': 'codex', 'label': 'B', 'kind': 'subscription'}
+        target={'id':'b','runtime':'codex','label':'B','kind':'subscription',
+                'login_ref':{'sessionId':'login-b','accountId':'account-b'}}
+        original=dict(target,id='a',label='A',login_ref={'sessionId':'login-a','accountId':'account-a'})
+        core.entries['doc/settings/accounts']={'version':7,'value':{'accounts':[original,target]}}
+        return core, Cutovers(core), target
 
     def claim(self, journal, target, **extra):
         plan = {'setup_id': 'shared-setup', 'membership_revision': 'members-1', 'affected': [member()]}

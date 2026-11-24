@@ -68,6 +68,23 @@ class ResumeConsumption(unittest.TestCase):
         self.assertFalse(any(method=='resource.invoke' for method,_ in core.calls))
         self.assertEqual(journal.lookup(token)['max_switches'],0)
 
+    def test_final_projection_rejects_changed_registry_before_pi_shutdown(self):
+        core,journal,_,token=self.fixture()
+        row=core.resources['r1'];row['available']=True;row.pop('exit');row['data']['agent']['lifecycle']='live'
+        original=core.call;reads=[]
+        def call(method,params=None):
+            if method=='workspace.get' and params['key']=='doc/settings/accounts':
+                reads.append(True)
+                if len(reads)==4:
+                    entry=core.entries['doc/settings/accounts'];entry['version']=8
+                    entry['value']['accounts'][1]['native_provider']='vqro_changed_b'
+            return original(method,params)
+        core.call=call
+        setup=PiPrepare();setup.setUp()
+        with self.assertRaises(VqroError) as caught:PiCutover(core).restart(dict(setup.args(),_claim=token))
+        self.assertEqual(caught.exception.kind,'stale');self.assertEqual(len(reads),4)
+        self.assertFalse(any(method=='resource.invoke' for method,_ in core.calls))
+
     def test_same_acknowledged_claim_can_launch_only_once(self):
         core,journal,frontend,token=self.fixture()
         with patch('pi.launch',return_value={'outcome':'observed','agent':'new','host':'new-host'}) as launch:

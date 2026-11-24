@@ -257,7 +257,15 @@ class Cutovers:
             raise VqroError('cutover claim is not acknowledged', 'not_found')
         # All other blocking reads precede the policy used for this allowance.
         # Callbacks consume this projection, never mix it with a later settings read.
-        accounts,_=account_snapshot(self.ext)
+        accounts,registry_revision=account_snapshot(self.ext)
+        if registry_revision!=record['_account_revision']:
+            raise VqroError('account registry changed after claim; no native effect authorized','stale')
+        targets=record['authorized_targets'] or [record['account']]
+        by_id={account['id']:account for account in accounts}
+        if any(target not in by_id or selection_problem(by_id[target])
+               or by_id[target]['runtime']!=record['runtime'] or by_id[target]['kind']!='subscription'
+               for target in targets):
+            raise VqroError('claimed credential target is no longer eligible; no native effect authorized','stale')
         configured=settings(self.ext);now=self.clock()
         if type(now) not in (int,float) or not math.isfinite(now) or now<0:
             raise VqroError('local time unavailable; no native switch authorized','unavailable')
