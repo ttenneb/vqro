@@ -1,5 +1,7 @@
 """Known credential groups, expiry and one-setup UNKNOWN targets: fake core only."""
 import copy
+import hashlib
+import json
 import unittest
 from unittest.mock import patch
 from account_credentials import SETTINGS
@@ -53,6 +55,30 @@ class KnownBlocked(unittest.TestCase):
         self.core.entries[POLICY]['value'].update(blocked='notify',auto_cutover_max_per_hour=0)
         self.assertEqual(self.journal.lookup(token)['blocked_mode'],'notify')
         self.assertEqual(self.journal.lookup(token)['max_switches'],0)
+
+    def test_installed_legacy_provider_key_stays_blocked_until_its_own_expiry(self):
+        from accounts_cutover import credential_key
+        self.b['provider']='openai-codex';alias=dict(self.b,id='alias-b',provider='openai')
+        self.core.entries[SETTINGS]['value']['accounts'].append(alias)
+        row=source();row.update(kind='agent',available=True)
+        row['data']['agent'].update(account={'id':'b'},lifecycle='live',
+            caps={'agent.availability':{'reasons':['quota']}},
+            availability={'state':'blocked','reason':'quota','native':{'turnId':'legacy-b-limit'}})
+        self.journal.observe_limits([row],[self.a,self.b,alias])
+        value,revision=self.journal.read();canonical=credential_key(self.b)
+        # EXACT f1 identity tuple/hash, independent of the new implementation.
+        old_identity=('codex','openai-codex','subscription',None,'login_ref','saved-b','native-b')
+        legacy=hashlib.sha256(json.dumps(old_identity,separators=(',',':')).encode()).hexdigest()
+        evidence=value['blocks'].pop(canonical);value['blocks'][legacy]=copy.deepcopy(evidence)
+        self.journal.write(value,revision)
+        self.assertTrue(self.journal.known_blocked(self.b));self.assertTrue(self.journal.known_blocked(alias))
+        self.assertEqual(self.journal.blocked_accounts([self.b,alias]),{'b','alias-b'})
+        self.now[0]+=3590
+        self.journal.observe_limits([row],[self.a,self.b,alias])
+        value,_=self.journal.read()
+        self.assertEqual(value['blocks'][canonical],evidence);self.assertEqual(value['blocks'][legacy],evidence)
+        self.now[0]+=11
+        self.assertFalse(self.journal.known_blocked(self.b));self.assertFalse(self.journal.known_blocked(alias))
 
     def test_known_blocked_saved_codex_login_excludes_singleton_provider_spelling_alias(self):
         from account_credentials import eligible_alternatives

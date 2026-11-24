@@ -40,9 +40,25 @@ def member(value):
     return dict(value)
 
 
-def credential_key(account):
-    identity=credential_identity(account)
+def credential_key(account, *, legacy_provider=False):
+    identity=credential_identity(account,legacy_provider=legacy_provider)
     return hashlib.sha256(json.dumps(identity,separators=(',',':')).encode()).hexdigest() if identity is not None else None
+
+
+def block_keys(account,accounts):
+    keys={credential_key(account)}
+    identity=credential_identity(account)
+    if account.get('runtime')=='codex' and account.get('kind')=='subscription' and identity is not None:
+        # Old installed journals included arbitrary provider spelling in the
+        # hash. Read every registered spelling for this SAME opaque native ref.
+        for row in [account,*accounts]:
+            if credential_identity(row)==identity:keys.add(credential_key(row,legacy_provider=True))
+    return keys-{None}
+
+
+def active_account_block(value,account,accounts,now):
+    return any(key in value['blocks'] and block_active(value['blocks'][key],now)
+               for key in block_keys(account,accounts))
 
 
 def limit_marker(resource):
@@ -276,8 +292,7 @@ class Cutovers:
         others={key:old for key,old in value['claims'].items() if key!=token}
         available=configured['auto_cutover_max_per_hour']-max(hourly_counts(others,record['runtime'],record['affected'],now),default=0)
         maximum=min(MAX_TARGETS,len(record['authorized_targets']),max(0,available)) if configured['blocked']=='auto_restart' else 0
-        blocked_ids={account['id'] for account in accounts if credential_key(account) in value['blocks']
-                     and block_active(value['blocks'][credential_key(account)],now)}
+        blocked_ids={account['id'] for account in accounts if active_account_block(value,account,accounts,now)}
         # Registry/policy reads can yield to another Accounts worker which
         # observes limits or claims budget. Never publish an older journal frame.
         _,latest_revision=self.read()
@@ -294,8 +309,8 @@ class Cutovers:
     def blocked_accounts(self,accounts):
         value,_=self.read();now=self.clock()
         if type(now) not in (int,float) or not math.isfinite(now) or now<0:return {row['id'] for row in accounts}
-        return {row['id'] for row in accounts if credential_key(row) in value['blocks']
-                and block_active(value['blocks'][credential_key(row)],now)}
+        registered,_=account_snapshot(self.ext)
+        return {row['id'] for row in accounts if active_account_block(value,row,registered,now)}
 
     def known_blocked(self,account):
         return account['id'] in self.blocked_accounts([account])
@@ -328,6 +343,11 @@ class Cutovers:
             marker=limit_marker(resource) if limited else hashlib.sha256(json.dumps(native.get('usage_limits'),sort_keys=True).encode()).hexdigest()
             key=credential_key(account)
             if key is None or value['blocks'].get(key,{}).get('episode')==marker:continue
+            old=next((value['blocks'][oldkey] for oldkey in block_keys(account,accounts)
+                      if oldkey in value['blocks'] and value['blocks'][oldkey]['episode']==marker),None)
+            if key not in value['blocks'] and old is not None:
+                # Promote identical evidence without renewing its reset/hour clock.
+                value['blocks'][key]=copy.deepcopy(old);changed=True;continue
             resets=[]
             for limit in native.get('usage_limits') or []:
                 if isinstance(limit,dict) and (limit.get('used_percent')==100 or limit.get('remaining')==0):

@@ -64,7 +64,7 @@ def selection_problem(row):
     return None
 
 
-def credential_identity(row):
+def credential_identity(row, *, legacy_provider=False):
     """Known reference equality only; never an authenticated-account assertion.
 
     Keep real runtime/issuer/kind/host namespaces distinct. Codex subscription
@@ -82,11 +82,11 @@ def credential_identity(row):
     # Native saved Codex logins and Claude subscriptions have an implicit
     # issuer; omission is not a different credential namespace.
     provider = row.get('provider')
-    if row['kind']=='subscription' and row['runtime']=='codex':
+    if row['kind']=='subscription' and row['runtime']=='codex' and not legacy_provider:
         # Native selection uses only sessionId/accountId, not this metadata.
         provider='openai'
     elif provider is None and row['kind'] == 'subscription':
-        provider = {'claude': 'anthropic'}.get(row['runtime'])
+        provider = {'codex':'openai','claude': 'anthropic'}.get(row['runtime'])
     return (row['runtime'], provider, row['kind'], row.get('host'), *route)
 
 
