@@ -53,6 +53,13 @@ impl Config {
         request: &Restart,
         deadline: Instant,
     ) -> Result<(), ProviderError> {
+        let deadline = deadline.min(Instant::now() + Duration::from_secs(35));
+        if Instant::now() >= deadline {
+            return Err(ProviderError::new(
+                "unavailable",
+                "private preflight deadline before dispatch; no owned stop dispatched",
+            ));
+        }
         let argv = self.helper_args("check", request);
         let mut command = crate::program::background_command(&argv[0]);
         command
@@ -71,14 +78,11 @@ impl Config {
             .take()
             .expect("private preflight pipe")
             .take(1025);
-        let result = tokio::time::timeout_at(
-            deadline.min(Instant::now() + Duration::from_secs(35)),
-            async {
-                let mut bytes = Vec::new();
-                let (status, _) = tokio::try_join!(child.wait(), stdout.read_to_end(&mut bytes))?;
-                Ok::<_, std::io::Error>((status, bytes))
-            },
-        )
+        let result = tokio::time::timeout_at(deadline, async {
+            let mut bytes = Vec::new();
+            let (status, _) = tokio::try_join!(child.wait(), stdout.read_to_end(&mut bytes))?;
+            Ok::<_, std::io::Error>((status, bytes))
+        })
         .await;
         match result {
             Ok(Ok((status, bytes)))
@@ -91,7 +95,7 @@ impl Config {
             }
             _ => Err(ProviderError::new(
                 "unavailable",
-                "private restart preflight not confirmed ready; old process unchanged",
+                "private restart preflight not confirmed ready; no owned stop dispatched",
             )),
         }
     }
@@ -323,6 +327,26 @@ mod tests {
         let account = Restart::parse(&args).unwrap().account_value();
         assert!(account.get("label").is_none());
         assert_eq!(account["sources"]["id"], "vqro:restart");
+    }
+    #[tokio::test]
+    async fn expired_preflight_refuses_before_helper_dispatch() {
+        let (_, args) = fixture();
+        let request = Restart::parse(&args).unwrap();
+        let absent = std::env::temp_dir()
+            .join("absent-synthetic-restart-interpreter")
+            .to_string_lossy()
+            .into_owned();
+        let config = Config {
+            helper: vec![absent.clone(), absent],
+            native: vec!["synthetic".into()],
+            cwd: PathBuf::new(),
+            environment: HashMap::new(),
+        };
+        let error = config
+            .preflight(&request, Instant::now() - Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("deadline before dispatch"));
     }
     #[test]
     fn helper_wiring_keeps_original_native_settings_without_new_launch_limits() {

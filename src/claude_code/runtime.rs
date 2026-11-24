@@ -486,7 +486,7 @@ impl Shared {
         if preflight.is_err() {
             return rejected(
                 "unavailable",
-                "private preflight not confirmed ready; old process unchanged",
+                "private preflight not confirmed ready; no owned stop dispatched",
             );
         }
         {
