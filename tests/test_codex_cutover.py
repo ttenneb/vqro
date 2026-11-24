@@ -93,6 +93,18 @@ class Tests(unittest.TestCase):
                     with self.assertRaises(VqroError) as error:Cutover(ext).prepare(dict(self.args(),automatic=automatic))
                     self.assertEqual(error.exception.kind,'busy')
                     self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
+    def test_incomplete_own_ledger_required_cuts_and_malformed_markers_reject(self):
+        cuts=[['_codex'],['_codex.input_ledger'],['_codex.input_ledger.pending'],['_codex.input_ledger[0]'],['epoch'],None,'_codex.input_ledger',[None],[''],['bad\u0000marker']]
+        for automatic in (True,False):
+            for markers in cuts:
+                with self.subTest(automatic=automatic,markers=markers):
+                    ext=Ext();ext.rows[1]['data']['agent']['incomplete']=markers
+                    with self.assertRaises(VqroError) as error:Cutover(ext).prepare(dict(self.args(),automatic=automatic))
+                    self.assertEqual(error.exception.kind,'busy')
+                    self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
+        for markers in ([],['config.model'],['_codex.other'],['_codex.input_ledger_extra']):
+            ext=Ext();ext.rows[1]['data']['agent']['incomplete']=markers
+            self.assertEqual(len(Cutover(ext).prepare(self.args())['affected']),2)
     def test_auto_requires_explicit_setup_consent_manual_offer_does_not(self):
         ext=Ext();ext.consent={'setups':{}};c=Cutover(ext)
         p=c.prepare(self.args());self.assertFalse(p['automatic_allowed'])

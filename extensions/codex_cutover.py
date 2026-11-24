@@ -29,6 +29,16 @@ def native(row):
     return (row.get('data') or {}).get('agent') or {}
 
 
+def evidence_complete(facts, required):
+    # Same producer-marker boundary as Claude; absence is legacy no cuts, not
+    # permission to ignore malformed markers or required parent/child cuts.
+    markers = facts.get('incomplete', [])
+    if not isinstance(markers,list) or any(not isinstance(mark,str) or not mark or not mark.isprintable() for mark in markers):
+        return False
+    return not any(mark==path or mark.startswith((path+'.',path+'['))
+                   or path.startswith((mark+'.',mark+'[')) for mark in markers for path in required)
+
+
 class Cutover:
     def __init__(self, ext):
         self.ext = ext
@@ -155,7 +165,8 @@ class Cutover:
                 fail('an affected Codex endpoint lacks native cutover/session evidence')
             private = b.get('_codex')
             ledger = private.get('input_ledger') if isinstance(private,dict) else None
-            if (not isinstance(ledger,dict) or type(ledger.get('v')) is not int or ledger['v']!=0
+            if (not evidence_complete(b,('_codex.input_ledger','epoch'))
+                    or not isinstance(ledger,dict) or type(ledger.get('v')) is not int or ledger['v']!=0
                     or ledger.get('source')!='vqro-ledger' or ledger.get('epoch')!=b.get('epoch')
                     or ledger.get('complete') is not True or type(ledger.get('pending')) is not int or ledger['pending']!=0
                     or type(ledger.get('unknown')) is not int or ledger['unknown']!=0):
