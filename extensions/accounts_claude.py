@@ -8,6 +8,7 @@ import copy
 import re
 
 import accounts_policy as policy
+from accounts_cutover import validate_offer_policy_after_owner
 from account_credentials import credential_identity, selection_problem, snapshot as account_snapshot
 from vqro_display import label
 from vqro_ext import VqroError
@@ -163,6 +164,7 @@ class ClaudeCutover:
             if (not isinstance(owner, dict) or owner.get('value') != authority['principal']
                     or owner.get('version') != authority['owner_revision']):
                 raise VqroError('workspace owner changed after the human choice; no switch', 'stale')
+            validate_offer_policy_after_owner(self.ext,mode)
 
     def restart(self, args):
         if (not isinstance(args, dict) or not text(args.get('resource'), 128)

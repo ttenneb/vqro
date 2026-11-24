@@ -133,6 +133,11 @@ an ordered bounded `authorized_targets` plan chosen by common policy. The full
 plan (at most three targets, even with an hourly cap above three) reserves hourly
 slots for **every affected native conversation**. Final projections include the
 explicit current blocked mode: NOTIFY/missing mode refuses both AUTO and OFFER.
+Pi/Claude owner OFFER checks sample mode again after the final blocking owner
+lookup and refuse a changed mode. Shared owner continuation similarly compares
+policy before/after owner verification. This closes revocation during that owner
+read, not a global atomicity guarantee: ownership can change during the final
+policy read, and either can change after its sample before native dispatch.
 Registry/policy reads are followed by a journal revision check; a concurrent
 observation or reservation invalidates the projection before native work. A definite
 attempted prefix refunds unused slots; a definite pre-callback rejection settles

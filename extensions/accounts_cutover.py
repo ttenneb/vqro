@@ -120,6 +120,18 @@ def validate_claim_authority(ext, claim, automatic):
         raise VqroError('recorded owner-click authority is no longer current', 'stale')
 
 
+def validate_offer_policy_after_owner(ext,projected_mode):
+    """Close a mode revocation observed during owner lookup, not a global lock.
+
+    This final policy sample follows the blocking owner read. The owner can still
+    change during this sample, or policy after it; neither read is an atomic
+    lease through native dispatch. Never report such a guarantee.
+    """
+    mode=settings(ext)['blocked']
+    if mode not in ('auto_restart','offer_restart') or mode!=projected_mode:
+        raise VqroError('account policy changed during owner verification; no native effect','policy_changed')
+
+
 class Cutovers:
     def __init__(self, ext, clock=time.time):
         self.ext = ext
@@ -633,9 +645,12 @@ class Cutovers:
         value, _ = self.read()
         record = value['claims'].get(token)
         if record is not None and record['state']=='owner_turn':
-            if settings(self.ext)['blocked'] not in ('auto_restart','offer_restart'):return False
+            configured=settings(self.ext)
+            if configured['blocked'] not in ('auto_restart','offer_restart'):return False
             validate_claim_authority(self.ext,{'authorization':record['continuation_owner'],'runtime':record['runtime']},False)
-            return True
+            # The last owner lookup may block while policy is revoked. Re-read
+            # the entire policy afterward; this is not an atomic dispatch lease.
+            return settings(self.ext)==configured
         if record is None or record['state'] != 'native_ready' or not record['automatic'] or record['continuation_cancelled']:
             return False
         validate_claim_authority(self.ext, record, True)

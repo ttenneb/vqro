@@ -40,6 +40,7 @@ class Fake:
                       'session': 'native-session', 'native_episode': 'native-result-uuid',
                       'authorization': {'mode': 'auto', 'principal': None, 'owner_revision': None}}
         self.owner = {'version': 3, 'value': 'workspace-owner'}
+        self.policy={'blocked':'auto_restart'}
         self.result = {'outcome': 'observed', 'effect': 'e7', 'data': {
             'started': True, 'requested_session': 'native-session', 'session': 'native-session', 'resume_confirmed': True,
             'account': 'b', 'epoch': 'e2'}}
@@ -69,6 +70,7 @@ class Fake:
         if method == 'resource.list':
             return {'resources': [copy.deepcopy(self.source)]}
         if method == 'workspace.get':
+            if params['key']==policy.POLICY:return {'version':1,'value':copy.deepcopy(self.policy)}
             return copy.deepcopy(self.owner if params['key'] == 'doc/principals/owner' else self.registry)
         if method == 'operational.get':
             return copy.deepcopy(self.claim)

@@ -12,7 +12,7 @@ import accounts_policy as policy
 from account_credentials import snapshot, selection_problem, credential_identity, require_fresh, provider_argv
 from agent_launch import runtimes
 from pi_accounts.limits import match_limit
-from accounts_cutover import validate_claim_authority
+from accounts_cutover import validate_claim_authority, validate_offer_policy_after_owner
 from vqro_ext import VqroError
 
 UUID=re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',re.I)
@@ -149,6 +149,8 @@ class PiCutover:
         if mode not in ('auto_restart','offer_restart') or args['automatic'] and mode!='auto_restart':
             raise VqroError('current protected mode does not allow this switch; nothing stopped','offer_required')
         validate_claim_authority(self.ext,claim,args['automatic'])
+        if not args['automatic']:
+            validate_offer_policy_after_owner(self.ext,mode)
         if args['automatic']:
             allowance=claim.get('max_switches');blocked=claim.get('known_blocked_targets')
             if type(allowance) is not int or allowance<1 or not isinstance(blocked,list) or args['account'] in blocked:
