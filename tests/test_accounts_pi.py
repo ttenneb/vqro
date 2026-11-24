@@ -143,6 +143,23 @@ class PiPrepare(unittest.TestCase):
         with self.assertRaises(VqroError):self.callback.restart(args)
         self.assertEqual(len(self.resumes),1)
 
+    def test_resume_requires_positive_exact_logical_work_principal_readback(self):
+        for principal,proof in ((None,'env'),('p:wrong-work','env'),('p:original-work','unknown'),('p:original-work',None)):
+            with self.subTest(principal=principal,proof=proof):
+                self.setUp();self.arm_restart();original=self.core.invoke
+                def invoke(name,args=None):
+                    result=original(name,args)
+                    if name=='pi.resume':
+                        native=self.core.resources['r2']['data']['agent']
+                        native['tool_principal']=principal
+                        native['caps']['agent']['tool_principal']=proof
+                    return result
+                self.core.invoke=invoke
+                with self.assertRaises(VqroError) as caught:self.callback.restart(dict(self.args(),_claim='a'*32))
+                self.assertEqual(caught.exception.kind,'indeterminate')
+                self.assertEqual(len(self.resumes),1)
+                self.assertFalse(any(method=='resource.invoke' and params.get('op')=='agent.send' for method,params in self.core.calls))
+
     def test_unknown_stop_or_owner_change_never_starts_b(self):
         self.arm_restart();self.stop_unknown=True
         with self.assertRaises(VqroError):self.callback.restart(dict(self.args(),_claim='a'*32))

@@ -189,6 +189,8 @@ class PiCutover:
         provider=self.ext.providers.get(resumed.get('provider')) or {}
         if resumed.get('available') is not True or state.get('lifecycle')!='live' \
                 or state.get('epoch')==native['epoch'] or not bounded(state.get('epoch')) \
+                or state.get('tool_principal')!=native['tool_principal'] \
+                or ((state.get('caps') or {}).get('agent') or {}).get('tool_principal')!='env' \
                 or session.get('id')!=native['session']['id'] or policy.configured_id(resumed)!=target['id'] \
                 or next_model.get('id')!=model['id'] or native_model.get('provider')!=target['native_provider'] \
                 or native_model.get('api')!=model['native']['api'] or history_file(state)!=history_file(native) or provider.get('role')!='runtime' \
