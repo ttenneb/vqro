@@ -19,6 +19,7 @@ fn old_process_observations_cannot_mutate_new_epoch() {
         &Event::Exited(Exit {
             code: Some(0),
             success: true,
+            observed: true,
         }),
     );
     shared.observe_native(1, &Event::ProtocolError("old pipe".into()));
