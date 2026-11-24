@@ -15,6 +15,7 @@ import sys
 import tempfile
 import traceback
 from pi_provider_e2e import E2E, REPO, identity, live
+from extension_layout import copy_packages
 
 
 class ClaudeLaunch(E2E):
@@ -24,6 +25,7 @@ class ClaudeLaunch(E2E):
         for source in (REPO / 'extensions').glob('*.py'):
             shutil.copy2(source, self.root / 'ext' / source.name)
         shutil.copytree(REPO / 'extensions/manifests', self.root / 'ext/manifests')
+        copy_packages(REPO/'extensions',self.root/'ext')
         if self.args.restart_fixture:
             shutil.copy2(REPO/'tests/fixtures/fake_claude_restart_helper.py',self.root/'ext/accounts_keychain_helper.py')
         peer = self.root / 'native-peer'

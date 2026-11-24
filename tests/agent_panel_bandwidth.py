@@ -5,6 +5,7 @@ Control-style20attempts/s, prompt:abort:steer=2:1:1; rejected busy prompts do no
 fixtures are modeled deterministically; no model, HC or inherited endpoint. All transcripts pre-warm128rows.
 """
 from python_interpreter import python
+from extension_layout import copy_packages
 import argparse
 import importlib.util
 import json
@@ -37,6 +38,7 @@ def run(args, count, before):
         (root/name).mkdir()
     for path in (ROOT/'extensions').glob('*.py'):
         shutil.copy2(path, root/'ext'/path.name)
+    copy_packages(ROOT/'extensions',root/'ext')
     if before:
         shutil.copy2(args.before_agents, root/'ext/agents.py')
     (root/'ext/defaults.json').write_text(json.dumps({'version':1,'extensions':[{'name':'agents','argv':[python(),str(root/'ext/agents.py')]}]}))

@@ -5,6 +5,7 @@ One synthetic backend publishes facts, not processes/models; this isolates exten
 execution and the separately tested runtime registry. No live vqro/hc/tmux or inherited HERDR environment.
 """
 from python_interpreter import python
+from extension_layout import copy_packages
 import argparse
 from collections import Counter
 import json
@@ -148,6 +149,7 @@ def run(args, root):
         (root/name).mkdir()
     for source in (REPO/'extensions').glob('*.py'):
         shutil.copy2(source, root/'ext'/source.name)
+    copy_packages(REPO/'extensions',root/'ext')
     if args.baseline_sidebar:
         shutil.copy2(args.baseline_sidebar, root/'ext/sidebar.py')
     names = ('sidebar', 'agents', 'settings', 'tabs')

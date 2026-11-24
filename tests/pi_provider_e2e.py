@@ -13,6 +13,7 @@ if __name__ == "__main__" and sys.platform != "linux":
     raise SystemExit(77)
 
 from python_interpreter import python
+from extension_layout import copy_packages
 import argparse
 import hashlib
 import json
@@ -700,7 +701,7 @@ class E2E:
         # imports. Private defaults still enable only herdr until UI extensions are requested.
         for helper in (REPO/'extensions').glob('*.py'):
             shutil.copy2(helper, self.root/'ext'/helper.name)
-        shutil.copytree(REPO/'extensions/pi_bridge', self.root/'ext/pi_bridge', ignore=shutil.ignore_patterns('__pycache__'))
+        copy_packages(REPO/'extensions', self.root/'ext')
         if self.args.bridge_program:
             shutil.copy2(self.args.bridge_program, self.root/'ext/pi_bridge/program.py')
         self.start()

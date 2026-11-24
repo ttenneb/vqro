@@ -27,13 +27,11 @@ if (-not $PSCmdlet.ShouldProcess($BinDir, 'Build and install vqro and bundled ex
 $ConfirmPreference = 'None'
 
 function Get-PythonPackageFiles($Package) {
-    Get-ChildItem -LiteralPath $Package.FullName -Filter '*.py' -File
-    if ($Package.Name -eq 'pi_accounts') {
-        # One inventory for preflight and publication; these are shipped code/data,
-        # never native user configuration, credentials or conversation files.
-        foreach ($name in @('index.mjs', 'provider.mjs', 'limit_messages.json')) {
-            Get-Item -LiteralPath (Join-Path $Package.FullName $name)
-        }
+    # Same code/data inventory as Unix installation and isolated e2e layouts.
+    $source = Join-Path $root 'extensions'
+    $inventory = Invoke-Python -Arguments @((Join-Path $source 'vqro_packages.py'), $source, '--package', $Package.Name)
+    foreach ($relative in @($inventory | ConvertFrom-Json)) {
+        Get-Item -LiteralPath (Join-Path $source $relative)
     }
 }
 

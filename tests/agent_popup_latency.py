@@ -5,6 +5,7 @@ Compare two agents.py versions with 30/200 synthetic agents and 128 warm rows ea
 Measures command replies, not terminal input-to-paint latency.
 """
 from python_interpreter import python
+from extension_layout import copy_packages
 import argparse
 import json
 from pathlib import Path
@@ -25,6 +26,7 @@ def run(args, count, before):
         (root / name).mkdir()
     for source in (ROOT / 'extensions').glob('*.py'):
         shutil.copy2(source, root / 'ext' / source.name)
+    copy_packages(ROOT/'extensions',root/'ext')
     if before:
         shutil.copy2(args.before_agents, root / 'ext/agents.py')
     # Instrument only the disposable extension copy; the production patch has no timing hooks.

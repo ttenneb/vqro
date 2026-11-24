@@ -16,6 +16,7 @@ if __name__ == "__main__" and sys.platform != "linux":
     raise SystemExit(77)
 
 from python_interpreter import python
+from extension_layout import copy_packages
 import argparse
 from collections import deque
 import json
@@ -381,6 +382,7 @@ def main():
     # Only sidebar: no unrelated policies/workspace scanners or real backend extensions.
     for source in (repo / "extensions").glob("*.py"):
         shutil.copy(source, root / "ext" / source.name)
+    copy_packages(repo/'extensions',root/'ext')
     (root / "run").chmod(0o700)
     env = {"HOME": str(root / "home"), "PATH": "/usr/bin:/bin", "TERM": "xterm-256color", "LANG": "C.UTF-8",
            "SHELL": "/bin/sh", "VQRO_STATE_DIR": str(root / "st"), "VQRO_SOCKET": str(root / "p.sock"),

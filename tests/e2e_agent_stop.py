@@ -13,6 +13,7 @@ if __name__ == "__main__" and sys.platform != "linux":
     raise SystemExit(77)
 
 from python_interpreter import python
+from extension_layout import copy_packages
 import argparse
 import json
 import os
@@ -60,7 +61,7 @@ class StopE2E(base.E2E):
         self.hc_process = base.identity(started['pid'])
         for helper in (REPO/'extensions').glob('*.py'):
             shutil.copy2(helper, self.root/'ext'/helper.name)
-        shutil.copytree(REPO/'extensions/pi_bridge', self.root/'ext/pi_bridge', ignore=shutil.ignore_patterns('__pycache__'))
+        copy_packages(REPO/'extensions', self.root/'ext')
         self.start()
         native = [python(), str(REPO/'tests/fixtures/fake_pi.py'), '--bridge-e2e',
                   '--trace-file', str(self.root/'native.jsonl'), '--timing-file', str(self.root/'timing.jsonl')]

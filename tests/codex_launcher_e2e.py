@@ -7,6 +7,7 @@ if __name__ == "__main__" and sys.platform != "linux":
     raise SystemExit(77)
 
 from python_interpreter import python
+from extension_layout import copy_packages
 import argparse
 import hashlib
 import json
@@ -29,6 +30,7 @@ class CodexLaunch(E2E):
         for source in (REPO / 'extensions').glob('*.py'):
             shutil.copy2(source, self.root / 'ext' / source.name)
         shutil.copytree(REPO / 'extensions/manifests', self.root / 'ext/manifests')
+        copy_packages(REPO/'extensions',self.root/'ext')
         started = self.hc('server', 'start'); self.hc_process = identity(started['pid'])
         assert not self.hc('ls', '--all')['terminals']
         self.start()

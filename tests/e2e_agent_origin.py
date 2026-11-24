@@ -8,6 +8,7 @@ before any native write), and one client that sends through `agents.send`. Passe
 Usage: e2e_agent_origin.py [--vqro target/debug/vqro]
 """
 import asyncio
+from extension_layout import copy_packages
 import json
 import os
 from pathlib import Path
@@ -80,6 +81,7 @@ def main():
         for f in (ROOT / "extensions").glob("*.py"):
             shutil.copy(f, root / "ext")
         shutil.copytree(ROOT / "extensions/manifests", root / "ext/manifests")
+        copy_packages(ROOT/'extensions',root/'ext')
         (root / "ext/defaults.json").write_text('{"version":5,"extensions":[{"name":"agents","argv":["python3","agents.py"]}]}')
         sock = root / "v.sock"
         env = {"HOME": str(root / "home"), "PATH": "/usr/bin:/bin", "VQRO_STATE_DIR": str(root / "st"), "VQRO_SOCKET": str(sock),

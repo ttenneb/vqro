@@ -34,21 +34,11 @@ cp integrations/pi/skills/vqro-setup-testing/SKILL.md "$HOME/.local/share/vqro/e
 mkdir -p "$HOME/.local/share/vqro/extensions/clients"
 # The OpenTUI trial client (clients/opentui, needs Bun and its packages) is not installed; run it from the repo.
 cp extensions/clients/*.py extensions/clients/text.json "$HOME/.local/share/vqro/extensions/clients/"
-# Python extension packages live beside helpers. Only pi_bridge is replaced as
-# a whole: it is installed code, never session/config data; old modules must go.
-for source in extensions/*; do
-  [ -d "$source" ] && [ -f "$source/__init__.py" ] || continue
-  package=${source##*/}
-  destination="$HOME/.local/share/vqro/extensions/$package"
-  if [ "$package" = pi_bridge ]; then
-    rm -rf "$HOME/.local/share/vqro/extensions/pi_bridge"
-  fi
-  mkdir -p "$destination"
-  cp "$source"/*.py "$destination/"
-done
-# Native account extension assets are installed beside their Python witness table,
-# never into a user's native Pi settings, history or credential directories.
-cp extensions/pi_accounts/*.mjs extensions/pi_accounts/*.json "$HOME/.local/share/vqro/extensions/pi_accounts/"
+# One code/data inventory shared with Windows and isolated e2e layouts.
+# Validate all source files before replacing installed pi_bridge code (never user data).
+python3 extensions/vqro_packages.py extensions --check
+rm -rf "$HOME/.local/share/vqro/extensions/pi_bridge"
+python3 extensions/vqro_packages.py extensions --copy-to "$HOME/.local/share/vqro/extensions"
 # Atomic replace: a running binary keeps its old inode. The provider programs (backends run as
 # extensions: vqro-herdr, vqro-tmux, the optional vqro-rex) go next to vqro, where the default extensions find them; so does
 # vqro-claude-hook, which the tier1 extension finds there.

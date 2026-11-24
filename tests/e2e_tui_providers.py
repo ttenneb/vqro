@@ -13,6 +13,7 @@ if sys.platform != "linux":
     raise SystemExit(77)
 
 from python_interpreter import python
+from extension_layout import copy_packages
 import json, os, shlex, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
@@ -29,6 +30,7 @@ for f in os.listdir(os.path.join(REPO, "extensions")):
     if f.endswith(".py") or f == "defaults.json":
         shutil.copy(os.path.join(REPO, "extensions", f), os.path.join(R, "ext", f))
 shutil.copytree(os.path.join(REPO, "extensions", "manifests"), os.path.join(R, "ext", "manifests"))
+copy_packages(os.path.join(REPO, 'extensions'), os.path.join(R, 'ext'))
 os.symlink(python(), os.path.join(R, "bin", "python3"))
 ENV = {"HOME": f"{R}/home", "PATH": f"{R}/bin", "TERM": "xterm-256color", "SHELL": "/bin/sh", "VQRO_STATE_DIR": f"{R}/st",
        "VQRO_SOCKET": f"{R}/p.sock", "VQRO_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
