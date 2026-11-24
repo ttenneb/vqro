@@ -244,7 +244,13 @@ def require_fresh(runtime, argv):
             raise VqroError('fresh Codex work requires a plain stdio app-server launch','unsupported')
 
 
+def require_launch_binding(account):
+    if account and account['kind']=='api_key':
+        raise VqroError('named API-key launch has no verified execution-host/native credential binding; nothing launched (standalone keychain helper remains available)','unsupported')
+
+
 def environment(account, env=None):
+    require_launch_binding(account)
     result = dict(env or {})
     # Untrusted runtime settings cannot smuggle a different account fact into a normal launch.
     result.pop('VQRO_ACCOUNT', None)
@@ -298,6 +304,7 @@ def choose(ext, args, runtime, command):
 
 
 def provider_argv(argv, account):
+    require_launch_binding(account)
     result = list(argv)
     if account and account['runtime'] == 'pi' and account.get('provider'):
         provider = account['provider']

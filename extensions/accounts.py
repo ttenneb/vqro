@@ -244,7 +244,7 @@ class Accounts:
         blocked_ids=self.cutovers.blocked_accounts(rows)
         source_row=next((row for row in rows if row['id']==policy.configured_id(source)),None)
         runtime=source_row['runtime'] if source_row else ('claude' if claude_episode(source,automatic=False) else 'pi' if pi_error(source) else None)
-        # API-key accounts remain launchable, but same-conversation API-key cutover is not yet supported.
+        # API-key keychain helpers remain; named launch binding and same-conversation cutover are unavailable.
         candidates=[row for row in eligible_alternatives(rows, policy.configured_id(source), blocked_ids, False)
                     if runtime is not None and row['runtime']==runtime]
         identities={row['id']:credential_identity(row) for row in rows}
@@ -262,7 +262,7 @@ class Accounts:
         candidates,revision,scores,_=self.alternatives(source,policy.settings(self.ext))
         token=policy.episode(source)
         items=[{'type':'text','text':'Continue the same native conversation. Earlier input is never replayed. AUTO submits one NEW visible vqro/tool continuation; an owner choice waits for your explicit next turn.'},
-               {'type':'text','text':'Continuing a conversation on an API-key account: not yet. API-key accounts remain available for new launches.'}]
+               {'type':'text','text':'Continuing a conversation on an API-key account: not yet. Named API-key launch currently refuses: native/host binding is unverified; standalone keychain helpers remain.'}]
         for target in candidates:
             score=scores.get(target['id'])
             items.append({'text':'Continue on '+label(target['label']),

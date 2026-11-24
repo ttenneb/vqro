@@ -1,5 +1,7 @@
 """Accounts consumer integration of credential readiness/alias identity."""
 import unittest
+from unittest.mock import patch
+from vqro_ext import VqroError
 from test_account_credential_routes import row
 from test_account_capacity import resource
 from test_account_cutover_claims import Core
@@ -21,6 +23,24 @@ class AccountRouteIntegration(unittest.TestCase):
         self.assertTrue(any(item.get('style') == 'warn' and 'not selectable' in item.get('text','') for item in items))
         self.assertFalse(any(item.get('command') in ('tier1.claude','accounts.sign_in') and
                              item.get('args',{}).get('account') == 'a' for item in items))
+
+    def test_unbound_named_api_key_launch_refuses_instead_of_shared_login_fallback(self):
+        from pi import Pi
+        from codex import Codex
+        from tier1 import Tier1
+        for runtime,provider in (('pi','anthropic'),('codex','openai'),('claude','anthropic')):
+            with self.subTest(runtime=runtime):
+                account=dict(row(),runtime=runtime,kind='api_key',provider=provider,host='keychain-only-host')
+                core=self.core([account])
+                with patch('pi.launch') as pi_launch,patch('codex.launch') as codex_launch:
+                    app=Pi(core) if runtime=='pi' else Codex(core) if runtime=='codex' else Tier1(core)
+                    with self.assertRaises(VqroError) as caught:
+                        if runtime=='claude':app.launch(runtime,{'account':'a'})
+                        else:app.new({'account':'a'})
+                self.assertEqual(caught.exception.kind,'unsupported')
+                self.assertIn('no verified execution-host/native credential binding',str(caught.exception))
+                pi_launch.assert_not_called();codex_launch.assert_not_called()
+                self.assertFalse(any(method=='resource.spawn' for method,_ in core.calls))
 
     def test_source_and_blocked_credential_aliases_are_not_alternatives(self):
         a, alias = row(), row('alias')

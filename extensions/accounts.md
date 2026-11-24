@@ -55,9 +55,12 @@ configured executable prefix and recognized inert options are preserved; prompt,
 resume, noninteractive or unproved argv shapes refuse before a sign-in launch.
 A failed/uncertain terminal launch is never automatically repeated.
 
-API-key accounts retain their execution-host keychain launch helper and explicit
-`api_key_overflow` opt-in. **Continuing a conversation on an API-key account: not
-yet.** They are not same-session cutover targets in this slice.
+The standalone execution-host keychain helper and explicit `api_key_overflow`
+setting remain. Named API-key launches currently refuse before spawn: their
+execution-host/native credential binding is not verified; they never fall back to
+the shared login. Restoring named launch support is an open scope decision, not
+completed work. **Continuing a conversation on an API-key account: not yet.**
+They are not same-session cutover targets in this slice.
 
 ## Capacity strategies
 
