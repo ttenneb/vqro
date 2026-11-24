@@ -204,6 +204,8 @@ impl Restart {
             || !state.literal_supported()
             || state.exit.is_some()
             || state.status() != "idle"
+            || !state.requests.is_empty()
+            || state.requests.has_unconfirmed()
             || !state.active_tools.is_empty()
         {
             return Err("restart requires initialized idle owned main process");

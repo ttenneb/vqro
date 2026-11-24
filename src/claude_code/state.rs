@@ -10,6 +10,9 @@ const ENTITY_TOTAL: usize = 512 * 1024;
 const NORMAL_BYTES: usize = 192 * 1024;
 const RETAIN: usize = 128 * 1024;
 type Key = (String, String);
+#[cfg(test)]
+#[path = "state_child_tests.rs"]
+mod child_tests;
 pub struct State {
     pub journal: ItemJournal,
     pub requests: Requests,
@@ -119,10 +122,10 @@ impl State {
     pub fn status(&self) -> &'static str {
         if self.exit.is_some() {
             "unknown"
-        } else if !self.requests.is_empty() {
+        } else if !self.requests.root_is_empty() {
             "requires_action"
         } else if self.foreground == "idle"
-            && (self.requests.has_unconfirmed()
+            && (self.requests.root_has_unconfirmed()
                 || self.receipts.keys().any(|id| self.delivery_active(id)))
         {
             "unknown"
@@ -376,10 +379,6 @@ impl State {
     }
     fn record(&mut self, frame: &Value) {
         let kind = frame["type"].as_str().unwrap_or("");
-        if kind == "conversation_reset" {
-            self.reset();
-            return;
-        }
         // Native background level is PER PROCESS, not the session_id on the event. A task from
         // the previous conversation can still run after a session reset; never drop its level.
         if kind == "system" && frame["subtype"] == "background_tasks_changed" {
@@ -404,6 +403,23 @@ impl State {
         {
             let changes = self.work.event(frame);
             self.work_changes(changes);
+            return;
+        }
+        let (child, changes, scoped) = self.work.scope(frame);
+        self.work_changes(changes);
+        if scoped {
+            if let Some(child) = child {
+                self.child_record(frame, &child);
+            } else {
+                self.incomplete.insert("child_items".into());
+                if matches!(kind, "control_request" | "control_cancel_request") {
+                    self.request_frame(frame, None, true);
+                }
+            }
+            return;
+        }
+        if kind == "conversation_reset" {
+            self.reset();
             return;
         }
         // Operation-scoped native consent can settle after the foreground session changed.
@@ -501,24 +517,7 @@ impl State {
             return;
         }
         if matches!(kind, "control_request" | "control_cancel_request") {
-            let incoming = self.requests.observe(frame, None);
-            for change in incoming.changes {
-                if !self.put("request", &change.id, change.value) {
-                    self.incomplete.insert("requests".into());
-                    if let Some(response) = self.requests.unrepresentable(&change.id) {
-                        if self.outgoing.len() < 16 {
-                            self.outgoing.push_back(response);
-                        }
-                    }
-                }
-            }
-            for response in incoming.outgoing {
-                if self.outgoing.len() < 16 {
-                    self.outgoing.push_back(response);
-                } else {
-                    self.incomplete.insert("requests".into());
-                }
-            }
+            self.request_frame(frame, None, false);
             return;
         }
         if kind == "control_response" {
@@ -539,12 +538,6 @@ impl State {
             }
             return;
         }
-        // A nested assistant/tool record is not the parent's conversation. Children are the next
-        // slice's scoped entities, not fabricated independent endpoints or root messages.
-        if frame["parent_tool_use_id"].is_string() || frame["agent_id"].is_string() {
-            self.incomplete.insert("children".into());
-            return;
-        }
         if matches!(kind, "assistant" | "tool_progress")
             || (kind == "user" && frame["isReplay"] == true)
             || (kind == "system"
@@ -560,7 +553,7 @@ impl State {
             || (kind == "system" && frame["subtype"] == "api_retry");
         self.availability.observe(frame, active);
         match kind {
-            "assistant" | "user" => self.message(frame),
+            "assistant" | "user" => self.message(frame, None),
             "result" => self.result(frame),
             "tool_progress" => {
                 if let Some(id) = frame["tool_use_id"].as_str() {
@@ -587,7 +580,57 @@ impl State {
             }
         }
     }
-    fn message(&mut self, frame: &Value) {
+    fn request_frame(&mut self, frame: &Value, child: Option<&str>, unscoped: bool) {
+        let incoming = if unscoped {
+            self.requests.observe_unscoped(frame)
+        } else {
+            self.requests.observe(frame, child)
+        };
+        for change in incoming.changes {
+            if !self.put("request", &change.id, change.value) {
+                self.incomplete.insert("requests".into());
+                if let Some(response) = self.requests.unrepresentable(&change.id) {
+                    if self.outgoing.len() < 16 {
+                        self.outgoing.push_back(response);
+                    }
+                }
+            }
+        }
+        for response in incoming.outgoing {
+            if self.outgoing.len() < 16 {
+                self.outgoing.push_back(response);
+            } else {
+                self.incomplete.insert("requests".into());
+            }
+        }
+    }
+    fn child_record(&mut self, frame: &Value, child: &str) {
+        match frame["type"].as_str() {
+            Some("control_request" | "control_cancel_request") => {
+                self.request_frame(frame, Some(child), false)
+            }
+            Some("assistant" | "user") => self.message(frame, Some(child)),
+            Some("tool_progress") => {
+                if let Some(native) = super::work::native_id(&frame["tool_use_id"]) {
+                    for change in self.requests.tool_started_scoped(native, Some(child)) {
+                        self.put("request", &change.id, change.value);
+                    }
+                    if let Some(id) = self.work.identity(child, "tool", native, false) {
+                        if let Some((_, value)) = self.journal.entity("tool", &id) {
+                            let mut value = value.clone();
+                            value["status"] = json!("running");
+                            self.put("tool", &id, value);
+                        }
+                    }
+                }
+            }
+            Some("auth_status" | "rate_limit_event" | "result" | "system") => {}
+            _ => {
+                self.incomplete.insert("child_items".into());
+            }
+        }
+    }
+    fn message(&mut self, frame: &Value, child: Option<&str>) {
         let uuid = frame["uuid"]
             .as_str()
             .filter(|s| s.len() <= 128)
@@ -598,7 +641,7 @@ impl State {
         } else {
             "user"
         };
-        if role == "assistant" {
+        if role == "assistant" && child.is_none() {
             self.foreground = "running";
             if self.run.is_none() {
                 self.run = Some(self.next("turn"));
@@ -622,7 +665,10 @@ impl State {
                         block["id"].as_str().filter(|s| s.len() <= 128),
                         block["name"].as_str().filter(|s| s.len() <= 256),
                     ) {
-                        if self.tools.len() >= 512 && !self.tools.contains_key(id) {
+                        if child.is_none()
+                            && self.tools.len() >= 512
+                            && !self.tools.contains_key(id)
+                        {
                             if let Some(old) = self
                                 .tools
                                 .keys()
@@ -635,7 +681,15 @@ impl State {
                                 continue;
                             }
                         }
-                        let entity = format!("tool-{id}");
+                        let entity = if let Some(child) = child {
+                            let Some(entity) = self.work.identity(child, "tool", id, true) else {
+                                self.incomplete.insert("child_items".into());
+                                continue;
+                            };
+                            entity
+                        } else {
+                            format!("tool-{id}")
+                        };
                         self.position += 1;
                         let mut value = json!({"position":self.position,"title":name,"status":"pending","native":{"tool_use_id":id}});
                         if crate::limits::encoded_bytes(&block["input"]) < 32 * 1024 {
@@ -644,8 +698,12 @@ impl State {
                             value["incomplete"] = json!(true);
                             self.incomplete.insert("tools".into());
                         }
-                        self.tools.insert(id.into(), entity.clone());
-                        self.active_tools.insert(id.into());
+                        if child.is_none() {
+                            self.tools.insert(id.into(), entity.clone());
+                            self.active_tools.insert(id.into());
+                        } else {
+                            value["child"] = json!(child);
+                        }
                         self.put("tool", &entity, value);
                     } else {
                         self.incomplete.insert("tools".into());
@@ -653,11 +711,18 @@ impl State {
                 }
                 Some("tool_result") => {
                     if let Some(id) = block["tool_use_id"].as_str() {
-                        self.active_tools.remove(id);
-                        for change in self.requests.tool_started(id) {
+                        if child.is_none() {
+                            self.active_tools.remove(id);
+                        }
+                        for change in self.requests.tool_started_scoped(id, child) {
                             self.put("request", &change.id, change.value);
                         }
-                        if let Some(entity) = self.tools.get(id).cloned() {
+                        let entity = if let Some(child) = child {
+                            self.work.identity(child, "tool", id, false)
+                        } else {
+                            self.tools.get(id).cloned()
+                        };
+                        if let Some(entity) = entity {
                             if let Some((_, old)) = self.journal.entity("tool", &entity) {
                                 let mut value = old.clone();
                                 value["status"] = json!(if block["is_error"] == true {
@@ -685,7 +750,17 @@ impl State {
                             self.incomplete.insert("messages".into());
                             continue;
                         }
-                        let id = format!("{uuid}.{index}");
+                        let native_id = format!("{uuid}.{index}");
+                        let id = if let Some(child) = child {
+                            let Some(id) = self.work.identity(child, "message", &native_id, true)
+                            else {
+                                self.incomplete.insert("child_items".into());
+                                continue;
+                            };
+                            id
+                        } else {
+                            native_id
+                        };
                         let position = self
                             .journal
                             .entity("message", &id)
@@ -696,7 +771,12 @@ impl State {
                             });
                         let mut value = json!({"position":position,"role":if thought{"thought"}else{role},"content":[{"type":"text","text":text}],
                             "final":frame["aborted"]!=true,"native":{"uuid":uuid,"message_id":frame["message"]["id"],"echo":frame["isReplay"]==true}});
-                        if let Some((delivery, epoch)) = self.inputs.get(&uuid) {
+                        if child.is_some() {
+                            value["child"] = json!(child);
+                        }
+                        if let Some((delivery, epoch)) =
+                            self.inputs.get(&uuid).filter(|_| child.is_none())
+                        {
                             if epoch == self.epoch() {
                                 value["delivery"] = json!(delivery);
                                 if let Some(receipt) = self.receipts.get(delivery) {
@@ -718,7 +798,7 @@ impl State {
                 }
             }
         }
-        if frame["isReplay"] == true {
+        if frame["isReplay"] == true && child.is_none() {
             self.correlate(&[uuid], "admitted", None, None);
         }
     }

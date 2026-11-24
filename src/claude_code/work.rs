@@ -168,6 +168,13 @@ impl Work {
             self.ensure_child(id);
             let row = self.tasks.get_mut(id).unwrap();
             text(&mut row.child_value, frame, "subagent_type", "role", 256);
+            text(
+                &mut row.child_value,
+                &frame["message"],
+                "model",
+                "model",
+                128,
+            );
             return (row.child.clone(), self.changes(id), true);
         }
         if let Some(parent) = parent {

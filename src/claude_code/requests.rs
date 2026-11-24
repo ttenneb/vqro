@@ -42,6 +42,17 @@ struct Pending {
     user_cancelled: bool,
     token: WriteToken,
 }
+#[derive(Clone, PartialEq, Eq)]
+enum RequestScope {
+    Root,
+    Child(String),
+    Unknown,
+}
+fn request_scope(child: Option<&str>) -> RequestScope {
+    child
+        .map(|id| RequestScope::Child(id.into()))
+        .unwrap_or(RequestScope::Root)
+}
 #[derive(Default)]
 pub struct Requests {
     serial: u64,
@@ -49,7 +60,7 @@ pub struct Requests {
     native: HashMap<String, String>,
     recent: VecDeque<(String, u64)>,
     unsupported_tokens: BTreeMap<String, WriteToken>,
-    unsupported_tools: BTreeMap<String, String>,
+    unsupported_tools: BTreeMap<String, (RequestScope, String)>,
 }
 fn error_response(id: &str) -> Value {
     json!({"type":"control_response","response":{"subtype":"error","request_id":id,
@@ -81,13 +92,28 @@ impl Requests {
                 p.value["status"] != "pending" && p.value["native"]["waiting"] != "not_waiting"
             })
     }
+    pub fn root_is_empty(&self) -> bool {
+        !self.pending.values().any(|p| {
+            p.value["status"] == "pending"
+                && p.value["child"].is_null()
+                && p.value["native"]["scope_unknown"] != true
+        })
+    }
+    pub fn root_has_unconfirmed(&self) -> bool {
+        self.pending.values().any(|p| {
+            p.value["child"].is_null()
+                && p.value["native"]["scope_unknown"] != true
+                && p.value["status"] != "pending"
+                && p.value["native"]["waiting"] != "not_waiting"
+        })
+    }
     pub fn summaries(&self) -> Vec<Value> {
         self.pending
             .iter()
             .filter(|(_, p)| p.value["status"] == "pending")
             .map(|(id, p)| {
                 json!({"request":id,"revision":1,"method":"form",
-            "title":p.value["title"],"status":"pending","incomplete":false})
+            "title":p.value["title"],"status":"pending","incomplete":false,"child":p.value["child"]})
             })
             .collect()
     }
@@ -100,7 +126,27 @@ impl Requests {
         self.recent.push_back((native.into(), fingerprint(request)));
         self.unsupported_tools.remove(native);
         if let Some(tool) = request["tool_use_id"].as_str().filter(|s| s.len() <= 4096) {
-            self.unsupported_tools.insert(native.into(), tool.into());
+            self.unsupported_tools
+                .insert(native.into(), (RequestScope::Root, tool.into()));
+        }
+        true
+    }
+    fn remember_scope(
+        &mut self,
+        native: &str,
+        request: &Value,
+        child: Option<&str>,
+        unknown: bool,
+    ) -> bool {
+        if !self.remember(native, request) {
+            return false;
+        }
+        if let Some((scope, _)) = self.unsupported_tools.get_mut(native) {
+            *scope = if unknown {
+                RequestScope::Unknown
+            } else {
+                request_scope(child)
+            };
         }
         true
     }
@@ -108,6 +154,17 @@ impl Requests {
         self.pending.get(id).map(|p| p.token.clone())
     }
     pub fn observe(&mut self, frame: &Value, child: Option<&str>) -> Incoming {
+        self.observe_scoped(frame, child, false)
+    }
+    pub fn observe_unscoped(&mut self, frame: &Value) -> Incoming {
+        self.observe_scoped(frame, None, true)
+    }
+    fn observe_scoped(
+        &mut self,
+        frame: &Value,
+        child: Option<&str>,
+        scope_unknown: bool,
+    ) -> Incoming {
         let mut result = Incoming::default();
         let Some(native) = frame["request_id"].as_str() else {
             return result;
@@ -136,11 +193,26 @@ impl Requests {
         if frame["type"] != "control_request" {
             return result;
         }
+        // Re-initialize snapshots may omit producer context. Absence does not erase the
+        // positively known child of this still-live native question identity.
+        let retained_child = if child.is_none() && !scope_unknown {
+            self.native
+                .get(native)
+                .and_then(|id| self.pending.get(id))
+                .and_then(|p| p.value["child"].as_str())
+                .map(str::to_owned)
+        } else {
+            None
+        };
+        let child = child.or(retained_child.as_deref());
         // A live question and identical initialize snapshots are one incarnation even after a
         // response write has an unknown outcome. Only independent settlement/reuse retires it.
         if let Some(old_id) = self.native.get(native).cloned() {
             if let Some(old) = self.pending.get(&old_id) {
-                if old.request == frame["request"] {
+                if old.request == frame["request"]
+                    && old.value["child"].as_str() == child
+                    && (old.value["native"]["scope_unknown"] == true) == scope_unknown
+                {
                     return result;
                 }
             }
@@ -240,7 +312,8 @@ impl Requests {
         ]
         .iter()
         .all(|field| request.get(*field).is_none_or(Value::is_boolean));
-        let supported = restrictions_valid
+        let supported = !scope_unknown
+            && restrictions_valid
             && request["subtype"] == "can_use_tool"
             && request["tool_name"].is_string()
             && request["tool_use_id"].is_string()
@@ -262,7 +335,7 @@ impl Requests {
             }
             if native.len() <= 4096 {
                 value["native"]["request_id"] = json!(native);
-                let remembered = self.remember(native, request);
+                let remembered = self.remember_scope(native, request, child, scope_unknown);
                 // An undeclared user dialog MUST NOT be answered as a user dismissal. The native CLI
                 // discards error replies for it too; local cancellation is not native settlement.
                 if remembered && request["subtype"] != "request_user_dialog" {
@@ -287,6 +360,12 @@ impl Requests {
                     token: WriteToken::new(),
                 },
             );
+        }
+        if let Some(child) = child {
+            value["child"] = json!(child);
+        }
+        if scope_unknown {
+            value["native"]["scope_unknown"] = json!(true);
         }
         result.changes.push(Change { id, value });
         result
@@ -401,10 +480,13 @@ impl Requests {
         })
     }
     pub fn tool_started(&mut self, tool: &str) -> Vec<Change> {
+        self.tool_started_scoped(tool, None)
+    }
+    pub fn tool_started_scoped(&mut self, tool: &str, child: Option<&str>) -> Vec<Change> {
         let retired: Vec<_> = self
             .unsupported_tools
             .iter()
-            .filter(|(_, id)| *id == tool)
+            .filter(|(_, (scope, id))| id == tool && *scope == request_scope(child))
             .map(|(native, _)| native.clone())
             .collect();
         for native in retired {
@@ -417,7 +499,9 @@ impl Requests {
         let ids: Vec<_> = self
             .pending
             .iter()
-            .filter(|(_, p)| p.value["native"]["tool_use_id"] == tool)
+            .filter(|(_, p)| {
+                p.value["native"]["tool_use_id"] == tool && p.value["child"].as_str() == child
+            })
             .map(|(id, _)| id.clone())
             .collect();
         ids.into_iter()
@@ -437,7 +521,12 @@ impl Requests {
     /// A full request that could not be published must not remain approvable through summaries.
     pub fn unrepresentable(&mut self, id: &str) -> Option<Outbound> {
         let mut pending = self.pending.remove(id)?;
-        if !self.remember(&pending.native, &pending.request) {
+        if !self.remember_scope(
+            &pending.native,
+            &pending.request,
+            pending.value["child"].as_str(),
+            pending.value["native"]["scope_unknown"] == true,
+        ) {
             // RECENT cannot accept another identity. Retain the already bounded original entry
             // and native mapping: a failed revoke must not erase a possibly-written claim.
             // It must NOT remain approvable through summaries when publication failed either.
