@@ -207,6 +207,7 @@ impl Restart {
             || !state.requests.is_empty()
             || state.requests.has_unconfirmed()
             || !state.active_tools.is_empty()
+            || state.work.root_foreground_active()
         {
             return Err("restart requires initialized idle owned main process");
         }
@@ -305,6 +306,47 @@ mod tests {
         newer["run_id"] = json!("2");
         state.observe(&crate::native_process::Event::Record(newer));
         assert!(request.guard(&state, Some("r/host")).is_err());
+    }
+    #[test]
+    fn slice3_known_direct_root_foreground_work_refuses_with_both_loss_values() {
+        let (mut state, mut args) = fixture();
+        let episode = state.availability.limit_episode.clone();
+        state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_started","task_id":"root-foreground","run_id":"1","task_type":"local_agent","subagent_type":"worker","spawn_depth":1,"is_backgrounded":false})));
+        for loss in [false, true] {
+            args["allow_background_loss"] = json!(loss);
+            assert!(
+                Restart::parse(&args)
+                    .unwrap()
+                    .guard(&state, Some("r/host"))
+                    .is_err(),
+                "known DIRECT ROOT foreground work MUST refuse before stop; background loss cannot bypass it"
+            );
+        }
+        assert_eq!(state.status(), "idle");
+        assert_eq!(state.background, Some(vec![]));
+        assert_eq!(state.availability.limit_episode, episode);
+        state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_notification","task_id":"root-foreground","run_id":"1","status":"completed"})));
+        assert!(
+            Restart::parse(&args)
+                .unwrap()
+                .guard(&state, Some("r/host"))
+                .is_ok()
+        );
+    }
+    #[test]
+    fn nested_foreground_under_known_background_is_not_inferred_as_root_work() {
+        let (mut state, mut args) = fixture();
+        state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_started","task_id":"bg-parent","run_id":"1","task_type":"local_agent","subagent_type":"worker","spawn_depth":1,"is_backgrounded":true})));
+        state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bg-parent","run_id":"1","task_type":"local_agent","subagent_type":"worker"}]})));
+        state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_started","task_id":"nested-foreground","run_id":"1","task_type":"local_agent","subagent_type":"worker","spawn_depth":2,"parent_task_id":"bg-parent","is_backgrounded":false})));
+        assert!(!state.work.root_foreground_active());
+        args["allow_background_loss"] = json!(true);
+        assert!(
+            Restart::parse(&args)
+                .unwrap()
+                .guard(&state, Some("r/host"))
+                .is_ok()
+        );
     }
     #[test]
     fn background_override_defaults_false_and_bypasses_only_background() {

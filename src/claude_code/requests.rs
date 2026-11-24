@@ -207,14 +207,33 @@ impl Requests {
         if frame["type"] != "control_request" {
             return result;
         }
-        // Re-initialize snapshots may omit producer context. Absence does not erase the
-        // positively known child of this still-live native question identity.
+        // Re-initialize snapshots may omit producer context. Pending AND RECENT records are
+        // unsettled native identities: absent metadata must not erase their known child/unknown scope.
+        let retained_recent = if self
+            .native
+            .get(native)
+            .and_then(|id| self.pending.get(id))
+            .is_none()
+        {
+            self.recent
+                .iter()
+                .find(|r| r.id == native)
+                .map(|r| r.scope.clone())
+        } else {
+            None
+        };
+        let scope_unknown =
+            scope_unknown || (child.is_none() && retained_recent == Some(RequestScope::Unknown));
         let retained_child = if child.is_none() && !scope_unknown {
             self.native
                 .get(native)
                 .and_then(|id| self.pending.get(id))
                 .and_then(|p| p.value["child"].as_str())
                 .map(str::to_owned)
+                .or_else(|| match retained_recent.as_ref() {
+                    Some(RequestScope::Child(id)) => Some(id.clone()),
+                    _ => None,
+                })
         } else {
             None
         };

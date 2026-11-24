@@ -1,5 +1,24 @@
 use super::*;
 #[test]
+fn slice3_recent_child_scope_survives_context_free_changed_unwritten_snapshot() {
+    let mut s = state();
+    let child = start(&mut s);
+    let mut first = question("changing-child", true);
+    first["request"]["requires_user_interaction"] = json!(true);
+    s.record(&first);
+    // Old automatic response is definitely unwritten. A changed full snapshot may omit optional
+    // producer context; an unsettled known-child native identity must not become a ROOT form.
+    let changed = question("changing-child", false);
+    s.record(&changed);
+    let summary = s.requests.summaries();
+    assert_eq!(summary.len(), 1);
+    assert_eq!(
+        summary[0]["child"], child,
+        "RECENT native question scope must survive missing optional metadata"
+    );
+    assert_eq!(s.status(), "idle");
+}
+#[test]
 fn known_root_unsupported_tombstone_keeps_root_unknown_but_child_does_not() {
     let mut root = state();
     let mut q = question("root-unconfirmed", false);

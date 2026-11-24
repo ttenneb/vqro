@@ -543,6 +543,16 @@ impl Work {
             })
         })
     }
+    /// Only positively known DIRECT root foreground work. Never guess unknown/nested ownership.
+    pub fn root_foreground_active(&self) -> bool {
+        self.tasks.values().any(|row| {
+            !row.terminal
+                && row.value["native"]["is_backgrounded"] == false
+                && row.child.is_some()
+                && row.child_value["depth"] == 1
+                && row.child_value.get("parent") == Some(&Value::Null)
+        })
+    }
     pub fn cancel_target(&self, kind: &str, id: &str) -> Option<&str> {
         self.tasks
             .iter()

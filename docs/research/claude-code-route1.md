@@ -125,6 +125,10 @@ is scope-specific; RECENT tombstones retain their own scope, so known-root unkno
 phase unknown while known-child tombstones stay outside it. A permission body's documented agent_id wins
 over extra wrapper metadata; context-free snapshots retain the positively known scope of a live native question. Root phase
 ignores child questions, but restart separately refuses ANY unresolved native consent, preserving its safety fence.
+It also refuses positively known DIRECT-root foreground work before stop for both background-loss choices;
+that guard does not rewrite root phase or background membership. Nested work under a known background parent
+is not inferred to be root foreground, and unknown ownership is never guessed. Known child/unknown question
+scope survives context-free changed snapshots in both pending and RECENT records until native settlement.
 No child endpoint/principal/inbox or send/resume/close is invented.
 
 Only successful structured `tool_use_result`, correlated to one observed tool result/name, supplies plan values:
