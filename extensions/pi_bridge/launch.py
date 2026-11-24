@@ -94,7 +94,10 @@ def negotiated(arguments, binary="vqro-bridge-pi"):
         del before[index:index + width]
         if binary not in _WARNED:
             _WARNED.add(binary)
-            print("NOT VERIFIED: " + _HELP_REASONS.get(binary, "bridge testing support unverified") + "; launching without testing hooks", file=sys.stderr)
+            try:
+                print("NOT VERIFIED: " + _HELP_REASONS.get(binary, "bridge testing support unverified") + "; launching without testing hooks", file=sys.stderr, flush=True)
+            except Exception:
+                pass  # Best-effort diagnostic only: never veto launch, claim delivery, or use protocol stdout.
     return [*before, *separator, *after]
 
 

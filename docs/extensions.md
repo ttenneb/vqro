@@ -98,8 +98,9 @@ never another arbitrary path. The bridge maps that field to native `-e`/`--skill
 and prompt-template flags remain refused. Only `VQRO_TESTING_SOCKET` and `VQRO_TESTING_STATE_DIR` are added to the
 native protected-name allowlist. The existing unrelated environment policy is unchanged. The isolated host wrapper
 probes the resolved bridge's `--help` once per path/mtime, with a two-second execution and bounded output. An older
-bridge that does not advertise the field gets one warning and a single ordinary launch without the field, never a
-retry. Unknown configured `bridge_argv` launchers also stay unhooked/NOT VERIFIED rather than receiving an
+bridge that does not advertise the field gets a single ordinary launch without the field, never a retry.
+The warning is attempted once, best-effort; failed stderr write/flush cannot veto launch, claim delivery or use
+protocol stdout. Unknown configured `bridge_argv` launchers also stay unhooked/NOT VERIFIED rather than receiving an
 unnegotiated field.
 
 Passing argv is not loading evidence. The bridge publishes `resource.data.agent.testing_plugin` only for an

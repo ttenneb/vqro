@@ -22,7 +22,10 @@ proofs, not a claim that the model-free double is the actual Pi runtime or that 
 ## Optional help failure is not a launch veto
 
 All help-probe failures, including kill/reap/stream cleanup failures, record a negative capability cache entry.
-The one warning names failure/uncertainty without claiming an unreaped child was reaped. Negotiation then omits
+The once-only warning attempt names failure/uncertainty without claiming an unreaped child was reaped. Its
+write/flush is best-effort: diagnostic I/O failure never vetoes launch or falls back to protocol stdout, and
+warning delivery is not claimed. Four fake main-seam controls cover OSError/BrokenPipeError on write/flush.
+Negotiation then omits
 only the optional field and performs one ordinary launch; no work is replayed. Fake-process controls call the
 actual main/negotiation seam for both a hanging probe with kill OSError and a second wait timeout. The probe uses
 the installed shared background-process helper via an explicit trusted path, not a project/PYTHONPATH import;

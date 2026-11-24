@@ -153,6 +153,56 @@ class RpcTestingTests(unittest.TestCase):
     def test_hanging_help_and_second_wait_timeout_still_launch_once_without_testing(self):
         self._assert_cleanup_failure_does_not_veto_main(kill_error=False)
 
+    def _assert_warning_io_failure_does_not_veto_main(self, error_type, failing_operation):
+        binary = self.executable("print('old fixture help')\n")
+        process = Mock(returncode=0, stdout=io.BytesIO(b"old fixture help\n"))
+        args = ["--testing-plugin", str(self.plugin), "--", "pi", "--mode", "rpc"]
+
+        class Diagnostic:
+            writes = flushes = 0
+            def write(self, value):
+                self.writes += 1
+                if failing_operation == "write":
+                    raise error_type("fixture diagnostic write failure")
+                return len(value)
+            def flush(self):
+                self.flushes += 1
+                if failing_operation == "flush":
+                    raise error_type("fixture diagnostic flush failure")
+
+        diagnostic = Diagnostic()
+        with patch.object(launch.shutil, "which", return_value=binary), \
+                patch.object(launch, "_background_kwargs", return_value={}), \
+                patch.object(launch.subprocess, "Popen", return_value=process) as popen, \
+                patch.object(launch.sys, "argv", ["launch.py", *args]), \
+                patch.object(launch.sys, "stderr", diagnostic), \
+                patch.object(launch.os, "execvp") as execute, contextlib.redirect_stdout(io.StringIO()) as stdout:
+            launch.main()
+            attempts = (diagnostic.writes, diagnostic.flushes)
+            self.assertEqual(launch.negotiated(args), ["--", "pi", "--mode", "rpc"])
+            self.assertEqual((diagnostic.writes, diagnostic.flushes), attempts, "failed warning is attempted only once")
+        execute.assert_called_once_with("vqro-bridge-pi", ["vqro-bridge-pi", "--", "pi", "--mode", "rpc"])
+        popen.assert_called_once()
+        self.assertEqual(set(launch._HELP.values()), {False})
+        self.assertEqual(stdout.getvalue(), "", "never fall back to protocol stdout")
+        if failing_operation == "write":
+            self.assertEqual(attempts, (1, 0))
+        else:
+            self.assertGreaterEqual(attempts[0], 1)
+            self.assertEqual(attempts[1], 1, "flush must occur inside the non-vetoing diagnostic guard")
+
+    def test_warning_write_oserror_still_launches_once(self):
+        self._assert_warning_io_failure_does_not_veto_main(OSError, "write")
+
+    def test_warning_write_broken_pipe_still_launches_once(self):
+        self._assert_warning_io_failure_does_not_veto_main(BrokenPipeError, "write")
+
+    def test_warning_flush_oserror_still_launches_once(self):
+        self._assert_warning_io_failure_does_not_veto_main(OSError, "flush")
+
+    def test_warning_flush_broken_pipe_still_launches_once(self):
+        self._assert_warning_io_failure_does_not_veto_main(BrokenPipeError, "flush")
+
     def executable(self, body):
         path = self.root / "bridge"
         path.write_text("#!" + sys.executable + "\n" + body)
