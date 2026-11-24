@@ -133,7 +133,10 @@ that every omitted foreground task ended. Same-process conversation reset does n
 history is retained rather than evicted and silently reopened by late frames; this may conservatively require
 closing/relaunching the bridge after foreground overflow, not an automatic probe or retry. Once tripped,
 automatic restart/cutover for that agent is refused until its process is replaced another way; the agent pane
-retains a bounded notice naming the reason (task list full, identity unavailable or generation unknown).
+attempts a bounded best-effort notice naming the reason (task list full, identity unavailable or generation unknown).
+Protected running tools may exhaust its normal entity budget; no notice budget is reserved. The actual restart
+rejection data ALWAYS carries the specific foreground reason plus automatic-refusal/until-process-replaced
+recovery, even when the pane notice cannot be published; the accounts flow surfaces refused cutover separately.
 A future complete native foreground inventory could support safe clearing, but no such API is assumed here. Nested work under a known background parent
 is not inferred to be root foreground, and unknown ownership is never guessed. Known child/unknown question
 scope survives context-free changed snapshots in both pending and RECENT records until native settlement.
@@ -141,8 +144,9 @@ If a NEW native request cannot be admitted and its identity/scope cannot be reme
 marker prevents new context-free questions from becoming root approval forms merely because another request
 settled. Known retained identities and positively reported child context remain separate. No extra identity cache,
 eviction or rearming is introduced. Freeing capacity/ordinary conversation reset does not prove all forgotten
-scope settled: new agent_id-less forms stay unapprovable, restart stays refused, and the pane explains that
-closing/relaunching with a NEW native process is the conservative recovery. No complete native request-scope
+scope settled: new agent_id-less forms stay unapprovable and restart stays refused. Its rejection carries the
+scope-history reason/new-process recovery independently of the best-effort pane notice. Closing/relaunching
+with a NEW native process is the conservative recovery. No complete native request-scope
 inventory or probe is assumed to clear it automatically.
 No child endpoint/principal/inbox or send/resume/close is invented.
 

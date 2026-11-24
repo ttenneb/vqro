@@ -44,7 +44,7 @@ fn joint_pending_and_recent_saturation_cannot_rearm_lost_child_as_root() {
             .answer(
                 &existing,
                 1,
-                &json!({"action":"submit","content":{"behavior":"deny"}})
+                &json!({"action":"accept","content":{"behavior":"deny"}})
             )
             .is_ok(),
         "already retained known-root identity remains valid"

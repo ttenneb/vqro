@@ -200,6 +200,27 @@ impl Restart {
         if authenticated_host != Some(self.host.as_str()) {
             return Err("restart execution host differs from authenticated provider binding");
         }
+        if let Some(reason) = state.work.foreground_loss_reason() {
+            return Err(match reason {
+                "task list full" => {
+                    "restart blocked: foreground work may be running (task list full); automatic restart refused until the process is replaced another way"
+                }
+                "foreground identity unavailable" => {
+                    "restart blocked: foreground work may be running (foreground identity unavailable); automatic restart refused until the process is replaced another way"
+                }
+                "foreground generation unknown" => {
+                    "restart blocked: foreground work may be running (foreground generation unknown); automatic restart refused until the process is replaced another way"
+                }
+                _ => {
+                    "restart blocked: foreground work may be running (foreground tracking incomplete); automatic restart refused until the process is replaced another way"
+                }
+            });
+        }
+        if state.requests.scope_history_incomplete() {
+            return Err(
+                "restart blocked: request scope evidence was lost at request bounds; automatic restart refused until the process is replaced another way",
+            );
+        }
         if !state.ready
             || !state.literal_supported()
             || state.exit.is_some()
@@ -453,6 +474,22 @@ mod tests {
             assert_eq!(
                 state.work.foreground_loss_reason(),
                 Some("foreground generation unknown")
+            );
+        }
+    }
+    #[test]
+    fn unrepresentable_foreground_identity_has_specific_recovery_refusal() {
+        let (mut state, mut args) = fixture();
+        state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_started","task_id":"x".repeat(129),"run_id":"1","task_type":"local_agent","subagent_type":"worker","spawn_depth":1,"is_backgrounded":false})));
+        for loss in [false, true] {
+            args["allow_background_loss"] = json!(loss);
+            let reason = Restart::parse(&args)
+                .unwrap()
+                .guard(&state, Some("r/host"))
+                .unwrap_err();
+            assert!(
+                reason.contains("foreground identity unavailable")
+                    && reason.contains("process is replaced another way")
             );
         }
     }

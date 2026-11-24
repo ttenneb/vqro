@@ -1,5 +1,51 @@
 //! Genuine native control routing to a synthetic peer; acceptance is never terminal proof.
 use super::*;
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_protected_budget_cannot_silence_public_foreground_restart_refusal() {
+    let (_root, shared, _guard, provider, mut requests, mut core, _log, helpers) =
+        fixture("same", true).await;
+    {
+        let mut s = shared.state.lock().unwrap();
+        let mut remaining: usize = 192 * 1024;
+        for n in 0..4 {
+            let mut tool = json!({"status":"running","padding":""});
+            let overhead = vqro::limits::encoded_bytes(&tool);
+            let size = remaining.min(60000);
+            tool["padding"] = json!("x".repeat(size - overhead));
+            assert!(s.put("tool", &format!("protected-{n}"), tool));
+            remaining -= size;
+        }
+        assert_eq!(remaining, 0);
+        for n in 0..128 {
+            s.observe(&vqro::native_process::Event::Record(json!({"type":"system","subtype":"task_notification","task_id":format!("old-{n}"),"run_id":"1","status":"completed"})));
+        }
+        s.observe(&vqro::native_process::Event::Record(json!({"type":"system","subtype":"task_started","task_id":"lost-129","run_id":"1","task_type":"local_agent","subagent_type":"worker","spawn_depth":1,"is_backgrounded":false})));
+        assert!(
+            s.journal.entity("notice", "foreground-work-loss").is_none(),
+            "existing budget permits only best-effort pane notice"
+        );
+    }
+    for loss in [false, true] {
+        let mut a = args(&shared);
+        a["allow_background_loss"] = json!(loss);
+        let reply = core
+            .invoke(&shared, &provider, &mut requests, "claude.restart", a)
+            .await;
+        assert_eq!(reply["result"]["outcome"], "rejected");
+        let message = reply["result"]["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("task list full")
+                && message.contains(
+                    "automatic restart refused until the process is replaced another way"
+                ),
+            "public refusal must retain lost-foreground reason/recovery even without pane budget: {reply}"
+        );
+    }
+    assert!(
+        lines(&helpers).is_empty(),
+        "guard must refuse before helper/preflight/new exec"
+    );
+}
 fn seed(shared: &Arc<Shared>) -> (String, String, String) {
     let mut s = shared.state.lock().unwrap();
     s.observe(&vqro::native_process::Event::Record(json!({"type":"system","subtype":"task_started","task_id":"native-task-a","run_id":"1","task_type":"local_agent","subagent_type":"worker","spawn_depth":1,"description":"actual task"})));
