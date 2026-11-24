@@ -72,6 +72,12 @@ def native_error_episode(row):
     return 'pi-error:'+hashlib.sha256(json.dumps([session,record['timestamp']],separators=(',',':')).encode()).hexdigest()
 
 
+def displayed_error_binding(row):
+    record=error_record(row);session=(policy.facts(row).get('session') or {}).get('id')
+    if record is None or not isinstance(session,str):return None
+    return hashlib.sha256(json.dumps([session,record],sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
 def error_inference(row):
     """UI label only; preparation/native admission still authorize effects."""
     native=policy.facts(row);model=(native.get('session') or {}).get('model') or {}
@@ -91,6 +97,8 @@ class PiCutover:
         if len(rows)!=1 or not eligible_error(rows[0]):
             raise VqroError('Pi requires an idle, unqueued native error with a stable record; nothing restarted','busy')
         row=rows[0];native=policy.facts(row)
+        if args.get('_displayed_error') is not None and args['_displayed_error']!=displayed_error_binding(row):
+            raise VqroError('displayed Pi error changed; reopen account options','stale')
         if policy.episode(row)!=args.get('episode'):
             raise VqroError('Pi source changed; reopen account options','stale')
         provider=self.ext.providers.get(row.get('provider')) or {}
@@ -145,6 +153,8 @@ class PiCutover:
                   'incarnation':source['incarnation'],'account':target['id']}
         inference=match_limit(base,record)
         membership=membership_revision(affected,episode,entry['version'] if entry else 0,model,history_file(native),native['tool_principal'])
+        if not args['automatic']:
+            membership=hashlib.sha256(json.dumps([membership,displayed_error_binding(source)],separators=(',',':')).encode()).hexdigest()
         return {'setup_id':'pi:'+session,'membership_revision':membership,'native_episode':episode,
                 'automatic_allowed':inference is not None,'affected':[affected],'inference':inference}
 

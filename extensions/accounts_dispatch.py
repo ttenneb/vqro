@@ -174,7 +174,7 @@ class Dispatch:
         self.journal.complete(token)
         return result
 
-    def execute(self, source, target, revision, *, automatic, background_loss_disclosed=False, expected_native_episode=None):
+    def execute(self, source, target, revision, *, automatic, background_loss_disclosed=False, expected_native_episode=None, displayed_error=None):
         configured = policy.settings(self.ext)
         if automatic and configured['blocked'] == 'auto_restart' and configured['auto_cutover_max_per_hour'] == 0:
             raise VqroError('AUTO hourly budget is zero; offer instead', 'offer_required')
@@ -187,6 +187,9 @@ class Dispatch:
         self.journal.authorization(automatic, background_loss_disclosed=background_loss_disclosed)  # Never trust raw caller flags.
         args = {'resource': source['id'], 'episode': policy.episode(source), 'account': target['id'],
                 '_account_revision': revision, 'automatic': automatic}
+        if displayed_error is not None:
+            if automatic or target['runtime']!='pi':raise VqroError('displayed error binding is a Pi owner choice only','invalid')
+            args['_displayed_error']=displayed_error
         plan = self.plan(source, target, args)  # Busy here consumes NO durable intent.
         if expected_native_episode is not None and expected_native_episode != plan['native_episode']:
             raise VqroError('native error changed since the owner choice; reopen account options', 'stale')

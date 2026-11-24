@@ -3,6 +3,7 @@ import copy
 import unittest
 import test_account_capacity as fixture
 from agents import Agents
+from accounts_pi import native_error_episode, displayed_error_binding
 from vqro_ext import VqroError
 
 
@@ -25,6 +26,7 @@ class PiErrorOfferUI(unittest.TestCase):
         choices=[item for item in items if item.get('command')=='accounts.restart']
         self.assertEqual([item['text'] for item in choices],['Continue on B'])
         self.assertIn('native_episode',choices[0]['args'])
+        self.assertEqual(choices[0]['args']['displayed_error'],displayed_error_binding(self.row))
         self.assertEqual(self.core.stops,[]);self.assertEqual(self.core.resumes,[]);self.assertEqual(self.core.sends,[])
 
     def test_manual_click_resumes_once_then_waits_without_a_continuation_turn(self):
@@ -89,6 +91,19 @@ class PiErrorOfferUI(unittest.TestCase):
         self.row['data']['agent']['completion']['native']['timestamp']+=1
         with self.assertRaises(VqroError):self.app.restart(choice['args'])
         self.assertEqual(self.core.stops,[]);self.assertEqual(self.core.resumes,[])
+
+    def test_same_timestamp_session_changed_message_refuses_displayed_choice(self):
+        reply=self.app.offer({'resource':'old'})
+        choice=next(item for item in self.core.live[reply['client']['popup']['view']]['items'] if item.get('command')=='accounts.restart')
+        self.row['data']['agent']['completion']['error']['message']='A different synthetic error at the same timestamp.'
+        with self.assertRaises(VqroError):self.app.restart(choice['args'])
+        self.assertEqual(self.core.stops,[]);self.assertEqual(self.core.resumes,[]);self.assertEqual(self.core.sends,[])
+
+    def test_display_binding_does_not_change_auto_episode_identity(self):
+        episode=native_error_episode(self.row);binding=displayed_error_binding(self.row)
+        self.row['data']['agent']['completion']['error']['message']='Different message, unchanged native episode.'
+        self.assertEqual(native_error_episode(self.row),episode)
+        self.assertNotEqual(displayed_error_binding(self.row),binding)
 
     def test_success_running_and_queued_errors_do_not_offer_panel_action(self):
         original=copy.deepcopy(self.row)

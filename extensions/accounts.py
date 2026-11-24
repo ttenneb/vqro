@@ -9,7 +9,7 @@ import uuid
 import accounts_policy as policy
 from accounts_cutover import Cutovers
 from accounts_claude import ClaudeCutover, eligible_episode as claude_episode
-from accounts_pi import PiCutover, eligible_error as pi_error, native_error_episode, error_inference
+from accounts_pi import PiCutover, eligible_error as pi_error, native_error_episode, error_inference, displayed_error_binding
 from accounts_dispatch import Dispatch
 from accounts_codex_logins import SavedLogins
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -302,7 +302,7 @@ class Accounts:
                           'description':('Reported headroom '+str(round(score,1))+'%' if score is not None else 'Capacity unknown/incomparable')+'; native same-conversation restart',
                           'command':'accounts.restart','args':{'resource':source['id'],'episode':token,
                                                                'account':target['id'],'_account_revision':revision,
-                                                               **({'native_episode':pi_episode} if pi_episode is not None else {})}})
+                                                               **({'native_episode':pi_episode,'displayed_error':displayed_error_binding(source)} if pi_episode is not None else {})}})
         if not candidates: items.append({'type':'text','text':'No configured alternative allowed by this policy. Native login and API-key setup are separate, explicit actions.'})
         self.ext.publish('accounts-restarts',{'title':'Continue this conversation','requires':['menu'],'items':items})
         return {'client':{'popup':{'view':'accounts-restarts','width':90}}}
@@ -326,7 +326,8 @@ class Accounts:
                 {'text':'I understand: continue on '+label(target['label']),'command':'accounts.restart.confirm','args':wire}]})
             return {'client':{'popup':{'view':'accounts-restart-warning','width':90}}}
         return self.dispatch.execute(source,target,revision,automatic=False,
-                                     expected_native_episode=args.get('native_episode'))
+                                     expected_native_episode=args.get('native_episode'),
+                                     displayed_error=args.get('displayed_error'))
 
     def confirm_restart(self,args):
         authority=self.cutovers.authorization(False)
