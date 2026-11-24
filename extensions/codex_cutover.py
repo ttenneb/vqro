@@ -350,22 +350,35 @@ class Cutover:
         attempted, blocked = [], []
         disposition = 'offer'
         for target_index,target in enumerate(plan):
-            switched, dispatched = [], False
+            switched, dispatched, preparing, cleaning = [], False, True, False
             try:
                 for row, _ in fenced:
+                    preparing=True
                     preparation=self._invoke(row,'_account.prepare_switch',dict(payload,login_ref=target['login_ref'],account=fact(target)))
                     ticket=preparation.get('prepared_ticket')
                     if not text(ticket):fail('native credential preparation unconfirmed','indeterminate')
+                    preparing=False
                     issue = self._effect_issue(args,claim,target_index)
                     if issue:
-                        if attempted:return self._walk_result(self._restore_revoked(fenced,hosts,payload,prepared,issue),attempted,blocked,'offer')
+                        if attempted:
+                            cleaning=True
+                            return self._walk_result(self._restore_revoked(fenced,hosts,payload,prepared,issue),attempted,blocked,'offer')
                         fail('protected switch authority changed before dispatch','stale')
                     if not dispatched:attempted.append(target['id'])
                     dispatched = True
+                    preparing=False
                     result = self._invoke(row, '_account.switch', dict(payload, prepared_ticket=ticket,login_ref=target['login_ref'], account=fact(target)))
                     if result.get('account_confirmed') is not True:fail('native account readback unconfirmed','indeterminate')
                     switched.append(row)
             except Exception as error:
+                if cleaning:raise  # Never replay an uncertain lifecycle cleanup.
+                if preparing and attempted:
+                    # Preparation is read-only, even when its reply is unknown.
+                    # Previous credential effects are confirmed: restore each actual
+                    # current login independently, never abort or replay selection.
+                    restored=self._restore_revoked(fenced,hosts,payload,prepared,'preparation_unconfirmed')
+                    if restored.get('account') is not None and not self._walk_issue(args,claim,plan):restored['restored_only']=False
+                    return self._walk_result(restored,attempted,blocked,'offer')
                 if isinstance(error,_NativeRejected):
                     if dispatched and not switched:attempted.pop()  # Explicit no-effect target, not a charged switch.
                     if attempted:return self._walk_result(self._restore_revoked(fenced,hosts,payload,prepared,'unconfirmed'),attempted,blocked,'offer')

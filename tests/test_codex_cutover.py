@@ -270,6 +270,20 @@ class Tests(unittest.TestCase):
         result=c.cutover(args)
         self.assertEqual(result['outcome'],'observed');self.assertEqual(result['attempted_targets'],['b']);self.assertFalse(result['fenced'])
         self.assertFalse(any(m=='resource.invoke' and a.get('op')=='agent.send' for m,a in ext.calls))
+    def test_unknown_next_preparation_restores_known_hosts_without_credential_retry(self):
+        for failed_host in ('x','y'):
+            with self.subTest(failed_host=failed_host):
+                ext,c,args=self.walk()
+                def hook(op,arguments):
+                    if op=='_account.prepare_switch' and arguments['args']['args']['account']['id']=='c' and arguments['resource']==failed_host:
+                        raise VqroError('unknown read-only preparation','indeterminate')
+                ext.hook=hook;result=c.cutover(args)
+                self.assertEqual(result['attempted_targets'],['b'] if failed_host=='x' else ['b','c'])
+                self.assertEqual(result['disposition'],'offer');self.assertFalse(result['continuation_allowed']);self.assertFalse(result['fenced'])
+                if failed_host=='x':self.assertFalse(result['restored_only']);self.assertEqual(result['account'],'b')
+                names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
+                self.assertEqual(names.count('_account.restore'),2);self.assertEqual(names.count('_account.release'),2)
+                self.assertNotIn('_account.abort',names)
     def test_prepare_is_readonly_and_native_episode_not_commonhash(self):
         ext=Ext();p=Cutover(ext).prepare(self.args())
         self.assertEqual(p['native_episode'],'native-turn');self.assertEqual(len(p['affected']),2)
