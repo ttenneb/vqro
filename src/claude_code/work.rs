@@ -247,7 +247,11 @@ impl Work {
                 return vec![];
             }
         }
-        if old.is_some() && run.is_none() {
+        // Two absent generations are not proof of the same terminal run. Keep the terminal
+        // latch, but never let it hide positively observed ROOT foreground from the stop fence.
+        if run.is_none()
+            && (old.is_some() || (known_root_foreground && self.tasks[native].terminal))
+        {
             if known_root_foreground {
                 self.unrepresented_root_foreground
                     .get_or_insert("foreground generation unknown");

@@ -494,6 +494,131 @@ mod tests {
         }
     }
     #[test]
+    fn terminal_foreground_generation_matrix_never_guesses_missing_runs_are_same() {
+        let mut failures = Vec::new();
+        for (old_label, old) in [
+            ("absent", None),
+            ("overbound", Some("x".repeat(129))),
+            ("known", Some("1".into())),
+        ] {
+            for (new_label, new) in [
+                ("absent", None),
+                ("overbound", Some("x".repeat(129))),
+                ("newer", Some("2".into())),
+            ] {
+                let (mut state, mut args) = fixture();
+                let mut terminal = json!({"type":"system","subtype":"task_notification","task_id":"matrix","status":"completed"});
+                if let Some(run) = &old {
+                    terminal["run_id"] = json!(run);
+                }
+                state.observe(&crate::native_process::Event::Record(terminal));
+                for loss in [false, true] {
+                    args["allow_background_loss"] = json!(loss);
+                    assert!(
+                        Restart::parse(&args)
+                            .unwrap()
+                            .guard(&state, Some("r/host"))
+                            .is_ok(),
+                        "terminal history alone is not active work"
+                    );
+                }
+                let mut start = json!({"type":"system","subtype":"task_started","task_id":"matrix","task_type":"local_agent","subagent_type":"worker","spawn_depth":1,"is_backgrounded":false});
+                if let Some(run) = &new {
+                    start["run_id"] = json!(run);
+                }
+                state.observe(&crate::native_process::Event::Record(start));
+                for loss in [false, true] {
+                    args["allow_background_loss"] = json!(loss);
+                    let result = Restart::parse(&args).unwrap().guard(&state, Some("r/host"));
+                    println!("old={old_label} new={new_label} loss={loss}: {result:?}");
+                    if result.is_ok() {
+                        failures.push(format!("old={old_label} new={new_label} loss={loss}: positive ROOT foreground disappeared"));
+                    } else if new_label != "newer" {
+                        let reason = result.unwrap_err();
+                        assert!(
+                            reason.contains("foreground generation unknown")
+                                && reason.contains("process is replaced another way")
+                        );
+                    }
+                }
+                if new_label == "newer" {
+                    assert!(state.work.foreground_loss_reason().is_none());
+                    state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_notification","task_id":"matrix","run_id":"2","status":"completed"})));
+                    for loss in [false, true] {
+                        args["allow_background_loss"] = json!(loss);
+                        assert!(
+                            Restart::parse(&args)
+                                .unwrap()
+                                .guard(&state, Some("r/host"))
+                                .is_ok(),
+                            "represented newer run can actually complete without permanent loss witness"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "generation matrix lost foreground permission evidence: {failures:?}"
+        );
+        for valid in ["0", "1"] {
+            let (mut state, mut args) = fixture();
+            state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_notification","task_id":"late","run_id":"1","status":"completed"})));
+            state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_started","task_id":"late","run_id":valid,"task_type":"local_agent","subagent_type":"worker","spawn_depth":1,"is_backgrounded":false})));
+            for loss in [false, true] {
+                args["allow_background_loss"] = json!(loss);
+                assert!(
+                    Restart::parse(&args)
+                        .unwrap()
+                        .guard(&state, Some("r/host"))
+                        .is_ok(),
+                    "PROVEN older/same-terminal VALID run stays terminal"
+                );
+            }
+            assert!(state.work.foreground_loss_reason().is_none());
+        }
+    }
+    #[test]
+    fn missing_generation_live_or_nested_rows_do_not_invent_a_root_loss_witness() {
+        let (mut state, mut args) = fixture();
+        let start = json!({"type":"system","subtype":"task_started","task_id":"live","task_type":"local_agent","subagent_type":"worker","spawn_depth":1,"is_backgrounded":false});
+        for _ in 0..2 {
+            state.observe(&crate::native_process::Event::Record(start.clone()));
+            assert!(state.work.foreground_loss_reason().is_none());
+            for loss in [false, true] {
+                args["allow_background_loss"] = json!(loss);
+                assert!(
+                    Restart::parse(&args)
+                        .unwrap()
+                        .guard(&state, Some("r/host"))
+                        .is_err()
+                );
+            }
+        }
+        state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_notification","task_id":"live","status":"completed"})));
+        assert!(
+            Restart::parse(&args)
+                .unwrap()
+                .guard(&state, Some("r/host"))
+                .is_ok()
+        );
+        state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_notification","task_id":"nested","status":"completed"})));
+        state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_started","task_id":"nested","task_type":"local_agent","subagent_type":"worker","spawn_depth":2,"parent_task_id":"unknown-parent","is_backgrounded":false})));
+        assert!(
+            state.work.foreground_loss_reason().is_none(),
+            "unknown nested ownership is not invented as direct-root foreground"
+        );
+        for loss in [false, true] {
+            args["allow_background_loss"] = json!(loss);
+            assert!(
+                Restart::parse(&args)
+                    .unwrap()
+                    .guard(&state, Some("r/host"))
+                    .is_ok()
+            );
+        }
+    }
+    #[test]
     fn background_override_defaults_false_and_bypasses_only_background() {
         let (mut state, mut args) = fixture();
         let ordinary = Restart::parse(&args).unwrap();
