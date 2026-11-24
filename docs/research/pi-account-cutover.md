@@ -16,7 +16,11 @@ The bridge reports experimental `data.agent.tool_principal` only when its existi
 logical work principal rather than creating a fresh undo/request scope. The
 protected claim binds both references. The frontend finishes one already-admitted
 lifecycle restore on the original execution backend, with no prompt; common checks
-current standing policy before the separate NEW visible turn.
+current standing policy before the separate NEW visible turn. The public resume
+frontend must consume a durable `resume_launch` intent in that same owner journal
+before its native spawn, bound to the authenticated Accounts AUTO invocation or
+recorded current OFFER owner. Duplicate/concurrent calls cannot launch again;
+unknown launch results retain consumption and are never replayed.
 
 Accounts use native provider aliases in **one shared native auth store**, not
 per-account configuration folders. Pi owns login, credential reads and refresh.

@@ -23,7 +23,7 @@ MEMBER_FIELDS = {'resource', 'host', 'session', 'epoch', 'incarnation', 'account
 RECORD_FIELDS = {'state', 'resource', 'episode', 'host', 'account', '_account_revision',
                  'automatic', 'setup_id', 'membership_revision', 'affected', 'runtime',
                  'source_incarnation', 'source_epoch', 'source_account', 'session', 'native_episode',
-                 'continuation_text', 'continuations', 'authorization', 'created_at', 'inference', 'continuation_cancelled', 'source_history', 'source_principal', 'authorized_targets', 'attempted_targets', 'resumed_members', 'continuation_owner', 'member_episodes', 'continuation_parent'}
+                 'continuation_text', 'continuations', 'authorization', 'created_at', 'inference', 'continuation_cancelled', 'source_history', 'source_principal', 'authorized_targets', 'attempted_targets', 'resumed_members', 'continuation_owner', 'member_episodes', 'continuation_parent', 'resume_launch'}
 
 
 def text(value, bound=256):
@@ -151,6 +151,10 @@ class Cutovers:
                 if not all(text(record[key]) for key in ('resource', 'episode', 'host', 'account', 'setup_id',
                         'membership_revision', 'runtime', 'source_incarnation', 'source_epoch', 'session')):
                     raise ValueError()
+                launch=record['resume_launch']
+                if launch is not None and (record['runtime']!='pi' or not isinstance(launch,dict)
+                        or set(launch)!={'state','principal'} or launch['state'] not in ('claimed','observed','unknown')
+                        or not text(launch['principal'])):raise ValueError()
                 parent=record['continuation_parent']
                 if parent is not None and (not text(parent,32) or parent not in value['claims']):raise ValueError()
                 episodes=record['member_episodes']
@@ -412,7 +416,7 @@ class Cutovers:
                   'source_history': ((facts(source).get('session') or {}).get('native') or {}).get('file') if target['runtime']=='pi' else None,
                   'source_principal': facts(source).get('tool_principal') if target['runtime']=='pi' else None,
                   'authorized_targets':list(targets),'attempted_targets':None,'resumed_members':[],'continuation_owner':None,'member_episodes':copy.deepcopy(plan.get('member_episodes',[])),
-                  'continuation_parent':continuation_parent}
+                  'continuation_parent':continuation_parent,'resume_launch':None}
         if self.group(record) in value['groups']:
             raise VqroError('another cutover owns this shared setup; never overlap switches', 'busy')
         if any(old['runtime'] == target['runtime'] and (continuation_parent is not None or old['setup_id'] == plan['setup_id'])
@@ -508,6 +512,30 @@ class Cutovers:
         # Unknown retains the entire reservation even if a partial prefix was reported.
         record['state'] = 'native_ready' if observed else 'unknown'
         self.write(value, revision)
+
+    def consume_resume(self,token):
+        """One owner-journal launch intent; never a second/private replay ledger."""
+        caller=self.ext.caller() or {};principal=caller.get('principal')
+        value,revision=self.read();record=value['claims'].get(token)
+        if record is None or record['runtime']!='pi' or record['state']!='claimed' or record['resume_launch'] is not None:
+            raise VqroError('Pi resume launch already attempted or not authorized; never replay','conflict')
+        if record['automatic']:
+            if principal!='extension:accounts':raise VqroError('Pi resume requires the authenticated accounts invocation','forbidden')
+        else:
+            validate_claim_authority(self.ext,record,False)
+            if principal!=record['authorization']['principal']:
+                raise VqroError('Pi resume caller does not match the recorded owner invocation','forbidden')
+        record['resume_launch']={'state':'claimed','principal':principal}
+        self.write(value,revision)
+        return {'consumed':True}
+
+    def resume_result(self,token,observed):
+        caller=self.ext.caller() or {};value,revision=self.read();record=value['claims'].get(token)
+        launch=record.get('resume_launch') if record else None
+        if not launch or launch['state']!='claimed' or caller.get('principal')!=launch['principal']:
+            raise VqroError('Pi resume result does not match its launch intent','forbidden')
+        launch['state']='observed' if observed else 'unknown'
+        self.write(value,revision)
 
     def record_restored(self,token,members):
         value,revision=self.read();record=value['claims'].get(token)

@@ -36,6 +36,8 @@ class Accounts:
         self.pending_lock = threading.Lock()
         self.wake = threading.Event()
         for name, method, title in [('claim.read',self.read_claim,'Read acknowledged account cutover claim'),
+                ('claim.resume.consume',self.consume_resume,'Consume acknowledged Pi resume launch'),
+                ('claim.resume.result',self.resume_result,'Record Pi resume launch result'),
                 ('policy',self.configure_policy,'Account capacity strategies'),
                 ('offer',self.offer,'Continue this conversation on another account'), ('restart',self.restart,'Continue on another account'),
                 ('restart.confirm',self.confirm_restart,'Confirm Claude background-loss warning'),
@@ -54,6 +56,16 @@ class Accounts:
     def read_claim(self, args):
         """Read the acknowledged intent; no native effects or independent claims."""
         return self.cutovers.lookup(args.get('claim'))
+
+    def consume_resume(self,args):
+        if not isinstance(args,dict) or set(args)!={'claim'}:raise VqroError('only the claim reference is accepted','invalid')
+        return self.cutovers.consume_resume(args['claim'])
+
+    def resume_result(self,args):
+        if not isinstance(args,dict) or set(args)!={'claim','observed'} or type(args['observed']) is not bool:
+            raise VqroError('invalid resume result','invalid')
+        self.cutovers.resume_result(args['claim'],args['observed'])
+        return {'recorded':True}
 
     def show(self, args):
         rows, revision = snapshot(self.ext)

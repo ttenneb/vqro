@@ -163,8 +163,18 @@ class Pi:
                 'argv':[*runtime.get('bridge_argv',default_bridge()),'--',*native_argv],'env':env}
         cwd=session.get('cwd') or source.get('cwd')
         if isinstance(cwd,str) and cwd:params['cwd']=cwd
-        return launch(self.ext,params,brand='Pi resume',initialize_route=self.initialize_request_route,
-                      show_terminal=self.terminal,expected_agents=1)
+        consumed=self.ext.invoke('accounts.claim.resume.consume',{'claim':args['_claim']})
+        if not isinstance(consumed,dict) or consumed.get('consumed') is not True:
+            raise VqroError('Pi resume launch consumption unconfirmed; do not launch','indeterminate')
+        try:
+            result=launch(self.ext,params,brand='Pi resume',initialize_route=self.initialize_request_route,
+                          show_terminal=self.terminal,expected_agents=1)
+        except Exception:
+            self.ext.invoke('accounts.claim.resume.result',{'claim':args['_claim'],'observed':False})
+            raise
+        observed=isinstance(result,dict) and result.get('outcome')=='observed' and isinstance(result.get('agent'),str)
+        self.ext.invoke('accounts.claim.resume.result',{'claim':args['_claim'],'observed':observed})
+        return result
 
     def initialize_request_route(self, agent):
         # Preserve Pi's return shape while sharing the actual-caller default mechanism.
