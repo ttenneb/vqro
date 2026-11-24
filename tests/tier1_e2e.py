@@ -23,6 +23,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+from extension_layout import copy_packages
 import signal
 import socket
 import subprocess
@@ -182,6 +183,7 @@ for name in os.listdir(os.path.join(REPO, "extensions")):
     if name.endswith(".py"):
         shutil.copy(os.path.join(REPO, "extensions", name), P["ext"])
 shutil.copytree(os.path.join(REPO, "extensions", "manifests"), os.path.join(P["ext"], "manifests"))
+copy_packages(os.path.join(REPO,'extensions'),P['ext'])
 os.makedirs(os.path.join(P["ext"], "tier1"))
 shutil.copy(os.path.join(REPO, "integrations", "pi", "vqro-pull.ts"), os.path.join(P["ext"], "tier1"))  # as dev-install does
 defaults = read_json(os.path.join(REPO, "extensions", "defaults.json"))

@@ -22,6 +22,7 @@ if sys.platform != "linux":
     raise SystemExit(77)
 
 import json, os, shutil, socket, subprocess, sys, tempfile, time
+from extension_layout import copy_packages
 
 TARGET = sys.argv[1]
 CAPTURES = sys.argv[2] if len(sys.argv) > 2 else None
@@ -35,6 +36,7 @@ for f in os.listdir(os.path.join(REPO, "extensions")):
     if f.endswith(".py"):
         shutil.copy(os.path.join(REPO, "extensions", f), os.path.join(R, "ext", f))
 shutil.copytree(os.path.join(REPO, "extensions", "manifests"), os.path.join(R, "ext", "manifests"))
+copy_packages(os.path.join(REPO,'extensions'),os.path.join(R,'ext'))
 with open(os.path.join(R, "ext", "defaults.json"), "w") as f:
     json.dump({"version": 2, "extensions": []}, f)  # only what this test enables below
 for tool in ("python3", "git"):

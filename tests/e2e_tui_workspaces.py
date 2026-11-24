@@ -13,6 +13,7 @@ Usage: tests/e2e_tui_workspaces.py TARGET_DIR   (debug binaries in TARGET_DIR/de
 Private /tmp root; nothing live is touched (no herdr-core: `VQRO_HERDR=/bin/false`). Stops only what it started.
 """
 from python_interpreter import python
+from extension_layout import copy_packages
 import json, os, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
@@ -26,6 +27,7 @@ for f in os.listdir(os.path.join(REPO, "extensions")):
     if f.endswith(".py"):
         shutil.copy(os.path.join(REPO, "extensions", f), os.path.join(R, "ext", f))
 shutil.copytree(os.path.join(REPO, "extensions", "manifests"), os.path.join(R, "ext", "manifests"))
+copy_packages(os.path.join(REPO,'extensions'),os.path.join(R,'ext'))
 with open(os.path.join(R, "ext", "defaults.json"), "w") as f:
     json.dump({"version": 1, "extensions": [{"name": n, "argv": ["python3", f"{n}.py"]} for n in ("tabs", "panes", "workspaces", "sidebar")]}, f)
 os.symlink(python(), os.path.join(R, "bin", "python3"))

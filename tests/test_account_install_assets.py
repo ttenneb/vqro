@@ -66,7 +66,9 @@ class AccountInstallAssets(unittest.TestCase):
         names=('pi_provider_e2e.py','e2e_agent_stop.py','e2e_tui_providers.py',
             'e2e_sidebar_scale.py','agent_popup_latency.py','agent_panel_bandwidth.py',
             'e2e_workspace_tabs.py','codex_launcher_e2e.py','claude_launcher_e2e.py',
-            'e2e_agent_origin.py','e2e_tui_scale.py')
+            'e2e_agent_origin.py','e2e_tui_scale.py','tier1_smoke.py','tier1_e2e.py',
+            'e2e_tui_workspaces.py','e2e_tui_sidebar_tree.py','e2e_tui_keys.py',
+            'e2e_tui_paste_dropdown.py','e2e_tui_pane_basics.py')
         for name in names:
             with self.subTest(harness=name):
                 tree=ast.parse((ROOT/'tests'/name).read_text(encoding='utf-8'))
