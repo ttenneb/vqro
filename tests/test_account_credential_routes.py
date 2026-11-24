@@ -35,6 +35,20 @@ class CredentialRoutes(unittest.TestCase):
             explicit = row('alias', runtime, provider=provider)
             self.assertEqual(credential_identity(implicit), credential_identity(explicit))
 
+    def test_codex_saved_login_uses_native_issuer_not_arbitrary_provider_metadata(self):
+        base=row(runtime='codex')
+        aliases=[row('alias-'+str(index),'codex',provider=provider)
+                 for index,provider in enumerate(('openai','openai-codex','configured-label'))]
+        for alias in aliases:
+            self.assertIsNone(selection_problem(alias))
+            self.assertEqual(credential_identity(alias),credential_identity(base))
+        self.assertEqual(len(distinct_accounts([base,*aliases])),1)
+        self.assertEqual(eligible_alternatives([base,*aliases],'a',set(),False),[])
+        other=row('other','codex',provider='openai-codex',login_ref={'sessionId':'different','accountId':'different'})
+        self.assertNotEqual(credential_identity(base),credential_identity(other))
+        self.assertNotEqual(credential_identity(row(runtime='pi')),
+                            credential_identity(row('pi-other','pi',provider='other-base')))
+
     def test_api_key_without_its_provider_route_is_shown_but_not_selectable(self):
         account = dict(row(), kind='api_key')
         core = self.core([account])

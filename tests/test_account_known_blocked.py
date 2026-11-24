@@ -54,6 +54,21 @@ class KnownBlocked(unittest.TestCase):
         self.assertEqual(self.journal.lookup(token)['blocked_mode'],'notify')
         self.assertEqual(self.journal.lookup(token)['max_switches'],0)
 
+    def test_known_blocked_saved_codex_login_excludes_singleton_provider_spelling_alias(self):
+        from account_credentials import eligible_alternatives
+        self.b['provider']='openai';alias=dict(self.b,id='alias-b',provider='openai-codex')
+        self.core.entries[SETTINGS]['value']['accounts'].append(alias)
+        row=source();row.update(kind='agent',available=True)
+        row['data']['agent'].update(account={'id':'b'},lifecycle='live',
+            caps={'agent.availability':{'reasons':['quota']}},
+            availability={'state':'blocked','reason':'quota','native':{'turnId':'known-b-limit'}})
+        self.journal.observe_limits([row],[self.a,self.b,alias])
+        self.assertTrue(self.journal.known_blocked(alias))
+        # Even if only the spelling alias is offered, it is still blocked B.
+        blocked=self.journal.blocked_accounts([self.a,alias])
+        self.assertIn('alias-b',blocked)
+        self.assertEqual(eligible_alternatives([self.a,alias],'a',blocked,False),[])
+
     def test_native_limit_blocks_all_known_aliases_not_unknown_b(self):
         self.observe()
         self.assertEqual(self.journal.blocked_accounts([self.a,self.alias,self.b]),{'a','alias-a'})
