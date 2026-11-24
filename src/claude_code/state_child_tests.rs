@@ -61,6 +61,7 @@ fn joint_pending_and_recent_saturation_cannot_rearm_lost_child_as_root() {
         "freeing bounds is not settlement of forgotten child scope"
     );
     assert!(s.requests.has_unconfirmed());
+    s.refresh(); // This reducer-level schedule must explicitly run the production publication step.
     assert!(
         s.journal.entity("notice", "request-scope-loss").unwrap().1["text"]
             .as_str()

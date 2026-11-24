@@ -41,8 +41,9 @@ omitted and marked incomplete, never shortened.
 Interrupt reports the native control outcome, not a fabricated no-effect result or queue clear. The native
 `still_queued` list is partial (UUID-stamped main-thread inputs only); `[]` is not a complete queue-empty
 witness. Likewise `result.queued_turn_count` excludes system-generated entries. Canonical `queue` stays null.
-Child records are not promoted to the parent's conversation. This slice does not implement child/task
-control, native settings changes or complete history.
+Child records are not promoted to the parent's conversation. The historical main-session slice did not
+implement child/task control; the later slice below adds genuine native stop_task only. Native settings
+changes and complete history remain outside this implementation.
 
 ## Availability and future cutover witnesses
 
@@ -166,6 +167,10 @@ objects/actions/kinds and raw native target overrides refuse before dispatch. Ro
 Forwarding text later would require emission-only source evidence and explicit opt-in; it is not silently enabled.
 No plan CRUD/model-prompt emulation or pane per-task button is added. Stores/items/identities are bounded; omitted
 fields/rows are marked incomplete, never shortened or inferred empty.
+
+Codex is a second observation implementation, not a second genuine object-cancel implementation. The generic
+object-control declaration remains draft, not stable/full-conformance or real-native qualification. Missing
+modules.children descriptors remain broader draft-conformance accounting; no descriptor/API is invented here.
 
 ## Item lifetime
 
