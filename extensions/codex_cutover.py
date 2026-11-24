@@ -330,12 +330,10 @@ class Cutover:
             self._validate_claim(args,prepared,current_claim)
             return fenced
         except Exception:
-            # Abort releases ONLY local fences in the unattempted-switch stage. It can
-            # never cancel/replay a native credential effect, even after an unknown fence reply.
-            for row in attempted:
-                try: self._invoke(row,'_account.abort',payload)
-                except Exception: pass  # unknown cleanup stays visibly blocked; never retry it
-            raise
+            # No credential preparation/commit has run in preflight. Native abort
+            # releases only local barriers; retain EVERY literal acknowledgement
+            # through the callback so common can settle a definite zero honestly.
+            return self._abort_unattempted([(row,{}) for row in attempted],payload,'preflight_rejected')
 
     def cutover(self, args):
         with self.admission:
@@ -360,6 +358,7 @@ class Cutover:
         payload = {'operation': args['_claim'], 'setup_id': prepared['setup_id'],
                    'authorized_targets':[{'login_ref':r['login_ref'],'account':fact(r)} for r in plan]}
         fenced = self._fence_hosts(rows, hosts, payload, prepared, args, claim)
+        if isinstance(fenced,dict):return fenced  # Explicit zero effect after all preflight abort ACKs.
         attempted, blocked = [], []
         disposition = 'offer'
         for target_index,target in enumerate(plan):

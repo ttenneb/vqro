@@ -227,6 +227,31 @@ class SharedPipeline(unittest.TestCase):
         self.assertEqual(core.op_entry['value']['groups'],{});self.assertEqual(core.sends,[])
         names=[a['args']['name'] for m,a in core.native.calls if m=='resource.invoke']
         self.assertEqual(names.count('_account.restore'),2);self.assertEqual(names.count('_account.release'),2);self.assertNotIn('_account.abort',names)
+    def test_final_fence_consent_revocation_settles_zero_only_after_all_literal_abort_acks(self):
+        for ack in (True,False,1,None,'missing','unknown'):
+            with self.subTest(ack=ack):
+                core=Pipeline(True,True);original=core.call
+                def hook(op,args):
+                    if op=='_account.fence' and args['resource']=='y':core.entries[CONSENT]['value']={'setups':{}}
+                core.native.hook=hook
+                def call(method,args=None):
+                    if method=='resource.invoke' and args.get('op')=='agent.command' and args['args']['name']=='_account.abort' and args['resource']=='x' and ack=='unknown':raise VqroError('unknown local abort','indeterminate')
+                    result=original(method,args)
+                    if method=='resource.invoke' and args.get('op')=='agent.command' and args['args']['name']=='_account.abort' and args['resource']=='x':
+                        if ack=='missing':result['data'].pop('aborted')
+                        else:result['data']['aborted']=ack
+                    return result
+                core.call=call;core.app.handle_blocked('x')
+                token,record=next((t,r) for t,r in core.op_entry['value']['claims'].items() if r.get('continuation_parent') is None)
+                self.assertEqual(core.sends,[]);self.assertNotIn('accounts-continuation',core.live)
+                names=[a['args']['name'] for m,a in core.native.calls if m=='resource.invoke']
+                self.assertNotIn('_account.prepare_switch',names);self.assertNotIn('_account.switch',names);self.assertNotIn('_account.resume',names)
+                self.assertTrue(any(m=='resource.invoke' and a['args']['name']=='_account.abort' and a['resource']=='y' for m,a in core.native.calls))
+                if ack is True:
+                    self.assertEqual(record['state'],'rejected');self.assertEqual(record['attempted_targets'],[])
+                    self.assertEqual(core.op_entry['value']['groups'],{});self.assertEqual(core.app.cutovers.remaining('codex',record['affected']),3)
+                else:
+                    self.assertEqual(record['state'],'unknown');self.assertIsNone(record['attempted_targets']);self.assertIn(token,core.op_entry['value']['groups'].values())
     def test_b_blocked_c_ready_is_one_claim_prefix_and_one_new_turn(self):
         core=self.run_case(False,True)
         self.assertEqual(len(core.sends),1)

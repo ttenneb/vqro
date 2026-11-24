@@ -454,7 +454,8 @@ class Tests(unittest.TestCase):
     def test_post_fence_target_change_aborts_only_local_fences_no_switch(self):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p)
         ext.hook=lambda op,_:setattr(ext,'registry_revision',4) if op=='_account.fence' else None
-        with self.assertRaises(VqroError):c.cutover(args)
+        result=c.cutover(args)
+        self.assertEqual(result['outcome'],'rejected');self.assertEqual(result['attempted_targets'],[]);self.assertFalse(result['fenced'])
         names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
         self.assertEqual(names,['_account.fence']*2+['_account.abort']*2)
     def test_unconfirmed_core_publication_does_not_authorize_continuation(self):
@@ -485,12 +486,14 @@ class Tests(unittest.TestCase):
         self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.prepare_switch','_account.switch']+['_account.abort']*2)
     def test_target_discovered_on_every_host_before_any_switch(self):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p);ext.missing_on='y'
-        with self.assertRaises(VqroError):c.cutover(args)
+        result=c.cutover(args)
+        self.assertEqual(result['outcome'],'rejected');self.assertEqual(result['attempted_targets'],[]);self.assertFalse(result['fenced'])
         names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
         self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.abort']*2)
     def test_auto_refuses_native_target_already_active_everywhere(self):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p);ext.all_active=True
-        with self.assertRaises(VqroError):c.cutover(args)
+        result=c.cutover(args)
+        self.assertEqual(result['outcome'],'rejected');self.assertEqual(result['attempted_targets'],[]);self.assertFalse(result['fenced'])
         self.assertFalse(any(a['args']['name']=='_account.switch' for m,a in ext.calls if m=='resource.invoke'))
     def test_known_source_credential_alias_is_not_a_different_target(self):
         ext=Ext();alias=copy.deepcopy(ext.registry['accounts'][0]);alias.update(id='a',label='A alias')
@@ -521,7 +524,8 @@ class Tests(unittest.TestCase):
         def revoke(op,_):
             if op=='_account.list':ext.policy['blocked']='notify'
         ext.hook=revoke
-        with self.assertRaises(VqroError):c.cutover(args)
+        result=c.cutover(args)
+        self.assertEqual(result['outcome'],'rejected');self.assertEqual(result['attempted_targets'],[]);self.assertFalse(result['fenced'])
         names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
         self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.abort']*2)
     def test_consent_revocation_between_switches_restores_b_and_a_without_rollback_or_continuation(self):
