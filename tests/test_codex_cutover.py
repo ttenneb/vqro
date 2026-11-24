@@ -65,6 +65,11 @@ class Ext:
                 target=next(r for r in self.rows if r['id']==args['resource'])
                 target['data']['agent'].update(epoch='resumed-'+target['id'],account=account)
                 target['data']['agent']['_codex']['input_ledger']['epoch']='resumed-'+target['id']
+            if op=='_account.release':
+                target=next(r for r in self.rows if r['id']==args['resource'])
+                send=target['data']['agent']['caps'].setdefault('agent.send',{})
+                if self.quota.get(ident) is True:send['native_included_usage']=True
+                else:send.pop('native_included_usage',None)
             return {'outcome':'observed','data':{'quiescent':True,'operation':args['args']['args'].get('operation'),
                 'account_confirmed':True,'resumed':True,'released':self.released,'account':account,
                 'prepared_ticket':'prepared-'+args['resource']+'-'+str(self.counter),

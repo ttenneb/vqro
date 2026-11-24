@@ -47,6 +47,10 @@ class Pipeline(JournalCore):
                     self.resources[params['resource']]['data']['agent']['availability']=None
                 return result
             if params['op']=='agent.send':
+                args=params['args'];native=self.resources[params['resource']]['data']['agent']
+                if (args['caps_rev']!=native['caps']['rev'] or args['epoch']!=native['epoch']
+                        or args.get('guard',{}).get('session')!=native['session']['id']):
+                    return {'outcome':'rejected','error':{'kind':'stale','message':'capability revision changed'}}
                 self.sends.append(copy.deepcopy(params));return {'outcome':'accepted'}
         return super().call(method,params)
 
@@ -60,6 +64,27 @@ class SharedPipeline(unittest.TestCase):
         core=Pipeline(permission,next_target)
         core.app.handle_blocked('x')
         return core
+
+    def test_quota_changes_at_actual_send_guard_then_owner_gets_one_new_delivery(self):
+        core=Pipeline(True);call=core.call;changed=[]
+        def at_guard(method,params=None):
+            if method=='resource.invoke' and params.get('op')=='agent.send' and not changed:
+                changed.append(True);caps=core.resources['x']['data']['agent']['caps']
+                caps['rev']+=1;caps['agent.send'].pop('native_included_usage')
+            return call(method,params)
+        core.call=at_guard;core.app.handle_blocked('x')
+        token,record=next((token,record) for token,record in core.op_entry['value']['claims'].items()
+                          if record.get('continuation_parent') is None)
+        self.assertEqual(core.sends,[]);self.assertEqual(record['state'],'awaiting_owner')
+        rejected=record['continuations']['thread-x']['rejected_delivery']
+        switches=len([1 for _,args in core.native.calls if args.get('op')=='agent.command'
+                      and args['args']['name']=='_account.switch'])
+        core.app.confirm_continuation({'claim':token})
+        self.assertEqual(len(core.sends),1);self.assertNotEqual(core.sends[0]['args']['delivery'],rejected)
+        self.assertEqual(switches,len([1 for _,args in core.native.calls if args.get('op')=='agent.command'
+                                     and args['args']['name']=='_account.switch']))
+        with self.assertRaises(VqroError):core.app.confirm_continuation({'claim':token})
+        self.assertEqual(len(core.sends),1)
 
     def test_ready_real_worker_claim_effect_and_one_labelled_turn(self):
         core=self.run_case()
