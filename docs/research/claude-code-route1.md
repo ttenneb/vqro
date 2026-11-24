@@ -95,9 +95,13 @@ Generation checks occur under the observation state lock; old observations/initi
 failures cannot mutate the replacement epoch. The existing CLI supervisor explicitly waits through an owned
 restart instead of treating its expected old-child exit as final provider termination. Both stdin-thread and
 signal-task lifetime publication take the EXISTING native admission fence, also held from the last ending
-sample through replacement initialization. Observed lifetime ending forbids later dispatch. A dispatch winner
-may finish its bounded operation before lifetime is published; publication then stops the current owned
-process. This is ordered publication, not a promise of immediate cancellation on physical EOF/signal arrival.
+sample through replacement initialization. Observed lifetime ending forbids later input admission or child
+dispatch. Lifetime publication waits behind effects already admitted ahead of it in the existing FIFO fence;
+each has its own absolute deadline (restart preflight is independently limited to35seconds). Publication then
+stops the CURRENT owned process, including after failed initialization. The delay includes that earlier admitted
+work, not just the currently running restart, and stop is not immediate under contention. An OS spawn cannot
+be pre-empted: these are deadline-accounting bounds, not a hard kernel-latency guarantee. The same bound is
+shown in the agent pane's restart lifetime notice. No second intent or priority mechanism is introduced.
 Actual initialization success, not PID allocation,
 is `started:true`; native same-session readback confirms resume, missing readback stays explicitly unconfirmed,
 and mismatch/refusal is not success. Requested session is never copied into observed session. Configured B

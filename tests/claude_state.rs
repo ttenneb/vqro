@@ -236,3 +236,31 @@ fn pending_snapshots_on_control_wrapper_are_not_lost_or_rendered_twice() {
     observe(&mut s, question);
     assert_eq!(s.requests.len(), 1);
 }
+#[test]
+fn restart_lifetime_notice_is_bounded_current_and_visible_across_replacement() {
+    let mut s = state();
+    assert!(s.journal.entity("notice", "restart-lifetime").is_none());
+    s.restart_configured = true;
+    s.refresh();
+    let (revision, notice) = s.journal.entity("notice", "restart-lifetime").unwrap();
+    let text = notice["text"].as_str().unwrap();
+    for fact in [
+        "earlier admitted effects",
+        "absolute deadline",
+        "35 s",
+        "not immediate",
+        "OS spawn",
+        "After end publication",
+    ] {
+        assert!(text.contains(fact), "missing pane disclosure: {fact}");
+    }
+    assert!(text.len() < 512);
+    s.refresh();
+    assert_eq!(
+        s.journal.entity("notice", "restart-lifetime").unwrap().0,
+        revision,
+        "do not re-publish unchanged notice on every native frame"
+    );
+    s.replace_owned(json!({"id":"B"}), 2);
+    assert!(s.journal.entity("notice", "restart-lifetime").is_some());
+}

@@ -135,6 +135,51 @@ async fn lifetime_cannot_publish_inside_the_admitted_spawn_window() {
         "dispatch winner must later stop its OWNED child on lifetime publication"
     );
 }
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_control_bringup_releases_admission_then_lifetime_stops_current_child() {
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+    };
+    let shared = Shared::new("boot".into(), "fixture".into(), "instance".into());
+    let (sender, receiver) = tokio::sync::watch::channel(false);
+    shared.set_lifetime(receiver);
+    let native = shared
+        .spawn_native(
+            &[
+                "/usr/bin/python3".into(),
+                "-c".into(),
+                "import sys; sys.stdin.buffer.read()".into(),
+            ],
+            &std::env::current_dir().unwrap(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+    // Exercise the actual initializer's failed-deadline path under the SAME admission fence.
+    // This is a private bring-up control, not a full native/helper restart qualification.
+    let admission = shared.effects.lock().await;
+    let mut publisher = Box::pin(shared.end_lifetime(&sender));
+    let pending = poll_fn(|cx| Poll::Ready(publisher.as_mut().poll(cx).is_pending())).await;
+    let initialized = tokio::time::timeout(Duration::ZERO, shared.initialize_primary(&native, 1))
+        .await
+        .unwrap_or(false);
+    drop(admission);
+    if pending {
+        publisher.await;
+    }
+    let publication_stop = tokio::time::timeout(Duration::from_secs(3), native.exited()).await;
+    native.stop(); // unconditional owned cleanup even if the assertion below would fail
+    let _ = tokio::time::timeout(Duration::from_secs(3), native.exited()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), native.drained()).await;
+    assert!(!initialized);
+    assert!(pending);
+    assert!(
+        matches!(publication_stop, Ok(Exit { observed: true, .. })),
+        "failed bring-up must release the fence and lifetime publication must stop CURRENT owned child"
+    );
+}
 #[tokio::test]
 async fn stdin_thread_publication_winner_refuses_before_any_spawn() {
     let shared = Shared::new("boot".into(), "fixture".into(), "instance".into());

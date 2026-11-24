@@ -270,6 +270,9 @@ impl State {
             json!({"state":self.status(),"run":self.run,"completion":self.completion}),
         );
         self.put("startup", "current", self.startup.value());
+        if self.restart_configured && self.journal.entity("notice", "restart-lifetime").is_none() {
+            self.put("notice","restart-lifetime",json!({"text":"During restart, EOF or a handled signal waits behind earlier admitted effects, then stops the current owned child. Each effect has its absolute deadline; preflight is limited to 35 s. Stop is not immediate under contention; OS spawn cannot be pre-empted. After end publication, no new input or child is dispatched."}));
+        }
         self.changed += 1;
     }
     pub fn initialized(&mut self, data: &Value) {
