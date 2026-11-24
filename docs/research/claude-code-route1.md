@@ -126,7 +126,12 @@ phase unknown while known-child tombstones stay outside it. A permission body's 
 over extra wrapper metadata; context-free snapshots retain the positively known scope of a live native question. Root phase
 ignores child questions, but restart separately refuses ANY unresolved native consent, preserving its safety fence.
 It also refuses positively known DIRECT-root foreground work before stop for both background-loss choices;
-that guard does not rewrite root phase or background membership. Nested work under a known background parent
+that guard does not rewrite root phase or background membership. If capacity or an unrepresentable identity
+loses known direct-root foreground evidence, a bounded sticky witness still blocks restart for both loss choices.
+It clears only with a NEW owned native process: a background-only level or one unmatched terminal cannot prove
+that every omitted foreground task ended. Same-process conversation reset does not clear it. Terminal/run/alias
+history is retained rather than evicted and silently reopened by late frames; this may conservatively require
+closing/relaunching the bridge after foreground overflow, not an automatic probe or retry. Nested work under a known background parent
 is not inferred to be root foreground, and unknown ownership is never guessed. Known child/unknown question
 scope survives context-free changed snapshots in both pending and RECENT records until native settlement.
 No child endpoint/principal/inbox or send/resume/close is invented.

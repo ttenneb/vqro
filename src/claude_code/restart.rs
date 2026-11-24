@@ -349,6 +349,79 @@ mod tests {
         );
     }
     #[test]
+    fn foreground_overflow_keeps_restart_fenced_for_both_loss_values() {
+        let (mut state, mut args) = fixture();
+        for n in 0..super::super::work::TASKS {
+            state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_notification","task_id":format!("history-{n}"),"run_id":"1","status":"completed"})));
+        }
+        state.observe(&crate::native_process::Event::Record(
+            json!({"type":"system","subtype":"background_tasks_changed","tasks":[]}),
+        ));
+        for loss in [false, true] {
+            args["allow_background_loss"] = json!(loss);
+            assert!(
+                Restart::parse(&args)
+                    .unwrap()
+                    .guard(&state, Some("r/host"))
+                    .is_ok(),
+                "historical terminal rows alone are not live work"
+            );
+        }
+        state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_started","task_id":"new-fg-129","run_id":"1","task_type":"local_agent","subagent_type":"worker","spawn_depth":1,"is_backgrounded":false})));
+        for loss in [false, true] {
+            args["allow_background_loss"] = json!(loss);
+            assert!(
+                Restart::parse(&args)
+                    .unwrap()
+                    .guard(&state, Some("r/host"))
+                    .is_err(),
+                "unrepresented known ROOT foreground work MUST retain the stop fence despite terminal history capacity"
+            );
+        }
+        assert_eq!(state.background, Some(vec![]));
+        assert_eq!(state.status(), "idle");
+        state.observe(&crate::native_process::Event::Record(
+            json!({"type":"system","subtype":"background_tasks_changed","tasks":[]}),
+        ));
+        state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_notification","task_id":"new-fg-129","run_id":"1","status":"completed"})));
+        assert!(
+            state.work.root_foreground_active(),
+            "a BG level or one unmatched terminal cannot clear an uncounted foreground loss witness"
+        );
+        state.observe(&crate::native_process::Event::Record(
+            json!({"type":"conversation_reset"}),
+        ));
+        assert!(
+            state.work.root_foreground_active(),
+            "same-process conversation reset is not process quiescence"
+        );
+        state.replace_owned(json!({"id":"B"}), 2);
+        assert!(
+            !state.work.root_foreground_active(),
+            "new owned native process clears the bounded witness"
+        );
+    }
+    #[test]
+    fn terminal_history_capacity_alone_and_background_overflow_do_not_invent_root_foreground() {
+        let (mut state, mut args) = fixture();
+        for n in 0..super::super::work::TASKS {
+            state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_notification","task_id":format!("old-{n}"),"run_id":"1","status":"completed"})));
+        }
+        state.observe(&crate::native_process::Event::Record(
+            json!({"type":"system","subtype":"background_tasks_changed","tasks":[]}),
+        ));
+        assert!(!state.work.root_foreground_active());
+        state.observe(&crate::native_process::Event::Record(json!({"type":"system","subtype":"task_started","task_id":"new-bg-129","run_id":"1","task_type":"local_agent","subagent_type":"worker","spawn_depth":1,"is_backgrounded":true})));
+        assert!(!state.work.root_foreground_active());
+        args["allow_background_loss"] = json!(true);
+        assert!(
+            Restart::parse(&args)
+                .unwrap()
+                .guard(&state, Some("r/host"))
+                .is_ok()
+        );
+    }
+    #[test]
     fn background_override_defaults_false_and_bypasses_only_background() {
         let (mut state, mut args) = fixture();
         let ordinary = Restart::parse(&args).unwrap();

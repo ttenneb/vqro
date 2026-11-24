@@ -26,6 +26,9 @@ pub struct Work {
     tools: BTreeMap<String, Option<String>>,
     scoped: BTreeMap<(String, String, String), String>,
     pub incomplete: bool,
+    // Lost permission evidence is not merely display truncation. No complete foreground
+    // inventory exists here: retain this bounded witness until a NEW native process.
+    unrepresented_root_foreground: bool,
 }
 pub fn native_id(value: &Value) -> Option<&str> {
     value
@@ -216,11 +219,19 @@ impl Work {
         Some(id)
     }
     pub fn event(&mut self, frame: &Value) -> Vec<Change> {
+        let known_root_foreground = frame["subtype"] == "task_started"
+            && frame["spawn_depth"] == 1
+            && frame["is_backgrounded"] == false
+            && frame.get("parent_task_id").is_none_or(Value::is_null)
+            && frame["subagent_type"] != "main-session"
+            && (frame["task_type"] == "local_agent" || frame["subagent_type"].is_string());
         let Some(native) = native_id(&frame["task_id"]) else {
             self.incomplete = true;
+            self.unrepresented_root_foreground |= known_root_foreground;
             return vec![];
         };
         if !self.ensure(native) {
+            self.unrepresented_root_foreground |= known_root_foreground;
             return vec![];
         }
         let run = frame.get("run_id").and_then(native_id).map(str::to_owned);
@@ -545,13 +556,14 @@ impl Work {
     }
     /// Only positively known DIRECT root foreground work. Never guess unknown/nested ownership.
     pub fn root_foreground_active(&self) -> bool {
-        self.tasks.values().any(|row| {
-            !row.terminal
-                && row.value["native"]["is_backgrounded"] == false
-                && row.child.is_some()
-                && row.child_value["depth"] == 1
-                && row.child_value.get("parent") == Some(&Value::Null)
-        })
+        self.unrepresented_root_foreground
+            || self.tasks.values().any(|row| {
+                !row.terminal
+                    && row.value["native"]["is_backgrounded"] == false
+                    && row.child.is_some()
+                    && row.child_value["depth"] == 1
+                    && row.child_value.get("parent") == Some(&Value::Null)
+            })
     }
     pub fn cancel_target(&self, kind: &str, id: &str) -> Option<&str> {
         self.tasks
