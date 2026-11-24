@@ -8,7 +8,9 @@ from vqro_ext import VqroError
 
 POLICY='doc/settings/accounts-policy'
 CURSORS='doc/accounts/round-robin/'
-DEFAULTS={'new_agents':'ask','blocked':'notify','api_key_overflow':False}
+CONTINUATION_TEXT='Continue where you left off. (vqro switched this agent to account B after account A reached its limit.)'
+DEFAULTS={'new_agents':'ask','blocked':'notify','api_key_overflow':False,'continuation_text':CONTINUATION_TEXT,
+          'auto_cutover_max_per_hour':3}
 MAX_AGE_MS=60_000
 MAX_ATTEMPTS=64
 DOMAIN='accounts'
@@ -25,6 +27,12 @@ def validate_settings(value):
     if result['new_agents'] not in ('ask','most_remaining_capacity','round_robin') \
             or result['blocked'] not in ('notify','offer_restart','auto_restart') or type(result['api_key_overflow']) is not bool:
         raise VqroError('invalid accounts policy choice','invalid')
+    maximum=result['auto_cutover_max_per_hour']
+    if type(maximum) is not int or not 0<=maximum<=10:
+        raise VqroError('auto_cutover_max_per_hour must be an integer from0through10','invalid')
+    text=result['continuation_text']
+    if not isinstance(text,str) or not text.strip() or '\0' in text or len(text.encode('utf-8'))>4096:
+        raise VqroError('continuation text must be nonempty literal text within4096UTF-8bytes','invalid')
     return result
 
 
