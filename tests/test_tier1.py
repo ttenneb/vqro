@@ -144,8 +144,8 @@ class Tier1Tests(unittest.TestCase):
         self.assertFalse(list((self.state / "tier1").glob("*.json")), "no per-launch file for Pi")
 
     def test_named_claude_subscription_refuses_before_any_hook_or_spawn(self):
-        from test_account_credential_routes import row
-        account=row()
+        account={'id':'a','label':'A','runtime':'claude','kind':'subscription',
+                 'host':'synthetic-host','secret_ref':'a'*32}
         self.core.apply([{'op':'set','key':'doc/settings/accounts','value':{'accounts':[account]}}],'metadata')
         with patch('tier1.find_hook') as hook,self.assertRaises(VqroError) as caught:
             self.launch('claude',account=account['id'])
@@ -154,8 +154,8 @@ class Tier1Tests(unittest.TestCase):
         hook.assert_not_called();self.assertEqual(self.spawns(),[])
 
     def test_named_pi_launch_loads_native_alias_before_pull_with_explicit_flag(self):
-        from test_accounts_pi import PiPrepare
-        fixture=PiPrepare();fixture.setUp();account=fixture.b
+        account={'id':'b','label':'B','runtime':'pi','kind':'subscription',
+                 'provider':'fake-base','native_provider':'vqro_b'}
         self.core.apply([{'op':'set','key':'doc/settings/accounts','value':{'accounts':[account]}}],'metadata')
         self.launch('pi',account=account['id'])
         spawn=self.spawns()[0];argv=spawn['argv']

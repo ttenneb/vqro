@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import runpy
 import sys
 import unittest
 from unittest import mock
@@ -109,6 +110,18 @@ return module.background_kwargs()
             self.assertTrue(any(isinstance(node, ast.ImportFrom) and node.module == "vqro_process"
                                 and any(alias.name == "background_kwargs" for alias in node.names)
                                 for node in tree.body), filename + " must import the shared launch helper")
+
+    def test_isolated_bridge_loader_uses_the_same_installed_background_helper(self):
+        module=runpy.run_path(str(EXTENSIONS/'pi_bridge/launch.py'),run_name='isolated_launch_test')
+        loader=SimpleNamespace(exec_module=mock.Mock())
+        for windows in (False,True):
+            with self.subTest(windows=windows),platform(windows), \
+                 mock.patch.object(subprocess,'CREATE_NO_WINDOW',NO_WINDOW,create=True), \
+                 mock.patch.object(module['importlib'].util,'spec_from_file_location',return_value=SimpleNamespace(loader=loader)) as source, \
+                 mock.patch.object(module['importlib'].util,'module_from_spec',return_value=vqro_process):
+                self.assertEqual(module['_background_kwargs'](),{'creationflags':NO_WINDOW} if windows else {})
+                self.assertEqual(source.call_args.args[1],EXTENSIONS/'vqro_process.py')
+                loader.exec_module.assert_called_with(vqro_process)
 
     def test_all_background_sites_add_windows_flag_but_unix_has_no_creationflags(self):
         sites = inventory()
