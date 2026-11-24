@@ -251,6 +251,17 @@ class Tests(unittest.TestCase):
                 return result
             ext.call=call;result=c.cutover(args)
             self.assertEqual(result['disposition'],'offer');self.assertFalse(result['continuation_allowed']);self.assertFalse(result['fenced'])
+    def test_manual_auto_to_offer_live_mode_is_not_immutable_claim_staleness(self):
+        ext=Ext();c=Cutover(ext);p=c.prepare(dict(self.args(),automatic=False));args=self.claimed(ext,p,automatic=False);original=ext.call
+        def call(method,arguments):
+            result=original(method,arguments)
+            if method=='command.invoke' and arguments['name']=='accounts.claim.read':result['blocked_mode']=ext.policy['blocked']
+            return result
+        ext.call=call
+        ext.hook=lambda op,_:ext.policy.update(blocked='offer_restart') if op=='_account.fence' else None
+        result=c.cutover(args)
+        self.assertEqual(result['outcome'],'observed');self.assertEqual(result['attempted_targets'],['b']);self.assertFalse(result['fenced'])
+        self.assertFalse(any(m=='resource.invoke' and a.get('op')=='agent.send' for m,a in ext.calls))
     def test_prepare_is_readonly_and_native_episode_not_commonhash(self):
         ext=Ext();p=Cutover(ext).prepare(self.args())
         self.assertEqual(p['native_episode'],'native-turn');self.assertEqual(len(p['affected']),2)

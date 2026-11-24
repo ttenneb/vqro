@@ -252,7 +252,7 @@ class Cutover:
 
     @staticmethod
     def _same_claim(old, current):
-        projected={'version','max_switches','known_blocked_targets'}
+        projected={'version','max_switches','known_blocked_targets','blocked_mode'}
         return isinstance(current,dict) and type(current.get('version')) is int and current['version']>=old['version'] \
             and {k:v for k,v in old.items() if k not in projected}=={k:v for k,v in current.items() if k not in projected}
 
