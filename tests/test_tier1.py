@@ -143,6 +143,21 @@ class Tier1Tests(unittest.TestCase):
         self.assertEqual(declared["app"], "pi")
         self.assertFalse(list((self.state / "tier1").glob("*.json")), "no per-launch file for Pi")
 
+    def test_named_pi_launch_loads_native_alias_before_pull_with_explicit_flag(self):
+        from test_accounts_pi import PiPrepare
+        fixture=PiPrepare();fixture.setUp();account=fixture.b
+        self.core.apply([{'op':'set','key':'doc/settings/accounts','value':{'accounts':[account]}}],'metadata')
+        self.launch('pi',account=account['id'])
+        spawn=self.spawns()[0];argv=spawn['argv']
+        alias=str(tier1.HERE / 'pi_accounts' / 'index.mjs')
+        self.assertIn(alias,argv)
+        self.assertEqual(argv[argv.index(alias)-1],'-e')
+        self.assertLess(argv.index(alias),argv.index(str(tier1.PI_PLUGIN)))
+        metadata=json.loads(argv[argv.index('--vqro-account')+1])
+        self.assertEqual(metadata,{key:account[key] for key in ('id','label','provider','native_provider')})
+        self.assertEqual(json.loads(spawn['env']['VQRO_PI_ACCOUNT']),metadata)
+        self.assertNotIn('--vqro-account-login',argv)
+
     def test_each_launch_has_a_fresh_principal_and_nonce(self):
         self.core.shells = []
         self.launch("pi")

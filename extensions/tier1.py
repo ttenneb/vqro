@@ -123,6 +123,13 @@ class Tier1:
             if not PI_PLUGIN.is_file():
                 raise VqroError("the Pi plugin is not installed at " + str(PI_PLUGIN), "unavailable")
             declaration = pi_declaration()
+            if account:
+                alias_plugin=HERE / 'pi_accounts' / 'index.mjs'
+                if not alias_plugin.is_file():
+                    raise VqroError('Pi native account extension unavailable; nothing launched','unavailable')
+                metadata={key:account[key] for key in ('id','label','provider','native_provider')}
+                argv=[*argv,'-e',str(alias_plugin),'--vqro-account',
+                      json.dumps(metadata,ensure_ascii=False,separators=(',',':'))]
             argv = [*argv, "-e", str(PI_PLUGIN), *testing_args(HERE, self.ext)]
         params = {"argv": ["python3", str(RUN), "--", *argv], "name": runtime + "-" + nonce,
                   "env": account_environment(account, {"VQRO_PRINCIPAL": principal, "VQRO_TIER1_LAUNCH": nonce,
