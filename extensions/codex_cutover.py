@@ -401,8 +401,11 @@ class Cutover:
         issue=self._authority_issue(claim)
         if issue:return issue
         try:
+            # Complete blocking registry validation BEFORE the final protected
+            # policy/allowance projection; never mix an old allowance with a new cap.
+            if self._authorized_plan(claim)!=plan:return 'unconfirmed'
             current=self.ext.vqro.call('command.invoke',{'name':'accounts.claim.read','args':{'claim':args['_claim']}})
-            if not self._same_claim(claim,current) or not self._common_view_valid(current) or self._authorized_plan(current)!=plan:return 'unconfirmed'
+            if not self._same_claim(claim,current) or not self._common_view_valid(current):return 'unconfirmed'
             if target_index is not None and not self._common_target_allowed(current,target_index):return 'disabled'
         except Exception:return 'unconfirmed'
         return None

@@ -200,6 +200,18 @@ class Tests(unittest.TestCase):
         ext,c,_=self.walk();ext.policy['blocked']='offer_restart';p=c.prepare(dict(self.args(),automatic=False));args=self.claimed(ext,p,automatic=False);ext.claim['authorized_targets']=['b','c']
         with self.assertRaises(VqroError):c.cutover(args)
         self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
+    def test_registry_read_cannot_mix_old_allowance_with_new_positive_cap(self):
+        ext,c,args=self.walk();original=ext.call;armed=[False];changed=[False]
+        def call(method,arguments):
+            if method=='workspace.get' and arguments['key']=='doc/settings/accounts' and armed[0] and not changed[0]:
+                ext.max_switches=1;ext.policy['auto_cutover_max_per_hour']=1;changed[0]=True
+            result=original(method,arguments)
+            if method=='resource.invoke' and arguments['args']['name']=='_account.inspect' and arguments['resource']=='y':armed[0]=True
+            return result
+        ext.call=call;result=c.cutover(args)
+        self.assertTrue(changed[0]);self.assertEqual(result['attempted_targets'],['b'])
+        self.assertTrue(result['restored_only']);self.assertFalse(result['continuation_allowed'])
+        self.assertFalse(any(m=='resource.invoke' and a['args']['name']=='_account.switch' and a['args']['args']['account']['id']=='c' for m,a in ext.calls))
     def test_prepare_is_readonly_and_native_episode_not_commonhash(self):
         ext=Ext();p=Cutover(ext).prepare(self.args())
         self.assertEqual(p['native_episode'],'native-turn');self.assertEqual(len(p['affected']),2)
