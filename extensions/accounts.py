@@ -11,6 +11,7 @@ from accounts_cutover import Cutovers
 from accounts_claude import ClaudeCutover, eligible_episode as claude_episode
 from accounts_pi import PiCutover, eligible_error as pi_error
 from accounts_dispatch import Dispatch
+from accounts_codex_logins import SavedLogins
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError
 from vqro_display import label
@@ -28,6 +29,7 @@ class Accounts:
         self.claude = ClaudeCutover(ext)
         self.pi = PiCutover(ext)
         self.dispatch = Dispatch(self)
+        self.saved_logins = SavedLogins(ext,self.register)
         self.seen = {}
         self.pending = set()
         self.observations = {}
@@ -50,6 +52,7 @@ class Accounts:
                         'view/accounts-restarts':{'kind':'panel','title':'Continue this conversation','items':[]},
                         'view/accounts-restart-warning':{'kind':'panel','title':'Claude background-loss warning','items':[]},
                         'view/accounts-continuation':{'kind':'panel','title':'Confirm continuation','items':[]},
+                        'view/accounts-codex-logins':{'kind':'panel','title':'Codex saved logins','items':[]},
                         'menu/accounts':{'where':'status','label':'accounts','command':'accounts.show','order':55}})
         ext.on_event(self.changed)
 
@@ -93,6 +96,9 @@ class Accounts:
         for runtime in SELECTORS:
             items.append({'type':'text','style':'bold','text':runtime})
             items.append({'text':'Shared runtime login', 'command':COMMANDS[runtime], 'args':{'account':'normal'}})
+            if runtime=='codex':
+                items.extend([{'text':'Add Codex saved login…','command':'accounts.codex.logins'},
+                              {'text':'Refresh saved logins','command':'accounts.codex.logins.refresh'}])
             items.append({'text':'Sign in… (shared '+runtime+' login)', 'command':'accounts.sign_in',
                           'args':{'account':'normal','runtime':runtime}})
             for row in rows:
@@ -124,12 +130,18 @@ class Accounts:
     def add(self, args):
         try: row = json.loads(args['text']) if 'text' in args else args
         except (ValueError,TypeError): raise VqroError('enter a metadata-only account JSON object','invalid') from None
+        return self.register(row)
+
+    def register(self, row, expected=None, before_save=None):
         account = validate(native_registration(validate(row)))
         rows, revision = snapshot(self.ext)
+        if expected is not None and revision!=expected:
+            raise VqroError('account registry changed; refresh saved logins','stale')
         if len(rows) >= MAX_ACCOUNTS: raise VqroError('accounts registry is full','overloaded')
         if any(r['id']==account['id'] for r in rows): raise VqroError('account id already exists','conflict')
+        if before_save is not None:before_save()
         self.ext.apply([{'op':'set','key':SETTINGS,'expect':revision,'value':{'accounts':rows+[account]}}], 'accounts: add metadata')
-        self.ext.notify('Account metadata saved; use Sign in… to open the runtime. No credential file was read.','ok')
+        self.ext.notify('Account metadata saved. Native login and running agents are unchanged; no credential file was read.','ok')
         return {'client':{'close':True}}
 
     def remove(self, args):
@@ -176,6 +188,8 @@ class Accounts:
         if runtime not in SELECTORS: raise VqroError('choose a native program','invalid')
         native, env = self.native_argv(runtime,args.get('launcher'))
         argv = provider_argv(native,account)
+        if runtime == 'codex':
+            self.ext.notify('Native sign-in can change the shared login for external Codex CLI/IDE clients; they cannot be fenced by vqro.','warn')
         if runtime == 'pi' and account:
             if not account.get('native_provider') or not account.get('provider'):
                 raise VqroError('Pi account needs an explicit base provider and native alias before sign-in', 'unavailable')
@@ -191,6 +205,8 @@ class Accounts:
         try: shown=self.ext.invoke('tabs.show',{'resource':host}) or {}
         except VqroError: self.ext.notify('Sign-in terminal '+host+' exists; open it from the resource picker. Do not repeat the launch.','warn')
         self.ext.notify('Native sign-in terminal opened'+('; enter /login in Pi' if runtime=='pi' else '')+'. vqro does not inspect login success.','info')
+        if runtime=='codex':
+            self.ext.notify('After completing native sign-in, reopen Accounts and choose Refresh saved logins; select the managed Codex host/setup explicitly.','info')
         return {'outcome':result.get('outcome'),'resource':host,'client':shown.get('client',{})}
 
 

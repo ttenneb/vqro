@@ -18,7 +18,37 @@ falls back to ambient API keys. Sign in through the native `/login` command.
 Virtual model routes remain native: account switching is explicitly unavailable
 for those models, not privately reconstructed. See `docs/research/pi-account-cutover.md`.
 
-Codex registrations use the native saved-login reference:
+### Add a Codex saved login without copying IDs
+
+In **Accounts**, choose **Sign in… (shared codex login)** to open the configured
+native `codex login` terminal. Follow the native flow; vqro does not inspect success
+or promise that a second login was saved. Native sign-in can change the login for
+external Codex CLI/IDE clients, which vqro cannot fence.
+
+After sign-in, explicitly choose **Refresh saved logins** (or **Add Codex saved
+login…**) in Accounts. Select the managed Codex agent and its setup/execution-host
+context; discovery never silently picks a host or launches one. The host must be
+available, declare `setup_id`, and advertise `_account.list`. If absent, configure
+the Codex runtime and launch/restart an agent first. There is no automatic login
+success detector or background refresh.
+
+The picker displays only native `sessionId`, `accountId`, and `active`, with setup,
+execution-host and native-host context. These are opaque references, not verified
+email/workspace names. Choose a row, type your own display name, and submit once.
+vqro allocates the registration ID. Existing references are shown as already
+registered. No email labels are inferred and arbitrary native response fields are
+never displayed. Native errors are not echoed with their private payloads.
+
+Before saving, the host/setup/epoch/capability identity and native saved-login row
+are rechecked; a changed/disappeared row or stale registry refuses. The write is
+one expected-version registry transaction. No credential switch, bind, prompt or
+retry follows discovery. A transaction conflict needs an explicit refresh. This
+registers subscription metadata only, not proof of current login or quota.
+**New agent on …** still requires that login already to be natively active.
+Fake tests cover this flow; real saved-login/auth/billing interoperability remains
+unverified. API-key launch/cutover restrictions below are unchanged.
+
+Manual Codex registrations can still use the native saved-login reference:
 
 ```json
 {"id":"capacity-b","label":"Capacity B","runtime":"codex","kind":"subscription","login_ref":{"sessionId":"native-saved-session-id","accountId":"native-account-id"}}

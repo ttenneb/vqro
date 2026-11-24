@@ -3,6 +3,16 @@
 D16: build vqro itself, smallest complete and usable first. The north star: an agent can substantially modify its own
 workspace through reliable public primitives, without changing the host or endangering underlying processes.
 
+## Codex saved-login registration picker (candidate)
+
+Accounts can explicitly list saved logins on a human-selected managed Codex host/setup, show only native
+session/workspace IDs and active status, and register a human-named reference in one registry transaction.
+Host/epoch/capability identity and the selected native row are revalidated; stale choices and conflicts refuse.
+Native sign-in warns about external clients and requires an explicit saved-login refresh afterwards. No automatic
+login-success detector, credential switch, prompt or retry is added. Fake controls cover the UI-to-registry flow;
+exact quick/Windows, primary delta and secondary review remain separate qualification. Real native saved-login,
+auth and billing interoperability is unverified. See `../extensions/accounts.md`.
+
 ## RPC setup-testing follow-up (2026-11-23, candidate)
 
 The default isolated Pi launcher negotiates one installed testing-plugin bridge field using bounded help discovery.
