@@ -82,9 +82,12 @@ separate. Literal `client_composed` input is currently source-qualified for CLI 
 version remains observable without a guessed literal-send capability. Native hooks can still transform input:
 receipts retain `may_transform:"unknown"` rather than claiming no transformation.
 
-This first vertical slice projects conversation/tools, bounded consent forms, interrupt, startup metadata and
-turn-scoped availability. It does not claim native-TUI parity, complete native queues, transcript history,
-child/task control or settings mutation. Native queue stays unknown; the separately named
+This adapter projects conversation/tools, bounded consent forms, interrupt, startup metadata and
+turn-scoped availability, plus native task/child observations, scoped child items and structured tool-output
+plans. Qualified native `stop_task` is exposed as `agent.object` cancel for observed tasks/children; an ACK is
+accepted, not an observed stop. Child send/resume/close, plan writes and settings mutation are absent, never
+emulated. Native root interrupt remains all-work; no first-attach flags or per-task pane affordance are added.
+It does not claim native-TUI parity, complete native queues or transcript history. Native queue stays unknown; the separately named
 vqro input ledger is not native evidence. The private execution-host restart helper enables guarded
 `claude.restart`: default refusal for unknown/running background, explicit background-loss override only,
 observed old exit before exact-session resume, and no adapter input replay. A missing helper never prevents

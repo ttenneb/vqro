@@ -673,6 +673,9 @@ dialogs remain answerable; nothing is auto-approved.
    close, config) is inferred from the root, and a child may allow cancelling its own tool or terminal without
    allowing session cancel. Parentage does not prove that cancelling the parent cancels the child. `agent.object {v,
    epoch, action: cancel, kind, id}` cancels one declared item; an accepted cancel is not an observed end.
+   Its generic cap metadata is `agent.object {actions: [string], kinds: [string]}`; for example
+   `{actions: ["cancel"], kinds: ["task", "child"]}`. Clients ignore unknown list values; an absent cap means
+   unsupported. A declaration does not itself require a per-item pane button.
 6. **Display terminals and content.** Agent-owned terminals are `terminal` entities (§4); they are not backend
    terminals unless the adapter publishes one; `agent.object {action: cancel, kind: "terminal"}` stops one if
    declared. A `tool.diff` is a list of `{path, kind: add | modify | delete | rename, old_path?, before?, after?,

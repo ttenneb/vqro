@@ -1,4 +1,35 @@
 use super::*;
+#[test]
+fn structured_plan_output_is_correlated_and_input_intent_is_not_projected() {
+    let mut s = state();
+    s.record(&json!({"type":"assistant","uuid":"p1","message":{"content":[{"type":"tool_use","id":"p-tool","name":"TodoWrite","input":{"todos":[{"content":"intent"}]}}]}}));
+    s.record(&json!({"type":"user","uuid":"p2","message":{"content":[{"type":"tool_result","tool_use_id":"p-tool","content":"not parsed"}]},"tool_use_result":{"newTodos":[{"content":"actual output","status":"completed","activeForm":"done"}]}}));
+    let value = s.journal.entity("plan", "plan1").unwrap().1;
+    assert_eq!(value["items"][0]["text"], "actual output");
+    assert_eq!(value["tool"], "tool-p-tool");
+    assert!(
+        s.work.rows().is_empty(),
+        "model task tracking is NOT native execution work"
+    );
+    s.record(&json!({"type":"assistant","uuid":"p3","message":{"content":[{"type":"tool_use","id":"other","name":"TodoWrite","input":{}}]}}));
+    s.record(&json!({"type":"user","uuid":"p4","message":{"content":[{"type":"tool_result","tool_use_id":"p-tool"},{"type":"tool_result","tool_use_id":"other"}]},"tool_use_result":{"newTodos":[{"content":"ambiguous must not apply","status":"pending"}]}}));
+    let value = s.journal.entity("plan", "plan1").unwrap().1;
+    assert_eq!(value["items"][0]["text"], "actual output");
+    assert_eq!(value["incomplete"], true);
+}
+#[test]
+fn goal_clear_removes_old_objective_without_inferred_completion() {
+    let mut s = state();
+    s.record(&json!({"type":"active_goal","session_id":"ROOT","value":{"condition":"actual native objective","iterations":1}}));
+    assert_eq!(
+        s.journal.entity("goal", "current").unwrap().1["objective"],
+        "actual native objective"
+    );
+    s.record(&json!({"type":"active_goal","session_id":"ROOT","value":null}));
+    let value = s.journal.entity("goal", "current").unwrap().1;
+    assert!(value.get("objective").is_none());
+    assert_eq!(value["status"], "unknown");
+}
 fn state() -> State {
     let mut s = State::new("boot".into());
     s.initialized(&json!({"claude_code_version":"2.1.329"}));

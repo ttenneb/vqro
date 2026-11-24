@@ -112,6 +112,9 @@ def receive_control(frame):
         if INITIALIZED > 1:
             emit({"type": "system", "subtype": "background_tasks_changed", "uuid": "background-snapshot",
                   "session_id": SESSION, "tasks": []})
+    elif request["subtype"] == "stop_task":
+        # Native acceptance only: no synthetic terminal edge is manufactured by an ACK.
+        control(request_id, {})
     elif request["subtype"] == "interrupt":
         control(request_id, {"still_queued": []})
         if ACTIVE:

@@ -30,9 +30,13 @@ with a synthetic native peer. These are not real CLI/model/account qualification
 the vqro input ledger and complete per-process native background level are explicitly separate witnesses.
 See `research/claude-code-route1.md`. The subsequent guarded account-restart slice now has private helper
 preflight, one owned stop/observed-exit/resume/initialize path, generation fencing and explicit background-loss
-handling under synthetic qualification. Its capability requires configured helper support. Child/task control
-remains next; no capability is advertised for an unimplemented operation. Current final gate and protected source/secondary acceptance remain
-release requirements, not implied by the fixture evidence.
+handling under synthetic qualification. Its capability requires configured helper support. Observed-exit provenance,
+ordered FIFO lifetime publication and complete owner-RPC deadline bounds are separately source/test qualified.
+The children/tasks/plans slice now implements bounded native lifecycle/membership observations, isolated scoped
+child items/consent, structured tool-output plans/native goal and qualified `stop_task` via `agent.object` cancel.
+Child send/resume/close, plan writes and per-task pane affordance remain absent; no first-attach behaviour flags
+or prompt emulation are introduced. This slice's current final gates and protected source/secondary acceptance
+are still release requirements, not implied by its working-tree fixture coverage.
 
 ## Disposable setup performance checks (2026-11-22)
 

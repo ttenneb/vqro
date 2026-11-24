@@ -21,6 +21,51 @@ pub fn id(value: &Value) -> Result<&str, Refusal> {
             )
         })
 }
+pub fn object_cancel(args: &Value, state: &State) -> Result<(String, String, String), Refusal> {
+    common(args, state)?;
+    if args.get("epoch").is_none() {
+        return Err(fail(
+            "invalid",
+            "object cancellation requires its observation epoch",
+        ));
+    }
+    if args.as_object().unwrap().keys().any(|k| {
+        !matches!(
+            k.as_str(),
+            "v" | "epoch"
+                | "caps_rev"
+                | "guard"
+                | "cause"
+                | "correlation"
+                | "action"
+                | "kind"
+                | "id"
+        )
+    }) {
+        return Err(fail("invalid", "undeclared object cancellation argument"));
+    }
+    if args["action"] != "cancel" {
+        return Err(fail(
+            "unsupported",
+            "only native object cancel is supported",
+        ));
+    }
+    let kind = args["kind"]
+        .as_str()
+        .filter(|k| matches!(*k, "task" | "child"))
+        .ok_or_else(|| {
+            fail(
+                "unsupported",
+                "only observed tasks or children can be cancelled",
+            )
+        })?;
+    let id = id(&args["id"])?;
+    let native = state
+        .work
+        .cancel_target(kind, id)
+        .ok_or_else(|| fail("stale", "native object is unknown or no longer cancellable"))?;
+    Ok((kind.into(), id.into(), native.into()))
+}
 pub fn common(args: &Value, state: &State) -> Result<(), Refusal> {
     if !args.is_object() || args["v"] != 0 {
         return Err(fail("invalid", "v:0 object arguments are required"));

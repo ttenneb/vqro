@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use vqro::claude_code::restart::Config as RestartConfig;
 #[path = "restart_guards.rs"]
 mod guards;
+#[path = "work.rs"]
+mod work;
 struct NativeGuard(Arc<Shared>);
 impl Drop for NativeGuard {
     fn drop(&mut self) {

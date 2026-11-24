@@ -108,6 +108,37 @@ and mismatch/refusal is not success. Requested session is never copied into obse
 publishes only known id/provider/kind with `vqro:restart` sources and omits unknown label; it is not authenticated
 identity. Native/helper/model execution is still synthetic qualification only.
 
+## Native children, execution work and plans
+
+Pinned SDK0.3.329/CLI2.1.329 supplies per-process background membership levels and separate task lifecycle edges.
+Membership replaces only the background witness; leaving a level does NOT complete a task. Native run ids are
+ordered only within their task; older runs cannot overwrite a later run. Conflicting terminal evidence is
+unknown/incomplete. A backgrounded `main-session` task is not fabricated as a child.
+
+Positive producer `agent_id` or an unambiguous observed spawn `tool_use_id` binds scoped child messages/tools/requests.
+Unknown or over-bound scope is omitted/incomplete, never root content or an approvable root form. Child UUIDs/tool
+ids cannot update root receipts, session, foreground availability or tool/consent identity. Consent settlement
+is scope-specific; context-free snapshots retain the positively known scope of a live native question. Root phase
+ignores child questions, but restart separately refuses ANY unresolved native consent, preserving its safety fence.
+No child endpoint/principal/inbox or send/resume/close is invented.
+
+Only successful structured `tool_use_result`, correlated to one observed tool result/name, supplies plan values:
+TodoWrite.newTodos/TaskList.tasks are whole snapshots; TaskCreate/Get seed partial observed items. TaskUpdate's
+updatedFields does NOT contain actual values and never authorizes copying tool input (hooks may change it).
+Only explicit statusChange supplies that changed status; unknown IDs/fields remain incomplete until native readback.
+Tool task tracking is a plan, NOT native background execution. Lists without native owner/id are namespaced by
+observing context; producing a shared list does not prove ownership, so owner stays absent and observer child is
+only native metadata. An `active_goal` event is observed separately; null clears the objective but does not infer
+completion, and tokens_at_start is not reported as used tokens or a budget.
+
+Native `stop_task {task_id}` alone backs epoch-guarded `agent.object` cancel for observed tasks/children on qualified
+2.1.329. ACK means accepted, not stopped; terminal projection waits for actual native evidence. Unknown versions,
+objects/actions/kinds and raw native target overrides refuse before dispatch. Root interrupt remains `all_work`;
+`perTaskStopAffordance` and `forwardSubagentText` are not sent. Text appears only if the native default emits it.
+Forwarding text later would require emission-only source evidence and explicit opt-in; it is not silently enabled.
+No plan CRUD/model-prompt emulation or pane per-task button is added. Stores/items/identities are bounded; omitted
+fields/rows are marked incomplete, never shortened or inferred empty.
+
 ## Item lifetime
 
 Items have bounded entities/retention and tail coverage, not a complete native transcript. Process exit and

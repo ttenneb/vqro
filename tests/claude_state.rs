@@ -37,7 +37,10 @@ fn completed_content_blocks_sharing_api_id_do_not_overwrite_each_other() {
         json!({"type":"assistant","uuid":"child-message","session_id":"s1","agent_id":"child1","parent_tool_use_id":"tool1","message":{"content":[{"type":"text","text":"child only"}]}}),
     );
     assert!(s.journal.entity("message", "child-message.0").is_none());
-    assert!(s.incomplete.contains("children"));
+    assert!(
+        !s.incomplete.contains("children"),
+        "positive native producer is now scoped rather than dropped"
+    );
 }
 #[test]
 fn tools_and_native_permission_withdrawals_are_correlated_not_guessed_from_order() {
@@ -201,9 +204,14 @@ fn only_complete_native_background_level_establishes_known_empty() {
         &mut s,
         json!({"type":"system","subtype":"background_tasks_changed","session_id":"s1","tasks":[{"task_id":"native-task"}]}),
     );
-    assert!(
-        s.background.is_none(),
-        "unprojected nonempty level cannot become known empty"
+    assert_eq!(
+        s.background.as_ref().unwrap().len(),
+        1,
+        "a valid full nonempty membership is not empty or guessed unknown"
+    );
+    assert_eq!(
+        s.background.as_ref().unwrap()[0]["native"]["task_id"],
+        "native-task"
     );
     observe(
         &mut s,

@@ -355,7 +355,11 @@ impl Work {
         } else {
             None
         };
-        if status.is_some_and(|s| s.len() > 128) {
+        if status.is_some_and(|s| s.len() > 128)
+            || (status.is_none()
+                && (subtype == "task_notification"
+                    || (subtype == "task_updated" && frame["patch"].get("status").is_some())))
+        {
             row.value["status"] = json!("unknown");
             row.value["native"]
                 .as_object_mut()
@@ -364,12 +368,20 @@ impl Work {
             cut(&mut row.value);
             if row.child.is_some() {
                 row.child_value["status"] = json!("unknown");
+                row.child_value["native"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("status");
                 cut(&mut row.child_value);
             }
         }
         if let Some(status) = status.filter(|s| s.len() <= 128) {
             let terminal = matches!(status, "completed" | "failed" | "stopped" | "killed");
-            if row.terminal && terminal && row.value["native"]["status"] != status {
+            if row.terminal
+                && terminal
+                && (row.value["native"]["status"] != status
+                    || row.value["native"].get("conflicting_status").is_some())
+            {
                 row.value["status"] = json!("unknown");
                 row.value["native"]["conflicting_status"] = json!(status);
                 cut(&mut row.value);

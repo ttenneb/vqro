@@ -503,6 +503,35 @@ impl Shared {
                     Err(error) => native_failure(error),
                 }
             }
+            "agent.object" => {
+                let (kind, id, task) = {
+                    let state = self.state.lock().unwrap();
+                    if !state.ready || !state.literal_supported() {
+                        return rejected(
+                            "unsupported",
+                            "native task cancellation is not qualified for this process",
+                        );
+                    }
+                    match contract::object_cancel(&effect.args, &state) {
+                        Ok(v) => v,
+                        Err(e) => return rejected(e.kind, e.message),
+                    }
+                };
+                let remaining = effect.deadline.saturating_duration_since(Instant::now());
+                match native
+                    .call("stop_task", json!({"task_id":task}), remaining)
+                    .await
+                {
+                    Ok(reply) if reply.success => {
+                        Ok(Outcome::Accepted(Some(json!({"kind":kind,"id":id}))))
+                    }
+                    Ok(_) => Err(ProviderError::new(
+                        "backend",
+                        "native task cancellation not confirmed; no terminal outcome inferred",
+                    )),
+                    Err(error) => native_failure(error),
+                }
+            }
             "agent.interrupt" => {
                 let remaining = effect.deadline.saturating_duration_since(Instant::now());
                 let result = native.call("interrupt", json!({}), remaining).await;

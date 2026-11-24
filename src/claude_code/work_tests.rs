@@ -21,6 +21,11 @@ fn native_runs_are_ordered_and_terminal_never_regresses_to_running() {
     );
     assert_eq!(w.tasks["a"].value["status"], "unknown");
     assert_eq!(w.tasks["a"].value["incomplete"], true);
+    w.event(&json!({"subtype":"task_notification","task_id":"a","run_id":"3","status":"failed"}));
+    assert_eq!(
+        w.tasks["a"].value["status"], "unknown",
+        "duplicate terminal cannot erase an unresolved same-run conflict"
+    );
 }
 #[test]
 fn full_level_is_independent_membership_not_terminal_evidence() {

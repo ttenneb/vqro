@@ -19,6 +19,7 @@ pub struct State {
     pub startup: Startup,
     pub availability: Availability,
     pub(crate) work: super::work::Work,
+    plans: super::plans::Plans,
     pub ready: bool,
     pub restart_configured: bool,
     pub session: Option<String>,
@@ -72,6 +73,7 @@ impl State {
             startup: Startup::new(),
             availability: Availability::default(),
             work: super::work::Work::default(),
+            plans: super::plans::Plans::default(),
             ready: false,
             restart_configured: false,
             session: None,
@@ -149,6 +151,9 @@ impl State {
             caps["agent.send"] = json!({"modes":{"admit":{}},"content":{"types":["text"],"shape":"ordered","max_bytes":65536},
                 "literal":"always","origin":[{"as":"user","role":"user"},{"as":"attributed_user","role":"user","frame":"sender_header"}],
                 "correlation":"acceptance","handled":"none","keys":null,"guards":{"session":"adapter","run":"none"},"receipts":{"retain":256}});
+        }
+        if upper || (self.ready && self.literal_supported()) {
+            caps["agent.object"] = json!({"actions":["cancel"],"kinds":["task","child"]});
         }
         if self.restart_configured && (upper || (self.ready && self.literal_supported())) {
             caps["claude.restart"] = json!({"v":0,"session":"resume","background":"refuse_unless_explicit_loss","allow_background_loss":true});
@@ -333,6 +338,7 @@ impl State {
         self.outgoing.clear();
         self.availability = Availability::default();
         self.startup = Startup::new();
+        self.plans = super::plans::Plans::default();
         self.work_changes(self.work.rows());
     }
     fn work_changes(&mut self, changes: Vec<super::work::Change>) {
@@ -569,6 +575,13 @@ impl State {
                     }
                 }
             }
+            "active_goal" => {
+                let changes = self.plans.goal(frame);
+                self.work_changes(changes);
+                if self.plans.incomplete {
+                    self.incomplete.insert("plans".into());
+                }
+            }
             "rate_limit_event" => {}
             "auth_status" => {} // Never retain login output, which can contain authentication material.
             "system" if frame["subtype"] == "api_retry" => {}
@@ -737,7 +750,26 @@ impl State {
                                     value["incomplete"] = json!(true);
                                     self.incomplete.insert("tools".into());
                                 }
+                                let name = value["title"].as_str().unwrap_or("").to_owned();
                                 self.put("tool", &entity, value);
+                                let result_count =
+                                    blocks.iter().filter(|b| b["type"] == "tool_result").count();
+                                let output = if result_count == 1 {
+                                    &frame["tool_use_result"]
+                                } else {
+                                    &Value::Null
+                                };
+                                let changes = self.plans.observe(
+                                    &name,
+                                    &entity,
+                                    child,
+                                    output,
+                                    !block.get("is_error").is_none_or(|v| v == false),
+                                );
+                                self.work_changes(changes);
+                                if self.plans.incomplete {
+                                    self.incomplete.insert("plans".into());
+                                }
                             }
                         }
                     }
