@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import traceback
-from pi_provider_e2e import E2E, REPO, identity
+from pi_provider_e2e import E2E, REPO, identity, live
 
 
 class ClaudeLaunch(E2E):
@@ -24,6 +24,8 @@ class ClaudeLaunch(E2E):
         for source in (REPO / 'extensions').glob('*.py'):
             shutil.copy2(source, self.root / 'ext' / source.name)
         shutil.copytree(REPO / 'extensions/manifests', self.root / 'ext/manifests')
+        if self.args.restart_fixture:
+            shutil.copy2(REPO/'tests/fixtures/fake_claude_restart_helper.py',self.root/'ext/accounts_keychain_helper.py')
         peer = self.root / 'native-peer'
         shutil.copy2(REPO / 'tests/fixtures/fake_claude_stream.py', peer)
         peer.chmod(0o755)
@@ -41,6 +43,12 @@ class ClaudeLaunch(E2E):
         self.wait(lambda: required <= {row['name'] for row in self.call('command.list')['commands'] if row.get('available')}, 'public Claude launcher')
         runtime = {'name': 'synthetic', 'argv': [str(peer)], 'bridge_argv': [str(self.args.bridge)],
                    'bridge_env': {'FAKE_CLAUDE_LOG': str(ledger), 'CLAUDE_CODE_RESUME_INTERRUPTED_TURN': '1'}}
+        helper_log=self.root/'synthetic-helper.jsonl'
+        if self.args.restart_fixture:
+            account={'id':'synthetic-A','label':'Synthetic A','kind':'subscription','provider':'anthropic'}
+            account['sources']={key:'vqro:launcher' for key in account}
+            runtime['bridge_argv']=['/usr/bin/env','VQRO_ACCOUNT='+json.dumps(account),str(self.args.bridge)]
+            runtime['bridge_env'].update(FAKE_RESTART_LOG=str(helper_log),FAKE_RESTART_SESSION='same')
         self.call('workspace.apply', {'ops': [{'op': 'set', 'key': 'doc/settings/claude-code', 'value': {'runtimes': [runtime]}}],
                                      'note': 'Synthetic native executable only'})
         launched = self.call('command.invoke', {'name': 'claude-code.new', 'args': {'runtime': 'synthetic', 'cwd': str(self.root / 'work')}})
@@ -53,10 +61,14 @@ class ClaudeLaunch(E2E):
         native = resource['data']['agent']
         assert resource['host'] == host and resource['available'], resource
         assert native['principal'] == launched['principal'] and native['principal'].startswith('p:'), resource
-        assert 'account' not in native, 'normal login must not invent configured account/kind'
+        if self.args.restart_fixture:
+            assert native['account']['id']=='synthetic-A'
+        else:
+            assert 'account' not in native, 'normal login must not invent configured account/kind'
         assert native['session'] is None and native['queue'] is None, native
         lines = [json.loads(line) for line in ledger.read_text().splitlines()]
-        self.tracked.append(identity(next(row['pid'] for row in lines if 'pid' in row)))
+        initial_native=identity(next(row['pid'] for row in lines if 'pid' in row))
+        self.tracked.append(initial_native)
         terminal = self.hc('get', self.resource(host)['backend_ref'])
         self.tracked.append(identity(terminal['pid']))
         inputs = [row['in'] for row in lines if 'in' in row]
@@ -87,6 +99,33 @@ class ClaudeLaunch(E2E):
         native = self.resource(rid)['data']['agent']
         assert native['queue'] is None and native['_claude']['input_ledger']['pending'] == 0 and native['background'] == [], native
         self.log.append({'native_completion': native, 'literal_receipt': receipt, 'native_user_frame': user, 'model_calls': 0})
+        if self.args.restart_fixture:
+            args=dict(args,delivery='restart-limit',content=[{'type':'text','text':'[[limit]]'}])
+            self.call('resource.invoke',{'resource':rid,'op':'agent.send','args':args})
+            self.wait(lambda:self.resource(rid)['data']['agent'].get('availability',{}).get('native',{}).get('subscription_limit') is True,'native terminal subscription witness')
+            before=self.resource(rid)['data']['agent']
+            restart_args={'v':0,'epoch':before['epoch'],'session':before['session']['id'],'account':'synthetic-A',
+                'episode':before['availability']['native']['episode'],'target':{'account':'synthetic-B','ref':'0123456789abcdef0123456789abcdef','host':provider['host'],'revision':3}}
+            restarted=self.call('resource.invoke',{'resource':rid,'op':'claude.restart','args':restart_args})
+            assert restarted['data']['started'] is True and restarted['data']['resume_confirmed'] is True,restarted
+            assert restarted['data']['session']==restart_args['session'] and restarted['data']['epoch']!=restart_args['epoch'],restarted
+            self.wait(lambda:self.resource(rid)['data']['agent']['epoch']==restarted['data']['epoch'],'replacement epoch published')
+            after=self.resource(rid)['data']['agent'];assert after['account']['id']=='synthetic-B',after
+            assert 'label' not in after['account'] and after['account']['sources']=={key:'vqro:restart' for key in ('id','provider','kind')},after
+            assert after['host']['incarnation']!=before['host']['incarnation'] and not live(initial_native),after
+            entries=[json.loads(line) for line in ledger.read_text().splitlines()]
+            pids=[row['pid'] for row in entries if 'pid' in row];assert len(pids)==2,pids
+            self.tracked.append(identity(pids[-1]))
+            checks=[json.loads(line) for line in helper_log.read_text().splitlines()]
+            assert [row['action'] for row in checks]==['check','launch'],checks
+            assert checks[-1]['runtime'][-2:]==['--resume',restart_args['session']],checks
+            assert len([row for row in entries if row.get('in',{}).get('type')=='user'])==3,'adapter must not replay/continue'
+            # A NEW visible input is explicit test/caller work, not a restart side effect. It proves
+            # the existing CLI supervisor still serves the replacement process rather than exiting.
+            follow={'v':0,'epoch':after['epoch'],'mode':'admit','delivery':'after-restart','origin':{'kind':'human'},'content':[{'type':'text','text':'new visible test input'}]}
+            self.call('resource.invoke',{'resource':rid,'op':'agent.send','args':follow})
+            self.wait(lambda:self.call('resource.invoke',{'resource':rid,'op':'agent.receipt','args':{'v':0,'delivery':'after-restart'}})['data']['stage']=='completed','new epoch explicit input completion')
+            self.log.append({'restart_before':before,'restart_result':restarted,'restart_after':after,'private_helper_trace':checks,'caller_new_delivery':'after-restart','model_calls':0})
 
 
 def main():
@@ -95,6 +134,7 @@ def main():
         return 77
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', action='store_true', required=True)
+    parser.add_argument('--restart-fixture', action='store_true', help='Also exercise synthetic owned-process restart; no real helper/native calls')
     target = Path(os.environ.get('CARGO_TARGET_DIR') or REPO / 'target') / 'debug'
     for key, default in (('vqro', target / 'vqro'), ('bridge', target / 'vqro-bridge-claude'),
                          ('hc', Path(shutil.which('herdr-core') or 'herdr-core').resolve())):
@@ -111,6 +151,8 @@ def main():
         command = ['/usr/bin/unshare', '-Urnpmf', '--kill-child=KILL', '--mount-proc', '/usr/bin/python3', str(Path(__file__).resolve()),
                    '--run', '--vqro', str(args.vqro), '--bridge', str(args.bridge), '--hc', str(args.hc),
                    '--isolated-root', str(root), '--parent-net', os.readlink('/proc/self/ns/net')]
+        if args.restart_fixture:
+            command.append('--restart-fixture')
         code = subprocess.run(command, cwd=root, env={'HOME': str(root), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8',
                               'PYTHONDONTWRITEBYTECODE': '1'}, timeout=180).returncode
         print(json.dumps({'exit': code, 'receipt': str(root / 'receipt.json')}))

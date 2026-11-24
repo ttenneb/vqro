@@ -28,8 +28,10 @@ agent UI primitives. Conversation/tool projection, bounded consent forms, interr
 have synthetic wire coverage; `claude_launcher_e2e.py` also uses the existing private real-core/backend harness
 with a synthetic native peer. These are not real CLI/model/account qualifications. Native queue remains unknown;
 the vqro input ledger and complete per-process native background level are explicitly separate witnesses.
-See `research/claude-code-route1.md`. Account restart and child/task control remain subsequent slices; no capability
-is advertised for an unimplemented operation. Current final gate and protected source/secondary acceptance remain
+See `research/claude-code-route1.md`. The subsequent guarded account-restart slice now has private helper
+preflight, one owned stop/observed-exit/resume/initialize path, generation fencing and explicit background-loss
+handling under synthetic qualification. Its capability requires configured helper support. Child/task control
+remains next; no capability is advertised for an unimplemented operation. Current final gate and protected source/secondary acceptance remain
 release requirements, not implied by the fixture evidence.
 
 ## Disposable setup performance checks (2026-11-22)

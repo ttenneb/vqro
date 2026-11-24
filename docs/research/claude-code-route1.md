@@ -42,7 +42,7 @@ Interrupt reports the native control outcome, not a fabricated no-effect result 
 `still_queued` list is partial (UUID-stamped main-thread inputs only); `[]` is not a complete queue-empty
 witness. Likewise `result.queued_turn_count` excludes system-generated entries. Canonical `queue` stays null.
 Child records are not promoted to the parent's conversation. This slice does not implement child/task
-control, native settings changes, complete history or account restart.
+control, native settings changes or complete history.
 
 ## Availability and future cutover witnesses
 
@@ -64,10 +64,39 @@ malformed or not-yet-projected nonempty sets stay unknown/incomplete. Levels are
 changes must not discard a live background level merely because its event carries another session ID.
 Protocol failure/native process replacement invalidates the witness.
 
-These observations do not implement policy or claim that native internal queues are observable. A later
-`claude.restart` slice must guard exact source/session/account/episode, the owned ledger and native background
-level inside its admission fence; stop only its owned process and observe exit before a new exec. It must not
-replay input. Common policy/claims and any new visible continuation remain outside the adapter.
+These observations do not implement policy or claim that native internal queues are observable. The
+`claude.restart` primitive guards exact source/session/account/episode, the complete empty owned ledger and
+native background level inside its admission fence. Common policy/claims and any new visible continuation
+remain outside the adapter.
+
+## Guarded owned-process restart
+
+The private bridge flag `--restart-helper '["/ABS/HOST_PYTHON","/ABS/HELPER"]'` precedes the native `--`.
+It selects execution-host helper configuration, never executable/environment arguments from public restart
+input. Omitted configuration has no restart capability; an unavailable helper does not affect initial launch.
+The versioned operation takes `{v,epoch,session,account,episode,target:{account,ref,host,revision},
+allow_background_loss?}`. The loss flag defaults false; unknown/incomplete/running native background refuses.
+True bypasses ONLY background, never the source/host/ledger/main-turn checks. Human disclosure and AUTO's
+always-false choice belong to the calling policy, not this primitive.
+
+Execution host comes from the core-acknowledged provider registration's `host` (the same authenticated value
+as provider snapshot metadata), never native process `data.agent.host`. A private metadata-only preflight
+`check --handle REF --provider anthropic --kind claude_subscription` is bounded by both the effect deadline
+and35seconds, accepts only bounded `{status:ready}`, and never forwards helper stderr/secrets. Failure leaves
+A untouched. After revalidation, stop A; unknown exit refuses any new exec. Then invoke that same private
+helper prefix with `launch --handle REF --provider anthropic --kind claude_subscription --` followed by
+original controlled native settings/cwd and literal `--resume EXACT_SESSION`. No fork, rescue flag, retry,
+second supervisor, fallback to A or input replay is introduced. The helper, not the bridge, retrieves/sets auth.
+The newer helper/callback is supplied by the accounts stream; an older incompatible helper safely fails preflight.
+
+Generation checks occur under the observation state lock; old observations/initializers/automatic-response
+failures cannot mutate the replacement epoch. The existing CLI supervisor explicitly waits through an owned
+restart instead of treating its expected old-child exit as final provider termination. Bridge lifetime ending
+cancels helper/init waits and forbids a later replacement. Actual initialization success, not PID allocation,
+is `started:true`; native same-session readback confirms resume, missing readback stays explicitly unconfirmed,
+and mismatch/refusal is not success. Requested session is never copied into observed session. Configured B
+publishes only known id/provider/kind with `vqro:restart` sources and omits unknown label; it is not authenticated
+identity. Native/helper/model execution is still synthetic qualification only.
 
 ## Item lifetime
 

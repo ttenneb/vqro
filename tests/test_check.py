@@ -202,12 +202,13 @@ class CheckTests(unittest.TestCase):
                           'check --target x86_64-pc-windows-gnu --all-targets'] * 2)
 
     def test_claude_launcher_platform_selection_preserves_linux_coverage(self):
-        for system, expected in [('Darwin', 'skip'), ('Linux', 'PASS')]:
-            result, receipt, logs = self.gate('CHECK_SYSTEM=' + system + '\nstep build-zero-warnings true\nstep e2e-claude-launcher bash -c \'echo linux-command-executed\'')
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(next(row['result'] for row in receipt['steps'] if row['name'] == 'e2e-claude-launcher'), expected)
-            output = (logs/'e2e-claude-launcher.log').read_text()
-            self.assertEqual('linux-command-executed' in output, system == 'Linux')
+        for name in ('e2e-claude-launcher', 'e2e-claude-restart'):
+            for system, expected in [('Darwin', 'skip'), ('Linux', 'PASS')]:
+                result, receipt, logs = self.gate('CHECK_SYSTEM=' + system + '\nstep build-zero-warnings true\nstep ' + name + ' bash -c \'echo linux-command-executed\'')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(next(row['result'] for row in receipt['steps'] if row['name'] == name), expected)
+                output = (logs/(name+'.log')).read_text()
+                self.assertEqual('linux-command-executed' in output, system == 'Linux')
 
     def test_claude_launcher_non_linux_entrypoint_refuses_before_imports_or_effects(self):
         program = '''import sys,runpy
