@@ -355,9 +355,10 @@ class Cutovers:
             if key is None or value['blocks'].get(key,{}).get('episode')==marker:continue
             old=next((value['blocks'][oldkey] for oldkey in block_keys(account,accounts)
                       if oldkey in value['blocks'] and value['blocks'][oldkey]['episode']==marker),None)
-            if key not in value['blocks'] and old is not None:
-                # Promote identical evidence without renewing its reset/hour clock.
-                if len(value['blocks'])<128:
+            if old is not None:
+                # Identical legacy evidence is not a new observation, even when
+                # canonical holds a different episode. Preserve both clocks.
+                if key not in value['blocks'] and len(value['blocks'])<128:
                     value['blocks'][key]=copy.deepcopy(old);changed=True
                 continue
             resets=[]

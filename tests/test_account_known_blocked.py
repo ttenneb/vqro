@@ -80,6 +80,27 @@ class KnownBlocked(unittest.TestCase):
         self.now[0]+=11
         self.assertFalse(self.journal.known_blocked(self.b));self.assertFalse(self.journal.known_blocked(alias))
 
+    def test_matching_legacy_episode_does_not_renew_a_different_canonical_episode(self):
+        from accounts_cutover import credential_key
+        self.b['provider']='openai-codex'
+        row=source();row.update(kind='agent',available=True)
+        row['data']['agent'].update(account={'id':'b'},lifecycle='live',
+            caps={'agent.availability':{'reasons':['quota']}},
+            availability={'state':'blocked','reason':'quota','native':{'turnId':'same-legacy-E1'}})
+        self.journal.observe_limits([row],[self.a,self.b])
+        value,revision=self.journal.read();canonical=credential_key(self.b)
+        old_identity=('codex','openai-codex','subscription',None,'login_ref','saved-b','native-b')
+        legacy=hashlib.sha256(json.dumps(old_identity,separators=(',',':')).encode()).hexdigest()
+        old=copy.deepcopy(value['blocks'][canonical]);old['observed_at']=self.now[0]-100
+        earlier=dict(old,observed_at=self.now[0]-200,episode='different-E0')
+        value['blocks'][legacy]=old;value['blocks'][canonical]=earlier
+        self.journal.write(value,revision)
+        self.journal.observe_limits([row],[self.a,self.b])
+        value,_=self.journal.read()
+        self.assertEqual(value['blocks'][canonical],earlier);self.assertEqual(value['blocks'][legacy],old)
+        self.now[0]=old['observed_at']+3601
+        self.assertFalse(self.journal.known_blocked(self.b))
+
     def test_known_blocked_saved_codex_login_excludes_singleton_provider_spelling_alias(self):
         from account_credentials import eligible_alternatives
         self.b['provider']='openai';alias=dict(self.b,id='alias-b',provider='openai-codex')
