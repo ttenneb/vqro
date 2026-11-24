@@ -320,6 +320,34 @@ class Tests(unittest.TestCase):
                     with self.assertRaises(VqroError):c.cutover(args)
                 names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
                 self.assertNotIn('_account.switch',names);self.assertNotIn('_account.resume',names);self.assertEqual(names.count('_account.abort'),1 if ack=='unknown' else 2)
+    def test_authoritative_raised_stale_commit_rejection_restores_known_b(self):
+        ext,c,args=self.walk()
+        def hook(op,arguments):
+            if op=='_account.switch' and arguments['args']['args']['account']['id']=='c':
+                raise VqroError('prepared auth revision changed','stale',data={'outcome':'rejected'})
+        ext.hook=hook;result=c.cutover(args)
+        self.assertEqual(result['attempted_targets'],['b']);self.assertEqual(result['account'],'b')
+        self.assertTrue(result['restored_only']);self.assertFalse(result['fenced']);self.assertFalse(result['continuation_allowed'])
+        names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
+        self.assertEqual(names.count('_account.restore'),2);self.assertEqual(names.count('_account.release'),2)
+        self.assertNotIn('_account.abort',names)
+    def test_raised_kind_alone_unknown_or_malformed_commit_error_never_restores(self):
+        for kind,data in (('stale',None),('stale',{}),('stale',{'outcome':'unknown'}),('stale',{'outcome':True}),('backend',{'outcome':'rejected'}),('indeterminate',{'outcome':'rejected'}),('stale',[])):
+            with self.subTest(kind=kind,data=data):
+                ext,c,args=self.walk()
+                def hook(op,arguments):
+                    if op=='_account.switch' and arguments['args']['args']['account']['id']=='c':raise VqroError('unconfirmed native result',kind,data=data)
+                ext.hook=hook
+                with self.assertRaises(VqroError):c.cutover(args)
+                names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
+                self.assertNotIn('_account.restore',names);self.assertNotIn('_account.release',names);self.assertNotIn('_account.abort',names)
+    def test_raised_rejected_marker_requires_prepared_commit_context(self):
+        for name,payload in (('_account.status',{'prepared_ticket':'irrelevant'}),('_account.switch',{})):
+            ext=Ext();c=Cutover(ext)
+            def hook(op,args):raise VqroError('stale elsewhere','stale',data={'outcome':'rejected'})
+            ext.hook=hook
+            with self.assertRaises(VqroError) as error:c._invoke(ext.rows[0],name,payload)
+            self.assertIs(type(error.exception),VqroError)
     def test_prepare_is_readonly_and_native_episode_not_commonhash(self):
         ext=Ext();p=Cutover(ext).prepare(self.args())
         self.assertEqual(p['native_episode'],'native-turn');self.assertEqual(len(p['affected']),2)

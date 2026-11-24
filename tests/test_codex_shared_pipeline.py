@@ -217,6 +217,16 @@ class SharedPipeline(unittest.TestCase):
         self.assertEqual(core.op_entry['value']['groups'],{});self.assertEqual(core.app.cutovers.remaining('codex',record['affected']),3)
         self.assertEqual(core.sends,[]);self.assertNotIn('accounts-continuation',core.live)
         self.assertFalse(any(m=='resource.invoke' and a['args']['name']=='_account.switch' for m,a in core.native.calls))
+    def test_real_sdk_stale_ticket_rejection_after_b_releases_known_hosts(self):
+        core=Pipeline(False,True)
+        def hook(op,args):
+            if op=='_account.switch' and args['args']['args']['account']['id']=='c':raise VqroError('prepared auth changed','stale',data={'outcome':'rejected'})
+        core.native.hook=hook;core.app.handle_blocked('x')
+        record=next(r for r in core.op_entry['value']['claims'].values() if r.get('continuation_parent') is None)
+        self.assertEqual(record['attempted_targets'],['b']);self.assertNotEqual(record['state'],'unknown')
+        self.assertEqual(core.op_entry['value']['groups'],{});self.assertEqual(core.sends,[])
+        names=[a['args']['name'] for m,a in core.native.calls if m=='resource.invoke']
+        self.assertEqual(names.count('_account.restore'),2);self.assertEqual(names.count('_account.release'),2);self.assertNotIn('_account.abort',names)
     def test_b_blocked_c_ready_is_one_claim_prefix_and_one_new_turn(self):
         core=self.run_case(False,True)
         self.assertEqual(len(core.sends),1)
