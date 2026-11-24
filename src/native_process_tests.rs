@@ -1,6 +1,8 @@
 //! Memory-only controls for the shared writer's actual commit boundary and stdout drain outcome.
 #[path = "native_process_automatic_tests.rs"]
 mod automatic;
+#[path = "native_process_guarded_failure_tests.rs"]
+mod guarded_failure;
 use super::*;
 struct CodecStub;
 impl Codec for CodecStub {

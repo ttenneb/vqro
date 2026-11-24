@@ -31,6 +31,7 @@ fn inner() -> (Arc<Inner>, mpsc::Receiver<Write>) {
     let (writes, receiver) = mpsc::channel(4);
     let (stop, _) = watch::channel(false);
     let (exit, _) = watch::channel(None);
+    let (drained, _) = watch::channel(None);
     (
         Arc::new(Inner {
             pending: Mutex::new(HashMap::new()),
@@ -42,6 +43,7 @@ fn inner() -> (Arc<Inner>, mpsc::Receiver<Write>) {
             stopping: AtomicBool::new(false),
             stop,
             exit,
+            drained,
             stderr: Mutex::new(VecDeque::new()),
             stderr_total: AtomicU64::new(0),
             observe: Arc::new(|_| {}),
