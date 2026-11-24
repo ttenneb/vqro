@@ -7,7 +7,7 @@ from accounts import Accounts
 from accounts_policy import POLICY, CONTINUATION_TEXT
 from account_credentials import SETTINGS as REGISTRY
 from codex_cutover import Cutover, SETTINGS as CONSENT
-from test_codex_cutover import Ext as Native
+from test_codex_cutover import Ext as Native, synthetic_native_reject
 from test_account_capacity import NOW
 from vqro_ext import VqroError
 from public_provider_error import provider_error
@@ -220,7 +220,7 @@ class SharedPipeline(unittest.TestCase):
     def test_real_sdk_stale_ticket_rejection_after_b_releases_known_hosts(self):
         core=Pipeline(False,True)
         def hook(op,args):
-            if op=='_account.switch' and args['args']['args']['account']['id']=='c':raise VqroError('prepared auth changed','stale',data={'outcome':'rejected'})
+            if op=='_account.switch' and args['args']['args']['account']['id']=='c':synthetic_native_reject()
         core.native.hook=hook;core.app.handle_blocked('x')
         record=next(r for r in core.op_entry['value']['claims'].values() if r.get('continuation_parent') is None)
         self.assertEqual(record['attempted_targets'],['b']);self.assertNotEqual(record['state'],'unknown')

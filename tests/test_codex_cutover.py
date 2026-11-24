@@ -5,10 +5,11 @@ import sys
 import unittest
 import time
 import itertools
+import threading
 from unittest.mock import patch
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'extensions'))
-from vqro_ext import VqroError
+from vqro_ext import Vqro, VqroError
 from codex_cutover import Cutover, SETTINGS, HOST_COMMANDS
 from accounts_policy import episode, DEFAULTS, POLICY
 
@@ -80,6 +81,16 @@ class Ext:
                     {'sessionId':'saved-b','accountId':'workspace-b','active':ident=='b' or self.all_active},
                     {'sessionId':'saved-c','accountId':'workspace-c','active':ident=='c'}]}}
         raise AssertionError((method,args))
+
+def synthetic_native_reject():
+    # Drive the real public SDK parser, with a local decoded transport reply only.
+    rpc=Vqro.__new__(Vqro);rpc.lock=threading.Lock();rpc.waiting={};rpc.next=1;rpc.patient=False
+    def send(message):
+        slot=rpc.waiting[message['id']]
+        slot[1]={'error':{'code':-32000,'message':'prepared auth revision changed','data':{'kind':'stale','outcome':'rejected'}}}
+        slot[0].set()
+    rpc._send=send
+    return rpc.call('resource.invoke',{'op':'agent.command'})
 
 class Tests(unittest.TestCase):
     def args(self):return {'resource':'x','episode':episode(row('x','execution','native-x')),'account':'b','_account_revision':3,'automatic':True}
@@ -324,7 +335,7 @@ class Tests(unittest.TestCase):
         ext,c,args=self.walk()
         def hook(op,arguments):
             if op=='_account.switch' and arguments['args']['args']['account']['id']=='c':
-                raise VqroError('prepared auth revision changed','stale',data={'outcome':'rejected'})
+                synthetic_native_reject()
         ext.hook=hook;result=c.cutover(args)
         self.assertEqual(result['attempted_targets'],['b']);self.assertEqual(result['account'],'b')
         self.assertTrue(result['restored_only']);self.assertFalse(result['fenced']);self.assertFalse(result['continuation_allowed'])
@@ -332,7 +343,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(names.count('_account.restore'),2);self.assertEqual(names.count('_account.release'),2)
         self.assertNotIn('_account.abort',names)
     def test_raised_kind_alone_unknown_or_malformed_commit_error_never_restores(self):
-        for kind,data in (('stale',None),('stale',{}),('stale',{'outcome':'unknown'}),('stale',{'outcome':True}),('backend',{'outcome':'rejected'}),('indeterminate',{'outcome':'rejected'}),('stale',[])):
+        for kind,data in (('stale',None),('stale',{}),('stale',{'outcome':'unknown'}),('stale',{'outcome':True}),('backend',{'outcome':'rejected'}),('indeterminate',{'outcome':'rejected'}),('stale',[]),('stale',{'outcome':'rejected','kind':'backend'}),('stale',{'outcome':'rejected'})):
             with self.subTest(kind=kind,data=data):
                 ext,c,args=self.walk()
                 def hook(op,arguments):
@@ -344,7 +355,7 @@ class Tests(unittest.TestCase):
     def test_raised_rejected_marker_requires_prepared_commit_context(self):
         for name,payload in (('_account.status',{'prepared_ticket':'irrelevant'}),('_account.switch',{})):
             ext=Ext();c=Cutover(ext)
-            def hook(op,args):raise VqroError('stale elsewhere','stale',data={'outcome':'rejected'})
+            def hook(op,args):raise VqroError('stale elsewhere','stale',data={'outcome':'rejected','kind':'stale'})
             ext.hook=hook
             with self.assertRaises(VqroError) as error:c._invoke(ext.rows[0],name,payload)
             self.assertIs(type(error.exception),VqroError)

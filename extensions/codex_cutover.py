@@ -181,17 +181,17 @@ class Cutover:
     def _invoke(self, row, name, payload):
         # Each fence has explicit ALL-slot epoch witnesses; later phases use the
         # one-use fenced operation token, not the intentionally replaced old epoch.
-        def rejected_before_commit(kind,data):
+        def rejected_before_commit(kind,data,raised=False):
             # The public SDK raises rejected effects. Kind/message alone is not
             # evidence: restrict recovery to this prepared commit's stale guard.
             return name=='_account.switch' and text(payload.get('prepared_ticket')) and kind=='stale' \
-                and isinstance(data,dict) and data.get('outcome')=='rejected'
+                and isinstance(data,dict) and data.get('outcome')=='rejected' and (not raised or data.get('kind')==kind)
         try:
             result = self.ext.vqro.call('resource.invoke', {'resource': row['id'], 'op': 'agent.command',
                 'args': {'v': 0, 'name': name, 'args': payload},
                 'deadline_ms': 30000})
         except VqroError as error:
-            if rejected_before_commit(error.kind,error.data):
+            if rejected_before_commit(error.kind,error.data,raised=True):
                 raise _NativeRejected('native prepared commit rejected before credential effect','stale') from error
             raise
         if isinstance(result,dict) and rejected_before_commit((result.get('error') or {}).get('kind') if isinstance(result.get('error'),dict) else None,result):
