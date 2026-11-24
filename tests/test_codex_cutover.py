@@ -65,6 +65,7 @@ class Ext:
                 target['data']['agent']['_codex']['input_ledger']['epoch']='resumed-'+target['id']
             return {'outcome':'observed','data':{'quiescent':True,'operation':args['args']['args'].get('operation'),
                 'account_confirmed':True,'resumed':True,'released':self.released,'account':account,
+                'admissions':[{'session':'thread-'+args['resource'],'epoch':'resumed-'+args['resource'],'caps_rev':1,'expires_at_ms':int(time.time()*1000)+30000}] if op=='_account.release' and self.quota.get(ident) is True else [],
                 'ordinary_usage_allowed':self.quota.get(ident),'observed_at_ms':int(time.time()*1000),'reset_at_ms':None,'source':'codex.account/rateLimits',
                 'logins':[] if args['resource']==self.missing_on else [
                     {'sessionId':'saved-a','accountId':'workspace-a','active':ident=='a' and not self.all_active},
@@ -228,6 +229,28 @@ class Tests(unittest.TestCase):
         self.assertFalse(any(m=='resource.invoke' and a['args']['name']=='_account.switch' and a['args']['args']['account']['id']=='c' for m,a in ext.calls))
     def test_registry_read_revocation_refreshes_private_consent_before_c(self):self.registry_revocation_control('consent')
     def test_registry_read_revocation_refreshes_policy_before_c(self):self.registry_revocation_control('policy')
+    def test_quota_false_or_unknown_during_resume_restores_without_auto_permission(self):
+        for value in (False,None):
+            ext,c,args=self.walk(True)
+            ext.hook=lambda op,_:ext.quota.update(b=value) if op=='_account.resume' else None
+            result=c.cutover(args)
+            self.assertEqual(result['disposition'],'offer');self.assertFalse(result['continuation_allowed']);self.assertFalse(result['fenced'])
+            self.assertTrue(all('admission_caps_rev' not in row for row in result['affected']))
+    def test_missing_stale_or_ambiguous_release_permission_is_not_ready(self):
+        for mode in ('missing','expired','wrong_epoch','duplicate','boolean'):
+            ext,c,args=self.walk(True);original=ext.call
+            def call(method,arguments):
+                result=original(method,arguments)
+                if method=='resource.invoke' and arguments['args']['name']=='_account.release':
+                    proofs=result['data']['admissions']
+                    if mode=='missing':result['data']['admissions']=[]
+                    elif mode=='expired':proofs[0]['expires_at_ms']=0
+                    elif mode=='wrong_epoch':proofs[0]['epoch']='foreign'
+                    elif mode=='duplicate':proofs.append(copy.deepcopy(proofs[0]))
+                    else:proofs[0]['caps_rev']=True
+                return result
+            ext.call=call;result=c.cutover(args)
+            self.assertEqual(result['disposition'],'offer');self.assertFalse(result['continuation_allowed']);self.assertFalse(result['fenced'])
     def test_prepare_is_readonly_and_native_episode_not_commonhash(self):
         ext=Ext();p=Cutover(ext).prepare(self.args())
         self.assertEqual(p['native_episode'],'native-turn');self.assertEqual(len(p['affected']),2)

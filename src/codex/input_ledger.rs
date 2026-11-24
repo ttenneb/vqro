@@ -36,6 +36,7 @@ impl Endpoint {
             .session
             .clone()
             .ok_or_else(|| rejected("stale", "no current session"))?;
+        self.invalidate_included_usage(); // Consumed by this input; never a later automatic turn.
         self.owned_inputs.insert(
             delivery.to_owned(),
             OwnedInput {

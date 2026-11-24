@@ -684,6 +684,13 @@ stale or undeclared before a native write. The bundled agents extension wraps th
 `agents.configure {id, value, rev?}` and `agents.command {name, text?}`; grants (Control) come later, so for now
 any connected client may use them, as with every other agent op.
 
+A provider may expose an optional, explicitly declared conditional-admission capability and bind its lifetime
+into the existing agent `caps_rev` plus epoch/session guards. A client using that condition must preserve the
+witnessed revision, never replace it with a later unconditional capability snapshot. Invalidating the condition
+changes the provider revision before native admission; ordinary operations without that condition remain
+available. This adds no core guard field, quota policy, retry or persistence. Codex's native included-usage
+condition and bounded lifetime are specified in agent-v0; other providers do not emulate it.
+
 Agent resources may also carry read-only `data.agent.usage_limits` observations (agent-v0 §2.3): native-scoped
 limits with provenance and millisecond observation/reset times, not session token totals or inferred availability.
 The core transports these provider facts unchanged; grouping and usage panels are extension/live-view policy.

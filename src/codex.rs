@@ -5,6 +5,7 @@
 mod availability;
 mod children;
 mod input_ledger;
+mod included_usage;
 pub mod configuration;
 mod customization;
 pub mod observation;
@@ -237,6 +238,7 @@ pub struct Endpoint {
     pub completion: Option<Value>,
     pub lifecycle: String,
     pub caps_rev: u64,
+    included_usage: Option<included_usage::IncludedUsage>,
     model: Option<Value>,
     startup: startup::Startup,
     input_transform: Option<Value>,
@@ -284,6 +286,7 @@ impl Endpoint {
             completion: None,
             lifecycle: "live".into(),
             caps_rev: 1,
+            included_usage: None,
             model: None,
             startup: startup::Startup::default(),
             input_transform: None,
@@ -487,7 +490,8 @@ impl Endpoint {
         } else {
             caps.as_object_mut().unwrap().remove("agent.customize");
         }
-        caps["rev"] = json!(self.caps_rev);
+        caps["rev"] = json!(self.effective_caps_rev());
+        if self.included_usage_fact().is_some() {caps["agent.send"]["native_included_usage"]=json!(true);}
         let items = caps["agent"]["items"].clone();
         let requests: Vec<_> = self
             .pending
@@ -547,7 +551,7 @@ impl Endpoint {
         }
         if args
             .get("caps_rev")
-            .is_some_and(|v| v.as_u64() != Some(self.caps_rev))
+            .is_some_and(|v| v.as_u64() != Some(self.effective_caps_rev()))
         {
             return Err(rejected("stale", "capability revision changed"));
         }

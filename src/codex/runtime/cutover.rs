@@ -21,6 +21,14 @@ pub(super) const COMMANDS: [&str; 10] = [
     "_account.list",
 ];
 
+#[derive(Clone)]
+struct PermissionFence {
+    auth_revision: u64,
+    quota_revision: u64,
+    deadline: Instant,
+    expires_at_ms: u64,
+}
+
 pub(super) struct Barrier {
     operation: String,
     threads: Vec<(usize, String, String)>,
@@ -32,6 +40,7 @@ pub(super) struct Barrier {
     login_ref: Option<(String, String)>,
     authorized_targets: Vec<(String, String)>,
     attempted_targets: usize,
+    permission: Option<PermissionFence>,
 }
 
 fn bounded(v: &Value, max: usize) -> Option<&str> {
@@ -49,6 +58,37 @@ fn unknown() -> Fault {
 }
 
 impl Runtime {
+    fn bind_cutover_permission(&self, operation: &str) -> Result<Vec<Value>, Fault> {
+        let permission = self
+            .cutover
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|b| b.operation == operation)
+            .ok_or_else(unknown)?
+            .permission
+            .clone();
+        let permission = permission.filter(|p| {
+            p.auth_revision == self.auth_revision.load(Ordering::Acquire)
+                && p.quota_revision == self.account_revision.load(Ordering::Acquire)
+                && Instant::now() < p.deadline
+        });
+        let mut admissions = Vec::new();
+        for (i, slot) in self.slots.iter().enumerate() {
+            let mut e = slot.endpoint.lock().unwrap();
+            if let Some(p) = &permission {
+                e.bind_included_usage(p.deadline, p.expires_at_ms);
+            } else {
+                e.invalidate_included_usage();
+            }
+            if let Some(proof) = e.included_usage_fact() {
+                admissions.push(json!({"session":e.session,"epoch":e.epoch,"caps_rev":proof["caps_rev"],"expires_at_ms":proof["expires_at_ms"]}));
+            }
+            self.emit(i, &e, vec![e.state_entity()], false);
+        }
+        Ok(admissions)
+    }
+
     /// Nonsecret launch configuration, not discovered from native settings/credential files.
     pub fn set_cutover_setup(&self, setup: &str) -> Result<(), RpcError> {
         if setup.is_empty()
@@ -379,6 +419,7 @@ impl Runtime {
                 login_ref: None,
                 authorized_targets,
                 attempted_targets: 0,
+                permission: None,
             });
             return Ok(Outcome::Observed(Some(
                 json!({"operation":operation,"quiescent":self.quiescent()}),
@@ -479,6 +520,7 @@ impl Runtime {
                     }
                     b.stage = "switching"; // Credential effect is consumed before dispatch.
                     b.attempted_targets += 1;
+                    b.permission = None;
                 }
                 // Never relabel B notifications as the previous configured account A.
                 *self.launcher_account.lock().unwrap() = None;
@@ -486,6 +528,9 @@ impl Runtime {
                     let mut e = slot.endpoint.lock().unwrap();
                     e.reset_availability();
                     self.emit(i, &e, vec![e.state_entity()], false);
+                }
+                for slot in &self.slots {
+                    slot.endpoint.lock().unwrap().invalidate_included_usage();
                 }
                 let response = self.native.call_with_timeout("accountSession/switch", json!({"sessionId":session,"accountId":workspace,"allowBrowserLogin":false}), remaining(deadline)).await.map_err(|_| unknown())?;
                 // Browser/SSO results never count as account confirmation; no token/URL publication.
@@ -571,7 +616,14 @@ impl Runtime {
                         "inspected"
                     };
                     b.auth_revision = Some(after);
+                    b.permission = permission.filter(|v| *v).map(|_| PermissionFence {
+                        auth_revision: after,
+                        quota_revision,
+                        deadline: Instant::now() + Duration::from_secs(30),
+                        expires_at_ms: observed.saturating_add(30_000),
+                    });
                 }
+                self.bind_cutover_permission(operation)?;
                 Ok(Outcome::Observed(Some(
                     json!({"ordinary_usage_allowed":permission,"observed_at_ms":observed,"reset_at_ms":null,"source":"codex.account/rateLimits"}),
                 )))
@@ -714,8 +766,9 @@ impl Runtime {
                     .as_mut()
                     .ok_or_else(unknown)?
                     .stage = "resumed";
+                let admissions = self.bind_cutover_permission(operation)?;
                 Ok(Outcome::Observed(Some(
-                    json!({"operation":operation,"resumed":true,"account_confirmed":true,"account":self.launcher_account.lock().unwrap().clone()}),
+                    json!({"operation":operation,"resumed":true,"account_confirmed":true,"admissions":admissions,"account":self.launcher_account.lock().unwrap().clone()}),
                 )))
             }
             "_account.release" => {
@@ -726,6 +779,7 @@ impl Runtime {
                 }
                 self.refresh_account_confirmation(operation, deadline)
                     .await?;
+                let admissions = self.bind_cutover_permission(operation)?;
                 let mut b = self.cutover.lock().unwrap().take().ok_or_else(unknown)?;
                 let account_name = b
                     .account
@@ -750,7 +804,7 @@ impl Runtime {
                 }
                 b.guards.clear();
                 Ok(Outcome::Observed(Some(
-                    json!({"operation":operation,"released":true}),
+                    json!({"operation":operation,"released":true,"admissions":admissions}),
                 )))
             }
             _ => Err(Fault::unsupported("unknown native account command")),

@@ -124,7 +124,10 @@ async fn fake(mode: &'static str) -> Fake {
                         write.write_all(format!("{}\n",json!({"id":request["id"],"error":{"code":-32000,"message":"unknown native admission"}})).as_bytes()).await.unwrap();
                         continue;
                     }
-                    assert_eq!(mode, "admitted_unstarted");
+                    assert!(matches!(
+                        mode,
+                        "admitted_unstarted" | "quota_resume_stale" | "quota_ready_send"
+                    ));
                     json!({"turn":{"id":"not-yet-started","status":"inProgress"}})
                 }
                 "account/rateLimits/read" => {
@@ -135,9 +138,12 @@ async fn fake(mode: &'static str) -> Fake {
                     if mode == "quota_newer_false" || mode == "quota_newer_null" {
                         write.write_all(format!("{}\n",json!({"method":"account/rateLimits/updated","params":{"ordinaryUsageAllowed":if mode=="quota_newer_false" {Some(false)}else{None},"accountId":"workspace-b"}})).as_bytes()).await.unwrap();
                     }
-                    json!({"ordinaryUsageAllowed":if mode=="quota_walk" {Some(switched_c)}else if mode=="quota_wrong_scope" || mode.starts_with("quota_newer_") {Some(true)}else{None},"accountId":if mode=="quota_wrong_scope" {"workspace-a"}else if switched_c {"workspace-c"}else{"workspace-b"}})
+                    json!({"ordinaryUsageAllowed":if mode=="quota_walk" {Some(switched_c)}else if mode=="quota_wrong_scope" || mode.starts_with("quota_newer_") || mode=="quota_resume_stale" || mode=="quota_ready_send" {Some(true)}else{None},"accountId":if mode=="quota_wrong_scope" {"workspace-a"}else if switched_c {"workspace-c"}else{"workspace-b"}})
                 }
                 "thread/resume" => {
+                    if mode == "quota_resume_stale" {
+                        write.write_all(format!("{}\n",json!({"method":"account/rateLimits/updated","params":{"accountId":"workspace-b","ordinaryUsageAllowed":false}})).as_bytes()).await.unwrap();
+                    }
                     assert_eq!(request["params"], json!({"threadId":"thread-a"}));
                     json!({"thread":{"id":if mode == "wrong_thread" {"other"} else {"thread-a"},"status":{"type":"idle"}}})
                 }
@@ -551,6 +557,79 @@ async fn ordered_native_plan_rejects_duplicates_overflow_and_unreserved_first_ta
             .any(|m| m == "accountSession/switch")
     );
     command(&f, "_account.switch", target()).await.unwrap();
+}
+
+#[tokio::test]
+async fn inspected_true_snapshot_does_not_authorize_auto_after_resume_negative() {
+    let f = fake("quota_resume_stale").await;
+    fence(&f).await;
+    command(&f, "_account.switch", target()).await.unwrap();
+    let Outcome::Observed(Some(quota)) = command(&f, "_account.inspect", json!({})).await.unwrap()
+    else {
+        panic!("inspect")
+    };
+    assert_eq!(quota["ordinary_usage_allowed"], true);
+    let positive_caps =
+        f.runtime.fact("endpoint-1").unwrap()["data"]["agent"]["caps"]["rev"].clone();
+    command(&f, "_account.resume", json!({})).await.unwrap();
+    command(&f, "_account.release", json!({})).await.unwrap();
+    let fact = f.runtime.fact("endpoint-1").unwrap();
+    let result=f.runtime.invoke("endpoint-1","inc","agent.send",json!({"v":0,"mode":"admit","delivery":"automatic-new-turn","caps_rev":positive_caps,"epoch":fact["data"]["agent"]["epoch"],"guard":{"session":"thread-a"},"origin":{"principal":"p","actor":"vqro.accounts","kind":"tool"},"content":[{"type":"text","text":"new continuation"}]}),Instant::now()+Duration::from_secs(2)).await.unwrap();
+    assert!(
+        matches!(result, Outcome::Rejected { .. }),
+        "processed newer negative must invalidate the positive AUTO snapshot before native input"
+    );
+}
+
+async fn guarded_input(f: &Fake, delivery: &str, caps: Value) -> Outcome {
+    let fact = f.runtime.fact("endpoint-1").unwrap();
+    f.runtime.invoke("endpoint-1","inc","agent.send",json!({"v":0,"mode":"admit","delivery":delivery,"caps_rev":caps,"epoch":fact["data"]["agent"]["epoch"],"guard":{"session":"thread-a"},"origin":{"principal":"p","actor":"a","kind":"tool"},"content":[{"type":"text","text":"new input"}]}),Instant::now()+Duration::from_secs(2)).await.unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn released_permission_rev_guards_auto_but_not_ordinary_human_input() {
+    for changed in ["none", "false", "null", "auth", "expiry", "model"] {
+        let f = fake("quota_ready_send").await;
+        fence(&f).await;
+        command(&f, "_account.switch", target()).await.unwrap();
+        command(&f, "_account.inspect", json!({})).await.unwrap();
+        command(&f, "_account.resume", json!({})).await.unwrap();
+        let Outcome::Observed(Some(released)) =
+            command(&f, "_account.release", json!({})).await.unwrap()
+        else {
+            panic!("release")
+        };
+        let caps = released["admissions"][0]["caps_rev"].clone();
+        assert!(caps.is_u64());
+        match changed {
+            "false" | "null" => f.runtime.incoming(Incoming::Notification {
+                method: "account/rateLimits/updated".into(),
+                params: json!({"ordinaryUsageAllowed":if changed=="false" {Some(false)}else{None}}),
+            }),
+            "auth" => f.runtime.incoming(Incoming::Notification {
+                method: "account/updated".into(),
+                params: json!({"authMode":"chatgpt"}),
+            }),
+            "expiry" => tokio::time::advance(Duration::from_secs(31)).await,
+            "model" => f.runtime.slots[0].endpoint.lock().unwrap().config_rev += 1,
+            _ => {}
+        }
+        let outcome = guarded_input(&f, "auto", caps).await;
+        if changed == "none" {
+            assert!(matches!(outcome, Outcome::Accepted(_)));
+        } else {
+            assert!(matches!(outcome, Outcome::Rejected { .. }), "{changed}");
+            let fact = f.runtime.fact("endpoint-1").unwrap();
+            assert!(fact["data"]["agent"]["caps"]["agent.send"]["native_included_usage"].is_null());
+            assert!(
+                matches!(
+                    guarded_input(&f, "human", fact["data"]["agent"]["caps"]["rev"].clone()).await,
+                    Outcome::Accepted(_)
+                ),
+                "ordinary input remains available after {changed}"
+            );
+        }
+    }
 }
 
 fn restore_accounts() -> Value {

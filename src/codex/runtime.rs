@@ -500,9 +500,11 @@ impl Runtime {
                 ) {
                     for (index, slot) in self.slots.iter().enumerate() {
                         let mut endpoint = slot.endpoint.lock().unwrap();
+                        let before=endpoint.effective_caps_rev();
+                        endpoint.invalidate_included_usage();
                         if auth_changed { endpoint.invalidate_availability_auth_scope(); }
                         let mut changes = endpoint.notification(&method, &params);
-                        if auth_changed && changes.is_empty() { changes.push(endpoint.state_entity()); }
+                        if (auth_changed || before!=endpoint.effective_caps_rev()) && changes.is_empty() { changes.push(endpoint.state_entity()); }
                         if !changes.is_empty() {
                             self.emit(index, &endpoint, changes, false);
                         }

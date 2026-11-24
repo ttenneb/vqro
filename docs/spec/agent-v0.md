@@ -230,6 +230,15 @@ authentication and quota-revision fences. Only explicit false permission permits
 positive percentages or elapsed reset times never authorize model input. Unknown/failed permission reads restore
 and release exact conversations on the independently confirmed current login, with zero automatic continuation.
 All blocked targets similarly restore/release and notify; only explicit true permission may produce `ready`.
+A positive native inspection also enables optional `caps.agent.send.native_included_usage:true`.
+Its existing `caps_rev` is a conditional-admission witness, not a new guard or timing mode. The witness is
+bound to native auth/quota revisions and exact resumed conversation/configuration, expires30seconds after
+inspection, and is invalidated by a newer auth/quota observation or any admitted owned input. Expiry removes
+the capability and changes the effective revision before validation. Normal human input remains supported.
+Confirmed release exports each session/epoch's positive revision and expiry; callback affected members carry
+`admission_caps_rev` and `admission_expires_at_ms`. AUTO must use THAT revision with the existing epoch/session
+guards, never substitute a later unconditional capability snapshot. Missing/stale permission restores/releases
+known conversations and offers instead; definite no-input guard rejection is not an uncertain admission retry.
 The callback reports the actual `attempted_targets` prefix, `inspected_blocked` observations, final account,
 `disposition: ready|offer|all_blocked`, exact resumed membership and `fenced:false` only after confirmed release.
 An unknown credential effect stays fenced and is never replayed. Common's live claim projection supplies

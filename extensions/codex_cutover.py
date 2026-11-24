@@ -391,9 +391,19 @@ class Cutover:
         final_index=len(attempted)-1 if disposition=='ready' else None
         issue = self._walk_issue(args,claim,plan,final_index)
         if issue:return self._walk_result(self._restore_revoked(fenced,hosts,payload,prepared,issue),attempted,blocked,'offer')
-        issue = self._resume_and_release(fenced,payload,claim)
+        issue,admissions = self._resume_and_release(fenced,payload,claim)
         expected = {m['resource']:target['id'] for m in prepared['affected']}
         result = self._observed(prepared,expected,bool(issue))
+        by_session={}
+        for proof in admissions:
+            if isinstance(proof,dict) and text(proof.get('session')) and text(proof.get('epoch')):
+                key=(proof['session'],proof['epoch'])
+                by_session[key]=proof if key not in by_session else None
+        for member in result['affected']:
+            proof=by_session.get((member['session'],member['epoch'])) or {}
+            if type(proof.get('caps_rev')) is int and proof['caps_rev']>0 and type(proof.get('expires_at_ms')) is int and proof['expires_at_ms']>int(time.time()*1000):
+                member.update(admission_caps_rev=proof['caps_rev'],admission_expires_at_ms=proof['expires_at_ms'])
+        if disposition=='ready' and any('admission_caps_rev' not in member for member in result['affected']):disposition='offer'
         if not issue and self._walk_issue(args,claim,plan,final_index):result.update(restored_only=True,continuation_allowed=False)
         return self._walk_result(result,attempted,blocked,disposition)
 
@@ -417,7 +427,7 @@ class Cutover:
         return result
 
     def _resume_and_release(self,fenced,payload,claim):
-        resumed, failed, issue = [], False, None
+        resumed, failed, issue, admissions = [], False, None, []
         for row, _ in fenced:
             try:
                 result = self._invoke(row, '_account.resume', payload)
@@ -430,9 +440,10 @@ class Cutover:
             try:
                 released=self._invoke(row, '_account.release', dict(payload,revoked=bool(issue),revocation_kind=issue))
                 if released.get('released') is not True:fail('native fence release unconfirmed','indeterminate')
+                if isinstance(released.get('admissions'),list):admissions.extend(released['admissions'])
             except Exception:failed = True
         if failed:fail('native lifecycle partly unconfirmed; other confirmed peers processed, no continuation','indeterminate')
-        return issue or self._authority_issue(claim)
+        return issue or self._authority_issue(claim),admissions
 
     def _authority_issue(self,claim):
         try:self._authorization(claim)
