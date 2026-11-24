@@ -580,15 +580,25 @@ impl Shared {
         let Some(runtime_host) = provider.registration()["host"].as_str() else {
             return rejected("unavailable", "authenticated runtime host unavailable");
         };
-        let resources = match provider
-            .call("resource.list", json!({"id":runtime_host}))
-            .await
+        // The SDK reply timer starts after send_line's byte-budget wait. Bound the
+        // WHOLE read-only lookup while holding admission, as for agent.send above.
+        let resources = match tokio::time::timeout_at(
+            effect.deadline,
+            provider.call("resource.list", json!({"id":runtime_host})),
+        )
+        .await
         {
-            Ok(value) => value,
-            Err(_) => {
+            Ok(Ok(value)) => value,
+            Ok(Err(_)) => {
                 return rejected(
                     "unavailable",
                     "authenticated backend host facts unavailable",
+                );
+            }
+            Err(_) => {
+                return rejected(
+                    "timeout",
+                    "host lookup deadline before helper or owned stop",
                 );
             }
         };
