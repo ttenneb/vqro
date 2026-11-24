@@ -219,10 +219,10 @@ class Accounts:
 
     def continuation_offer(self,claim,target):
         self.ext.publish('accounts-continuation',{'title':'Continue on '+label(target['label']),'requires':['menu'],'items':[
-            {'type':'text','text':'Switched to account '+label(target['label'])+'; its usage could not be read. Continue?'},
+            {'type':'text','text':'Switched to account '+label(target['label'])+'; current included usage is unconfirmed. Continue?'},
             {'type':'text','text':'One NEW visible vqro/tool turn on the original conversation. No native switch or earlier input replay.'},
             {'text':'Continue','command':'accounts.continuation.confirm','args':{'claim':claim}}]})
-        self.ext.notify('Switched to account '+label(target['label'])+'; usage could not be read. Owner continuation choice available.','warn')
+        self.ext.notify('Switched to account '+label(target['label'])+'; current included usage is unconfirmed. Owner continuation choice available.','warn')
 
     def confirm_continuation(self,args):
         if not isinstance(args,dict) or set(args)!={'claim'}:raise VqroError('only the same claim reference is accepted','invalid')

@@ -4,6 +4,7 @@ Runtime callbacks own native execution. This owner alone claims and submits the
 continuation. Neither a callback result nor a failed send is ever replayed.
 """
 import copy
+import math
 from accounts_cutover import MAX_TARGETS, member, text
 from accounts_pi import same_model as same_pi_model
 from account_credentials import snapshot, credential_identity
@@ -119,10 +120,32 @@ class Dispatch:
             self.journal.await_owner(child,[destination])
             self.owner.continuation_offer(child,target)
 
+    @staticmethod
+    def admission_revision(result,item,native):
+        rows=result.get('affected',[]) if isinstance(result,dict) else []
+        matches=[row for row in rows if isinstance(row,dict) and row.get('resource')==item['resource']
+                 and row.get('epoch')==item['epoch'] and row.get('session')==item['session']
+                 and row.get('account')==item['account']]
+        if len(matches)!=1:return None
+        witness=matches[0];revision=witness.get('admission_caps_rev');expires=witness.get('admission_expires_at_ms')
+        now=policy.now_ms();caps=native.get('caps') or {};send=caps.get('agent.send') or {}
+        if (type(revision) is not int or revision<=0 or type(expires) is not int
+                or type(now) not in (int,float) or not math.isfinite(now) or now>=expires
+                or caps.get('rev')!=revision or send.get('native_included_usage') is not True):return None
+        return revision
+
+    def offer_admission(self,claim,target,members,result,*,rejected=None):
+        self.journal.await_owner(claim,members,rejected=rejected)
+        self.owner.continuation_offer(claim,target)
+        return dict(result,disposition='offer',continuation_allowed=False,
+                    continuation_reason='native included-usage admission is unconfirmed')
+
     def confirm_continuation(self,token):
         self.journal.authorization(False)
         record=self.journal.lookup(token)
         if record['state']!='awaiting_owner':raise VqroError('continuation offer already consumed','conflict')
+        if record.get('blocked_mode') not in ('auto_restart','offer_restart'):
+            raise VqroError('current policy permits notification only; nothing submitted','policy_changed')
         destinations=[item for item in record['resumed_members'] if item['session']==record['session']]
         if len(destinations)!=1:raise VqroError('original conversation destination is ambiguous','stale')
         item=destinations[0]
@@ -219,6 +242,14 @@ class Dispatch:
             else:
                 self.journal.reject_before_effect(claim)
             raise
+        if (target['runtime']=='codex' and isinstance(result,dict) and result.get('outcome')=='rejected'
+                and result.get('attempted_targets')==[] and result.get('fenced') is False
+                and result.get('continuation_allowed') is False):
+            # Explicit callback proof: no credential commit, all aborts ACKed.
+            # This is not a lost/uncertain callback and refunds the full prefix.
+            self.journal.reject_before_effect(claim)
+            self.ext.notify('Policy changed before any account switch; nothing restarted or sent.','warn')
+            return result
         disposition=result.get('disposition','ready') if isinstance(result,dict) else None
         restored_only=isinstance(result,dict) and result.get('restored_only') is True
         nonready=disposition in ('offer','all_blocked') or restored_only
@@ -309,7 +340,12 @@ class Dispatch:
                 mode = 'start' if 'start' in modes else 'admit' if target['runtime'] in ('codex', 'claude') and 'admit' in modes else None
                 if not mode or type(caps.get('rev')) is not int:
                     raise VqroError('destination cannot admit a new attributed turn', 'unsupported')
-                wire = {'v': 0, 'caps_rev': caps['rev'], 'epoch': item['epoch'], 'mode': mode,
+                witnessed_revision=caps['rev']
+                if target['runtime']=='codex' and old['session']==policy.facts(source)['session']['id']:
+                    witnessed_revision=self.admission_revision(result,item,native)
+                    if witnessed_revision is None:
+                        return self.offer_admission(claim,target,restored,result)
+                wire = {'v': 0, 'caps_rev': witnessed_revision, 'epoch': item['epoch'], 'mode': mode,
                         'content': [{'type': 'text', 'text': configured['continuation_text']}],
                         'origin': {'kind': 'tool', 'sender': 'vqro.accounts' if confirmed else 'vqro.accounts (resume unconfirmed)'},
                         'render': ['attributed_user']}
@@ -340,6 +376,11 @@ class Dispatch:
                 except Exception:
                     self.journal.continuation_result(claim, old, observed=False)
                     raise
+                if (target['runtime']=='codex' and isinstance(sent,dict) and sent.get('outcome')=='rejected'
+                        and isinstance(sent.get('error'),dict) and sent['error'].get('kind')=='stale'):
+                    # Native contract: capability/epoch/session PRE-WRITE rejection.
+                    # Preserve the cancelled AUTO delivery and offer one owner turn.
+                    return self.offer_admission(claim,target,restored,result,rejected=old)
                 acknowledged = isinstance(sent, dict) and sent.get('outcome') in ('observed', 'accepted', 'dispatched')
                 self.journal.continuation_result(claim, old, observed=acknowledged)
                 if not acknowledged:

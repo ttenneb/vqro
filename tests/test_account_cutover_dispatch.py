@@ -43,9 +43,11 @@ class Core(JournalCore):
             self.assert_effect_args = copy.deepcopy(args)
             native = self.resources['r1']['data']['agent']
             native.update(epoch='new-epoch', availability={'state': 'available'}, account={'id': 'b'},
-                          caps={'rev': 2, 'agent.send': {'modes': {'admit': {}}, 'origin': [{'as': 'attributed_user'}]}})
+                          caps={'rev': 2, 'agent.send': {'modes': {'admit': {}}, 'origin': [{'as': 'attributed_user'}],
+                                                     'native_included_usage':True}})
             return {'outcome': self.result_outcome, 'account': 'b', 'affected': [{'resource': 'r1', 'host': 'terminal-1',
-                'session': 'session-1', 'epoch': 'new-epoch', 'account': 'b', 'session_confirmed': True, 'resumed': True}]}
+                'session': 'session-1', 'epoch': 'new-epoch', 'account': 'b', 'session_confirmed': True, 'resumed': True,
+                'admission_caps_rev':2,'admission_expires_at_ms':NOW+30000}]}
         return super().invoke(name, args)
 
     def call(self, method, params=None):

@@ -61,6 +61,14 @@ def active_account_block(value,account,accounts,now):
                for key in block_keys(account,accounts))
 
 
+def owner_offer_children(record):
+    children=record['continuations']
+    if not children:return True
+    if set(children)!={record['session']}:return False
+    child=children[record['session']]
+    return child['state']=='cancelled' and child.get('rejected_delivery')==child['delivery']
+
+
 def limit_marker(resource):
     native=facts(resource);availability=native.get('availability')
     reported=availability.get('native') if isinstance(availability,dict) else None
@@ -239,7 +247,9 @@ class Cutovers:
                 if not isinstance(children, dict) or len(children) > MAX_ATTEMPTS:
                     raise ValueError()
                 for session, child in children.items():
-                    if not text(session) or not isinstance(child, dict) or set(child) != {'resource', 'delivery', 'state'} \
+                    if not text(session) or not isinstance(child, dict) or set(child) not in (
+                            {'resource','delivery','state'},{'resource','delivery','state','rejected_delivery'}) \
+                            or ('rejected_delivery' in child and not text(child['rejected_delivery'])) \
                             or not text(child['resource']) or not text(child['delivery']) or child['state'] not in CHILD_STATES:
                         raise ValueError()
             for group, token in value['groups'].items():
@@ -347,7 +357,9 @@ class Cutovers:
                       if oldkey in value['blocks'] and value['blocks'][oldkey]['episode']==marker),None)
             if key not in value['blocks'] and old is not None:
                 # Promote identical evidence without renewing its reset/hour clock.
-                value['blocks'][key]=copy.deepcopy(old);changed=True;continue
+                if len(value['blocks'])<128:
+                    value['blocks'][key]=copy.deepcopy(old);changed=True
+                continue
             resets=[]
             for limit in native.get('usage_limits') or []:
                 if isinstance(limit,dict) and (limit.get('used_percent')==100 or limit.get('remaining')==0):
@@ -586,10 +598,20 @@ class Cutovers:
         record['resumed_members']=[member(item) for item in members]
         self.write(value,revision)
 
-    def await_owner(self,token,members):
+    def await_owner(self,token,members,*,rejected=None):
         value,revision=self.read();record=value['claims'].get(token)
-        if record is None or record['state']!='native_ready' or record['runtime']!='codex' or record['continuations']:
+        if record is None or record['state']!='native_ready' or record['runtime']!='codex':
             raise VqroError('owner offer does not match a restored native result','stale')
+        if rejected is not None:
+            child=record['continuations'].get(record['session'])
+            if not record['automatic'] or rejected.get('session')!=record['session'] \
+                    or set(record['continuations'])!={record['session']} or child['state']!='claimed':
+                raise VqroError('definite guard rejection does not match the AUTO intent','stale')
+            # Only an explicit native PRE-WRITE rejection reaches this path.
+            # Keep its delivery tombstone; UNKNOWN is never cleared or rearmed.
+            child['state']='cancelled';child['rejected_delivery']=child['delivery']
+        if not owner_offer_children(record):
+            raise VqroError('an uncertain/observed continuation cannot become an offer','conflict')
         record['resumed_members']=[member(item) for item in members]
         if sorted(item['session'] for item in members)!=sorted(item['session'] for item in record['affected']):
             raise VqroError('owner offer lost native conversations','stale')
@@ -600,7 +622,7 @@ class Cutovers:
     def authorize_owner_continuation(self,token):
         authority=self.authorization(False)
         value,revision=self.read();record=value['claims'].get(token)
-        if record is None or record['state']!='awaiting_owner' or record['continuations']:
+        if record is None or record['state']!='awaiting_owner' or not owner_offer_children(record):
             raise VqroError('this continuation choice was already consumed; never resend','conflict')
         record['continuation_owner']=authority;record['state']='owner_turn'
         self.write(value,revision)
@@ -610,6 +632,7 @@ class Cutovers:
         value, _ = self.read()
         record = value['claims'].get(token)
         if record is not None and record['state']=='owner_turn':
+            if settings(self.ext)['blocked'] not in ('auto_restart','offer_restart'):return False
             validate_claim_authority(self.ext,{'authorization':record['continuation_owner'],'runtime':record['runtime']},False)
             return True
         if record is None or record['state'] != 'native_ready' or not record['automatic'] or record['continuation_cancelled']:
@@ -642,7 +665,8 @@ class Cutovers:
             raise VqroError('current policy no longer authorizes an automatic turn', 'policy_changed')
         value, revision = self.read()
         record = value['claims'].get(token)
-        if record is None or record['state'] not in ('native_ready','owner_turn') or not record['automatic']:
+        if record is None or record['state'] not in ('native_ready','owner_turn') \
+                or (not record['automatic'] and record['state']!='owner_turn'):
             raise VqroError('no new turn is authorized by this native result', 'unavailable')
         if not isinstance(affected,dict) or affected.get('session')!=record['session']:
             raise VqroError('each claim authorizes only its original conversation','forbidden')
@@ -651,13 +675,16 @@ class Cutovers:
                            and item['host'] == affected.get('host') for item in record['affected']):
             raise VqroError('continuation does not name a prepared native conversation', 'stale')
         session = affected['session']
-        if session in record['continuations']:
+        previous=record['continuations'].get(session)
+        if previous is not None and not (record['state']=='owner_turn' and owner_offer_children(record)):
             raise VqroError('new continuation turn was already attempted; never resend it', 'conflict')
         destination = affected if destination is None else destination
         if not isinstance(destination, dict) or not text(destination.get('resource')) or not text(destination.get('host')):
             raise VqroError('continuation destination is incomplete', 'stale')
         delivery = 'd:' + uuid.uuid4().hex
         record['continuations'][session] = {'resource': destination['resource'], 'delivery': delivery, 'state': 'claimed'}
+        if previous is not None:
+            record['continuations'][session]['rejected_delivery']=previous['rejected_delivery']
         self.write(value, revision)
         return delivery
 
