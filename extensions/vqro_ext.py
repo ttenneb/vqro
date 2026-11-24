@@ -426,6 +426,17 @@ class VqroError(RuntimeError):
         self.wire_error = wire_error
 
 
+def command_payload(args):
+    """Opt-in semantic payload for strict commands; UI context is never authority.
+
+    Keep context on the public SDK envelope for layout propagation. Only handlers
+    which do not consume it use this copy before validating their semantic keys.
+    """
+    if not isinstance(args,dict) or 'context' in args and not isinstance(args['context'],dict):
+        raise VqroError('command payload/context must be objects','invalid')
+    return {key:value for key,value in args.items() if key!='context'}
+
+
 class Extension:
     def __init__(self, name=None, event_types=None, view_content=None):
         """event_types: only these types; None for all. view_content: optional {names, prefixes}

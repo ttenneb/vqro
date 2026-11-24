@@ -13,7 +13,7 @@ from accounts_pi import PiCutover, eligible_error as pi_error, native_error_epis
 from accounts_dispatch import Dispatch
 from accounts_codex_logins import SavedLogins
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from vqro_ext import Extension, VqroError
+from vqro_ext import Extension, VqroError, command_payload
 from vqro_display import label
 from account_credentials import SETTINGS, SELECTORS, MAX_ACCOUNTS, snapshot, validate, native_registration, migrate, environment, provider_argv, login_environment, native_login_argv, require_fresh, selection_problem, credential_identity, distinct_accounts, eligible_alternatives
 from agent_launch import runtimes, valid_argv
@@ -66,6 +66,7 @@ class Accounts:
         return self.cutovers.lookup(args.get('claim'))
 
     def resume_admission(self,args,*,consume):
+        args=command_payload(args)
         if not isinstance(args,dict) or set(args) not in ({'claim'},{'claim','recovery'}) \
                 or 'recovery' in args and args['recovery'] is not True:
             raise VqroError('only the claim reference and explicit recovery flag are accepted','invalid')
@@ -77,6 +78,7 @@ class Accounts:
     def consume_resume(self,args):return self.resume_admission(args,consume=True)
 
     def recover_pi(self,args):
+        args=command_payload(args)
         if not isinstance(args,dict) or set(args)!={'_claim'}:raise VqroError('only the recovery claim is accepted','invalid')
         self.cutovers.authorization(False)
         claim=self.cutovers.lookup(args['_claim'])
@@ -104,6 +106,7 @@ class Accounts:
         return dict(result,**({'client':launched['client']} if isinstance(launched.get('client'),dict) else {}))
 
     def resume_result(self,args):
+        args=command_payload(args)
         if not isinstance(args,dict) or set(args)!={'claim','observed'} or type(args['observed']) is not bool:
             raise VqroError('invalid resume result','invalid')
         self.cutovers.resume_result(args['claim'],args['observed'])

@@ -206,6 +206,12 @@ model/history/principal, runtime argv and original backend checks before quiesce
 once-only launch intent. Preparation is not a promise of future backend acceptance.
 The same protected launch admission (including caller authority and unused slot)
 is checked read-only before stopping, then checked again by the consuming CAS.
+Strict resume/recovery handlers accept the SDK's object `context` as non-authority
+window metadata while retaining exact semantic keys; context never supplies owner
+identity. Native preparation also checks the original backend's current public
+`connected` evidence, declared `terminal.spawn` and absence of an explicit
+`terminal.spawn.env:false` refusal. These checks repeat after exit; they do not
+reserve future backend acceptance or relocate to another backend.
 
 Post-stop failures report their known phase and retained native session reference.
 Accounts offers **Resume conversation on B** only for a failed Pi claim whose old

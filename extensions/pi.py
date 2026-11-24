@@ -7,7 +7,7 @@ import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from vqro_ext import Extension, VqroError
+from vqro_ext import Extension, VqroError, command_payload
 from pi_testing import testing_notice, testing_environment, rpc_testing_args
 from vqro_display import label
 from account_credentials import choose as choose_account, environment as account_environment, provider_argv, runtime_environment, require_fresh, snapshot, selection_problem
@@ -119,6 +119,7 @@ class Pi:
 
     def _resume_parameters(self,args,*,require_exit,recovery=False):
         """Shared read-only admission for pre-stop preparation and real resume."""
+        args=command_payload(args)
         if not isinstance(args,dict) or set(args)!={'_claim'}:
             raise VqroError('Pi resume requires only its protected claim reference','invalid')
         claim=self.ext.invoke('accounts.claim.read',{'claim':args['_claim']})
@@ -156,6 +157,12 @@ class Pi:
         hosts=self.ext.vqro.call('resource.list',{'id':claim['host']}).get('resources',[])
         if len(hosts)!=1 or not isinstance(hosts[0].get('provider'),str):
             raise VqroError('original execution backend is unavailable; no relocation','unavailable')
+        with self.ext.cache_lock:backend=dict(self.ext.providers.get(hosts[0]['provider']) or {})
+        spawn=(backend.get('capabilities') or {}).get('terminal.spawn')
+        if backend.get('connected') is not True:
+            raise VqroError('original execution backend is disconnected; nothing may be spawned','unavailable')
+        if not isinstance(spawn,dict) or spawn.get('env') is False:
+            raise VqroError('original backend cannot spawn a bridge with its required environment','unsupported')
         env=account_environment(target,runtime_environment('pi',runtime))
         env['VQRO_PRINCIPAL']=claim['source_principal']
         params={'bridge':True,'provider':hosts[0]['provider'],'name':'pi-resume-'+uuid.uuid4().hex[:12],

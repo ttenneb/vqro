@@ -24,6 +24,7 @@ class PiPrepare(unittest.TestCase):
         self.core.entries[SETTINGS]={'version':7,'value':{'accounts':[self.a,self.b]}}
         self.core.entries['doc/settings/pi']={'version':3,'value':{'runtimes':[{'name':'pi','argv':['pi1','--mode','rpc']}]}}
         self.core.providers['pi-runtime']={'role':'runtime','host':'terminal-1','capabilities':{'agent.command':{}}}
+        self.core.providers['mux']={'role':'backend','connected':True,'capabilities':{'terminal.spawn':{'env':True}}}
         self.row={'id':'r1','kind':'agent','available':True,'incarnation':'incarnation-1','provider':'pi-runtime','host':'terminal-1','cwd':'/fake/project',
           'data':{'agent':{'v':0,'state':'idle','lifecycle':'live','epoch':'epoch-1','account':fact(self.a),'queue':[],'tool_principal':'p:original-work',
             'session':{'id':SESSION,'native':{'file':'/synthetic/native-history.jsonl'},'model':{'id':'gpt-6-luna','effort':'high','native':{'provider':'alias-a','api':'openai-codex-responses'}}},
