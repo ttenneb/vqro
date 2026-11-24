@@ -8,10 +8,15 @@ from pathlib import Path
 import shutil
 
 PACKAGE_ASSETS={'pi_accounts':('index.mjs','provider.mjs','limit_messages.json')}
+REQUIRED_PACKAGES=(*PACKAGE_ASSETS,'pi_bridge')
 
 
 def package_files(root,package=None):
     root=Path(root)
+    for name in REQUIRED_PACKAGES:
+        if package is None or package==name:
+            if not (root/name/'__init__.py').is_file():
+                raise ValueError('missing shipped Python package marker: '+name+'/__init__.py')
     result=[]
     for directory in sorted(root.iterdir()):
         if not directory.is_dir() or not (directory/'__init__.py').is_file():continue

@@ -219,6 +219,9 @@ try {
     foreach ($file in Get-ChildItem -LiteralPath (Join-Path $root 'extensions/clients') -Filter '*.py' -File) {
         Assert-PlainPath (Join-Path (Join-Path $extensions 'clients') $file.Name) 'File'
     }
+    $python = Find-Python
+    Invoke-Python -Arguments @('-c', 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required"')
+    Invoke-Python -Arguments @((Join-Path $root 'extensions/vqro_packages.py'), (Join-Path $root 'extensions'), '--check')
     foreach ($package in Get-ChildItem -LiteralPath (Join-Path $root 'extensions') -Directory) {
         if (-not (Test-Path -LiteralPath (Join-Path $package.FullName '__init__.py'))) { continue }
         $destination = Join-Path $extensions $package.Name
@@ -233,8 +236,6 @@ try {
     Assert-Separate $BinDir $extensions
     Assert-Separate $BinDir $backupRoot
     Assert-Separate $extensions $backupRoot
-    $python = Find-Python
-    Invoke-Python -Arguments @('-c', 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required"')
     Invoke-Python -Arguments @((Join-Path $root 'scripts/install_extension_tests.py'), '--check', $extensions)
     $metadataText = & cargo metadata --manifest-path $manifest --no-deps --format-version=1
     if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed; nothing installed.' }

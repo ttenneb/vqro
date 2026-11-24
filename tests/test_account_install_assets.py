@@ -57,6 +57,7 @@ class AccountInstallAssets(unittest.TestCase):
     def test_incomplete_package_refuses_before_copying_any_file(self):
         with tempfile.TemporaryDirectory(prefix='vq-package-missing-') as temporary:
             root=Path(temporary)/'source';package=root/'pi_accounts';package.mkdir(parents=True)
+            bridge=root/'pi_bridge';bridge.mkdir();(bridge/'__init__.py').write_text('')
             for name in ('__init__.py','limits.py','index.mjs','provider.mjs'):(package/name).write_text('')
             destination=Path(temporary)/'destination'
             with self.assertRaisesRegex(ValueError,'limit_messages.json'):copy_packages(root,destination)
@@ -76,6 +77,37 @@ class AccountInstallAssets(unittest.TestCase):
                     and any(alias.name=='copy_packages' for alias in node.names) for node in ast.walk(tree)))
                 self.assertTrue(any(isinstance(node,ast.Call) and isinstance(node.func,ast.Name)
                     and node.func.id=='copy_packages' for node in ast.walk(tree)))
+
+    def test_windows_inventory_bootstrap_precedes_first_preflight_call(self):
+        script=(ROOT/'scripts/dev-install.ps1').read_text(encoding='utf-8')
+        first=script.index('foreach ($file in @(Get-PythonPackageFiles $package))')
+        self.assertLess(script.index('$python = Find-Python'),first)
+        self.assertLess(script.index('assert sys.version_info >= (3, 11)'),first)
+        self.assertLess(script.index("'extensions/vqro_packages.py'), (Join-Path $root 'extensions'), '--check'"),first)
+
+    def test_unix_inventory_check_precedes_first_destination_write(self):
+        script=(ROOT/'scripts/dev-install.sh').read_text(encoding='utf-8')
+        self.assertLess(script.index('python3 extensions/vqro_packages.py extensions --check'),
+            script.index('mkdir -p "$HOME/.local/share/vqro/extensions"'))
+
+    def test_missing_asset_package_or_marker_refuses_before_copy(self):
+        for marker in ('absent-package','absent-marker'):
+            with self.subTest(source=marker),tempfile.TemporaryDirectory(prefix='vq-package-absent-') as temporary:
+                root=Path(temporary)/'source';root.mkdir()
+                if marker=='absent-marker':
+                    package=root/'pi_accounts';package.mkdir()
+                    for name in ('limits.py','index.mjs','provider.mjs','limit_messages.json'):(package/name).write_text('')
+                destination=Path(temporary)/'destination'
+                with self.assertRaisesRegex(ValueError,'pi_accounts'):copy_packages(root,destination)
+                self.assertFalse(destination.exists())
+
+    def test_missing_bridge_refuses_before_copy_or_installer_replacement(self):
+        with tempfile.TemporaryDirectory(prefix='vq-bridge-absent-') as temporary:
+            root=Path(temporary)/'source';package=root/'pi_accounts';package.mkdir(parents=True)
+            for name in ('__init__.py','limits.py','index.mjs','provider.mjs','limit_messages.json'):(package/name).write_text('')
+            destination=Path(temporary)/'destination'
+            with self.assertRaisesRegex(ValueError,'pi_bridge'):copy_packages(root,destination)
+            self.assertFalse(destination.exists())
 
     def test_unix_package_marker_and_nonpython_assets_are_installed(self):
         self.assertTrue((ROOT/'extensions/pi_accounts/__init__.py').is_file())

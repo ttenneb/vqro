@@ -15,6 +15,8 @@ done
 python3 scripts/install_preflight.py "$TARGET/release/vqro" || echo 'dev-install: warning: stale-install preflight unavailable; inspect old cores manually' >&2
 # Fail before touching installed files if bundled tests or their destination are unsafe.
 python3 scripts/install_extension_tests.py --check "$HOME/.local/share/vqro/extensions"
+# Validate all package code/data before the FIRST installed-file write.
+python3 extensions/vqro_packages.py extensions --check
 # Bundled extensions: the core installs the ones in defaults.json on first run.
 mkdir -p "$HOME/.local/share/vqro/extensions" "$HOME/.local/bin"
 cp extensions/*.py extensions/defaults.json "$HOME/.local/share/vqro/extensions/"
@@ -35,8 +37,7 @@ mkdir -p "$HOME/.local/share/vqro/extensions/clients"
 # The OpenTUI trial client (clients/opentui, needs Bun and its packages) is not installed; run it from the repo.
 cp extensions/clients/*.py extensions/clients/text.json "$HOME/.local/share/vqro/extensions/clients/"
 # One code/data inventory shared with Windows and isolated e2e layouts.
-# Validate all source files before replacing installed pi_bridge code (never user data).
-python3 extensions/vqro_packages.py extensions --check
+# Replace installed pi_bridge code only (never user data).
 rm -rf "$HOME/.local/share/vqro/extensions/pi_bridge"
 python3 extensions/vqro_packages.py extensions --copy-to "$HOME/.local/share/vqro/extensions"
 # Atomic replace: a running binary keeps its old inode. The provider programs (backends run as
