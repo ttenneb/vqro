@@ -38,7 +38,7 @@ class AccountRouteIntegration(unittest.TestCase):
                         if runtime=='claude':app.launch(runtime,{'account':'a'})
                         else:app.new({'account':'a'})
                 self.assertEqual(caught.exception.kind,'unsupported')
-                self.assertIn('no verified execution-host/native credential binding',str(caught.exception))
+                self.assertIn('API-key accounts: launching is not available yet; the keychain entry is kept',str(caught.exception))
                 pi_launch.assert_not_called();codex_launch.assert_not_called()
                 self.assertFalse(any(method=='resource.spawn' for method,_ in core.calls))
 

@@ -246,7 +246,7 @@ def require_fresh(runtime, argv):
 
 def require_launch_binding(account):
     if account and account['kind']=='api_key':
-        raise VqroError('named API-key launch has no verified execution-host/native credential binding; nothing launched (standalone keychain helper remains available)','unsupported')
+        raise VqroError('API-key accounts: launching is not available yet; the keychain entry is kept','unsupported')
 
 
 def environment(account, env=None):

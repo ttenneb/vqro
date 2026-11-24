@@ -262,7 +262,7 @@ class Accounts:
         candidates,revision,scores,_=self.alternatives(source,policy.settings(self.ext))
         token=policy.episode(source)
         items=[{'type':'text','text':'Continue the same native conversation. Earlier input is never replayed. AUTO submits one NEW visible vqro/tool continuation; an owner choice waits for your explicit next turn.'},
-               {'type':'text','text':'Continuing a conversation on an API-key account: not yet. Named API-key launch currently refuses: native/host binding is unverified; standalone keychain helpers remain.'}]
+               {'type':'text','text':'Continuing a conversation on an API-key account: not yet. API-key accounts: launching is not available yet; the keychain entry is kept.'}]
         for target in candidates:
             score=scores.get(target['id'])
             items.append({'text':'Continue on '+label(target['label']),

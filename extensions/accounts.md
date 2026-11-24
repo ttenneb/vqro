@@ -58,8 +58,9 @@ A failed/uncertain terminal launch is never automatically repeated.
 The standalone execution-host keychain helper and explicit `api_key_overflow`
 setting remain. Named API-key launches currently refuse before spawn: their
 execution-host/native credential binding is not verified; they never fall back to
-the shared login. Restoring named launch support is an open scope decision, not
-completed work. **Continuing a conversation on an API-key account: not yet.**
+the shared login. API-key accounts: launching is not available yet; the keychain entry is kept.
+Wiring the helper into named launches (execution host and native auth precedence)
+is an approved post-release follow-up, not part of this slice. **Continuing a conversation on an API-key account: not yet.**
 They are not same-session cutover targets in this slice.
 
 ## Capacity strategies
