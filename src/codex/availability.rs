@@ -12,6 +12,7 @@ impl Endpoint {
     }
 
     pub(super) fn invalidate_availability_auth_scope(&mut self) {
+        self.availability_auth_generation = self.availability_auth_generation.saturating_add(1);
         // An auth notification is not quota recovery. Retire the old account's known
         // turn causes and require a new native turn before accepting a new episode.
         if let Some(session) = self.session.clone() {
@@ -40,8 +41,30 @@ impl Endpoint {
                 }
             }
         }
+        for (session, run) in self.known_owned_input_runs() {
+            self.retire_availability_turn(&session, &run);
+        }
         self.availability_auth_fenced = true;
         self.reset_availability(); // Unknown, never a fabricated available/recovered level.
+    }
+
+    pub(super) fn retire_availability_turn(&mut self, session: &str, run: &str) {
+        let key = (session.to_owned(), run.to_owned());
+        if !self.availability_retired_turns.contains(&key)
+            && self.availability_retired_turns.len() < 256
+        {
+            self.availability_retired_turns.push(key);
+        }
+        if self.session.as_deref() == Some(session)
+            && self
+                .availability_blocks
+                .iter()
+                .chain(self.availability_retry.iter())
+                .any(|v| v["native"]["turnId"] == run)
+        {
+            self.reset_availability();
+            self.availability_auth_fenced = true;
+        }
     }
 
     // At most three persistent native classes plus one transient native retry. A clear for one
@@ -94,7 +117,9 @@ impl Endpoint {
                         {
                             return Some(false);
                         }
-                        if self.availability_retired_turns.len() < 256 {
+                        if self.availability_retired_turns.len() < 256
+                            && !self.old_unbound_own_inputs()
+                        {
                             self.availability_auth_fenced = false;
                         }
                     }

@@ -109,6 +109,14 @@ async fn fake(mode: &'static str) -> Fake {
                         sessions("saved-b")
                     }
                 }
+                "turn/start" => {
+                    if mode == "unknown_admission" {
+                        write.write_all(format!("{}\n",json!({"id":request["id"],"error":{"code":-32000,"message":"unknown native admission"}})).as_bytes()).await.unwrap();
+                        continue;
+                    }
+                    assert_eq!(mode, "admitted_unstarted");
+                    json!({"turn":{"id":"not-yet-started","status":"inProgress"}})
+                }
                 "account/rateLimits/read" => json!({"ordinaryUsageAllowed":null}),
                 "thread/resume" => {
                     assert_eq!(request["params"], json!({"threadId":"thread-a"}));
@@ -270,6 +278,153 @@ async fn same_auth_readonly_bind_preserves_current_native_limit() {
     assert_eq!(
         fact["data"]["agent"]["availability"]["native"]["turnId"],
         "limit-under-a"
+    );
+}
+
+#[tokio::test]
+async fn owned_admitted_unstarted_and_unknown_inputs_prevent_fencing() {
+    for mode in ["admitted_unstarted", "unknown_admission"] {
+        let f = fake(mode).await;
+        let result=f.runtime.invoke("endpoint-1","inc","agent.send",json!({"v":0,"mode":"admit","delivery":"own-input","origin":{"principal":"p","actor":"a","kind":"agent"},"content":[{"type":"text","text":"new owned input"}]}),Instant::now()+Duration::from_secs(2)).await;
+        if mode == "admitted_unstarted" {
+            assert!(matches!(result.unwrap(), Outcome::Accepted(_)));
+        } else {
+            assert!(result.is_err());
+        }
+        tokio::task::yield_now().await;
+        let result = command(
+            &f,
+            "_account.fence",
+            json!({"members":[{"session":"thread-a","epoch":"epoch-a"}]}),
+        )
+        .await
+        .unwrap();
+        let Outcome::Observed(Some(value)) = result else {
+            panic!("expected local fence")
+        };
+        assert_eq!(
+            value["quiescent"], false,
+            "{mode}: native ACK is not turnStarted or terminal"
+        );
+        assert!(matches!(
+            command(&f, "_account.switch", target()).await.unwrap(),
+            Outcome::Rejected { .. }
+        ));
+        let fact = f.runtime.fact("endpoint-1").unwrap();
+        assert_eq!(
+            fact["data"]["agent"]["_codex"]["input_ledger"]["source"],
+            "vqro-ledger"
+        );
+        assert_eq!(
+            fact["data"]["agent"]["_codex"]["input_ledger"]["pending"],
+            1
+        );
+        assert!(fact["data"]["agent"]["queue"].is_null());
+        f.runtime.incoming(Incoming::Notification {
+            method: "turn/started".into(),
+            params: json!({"threadId":"thread-a","turn":{"id":"not-yet-started"}}),
+        });
+        f.runtime.incoming(Incoming::Notification {method:"turn/completed".into(),params:json!({"threadId":"thread-a","turn":{"id":"not-yet-started","status":"completed"}})});
+        let Outcome::Observed(Some(status)) =
+            command(&f, "_account.status", json!({})).await.unwrap()
+        else {
+            panic!("status")
+        };
+        assert_eq!(
+            status["quiescent"],
+            mode == "admitted_unstarted",
+            "unknown start has no run correlation; never guess or replay"
+        );
+        assert_eq!(
+            f.methods
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.as_str() == "turn/start")
+                .count(),
+            1
+        );
+        assert!(
+            !f.methods
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m == "accountSession/switch")
+        );
+    }
+}
+
+#[tokio::test]
+async fn own_ledger_handles_early_events_unknown_steers_and_receipt_eviction() {
+    let f = fake("ok").await;
+    let mut e = f.runtime.slots[0].endpoint.lock().unwrap();
+    e.reserve_owned_input("early", None).unwrap();
+    e.observe_owned_input_run("early-run", false);
+    e.finish_owned_input("early", "admitted", Some(&json!({"run":"early-run"})));
+    assert!(e.own_inputs_quiescent());
+    e.reserve_owned_input("steer", Some("existing-run".into()))
+        .unwrap();
+    e.finish_owned_input("steer", "unknown", None);
+    e.observe_owned_input_run("existing-run", false);
+    assert!(!e.own_inputs_quiescent());
+    e.observe_owned_input_run("other-run", true);
+    assert!(!e.own_inputs_quiescent());
+    e.observe_owned_input_run("existing-run", true);
+    assert!(e.own_inputs_quiescent());
+    e.reserve_owned_input("unresolved", None).unwrap();
+    e.finish_owned_input("unresolved", "unknown", None);
+    e.record_receipt("unresolved", "unknown", None, &json!({}));
+    for n in 0..=crate::codex::RECEIPTS {
+        e.record_receipt(&format!("done-{n}"), "rejected", None, &json!({}));
+    }
+    assert!(!e.receipts.contains_key("unresolved"));
+    assert_eq!(e.input_ledger()["pending"], 1);
+    assert_eq!(e.input_ledger()["unknown"], 1);
+    assert!(e.may_switch(&json!({"v":0})).is_err());
+}
+
+#[tokio::test]
+async fn own_input_ack_after_auth_change_cannot_establish_b_quota_from_a() {
+    let f = fake("ok").await;
+    f.runtime.slots[0]
+        .endpoint
+        .lock()
+        .unwrap()
+        .reserve_owned_input("inflight-a", None)
+        .unwrap();
+    f.active_b.store(true, Ordering::Release);
+    f.runtime.incoming(Incoming::Notification {
+        method: "account/updated".into(),
+        params: json!({"authMode":"chatgpt"}),
+    });
+    command(&f, "_account.bind", target()).await.unwrap();
+    f.runtime.incoming(Incoming::Notification {
+        method: "turn/started".into(),
+        params: json!({"threadId":"thread-a","turn":{"id":"late-a"}}),
+    });
+    limit(&f, "late-a");
+    assert!(f.runtime.fact("endpoint-1").unwrap()["data"]["agent"]["availability"].is_null());
+    f.runtime.slots[0]
+        .endpoint
+        .lock()
+        .unwrap()
+        .finish_owned_input("inflight-a", "admitted", Some(&json!({"run":"late-a"})));
+    f.runtime.incoming(Incoming::Notification {
+        method: "turn/completed".into(),
+        params: json!({"threadId":"thread-a","turn":{"id":"late-a","status":"failed"}}),
+    });
+    f.runtime.incoming(Incoming::Notification {
+        method: "turn/started".into(),
+        params: json!({"threadId":"thread-a","turn":{"id":"fresh-b"}}),
+    });
+    limit(&f, "late-a");
+    assert!(f.runtime.fact("endpoint-1").unwrap()["data"]["agent"]["availability"].is_null());
+    limit(&f, "fresh-b");
+    let fact = f.runtime.fact("endpoint-1").unwrap();
+    assert_eq!(fact["data"]["agent"]["account"]["id"], "b");
+    assert_eq!(
+        fact["data"]["agent"]["availability"]["native"]["turnId"],
+        "fresh-b"
     );
 }
 

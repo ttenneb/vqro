@@ -153,6 +153,13 @@ class Cutover:
                     or 'agent.command' not in (b.get('caps') or {}) \
                     or not isinstance(b.get('commands'),list) or not HOST_COMMANDS.issubset({c.get('name') for c in b.get('commands',[]) if isinstance(c,dict)}):
                 fail('an affected Codex endpoint lacks native cutover/session evidence')
+            private = b.get('_codex')
+            ledger = private.get('input_ledger') if isinstance(private,dict) else None
+            if (not isinstance(ledger,dict) or type(ledger.get('v')) is not int or ledger['v']!=0
+                    or ledger.get('source')!='vqro-ledger' or ledger.get('epoch')!=b.get('epoch')
+                    or ledger.get('complete') is not True or type(ledger.get('pending')) is not int or ledger['pending']!=0
+                    or type(ledger.get('unknown')) is not int or ledger['unknown']!=0):
+                fail('Waiting for a complete, empty vqro input ledger; native queue remains unknown','busy')
             if require_idle and (b.get('state') != 'idle' or b.get('run') is not None or b.get('requests')):
                 fail('Waiting for all Codex turns and pending approvals to finish; no switch or durable intent yet','busy')
             affected.append(member)

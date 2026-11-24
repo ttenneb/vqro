@@ -17,6 +17,7 @@ def row(ident, host, native_host, state='idle'):
     return {'id':ident,'available':True,'host':host,'incarnation':'inc-'+ident,'status':{'app':'codex'},'data':{'agent':{
         'v':0,'lifecycle':'live','state':state,'run':None if state=='idle' else 'running','epoch':'epoch-'+ident,
         'host':{'id':native_host},'session':{'id':'thread-'+ident},'account_setup':{'id':'shared'},
+        '_codex':{'input_ledger':{'v':0,'source':'vqro-ledger','epoch':'epoch-'+ident,'complete':True,'pending':0,'unknown':0}},
         'account':{'id':'a','kind':'subscription','rev':1,'native':{'login_ref':{'sessionId':'saved-a','accountId':'workspace-a'}}},'caps':{'rev':1,'agent.command':{},'agent.availability':{'reasons':['quota','rate_limited']}},'commands':[{'name':n} for n in HOST_COMMANDS],'queue':None,'requests':[], 'background':None,
         'availability':{'state':'blocked','reason':'quota','native':{'threadId':'thread-'+ident,'turnId':'native-turn',
             'codexErrorInfo':'usageLimitExceeded','willRetry':False}}}}}
@@ -60,6 +61,7 @@ class Ext:
             if op in ('_account.resume','_account.restore') and not self.skip_publication:
                 target=next(r for r in self.rows if r['id']==args['resource'])
                 target['data']['agent'].update(epoch='resumed-'+target['id'],account=account)
+                target['data']['agent']['_codex']['input_ledger']['epoch']='resumed-'+target['id']
             return {'outcome':'observed','data':{'quiescent':True,'operation':args['args']['args'].get('operation'),
                 'account_confirmed':True,'resumed':True,'account':account,
                 'logins':[] if args['resource']==self.missing_on else [
@@ -81,6 +83,16 @@ class Tests(unittest.TestCase):
         self.assertEqual(p['native_episode'],'native-turn');self.assertEqual(len(p['affected']),2)
         self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
         self.assertTrue(all(r['account']=='b' and r['host']=='execution' for r in p['affected']))
+    def test_all_hosts_require_complete_empty_epoch_bound_own_ledger_in_auto_and_offer(self):
+        for automatic in (True,False):
+            for delta in ({'complete':False},{'pending':1},{'pending':True},{'unknown':1},{'epoch':'old'},{'source':'native'},{'v':True},None):
+                with self.subTest(automatic=automatic,delta=delta):
+                    ext=Ext();private=ext.rows[1]['data']['agent']['_codex']
+                    if delta is None: private.clear()
+                    else: private['input_ledger'].update(delta)
+                    with self.assertRaises(VqroError) as error:Cutover(ext).prepare(dict(self.args(),automatic=automatic))
+                    self.assertEqual(error.exception.kind,'busy')
+                    self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
     def test_auto_requires_explicit_setup_consent_manual_offer_does_not(self):
         ext=Ext();ext.consent={'setups':{}};c=Cutover(ext)
         p=c.prepare(self.args());self.assertFalse(p['automatic_allowed'])

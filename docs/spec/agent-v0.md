@@ -210,6 +210,15 @@ old account. Configured registry IDs remain distinct from native saved-login/wor
 publish launcher hints as account IDs or quota scope: a read-only active-reference match must first verify the
 registered binding. Its `account.native.login_ref` is nonsecret native evidence; unknown values remain unknown.
 All Codex endpoints expose `_account.list`/`_account.bind` metadata commands, independent of cutover consent.
+Codex publishes its own input inventory as `data.agent._codex.input_ledger`:
+`{v:0, source:"vqro-ledger", epoch, complete:true, pending, unknown}`. This is not native queue evidence:
+`queue` remains null. Inputs are reserved before native dispatch and remain pending until a confirmed rejection,
+or an admitted run is seen started/terminal; an unknown start without run correlation cannot be guessed clear.
+Unknown steers with an exact expected run wait for that run's terminal event, not its already-known start.
+Notifications preceding the native reply are correlated by exact session/epoch/run. The inventory is bounded
+at256 unresolved inputs; overflow refuses new dispatch rather than dropping inventory. Receipt-history eviction
+never clears it. AUTO and OFFER require a complete, epoch-matching, empty inventory on every affected endpoint;
+there is no ledger-loss override. Native all-host quiescence also checks it after fencing.
 
 A Codex host with an explicitly declared setup exposes native saved-login cutover through ordinary advertised
 `agent.command` names `_account.list`, `_account.fence`, `_account.status`, `_account.switch`, `_account.resume`,

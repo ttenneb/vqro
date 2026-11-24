@@ -211,7 +211,7 @@ impl Runtime {
     fn quiescent(&self) -> bool {
         self.slots.iter().all(|slot| {
             let e = slot.endpoint.lock().unwrap();
-            e.lifecycle == "live" && e.state == "idle" && e.run.is_none() && e.pending.is_empty()
+            e.lifecycle == "live" && e.state == "idle" && e.run.is_none() && e.pending.is_empty() && e.own_inputs_quiescent()
         })
     }
 

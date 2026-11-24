@@ -4,6 +4,7 @@
 //! the existing bounded `rpc::Peer`; this module only validates and reduces native observations.
 mod availability;
 mod children;
+mod input_ledger;
 pub mod configuration;
 mod customization;
 pub mod observation;
@@ -251,6 +252,7 @@ pub struct Endpoint {
     availability_retry: Option<Value>,
     availability_generation: u64,
     availability_auth_fenced: bool,
+    availability_auth_generation: u64,
     availability_retired_turns: Vec<(String, String)>,
     usage: Option<Value>,
     usage_limits: usage_limits::UsageLimits,
@@ -258,6 +260,8 @@ pub struct Endpoint {
     next_request: u64,
     pending: BTreeMap<String, Pending>,
     receipts: BTreeMap<String, Value>,
+    owned_inputs: BTreeMap<String, input_ledger::OwnedInput>,
+    observed_input_runs: VecDeque<(String, String, String, bool)>,
     recent: VecDeque<String>,
     children: children::Children,
 }
@@ -295,6 +299,7 @@ impl Endpoint {
             availability_retry: None,
             availability_generation: 0,
             availability_auth_fenced: false,
+            availability_auth_generation: 0,
             availability_retired_turns: Vec::new(),
             usage: None,
             usage_limits: usage_limits::UsageLimits::default(),
@@ -302,6 +307,8 @@ impl Endpoint {
             next_request: 0,
             pending: BTreeMap::new(),
             receipts: BTreeMap::new(),
+            owned_inputs: BTreeMap::new(),
+            observed_input_runs: VecDeque::new(),
             recent: VecDeque::new(),
             children: children::Children::default(),
         }
@@ -510,7 +517,7 @@ impl Endpoint {
                 "host":{"id":self.host,"provider":self.host_provider,"instance":self.host_instance,
                     "incarnation":self.incarnation,"kind":"server","owns_lifecycle":true},
                 "completion":self.completion,"session":self.session_info(),
-                "epoch":self.epoch,"caps":caps,"queue":null,"requests":requests,"background":null,
+                "epoch":self.epoch,"caps":caps,"_codex":{"input_ledger":self.input_ledger()},"queue":null,"requests":requests,"background":null,
                 "config":if self.model_config_available(){vec![self.model_option()]}else{Vec::<Value>::new()},"commands":[],
                 "usage":if self.config_uncertain {None}else{self.usage.as_ref()},
                 "incomplete":if self.config_uncertain {vec!["config.model"]}else{vec![]},
@@ -791,7 +798,7 @@ impl Endpoint {
     }
 
     pub fn state_entity(&self) -> Change {
-        let mut value = json!({"state":self.state,"run":self.run,"completion":self.completion,"background":null});
+        let mut value = json!({"state":self.state,"run":self.run,"completion":self.completion,"background":null,"_codex":{"input_ledger":self.input_ledger()}});
         if !self.config_uncertain {
             if let Some(usage) = &self.usage {
                 value["usage"] = usage.clone();
@@ -938,7 +945,7 @@ impl Endpoint {
 
     pub fn may_switch(&self, args: &Value) -> Result<(), RpcError> {
         self.validate(args)?;
-        if self.session.is_some() && (self.state != "idle" || !self.pending.is_empty()) {
+        if self.session.is_some() && (self.state != "idle" || !self.pending.is_empty() || !self.own_inputs_quiescent()) {
             return Err(rejected(
                 "busy",
                 "session work or requests are still active",
@@ -1022,6 +1029,7 @@ impl Endpoint {
                     .as_str()
                     .filter(|s| s.len() <= 128)
                     .map(str::to_owned);
+                if let Some(run)=self.run.clone() { self.observe_owned_input_run(&run,false); }
                 self.state = "running".into();
                 let mut changes = vec![self.state_entity()];
                 if let Some(change) = self.run_change(&p["turn"]) {
@@ -1034,6 +1042,7 @@ impl Endpoint {
                 let Some(run) = turn["id"].as_str().filter(|s| s.len() <= 128) else {
                     return Vec::new();
                 };
+                if matches!(turn["status"].as_str(),Some("completed"|"failed"|"interrupted")) {self.observe_owned_input_run(run,true);}
                 self.availability_turn_completed(turn);
                 // A late old-turn completion must not mark a newer turn idle.
                 let (reason, known) = match turn["status"].as_str() {

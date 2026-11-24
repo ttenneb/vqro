@@ -826,12 +826,17 @@ impl Runtime {
             }
             {
                 let mut endpoint = this.slots[index].endpoint.lock().unwrap();
+                let run=if call.method=="turn/steer" {call.params["expectedTurnId"].as_str().map(str::to_owned)}else{None};
+                if let Err(error)=endpoint.reserve_owned_input(&call.delivery,run) {
+                    let _=tx.send(Err(Fault::Reject(error)));return;
+                }
                 let mut changes = if model_scope.is_some() {
                     endpoint.begin_model_turn()
                 } else {
                     Vec::new()
                 };
                 changes.push(endpoint.record_receipt(&call.delivery, "dispatched", None, &args));
+                changes.push(endpoint.state_entity());
                 this.emit(index, &endpoint, changes, false);
             }
             let result = this
@@ -852,9 +857,10 @@ impl Runtime {
             };
             let receipt = {
                 let mut endpoint = this.slots[index].endpoint.lock().unwrap();
+                endpoint.finish_owned_input(&call.delivery,stage,native.as_ref());
                 let change = endpoint.record_receipt(&call.delivery, stage, native, &args);
                 let receipt = change.value.clone();
-                this.emit(index, &endpoint, vec![change], false);
+                this.emit(index, &endpoint, vec![change,endpoint.state_entity()], false);
                 receipt
             };
             let admitted = result.is_ok();
