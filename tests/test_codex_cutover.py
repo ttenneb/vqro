@@ -38,7 +38,8 @@ class Ext:
         self.owner={'value':'human-owner','version':5}
         self.policy=dict(DEFAULTS,blocked='auto_restart')
         self.registry_revision=3;self.hook=None;self.skip_publication=False;self.reject=None
-        self.all_active=False;self.missing_on=None;self.selected={'x':'a','y':'a'}
+        self.all_active=False;self.missing_on=None;self.selected={'x':'a','y':'a'};self.quota={'b':True,'c':True}
+        self.max_switches=3;self.known_blocked=[];self.released=True
     def command(self,*_):return lambda fn:fn
     def call(self,method,args):
         self.calls.append((method,copy.deepcopy(args)))
@@ -49,13 +50,13 @@ class Ext:
             return {'version':3 if args['key']==SETTINGS else self.registry_revision,'value':copy.deepcopy(self.consent if args['key']==SETTINGS else self.registry)}
         if method=='command.invoke':
             assert args['name']=='accounts.claim.read'
-            return copy.deepcopy(self.claim)
+            return dict(copy.deepcopy(self.claim),max_switches=self.max_switches,known_blocked_targets=copy.deepcopy(self.known_blocked)) if isinstance(self.claim,dict) else None
         if method=='resource.invoke':
             op=args['args']['name'];self.counter+=1
             if self.hook:self.hook(op,args)
             if self.fail==op:raise VqroError('unknown native effect','indeterminate')
             if self.reject==op:return {'outcome':'rejected','error':{'kind':'stale','message':'native precondition rejected'}}
-            if op=='_account.switch':self.selected[args['resource']]='b'
+            if op=='_account.switch':self.selected[args['resource']]=args['args']['args']['account']['id']
             ident=self.selected[args['resource']]
             account={'id':ident,'label':ident.upper(),'kind':'subscription','rev':1,'native':{'login_ref':{'sessionId':'saved-'+ident,'accountId':'workspace-'+ident}}}
             if op in ('_account.resume','_account.restore') and not self.skip_publication:
@@ -63,10 +64,12 @@ class Ext:
                 target['data']['agent'].update(epoch='resumed-'+target['id'],account=account)
                 target['data']['agent']['_codex']['input_ledger']['epoch']='resumed-'+target['id']
             return {'outcome':'observed','data':{'quiescent':True,'operation':args['args']['args'].get('operation'),
-                'account_confirmed':True,'resumed':True,'account':account,
+                'account_confirmed':True,'resumed':True,'released':self.released,'account':account,
+                'ordinary_usage_allowed':self.quota.get(ident),'observed_at_ms':int(time.time()*1000),'reset_at_ms':None,'source':'codex.account/rateLimits',
                 'logins':[] if args['resource']==self.missing_on else [
                     {'sessionId':'saved-a','accountId':'workspace-a','active':ident=='a' and not self.all_active},
-                    {'sessionId':'saved-b','accountId':'workspace-b','active':ident=='b' or self.all_active}]}}
+                    {'sessionId':'saved-b','accountId':'workspace-b','active':ident=='b' or self.all_active},
+                    {'sessionId':'saved-c','accountId':'workspace-c','active':ident=='c'}]}}
         raise AssertionError((method,args))
 
 class Tests(unittest.TestCase):
@@ -75,9 +78,128 @@ class Tests(unittest.TestCase):
         args=self.args();common=args['episode'];args.update(episode='native-turn',_claim='opaque-claim',automatic=automatic)
         ext.claim=dict(prepare,state='claimed',resource='x',host='execution',episode=common,native_episode='native-turn',
             source_incarnation='inc-x',source_epoch='epoch-x',source_account='a',session='thread-x',
-            account='b',_account_revision=3,automatic=automatic,runtime='codex',version=1,
+            account='b',authorized_targets=['b'],_account_revision=3,automatic=automatic,runtime='codex',version=1,
             authorization={'mode':'auto','principal':None,'owner_revision':None} if automatic else {'mode':'offer','principal':'human-owner','owner_revision':5})
         return args
+    def test_one_setup_unknown_target_inspection_settles_ready_offer_or_all_blocked(self):
+        for permission,disposition in ((True,'ready'),(None,'offer'),(False,'all_blocked')):
+            with self.subTest(permission=permission):
+                ext=Ext();ext.rows.pop();ext.quota['b']=permission;c=Cutover(ext)
+                p=c.prepare(self.args());result=c.cutover(self.claimed(ext,p))
+                self.assertEqual(result['disposition'],disposition);self.assertEqual(result['continuation_allowed'],permission is True)
+                self.assertEqual(result['attempted_targets'],['b']);self.assertFalse(result['fenced'])
+                self.assertEqual(len(result['inspected_blocked']),1 if permission is False else 0)
+                names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
+                self.assertLess(max(i for i,n in enumerate(names) if n=='_account.inspect'),names.index('_account.resume'))
+                self.assertEqual(names.count('_account.resume'),2);self.assertEqual(names.count('_account.release'),2)
+                self.assertFalse(any(a.get('op')=='agent.send' for m,a in ext.calls if m=='resource.invoke'))
+    def test_ordered_authorized_walk_b_blocked_then_c_ready_and_unknown_stops(self):
+        for permission in (False,None):
+            ext=Ext();ext.rows.pop();ext.registry['accounts'].append({'id':'c','label':'C','runtime':'codex','kind':'subscription','login_ref':{'sessionId':'saved-c','accountId':'workspace-c'}})
+            ext.quota['b']=permission;c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p);ext.claim['authorized_targets']=['b','c']
+            result=c.cutover(args)
+            self.assertEqual(result['attempted_targets'],['b','c'] if permission is False else ['b'])
+            self.assertEqual(result['account'],'c' if permission is False else 'b')
+            self.assertEqual(result['disposition'],'ready' if permission is False else 'offer')
+            switches=[a['args']['args']['account']['id'] for m,a in ext.calls if m=='resource.invoke' and a['args']['name']=='_account.switch']
+            self.assertEqual(switches,['b','b','c','c'] if permission is False else ['b','b'])
+    def walk(self,quota=False):
+        ext=Ext();ext.rows.pop();ext.registry['accounts'].append({'id':'c','label':'C','runtime':'codex','kind':'subscription','login_ref':{'sessionId':'saved-c','accountId':'workspace-c'}})
+        ext.quota['b']=quota;c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p);ext.claim['authorized_targets']=['b','c']
+        return ext,c,args
+    def test_reserved_prefix_bound_never_selects_unreserved_c(self):
+        ext,c,args=self.walk();ext.claim['authorized_targets']=['b']
+        result=c.cutover(args)
+        self.assertEqual(result['disposition'],'all_blocked');self.assertEqual(result['attempted_targets'],['b'])
+        self.assertFalse(any(m=='resource.invoke' and a['args']['name']=='_account.switch' and a['args']['args']['account']['id']=='c' for m,a in ext.calls))
+    def test_malformed_or_source_alias_ordered_plans_have_no_native_effect(self):
+        for ids in (None,[],['b','b'],['c','b'],['b','a'],['b','missing'],['b','c','a','missing']):
+            ext,c,args=self.walk();ext.claim['authorized_targets']=ids
+            with self.assertRaises(VqroError):c.cutover(args)
+            self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
+    def test_failed_quota_read_restores_known_b_and_offers_without_c(self):
+        ext,c,args=self.walk();ext.fail='_account.inspect';result=c.cutover(args)
+        self.assertEqual(result['disposition'],'offer');self.assertEqual(result['attempted_targets'],['b'])
+        self.assertFalse(result['continuation_allowed']);self.assertFalse(result['fenced'])
+        self.assertEqual(sum(m=='resource.invoke' and a['args']['name']=='_account.release' for m,a in ext.calls),2)
+    def test_all_ordered_targets_blocked_restore_last_c_without_model(self):
+        ext,c,args=self.walk();ext.quota['c']=False;result=c.cutover(args)
+        self.assertEqual(result['disposition'],'all_blocked');self.assertEqual(result['account'],'c')
+        self.assertEqual([r['account'] for r in result['inspected_blocked']],['b','c'])
+        self.assertEqual(result['attempted_targets'],['b','c']);self.assertFalse(result['continuation_allowed']);self.assertFalse(result['fenced'])
+    def test_quota_contradiction_is_offer_not_another_switch_or_auto_turn(self):
+        ext,c,args=self.walk()
+        def hook(op,args):
+            if op=='_account.inspect':ext.quota['b']=args['resource']=='y'
+        ext.hook=hook;result=c.cutover(args)
+        self.assertEqual(result['disposition'],'offer');self.assertEqual(result['attempted_targets'],['b'])
+        self.assertEqual([r['account'] for r in result['inspected_blocked']],['b'])
+        self.assertFalse(result['continuation_allowed'])
+    def test_revoked_authority_or_registry_during_inspection_stops_walk_and_restores(self):
+        for changed in ('policy','registry','claim'):
+            ext,c,args=self.walk()
+            def hook(op,_):
+                if op=='_account.inspect':
+                    if changed=='policy':ext.consent={'setups':{}}
+                    elif changed=='registry':ext.registry_revision=4
+                    else:ext.claim['authorized_targets']=['b']
+            ext.hook=hook;result=c.cutover(args)
+            self.assertTrue(result['restored_only']);self.assertFalse(result['continuation_allowed'])
+            self.assertEqual(result['attempted_targets'],['b']);self.assertFalse(result['fenced'])
+            self.assertEqual([r['account'] for r in result['inspected_blocked']],['b'])
+    def test_rejected_next_target_restores_known_lifecycle_and_does_not_charge_c(self):
+        ext,c,args=self.walk()
+        def hook(op,args):
+            if op=='_account.switch' and args['args']['args']['account']['id']=='c':ext.reject=op
+        ext.hook=hook;result=c.cutover(args)
+        self.assertEqual(result['attempted_targets'],['b']);self.assertEqual(result['account'],'b')
+        self.assertTrue(result['restored_only']);self.assertFalse(result['continuation_allowed']);self.assertFalse(result['fenced'])
+    def test_uncertain_next_credential_effect_keeps_shared_fences_and_never_replays(self):
+        ext,c,args=self.walk()
+        def hook(op,args):
+            if op=='_account.switch' and args['args']['args']['account']['id']=='c':ext.fail=op
+        ext.hook=hook
+        with self.assertRaises(VqroError):c.cutover(args)
+        names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
+        self.assertEqual(names.count('_account.switch'),3);self.assertNotIn('_account.resume',names);self.assertNotIn('_account.release',names)
+    def test_common_live_budget_and_block_projection_stop_next_switch(self):
+        for changed in ('budget','blocked'):
+            ext,c,args=self.walk()
+            def hook(op,_):
+                if op=='_account.inspect':
+                    if changed=='budget':ext.max_switches=1
+                    else:ext.known_blocked=['c']
+            ext.hook=hook;result=c.cutover(args)
+            self.assertEqual(result['attempted_targets'],['b']);self.assertTrue(result['restored_only'])
+            self.assertFalse(result['continuation_allowed']);self.assertFalse(result['fenced'])
+    def test_unrelated_live_block_projection_does_not_mutate_frozen_plan(self):
+        ext,c,args=self.walk(True)
+        ext.hook=lambda op,_:setattr(ext,'known_blocked',['unrelated']) if op=='_account.switch' else None
+        result=c.cutover(args)
+        self.assertEqual(result['disposition'],'ready');self.assertTrue(result['continuation_allowed'])
+    def test_common_expired_block_allows_target_despite_old_raw_blocked_fact(self):
+        ext=Ext();ext.rows[-1]['data']['agent']['availability']={'state':'blocked','reason':'quota'}
+        ext.known_blocked=[];c=Cutover(ext);p=c.prepare(self.args());result=c.cutover(self.claimed(ext,p))
+        self.assertEqual(result['disposition'],'ready');self.assertEqual(result['attempted_targets'],['b'])
+    def test_malformed_or_exhausted_common_live_permissions_have_no_native_effect(self):
+        for maximum,blocked in ((True,[]),(None,[]),(-1,[]),(4,[]),(0,[]),(3,None),(3,[''])):
+            ext,c,args=self.walk();ext.max_switches=maximum;ext.known_blocked=blocked
+            with self.assertRaises(VqroError):c.cutover(args)
+            self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
+    def test_false_release_ack_never_reports_unfenced_and_processes_known_peer(self):
+        ext,c,args=self.walk(True)
+        def hook(op,args):
+            if op=='_account.release':ext.released=args['resource']=='y'
+        ext.hook=hook
+        with self.assertRaises(VqroError):c.cutover(args)
+        self.assertEqual([a['resource'] for m,a in ext.calls if m=='resource.invoke' and a['args']['name']=='_account.release'],['x','y'])
+    def test_manual_offer_uses_owner_singleton_not_auto_budget_or_block_grant(self):
+        ext=Ext();ext.max_switches=0;ext.known_blocked=['b'];ext.policy['blocked']='offer_restart'
+        c=Cutover(ext);p=c.prepare(dict(self.args(),automatic=False));result=c.cutover(self.claimed(ext,p,automatic=False))
+        self.assertEqual(result['attempted_targets'],['b']);self.assertEqual(result['account'],'b')
+        ext,c,_=self.walk();ext.policy['blocked']='offer_restart';p=c.prepare(dict(self.args(),automatic=False));args=self.claimed(ext,p,automatic=False);ext.claim['authorized_targets']=['b','c']
+        with self.assertRaises(VqroError):c.cutover(args)
+        self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
     def test_prepare_is_readonly_and_native_episode_not_commonhash(self):
         ext=Ext();p=Cutover(ext).prepare(self.args())
         self.assertEqual(p['native_episode'],'native-turn');self.assertEqual(len(p['affected']),2)
@@ -116,7 +238,7 @@ class Tests(unittest.TestCase):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());result=c.cutover(self.claimed(ext,p))
         self.assertEqual(result['outcome'],'observed');self.assertEqual(len(result['affected']),2)
         names=[a['args']['name'] for m,a in ext.calls if m=='resource.invoke']
-        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.switch']*2+['_account.resume']*2+['_account.release']*2)
+        self.assertEqual(names,['_account.fence']*2+['_account.list']*2+['_account.switch']*2+['_account.inspect']*2+['_account.resume']*2+['_account.release']*2)
         self.assertFalse(any(a.get('op')=='agent.send' for m,a in ext.calls if m=='resource.invoke'))
     def test_changed_group_or_claim_refuses_before_effect(self):
         for field in ['membership_revision','account','native_episode','state']:
@@ -158,15 +280,17 @@ class Tests(unittest.TestCase):
             ext=Ext();account=ext.rows[-1]['data']['agent']['account']
             if mode=='hint':account.pop('native');account.pop('rev')
             else:account['native']['login_ref']['sessionId']='another-login'
-            with self.assertRaises(VqroError):Cutover(ext).prepare(self.args())
-            self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
-    def test_unknown_or_blocked_target_is_never_auto_switched(self):
-        for mode in ['unknown','blocked']:
-            ext=Ext()
-            if mode=='unknown':ext.rows.pop()
-            else:ext.rows[-1]['data']['agent']['availability']={'state':'blocked','reason':'quota'}
-            with self.assertRaises(VqroError):Cutover(ext).prepare(self.args())
-            self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
+            ext.quota['b']=None;c=Cutover(ext);p=c.prepare(self.args())
+            result=c.cutover(self.claimed(ext,p))
+            self.assertEqual(result['disposition'],'offer');self.assertFalse(result['continuation_allowed'])
+            self.assertEqual(sum(m=='resource.invoke' and a['args']['name']=='_account.inspect' for m,a in ext.calls),2)
+    def test_unknown_target_may_switch_but_current_blocked_target_is_rejected(self):
+        ext=Ext();ext.rows.pop();ext.quota['b']=None;c=Cutover(ext);p=c.prepare(self.args())
+        self.assertEqual(c.cutover(self.claimed(ext,p))['disposition'],'offer')
+        ext=Ext();ext.rows[-1]['data']['agent']['availability']={'state':'blocked','reason':'quota'};ext.known_blocked=['b']
+        c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p)
+        with self.assertRaises(VqroError):c.cutover(args)
+        self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
     def test_post_fence_target_change_aborts_only_local_fences_no_switch(self):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p)
         ext.hook=lambda op,_:setattr(ext,'registry_revision',4) if op=='_account.fence' else None
@@ -214,13 +338,18 @@ class Tests(unittest.TestCase):
     def test_incomplete_target_route_is_visible_but_cannot_be_selected(self):
         ext=Ext();ext.registry['accounts'][0]['host']='unpaired-host'
         with self.assertRaises(VqroError):Cutover(ext).prepare(self.args())
-    def test_alias_missing_capacity_poisoning_is_preserved_at_native_boundary(self):
+    def test_alias_missing_capacity_cannot_invent_positive_native_permission(self):
         ext=Ext();alias=copy.deepcopy(ext.registry['accounts'][0]);alias.update(id='b-alias',label='B alias')
         ext.registry['accounts'].append(alias)
         missing=copy.deepcopy(ext.rows[-1]);missing.update(id='alias-observer',incarnation='alias-inc')
         missing['data']['agent'].update(account={'id':'b-alias'},usage_limits=None)
-        ext.rows.append(missing)
-        with self.assertRaises(VqroError):Cutover(ext).prepare(self.args())
+        ext.rows.append(missing);ext.quota['b']=None
+        c=Cutover(ext);p=c.prepare(self.args());result=c.cutover(self.claimed(ext,p))
+        self.assertEqual(result['disposition'],'offer');self.assertFalse(result['continuation_allowed'])
+        ext=Ext();ext.registry['accounts'].append(alias);c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p)
+        ext.claim['authorized_targets']=['b','b-alias']
+        with self.assertRaises(VqroError):c.cutover(args)
+        self.assertFalse(any(m=='resource.invoke' for m,_ in ext.calls))
     def test_notify_policy_revocation_prevents_any_native_restart(self):
         ext=Ext();c=Cutover(ext);p=c.prepare(self.args());args=self.claimed(ext,p);ext.policy['blocked']='notify'
         with self.assertRaises(VqroError):c.cutover(args)

@@ -221,10 +221,20 @@ never clears it. AUTO and OFFER require a complete, epoch-matching, empty invent
 there is no ledger-loss override. Native all-host quiescence also checks it after fencing.
 
 A Codex host with an explicitly declared setup exposes native saved-login cutover through ordinary advertised
-`agent.command` names `_account.list`, `_account.fence`, `_account.status`, `_account.switch`, `_account.resume`,
+`agent.command` names `_account.list`, `_account.fence`, `_account.status`, `_account.switch`, `_account.inspect`, `_account.resume`,
 `_account.restore`, `_account.release`, and `_account.abort`. These native mechanism commands fence all endpoints of that app-server,
 confirm a selected saved login/workspace and resume the exact old thread IDs without `turn/start`. Unknown
-commands/sources/setup facts are not synthesized by other adapters. Cross-host membership, explicit shared-login
+commands/sources/setup facts are not synthesized by other adapters. The fence freezes one to three unique native
+references in the common-authorized order. Each selected target is inspected through native rate-limit reads under
+authentication and quota-revision fences. Only explicit false permission permits advancing to the next reference;
+positive percentages or elapsed reset times never authorize model input. Unknown/failed permission reads restore
+and release exact conversations on the independently confirmed current login, with zero automatic continuation.
+All blocked targets similarly restore/release and notify; only explicit true permission may produce `ready`.
+The callback reports the actual `attempted_targets` prefix, `inspected_blocked` observations, final account,
+`disposition: ready|offer|all_blocked`, exact resumed membership and `fenced:false` only after confirmed release.
+An unknown credential effect stays fenced and is never replayed. Common's live claim projection supplies
+`max_switches` and `known_blocked_targets`; raw persistent blocked facts do not override its reset/hour policy.
+Cross-host membership, explicit shared-login
 consent, protected policy claims and the one new labelled AUTO continuation are accounts-extension policy, not
 core transaction state or a bridge replay queue. Notify never switches; offer requires human click authority.
 A visible system notice says `continued on account B` only after confirmed native resume. Revoked consent stops

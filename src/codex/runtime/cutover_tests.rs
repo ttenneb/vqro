@@ -42,11 +42,14 @@ async fn fake(mode: &'static str) -> Fake {
         let (read, mut write) = tokio::io::split(server);
         let mut lines = BufReader::new(read).lines();
         let mut switched = mode == "already_active";
+        let mut switched_c = false;
         while let Ok(Some(line)) = lines.next_line().await {
             let request: Value = serde_json::from_str(&line).unwrap();
             let method = request["method"].as_str().unwrap();
             calls.lock().unwrap().push(method.to_owned());
-            let active = if switched || native_b.load(Ordering::Acquire) {
+            let active = if switched_c {
+                "saved-c"
+            } else if switched || native_b.load(Ordering::Acquire) {
                 "saved-b"
             } else {
                 "saved-a"
@@ -78,10 +81,17 @@ async fn fake(mode: &'static str) -> Fake {
                     snapshot
                 }
                 "accountSession/switch" => {
+                    let c =
+                        mode.starts_with("quota_") && request["params"]["sessionId"] == "saved-c";
                     assert_eq!(
                         request["params"],
-                        json!({"sessionId":"saved-b","accountId":"workspace-b","allowBrowserLogin":false})
+                        if c {
+                            json!({"sessionId":"saved-c","accountId":"workspace-c","allowBrowserLogin":false})
+                        } else {
+                            json!({"sessionId":"saved-b","accountId":"workspace-b","allowBrowserLogin":false})
+                        }
                     );
+                    switched_c = c;
                     switched = true;
                     write
                         .write_all(
@@ -106,7 +116,7 @@ async fn fake(mode: &'static str) -> Fake {
                     if mode == "browser" {
                         json!({"login_id":"sso","auth_url":"never-publish"})
                     } else {
-                        sessions("saved-b")
+                        sessions(if switched_c { "saved-c" } else { "saved-b" })
                     }
                 }
                 "turn/start" => {
@@ -117,7 +127,16 @@ async fn fake(mode: &'static str) -> Fake {
                     assert_eq!(mode, "admitted_unstarted");
                     json!({"turn":{"id":"not-yet-started","status":"inProgress"}})
                 }
-                "account/rateLimits/read" => json!({"ordinaryUsageAllowed":null}),
+                "account/rateLimits/read" => {
+                    if mode == "quota_fail" {
+                        write.write_all(format!("{}\n",json!({"id":request["id"],"error":{"code":-32601,"message":"quota read unavailable"}})).as_bytes()).await.unwrap();
+                        continue;
+                    }
+                    if mode == "quota_newer_false" || mode == "quota_newer_null" {
+                        write.write_all(format!("{}\n",json!({"method":"account/rateLimits/updated","params":{"ordinaryUsageAllowed":if mode=="quota_newer_false" {Some(false)}else{None},"accountId":"workspace-b"}})).as_bytes()).await.unwrap();
+                    }
+                    json!({"ordinaryUsageAllowed":if mode=="quota_walk" {Some(switched_c)}else if mode=="quota_wrong_scope" || mode.starts_with("quota_newer_") {Some(true)}else{None},"accountId":if mode=="quota_wrong_scope" {"workspace-a"}else if switched_c {"workspace-c"}else{"workspace-b"}})
+                }
                 "thread/resume" => {
                     assert_eq!(request["params"], json!({"threadId":"thread-a"}));
                     json!({"thread":{"id":if mode == "wrong_thread" {"other"} else {"thread-a"},"status":{"type":"idle"}}})
@@ -142,7 +161,8 @@ async fn fake(mode: &'static str) -> Fake {
     }
 }
 async fn command(f: &Fake, name: &str, extra: Value) -> Result<Outcome, ProviderError> {
-    let mut p = json!({"operation":"claimed-once","setup_id":"shared"});
+    let mut p =
+        json!({"operation":"claimed-once","setup_id":"shared","authorized_targets":[target()]});
     p.as_object_mut()
         .unwrap()
         .extend(extra.as_object().unwrap().clone());
@@ -428,6 +448,111 @@ async fn own_input_ack_after_auth_change_cannot_establish_b_quota_from_a() {
     );
 }
 
+fn target_c() -> Value {
+    json!({"login_ref":{"sessionId":"saved-c","accountId":"workspace-c"},"account":{"id":"c","label":"C","kind":"subscription"}})
+}
+
+#[tokio::test]
+async fn quota_walk_requires_blocked_inspection_and_exact_authorized_prefix() {
+    for mode in [
+        "quota_walk",
+        "quota_unknown",
+        "quota_fail",
+        "quota_wrong_scope",
+        "quota_newer_false",
+        "quota_newer_null",
+    ] {
+        let f = fake(mode).await;
+        command(&f,"_account.fence",json!({"members":[{"session":"thread-a","epoch":"epoch-a"}],"authorized_targets":[target(),target_c()]})).await.unwrap();
+        command(&f, "_account.switch", target()).await.unwrap();
+        assert!(matches!(
+            command(&f, "_account.switch", target_c()).await.unwrap(),
+            Outcome::Rejected { .. }
+        ));
+        let Outcome::Observed(Some(quota)) =
+            command(&f, "_account.inspect", json!({})).await.unwrap()
+        else {
+            panic!("quota read")
+        };
+        assert_eq!(
+            quota["ordinary_usage_allowed"],
+            if mode == "quota_walk" {
+                json!(false)
+            } else {
+                Value::Null
+            }
+        );
+        if mode == "quota_walk" {
+            assert!(matches!(
+                command(&f, "_account.switch", target()).await.unwrap(),
+                Outcome::Rejected { .. }
+            ));
+            command(&f, "_account.switch", target_c()).await.unwrap();
+            let Outcome::Observed(Some(quota)) =
+                command(&f, "_account.inspect", json!({})).await.unwrap()
+            else {
+                panic!("Cquota")
+            };
+            assert_eq!(quota["ordinary_usage_allowed"], true);
+        } else {
+            assert!(matches!(
+                command(&f, "_account.switch", target_c()).await.unwrap(),
+                Outcome::Rejected { .. }
+            ));
+        }
+        if mode == "quota_fail" || mode == "quota_walk" {
+            command(
+                &f,
+                "_account.restore",
+                json!({"accounts":[target(),target_c(),restore_accounts()["accounts"][1].clone()]}),
+            )
+            .await
+            .unwrap();
+        } else {
+            command(&f, "_account.resume", json!({})).await.unwrap();
+        }
+        command(&f, "_account.release", json!({})).await.unwrap();
+        let methods = f.methods.lock().unwrap();
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|m| m.as_str() == "accountSession/switch")
+                .count(),
+            if mode == "quota_walk" { 2 } else { 1 }
+        );
+        assert!(
+            !methods
+                .iter()
+                .any(|m| m == "turn/start" || m == "turn/steer")
+        );
+    }
+}
+
+#[tokio::test]
+async fn ordered_native_plan_rejects_duplicates_overflow_and_unreserved_first_target() {
+    let f = fake("quota_walk").await;
+    for plan in [
+        json!([]),
+        json!([target(), target()]),
+        json!([target(), target_c(), target(), target_c()]),
+    ] {
+        assert!(matches!(command(&f,"_account.fence",json!({"members":[{"session":"thread-a","epoch":"epoch-a"}],"authorized_targets":plan})).await.unwrap(),Outcome::Rejected {..}));
+    }
+    fence(&f).await;
+    assert!(matches!(
+        command(&f, "_account.switch", target_c()).await.unwrap(),
+        Outcome::Rejected { .. }
+    ));
+    assert!(
+        !f.methods
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m == "accountSession/switch")
+    );
+    command(&f, "_account.switch", target()).await.unwrap();
+}
+
 fn restore_accounts() -> Value {
     json!({"accounts":[target(),{"login_ref":{"sessionId":"saved-a","accountId":"workspace-a"},"account":{"id":"a","label":"A","kind":"subscription"}}]})
 }
@@ -670,7 +795,7 @@ async fn multi_slot_host_requires_every_thread_witness_and_fences_all_admissions
             )
             .unwrap();
     }
-    let call = |members: Value| json!({"v":0,"name":"_account.fence","args":{"operation":"group","setup_id":"shared","members":members}});
+    let call = |members: Value| json!({"v":0,"name":"_account.fence","args":{"operation":"group","setup_id":"shared","members":members,"authorized_targets":[target()]}});
     let deadline = Instant::now() + Duration::from_secs(1);
     let missing = runtime
         .invoke(

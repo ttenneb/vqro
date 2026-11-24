@@ -10,7 +10,7 @@ from vqro_ext import VqroError
 
 SETTINGS = 'doc/settings/codex-cutover'
 MAX_MEMBERS = 200
-HOST_COMMANDS = {'_account.fence','_account.status','_account.switch','_account.resume','_account.restore','_account.release','_account.abort','_account.list'}
+HOST_COMMANDS = {'_account.inspect','_account.fence','_account.status','_account.switch','_account.resume','_account.restore','_account.release','_account.abort','_account.list'}
 
 
 class _NativeRejected(VqroError):
@@ -127,9 +127,10 @@ class Cutover:
         target = next((r for r in target_rows if r['id'] == args.get('account')), None)
         if not target or target['runtime'] != 'codex' or target['kind'] != 'subscription' or not target.get('login_ref'):
             fail('target needs a native Codex saved-login/workspace reference', 'unsupported')
-        from accounts_policy import blocked, configured_id
-        eligible = eligible_alternatives(target_rows, configured_id(source),
-            {configured_id(r) for r in rows if blocked(r)}, allow_api_key=False)
+        from accounts_policy import configured_id
+        # Common's protected live projection owns reset/hour-bound block policy.
+        # Raw persistent availability cannot override its expiry decision here.
+        eligible = eligible_alternatives(target_rows, configured_id(source),set(),allow_api_key=False)
         if selection_problem(target) or target not in eligible:
             fail('target route is incomplete, blocked, duplicated or aliases the source account','stale')
         if args.get('automatic') is True:
@@ -141,13 +142,8 @@ class Cutover:
                     and (account.get('native') or {}).get('login_ref')==record['login_ref']
             if (a.get('account') or {}).get('kind') != 'subscription' or not verified(source):
                 fail('current native subscription binding is unverified; use notify/offer','unavailable')
-            from accounts_policy import capacities
-            identities = {r['id']:credential_identity(r) for r in target_rows}
-            observations = [dict(row,data=dict(row.get('data') or {},agent=dict(native(row),usage_limits=None)))
-                if configured_id(row) in registered and not verified(row) else row for row in rows]
-            headroom = capacities(observations, [target], credential_identities=identities).get(target['id'])
-            if headroom is None or headroom <= 0:
-                fail('target capacity is unknown, stale or blocked; use offer, no automatic switch','stale')
+            # Common authorizes UNKNOWN capacity too. Cached percentages are not a
+            # native permission grant; inspect the selected login before any continuation.
         consent = self._automatic_allowed(setup)
         affected = []
         for row in rows:
@@ -219,6 +215,20 @@ class Cutover:
         elif mode not in ('offer_restart','auto_restart'):
             fail('NOTIFY policy never authorizes a native restart','forbidden')
 
+    def _authorized_plan(self,claim):
+        targets,revision=snapshot(self.ext)
+        if revision!=claim.get('_account_revision'):fail('ordered target registry changed','stale')
+        ids=claim.get('authorized_targets')
+        if not isinstance(ids,list) or not 1<=len(ids)<=3 or any(not text(ident) for ident in ids) or len(set(ids))!=len(ids) or ids[0]!=claim.get('account'):
+            fail('protected ordered target plan is missing or malformed','forbidden')
+        if claim.get('automatic') is not True and len(ids)!=1:fail('manual owner authority permits only its singleton target','forbidden')
+        eligible=eligible_alternatives(targets,claim.get('source_account'),set(),allow_api_key=False)
+        by_id={r['id']:r for r in eligible if r['runtime']=='codex' and r['kind']=='subscription' and not selection_problem(r)}
+        if any(ident not in by_id for ident in ids):fail('ordered target aliases source or has no usable native route','stale')
+        plan=[by_id[ident] for ident in ids]
+        if len({credential_identity(r) for r in plan})!=len(plan):fail('ordered targets duplicate credential identity','stale')
+        return plan
+
     def _validate_claim(self, args, prepared, claim):
         from accounts_policy import episode, configured_id
         if not isinstance(claim,dict):fail('cutover claim is unavailable','forbidden')
@@ -236,11 +246,25 @@ class Cutover:
             fail('protected Codex claim or source membership changed; no native effect','stale')
         if type(claim.get('version')) is not int or claim['version']<1:fail('claim acknowledgement unavailable','forbidden')
         self._authorization(claim)
+        plan=self._authorized_plan(claim)
+        if not self._common_target_allowed(claim,0):fail('common target budget or known-blocked policy no longer permits first switch','stale')
+        return plan
 
     @staticmethod
     def _same_claim(old, current):
+        projected={'version','max_switches','known_blocked_targets'}
         return isinstance(current,dict) and type(current.get('version')) is int and current['version']>=old['version'] \
-            and {k:v for k,v in old.items() if k!='version'}=={k:v for k,v in current.items() if k!='version'}
+            and {k:v for k,v in old.items() if k not in projected}=={k:v for k,v in current.items() if k not in projected}
+
+    @staticmethod
+    def _common_view_valid(claim):
+        maximum=claim.get('max_switches');blocked=claim.get('known_blocked_targets')
+        return type(maximum) is int and 0<=maximum<=3 and isinstance(blocked,list) and len(blocked)<=256 and all(text(ident) for ident in blocked)
+
+    @staticmethod
+    def _common_target_allowed(claim,index):
+        if not Cutover._common_view_valid(claim):return False
+        return claim.get('automatic') is not True or (index<claim['max_switches'] and claim['authorized_targets'][index] not in claim['known_blocked_targets'])
 
     def _fence_hosts(self, rows, hosts, payload, prepared, args, claim):
         fenced, attempted = [], []
@@ -261,22 +285,26 @@ class Cutover:
                 fail('Codex source/target/claim changed after fencing; no switch','stale')
             self._validate_claim(args,prepared,current_claim)
             targets,_ = snapshot(self.ext)
-            target = next(r for r in targets if r['id']==args['account'])
+            plan = self._authorized_plan(claim)
             active = []
             # Prove the target exists on EVERY native host before changing ANY login.
             for row,state in fenced:
                 logins = self._invoke(row,'_account.list',payload).get('logins')
-                matches = [r for r in logins if isinstance(r,dict) and all(r.get(k)==v for k,v in target['login_ref'].items())] if isinstance(logins,list) else []
-                if len(matches)!=1 or type(matches[0].get('active')) is not bool:
-                    fail('target saved login/workspace is not uniquely available on every managed host','unavailable')
+                selected=[]
+                for target in plan:
+                    matches = [r for r in logins if isinstance(r,dict) and all(r.get(k)==v for k,v in target['login_ref'].items())] if isinstance(logins,list) else []
+                    if len(matches)!=1 or type(matches[0].get('active')) is not bool:
+                        fail('ordered target is not uniquely available on every managed host','unavailable')
+                    selected.append(matches[0])
                 original = [r for r in logins if isinstance(r,dict) and r.get('active') is True]
                 if len(original)!=1 or not all(text(original[0].get(k)) for k in ('sessionId','accountId')):
                     fail('original saved login is not uniquely evidenced; cannot restore safely','unavailable')
                 original_ref = {k:original[0][k] for k in ('sessionId','accountId')}
                 source = next((r for r in targets if r.get('login_ref')==original_ref and r.get('kind')=='subscription' and not selection_problem(r)),None)
-                state['_restore_accounts'] = [{'login_ref':target['login_ref'],'account':fact(target)},
-                    {'login_ref':original_ref,'account':fact(source) if source else None}]
-                active.append(matches[0]['active'])
+                state['_restore_accounts'] = [{'login_ref':target['login_ref'],'account':fact(target)} for target in plan]
+                if not any(candidate['login_ref']==original_ref for candidate in state['_restore_accounts']):
+                    state['_restore_accounts'].append({'login_ref':original_ref,'account':fact(source) if source else None})
+                active.append(selected[0]['active'])
             if args['automatic'] and all(active):
                 fail('target native account is already active everywhere; no automatic restart loop','stale')
             # Native listing may block; repeat target/consent/authority validation afterwards.
@@ -302,9 +330,7 @@ class Cutover:
         if not text(args.get('_claim')): fail('a durable common claim is required', 'forbidden')
         prepared = self._prepare(args)
         claim = self.ext.vqro.call('command.invoke', {'name': 'accounts.claim.read', 'args': {'claim': args['_claim']}})
-        self._validate_claim(args,prepared,claim)
-        targets, _ = snapshot(self.ext)
-        target = next(r for r in targets if r['id'] == args['account'])
+        plan = self._validate_claim(args,prepared,claim)
         rows = {r['id']: r for r in self.resources()}
         hosts = {}
         for member in prepared['affected']:
@@ -313,46 +339,97 @@ class Cutover:
             ident = host.get('id')
             if not text(ident): fail('native Codex host identity unavailable')
             hosts.setdefault((member['host'], ident), []).append(member)
-        payload = {'operation': args['_claim'], 'setup_id': prepared['setup_id']}
+        payload = {'operation': args['_claim'], 'setup_id': prepared['setup_id'],
+                   'authorized_targets':[{'login_ref':r['login_ref'],'account':fact(r)} for r in plan]}
         fenced = self._fence_hosts(rows, hosts, payload, prepared, args, claim)
-        switched, attempted = [], False
+        attempted, blocked = [], []
+        disposition = 'offer'
+        for target_index,target in enumerate(plan):
+            switched, dispatched = [], False
+            try:
+                for row, _ in fenced:
+                    issue = self._walk_issue(args,claim,plan,target_index)
+                    if issue:
+                        if attempted:return self._walk_result(self._restore_revoked(fenced,hosts,payload,prepared,issue),attempted,blocked,'offer')
+                        fail('protected switch authority changed before dispatch','stale')
+                    if not dispatched:attempted.append(target['id'])
+                    dispatched = True
+                    result = self._invoke(row, '_account.switch', dict(payload, login_ref=target['login_ref'], account=fact(target)))
+                    if result.get('account_confirmed') is not True:fail('native account readback unconfirmed','indeterminate')
+                    switched.append(row)
+            except Exception as error:
+                if isinstance(error,_NativeRejected):
+                    if dispatched and not switched:attempted.pop()  # Explicit no-effect target, not a charged switch.
+                    if attempted:return self._walk_result(self._restore_revoked(fenced,hosts,payload,prepared,'unconfirmed'),attempted,blocked,'offer')
+                if not attempted or (not switched and not dispatched):
+                    for row,_ in fenced:
+                        try:self._invoke(row,'_account.abort',payload)
+                        except Exception:pass
+                # An uncertain credential effect can still change the shared login:
+                # keep every fence, never guess a prefix or resume/replay it.
+                raise
+            permissions = []
+            for row,_ in fenced:
+                issue = self._walk_issue(args,claim,plan)
+                if issue:return self._walk_result(self._restore_revoked(fenced,hosts,payload,prepared,issue),attempted,blocked,'offer')
+                try:quota=self._invoke(row,'_account.inspect',payload)
+                except VqroError:quota={}  # Read-only uncertainty: resume independently verified B, zero model input.
+                value=quota.get('ordinary_usage_allowed')
+                valid=quota.get('source')=='codex.account/rateLimits' and type(quota.get('observed_at_ms')) is int and quota['observed_at_ms']>0
+                permissions.append(value if valid and type(value) is bool else None)
+                if valid and value is False:
+                    observed={'account':target['id'],'observed_at_ms':quota['observed_at_ms'],
+                              'reset_at_ms':None,'source':'codex.account/rateLimits'}
+                    if blocked and blocked[-1]['account']==target['id']:
+                        blocked[-1]['observed_at_ms']=max(blocked[-1]['observed_at_ms'],observed['observed_at_ms'])
+                    else:blocked.append(observed)
+            if all(value is False for value in permissions):
+                disposition='all_blocked'
+                continue  # Native phases independently require this false before next target.
+            disposition='ready' if all(value is True for value in permissions) else 'offer'
+            break
+        final_index=len(attempted)-1 if disposition=='ready' else None
+        issue = self._walk_issue(args,claim,plan,final_index)
+        if issue:return self._walk_result(self._restore_revoked(fenced,hosts,payload,prepared,issue),attempted,blocked,'offer')
+        issue = self._resume_and_release(fenced,payload,claim)
+        expected = {m['resource']:target['id'] for m in prepared['affected']}
+        result = self._observed(prepared,expected,bool(issue))
+        if not issue and self._walk_issue(args,claim,plan,final_index):result.update(restored_only=True,continuation_allowed=False)
+        return self._walk_result(result,attempted,blocked,disposition)
+
+    def _walk_issue(self,args,claim,plan,target_index=None):
+        issue=self._authority_issue(claim)
+        if issue:return issue
         try:
-            for row, _ in fenced:
-                issue = self._authority_issue(claim)
-                if issue:
-                    if switched:return self._restore_revoked(fenced,hosts,payload,prepared,issue)
-                    self._authorization(claim)  # No credential effect: the outer path aborts local fences.
-                attempted = True
-                result = self._invoke(row, '_account.switch', dict(payload, login_ref=target['login_ref'], account=fact(target)))
-                if result.get('account_confirmed') is not True: fail('native account readback unconfirmed', 'indeterminate')
-                switched.append(row)
-        except Exception as error:
-            if not switched and (not attempted or isinstance(error,_NativeRejected)):
-                for row,_ in fenced:
-                    try:self._invoke(row,'_account.abort',payload)
-                    except Exception:pass
-            raise
-        issue = self._authority_issue(claim)
-        if issue:return self._restore_revoked(fenced,hosts,payload,prepared,issue)
-        resumed, failed = [], False
+            current=self.ext.vqro.call('command.invoke',{'name':'accounts.claim.read','args':{'claim':args['_claim']}})
+            if not self._same_claim(claim,current) or not self._common_view_valid(current) or self._authorized_plan(current)!=plan:return 'unconfirmed'
+            if target_index is not None and not self._common_target_allowed(current,target_index):return 'disabled'
+        except Exception:return 'unconfirmed'
+        return None
+
+    @staticmethod
+    def _walk_result(result,attempted,blocked,disposition):
+        result.update(attempted_targets=list(attempted),inspected_blocked=blocked,disposition=disposition,fenced=False,
+                      continuation_allowed=disposition=='ready' and result.get('restored_only') is not True)
+        return result
+
+    def _resume_and_release(self,fenced,payload,claim):
+        resumed, failed, issue = [], False, None
         for row, _ in fenced:
             try:
                 result = self._invoke(row, '_account.resume', payload)
                 if result.get('resumed') is not True:fail('same-thread native resume unconfirmed','indeterminate')
                 resumed.append(row)
-            except Exception:failed = True  # Never replay this host; restore the other known peers.
+            except Exception:failed = True
             issue = issue or self._authority_issue(claim)
         for row in resumed:
             issue = issue or self._authority_issue(claim)
-            try:self._invoke(row, '_account.release', dict(payload,revoked=bool(issue),revocation_kind=issue))
-            except Exception:failed = True  # A failed release cannot strand another confirmed peer.
+            try:
+                released=self._invoke(row, '_account.release', dict(payload,revoked=bool(issue),revocation_kind=issue))
+                if released.get('released') is not True:fail('native fence release unconfirmed','indeterminate')
+            except Exception:failed = True
         if failed:fail('native lifecycle partly unconfirmed; other confirmed peers processed, no continuation','indeterminate')
-        issue = issue or self._authority_issue(claim)
-        expected = {m['resource']:target['id'] for m in prepared['affected']}
-        result = self._observed(prepared,expected,bool(issue))
-        # A final read also covers revocation during read-only publication settling.
-        if not issue and self._authority_issue(claim):result.update(restored_only=True,continuation_allowed=False)
-        return result
+        return issue or self._authority_issue(claim)
 
     def _authority_issue(self,claim):
         try:self._authorization(claim)
@@ -374,7 +451,9 @@ class Cutover:
                 restored.append(row)
             except Exception:failed = True
         for row in restored:
-            try:self._invoke(row,'_account.release',dict(payload,revoked=True,revocation_kind=issue))
+            try:
+                released=self._invoke(row,'_account.release',dict(payload,revoked=True,revocation_kind=issue))
+                if released.get('released') is not True:fail('native restore fence release unconfirmed','indeterminate')
             except Exception:failed = True
         if failed:fail('switch authorization changed; lifecycle restoration partly unconfirmed, no continuation','indeterminate')
         return self._observed(prepared,expected,True)

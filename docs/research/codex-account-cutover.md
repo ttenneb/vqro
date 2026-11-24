@@ -10,7 +10,9 @@ The accounts extension owns notify/offer/auto policy, one protected acknowledged
 and exactly one protected NEW continuation-turn intent per affected resumed conversation. Codex never claims or
 sends the continuation independently. NOTIFY only tells the human. OFFER requires an explicit human-principal
 click, recorded by the common claim owner. AUTO uses common native-episode and rolling-hour caps (default3),
-fallback to OFFER and conservative known-positive target capacity. No earlier input or queue is appended.
+and may select UNKNOWN target capacity, never common-known blocked capacity. Common freezes a unique ordered
+`authorized_targets` plan bounded by every affected conversation's remaining hourly budget; every dispatched
+target consumes a slot for every affected conversation. No earlier input or queue is appended.
 
 `accounts.prepare.codex` is read-only: `{resource,episode,account,_account_revision,automatic}`. Its input episode
 is the common hash. It returns `setup_id`, `membership_revision`, `automatic_allowed`, `native_episode` and exact
@@ -23,6 +25,14 @@ preparation without claiming or switching; the common worker can wait read-only.
 It validates `accounts.claim.read` and all protected source/target/setup/membership witnesses, fences every managed
 native host, waits for quiescence and revalidates before any saved-login effect. Common policy alone grants
 restart authority; callbacks do not interpret a configured label as native account proof.
+The callback rereads common's `max_switches`/`known_blocked_targets` projection before each credential step,
+without confusing those live projections with the immutable plan. It never substitutes raw persistent blocked
+facts for common's reset/hour policy. Every target is selected/read back on every host, then inspected before
+any continuation. All-host positive native permission yields `ready`; all-host false may walk to the next frozen
+target. Unknown, failed or contradictory permission yields `offer`, never another switch. Exhausted all-false
+plans yield `all_blocked`. All confirmed nonready outcomes resume/release the exact threads on the last selected
+login with zero automatic model input. Common alone offers one SAME-claim human continuation or notifies.
+Actual dispatched prefixes and negative inspection observations are returned for common's budget/block ledger.
 
 ## Setup consent and external clients
 
@@ -54,6 +64,14 @@ read-only `_account.list` and `_account.bind`; setup-enabled endpoints add the f
 - `_account.list`: read-only `accountSession/list`, projecting bounded opaque `sessionId`/workspace `accountId`
   and active flags only. No email, user ID, image, token, auth URL or unfiltered native response is published.
 - `_account.fence`: exact all-slot session/epoch witnesses plus operation/setup ID; acquires ALL admission guards.
+  It freezes `authorized_targets`, one to three unique native login/workspace references in order.
+- `_account.inspect`: after a confirmed selection, read native `account/rateLimits/read` between stable active-login
+  readbacks. Only explicit `ordinaryUsageAllowed` classifies permission; percentages/reset timestamps do not.
+  Wrong-account scope or unavailable permission is unknown. A failed quota RPC can still return unknown after
+  independently confirming the selected login. No causal reset is invented (`reset_at_ms:null`).
+  Only confirmed false opens the next frozen target slot; true/unknown cannot advance. Every credential phase
+  is consumed before dispatch. Read-only inspection uncertainty permits independently verified lifecycle cleanup,
+  never credential replay. Source plus up to three target refs may authorize lifecycle-only restoration.
 - `_account.status`: read-only quiescence evidence. Native terminal events, not elapsed time, end a running turn.
 - `_account.switch`: typed saved-login reference, configured account metadata; consumes phase BEFORE native effect,
   validates membership, calls `accountSession/switch` with `allowBrowserLogin:false`, then confirms active saved

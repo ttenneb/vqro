@@ -8,7 +8,8 @@ use tokio::sync::OwnedMutexGuard;
 mod tests;
 
 pub(super) const METADATA_COMMANDS: [&str; 2] = ["_account.list", "_account.bind"];
-pub(super) const COMMANDS: [&str; 9] = [
+pub(super) const COMMANDS: [&str; 10] = [
+    "_account.inspect",
     "_account.bind",
     "_account.fence",
     "_account.status",
@@ -29,6 +30,8 @@ pub(super) struct Barrier {
     auth_revision: Option<u64>,
     source_auth_revision: u64,
     login_ref: Option<(String, String)>,
+    authorized_targets: Vec<(String, String)>,
+    attempted_targets: usize,
 }
 
 fn bounded(v: &Value, max: usize) -> Option<&str> {
@@ -211,7 +214,11 @@ impl Runtime {
     fn quiescent(&self) -> bool {
         self.slots.iter().all(|slot| {
             let e = slot.endpoint.lock().unwrap();
-            e.lifecycle == "live" && e.state == "idle" && e.run.is_none() && e.pending.is_empty() && e.own_inputs_quiescent()
+            e.lifecycle == "live"
+                && e.state == "idle"
+                && e.run.is_none()
+                && e.pending.is_empty()
+                && e.own_inputs_quiescent()
         })
     }
 
@@ -312,6 +319,24 @@ impl Runtime {
                     "Codex host already fenced or intent consumed; never replay",
                 ));
             }
+            let plan = p["authorized_targets"]
+                .as_array()
+                .filter(|v| !v.is_empty() && v.len() <= 3)
+                .ok_or_else(|| Fault::invalid("bounded ordered native target plan required"))?;
+            let mut authorized_targets = Vec::new();
+            for target in plan {
+                let session = bounded(&target["login_ref"]["sessionId"], 256)
+                    .ok_or_else(|| Fault::invalid("plan login reference required"))?
+                    .to_owned();
+                let workspace = bounded(&target["login_ref"]["accountId"], 256)
+                    .ok_or_else(|| Fault::invalid("plan workspace reference required"))?
+                    .to_owned();
+                let key = (session, workspace);
+                if authorized_targets.contains(&key) {
+                    return Err(reject("duplicate native target identity"));
+                }
+                authorized_targets.push(key);
+            }
             let members = p["members"]
                 .as_array()
                 .ok_or_else(|| Fault::invalid("all host thread witnesses required"))?;
@@ -352,6 +377,8 @@ impl Runtime {
                 auth_revision: None,
                 source_auth_revision: self.auth_revision.load(Ordering::Acquire),
                 login_ref: None,
+                authorized_targets,
+                attempted_targets: 0,
             });
             return Ok(Outcome::Observed(Some(
                 json!({"operation":operation,"quiescent":self.quiescent()}),
@@ -363,7 +390,15 @@ impl Runtime {
                 .as_ref()
                 .filter(|b| b.operation == operation)
                 .ok_or_else(|| reject("Codex fence witness missing"))?;
-            (b.stage, b.threads.clone(), b.source_auth_revision)
+            (
+                b.stage,
+                b.threads.clone(),
+                if b.attempted_targets == 0 {
+                    b.source_auth_revision
+                } else {
+                    b.auth_revision.unwrap_or(b.source_auth_revision)
+                },
+            )
         };
         match name {
             "_account.status" => Ok(Outcome::Observed(Some(
@@ -386,7 +421,7 @@ impl Runtime {
             }
             "_account.switch" => {
                 self.sync_account_notifications(deadline).await?;
-                if stage != "fenced" || !self.quiescent() {
+                if !matches!(stage, "fenced" | "blocked") || !self.quiescent() {
                     return Err(reject(
                         "Codex turns/requests are not quiescent or switch already attempted",
                     ));
@@ -401,8 +436,17 @@ impl Runtime {
                     let mut barrier = self.cutover.lock().unwrap();
                     let b = barrier
                         .as_mut()
-                        .filter(|b| b.operation == operation && b.stage == "fenced")
+                        .filter(|b| {
+                            b.operation == operation && matches!(b.stage, "fenced" | "blocked")
+                        })
                         .ok_or_else(|| reject("switch phase already consumed"))?;
+                    if b.authorized_targets.get(b.attempted_targets)
+                        != Some(&(session.to_owned(), workspace.to_owned()))
+                    {
+                        return Err(reject(
+                            "target is not the next authorized native prefix entry",
+                        ));
+                    }
                     b.stage = "checking";
                 }
                 let before = self
@@ -434,6 +478,7 @@ impl Runtime {
                         return Err(reject("native source changed during saved-login preflight"));
                     }
                     b.stage = "switching"; // Credential effect is consumed before dispatch.
+                    b.attempted_targets += 1;
                 }
                 // Never relabel B notifications as the previous configured account A.
                 *self.launcher_account.lock().unwrap() = None;
@@ -475,16 +520,75 @@ impl Runtime {
                     json!({"operation":operation,"account_confirmed":true}),
                 )))
             }
+            "_account.inspect" => {
+                let (login, revision) = {
+                    let mut barrier = self.cutover.lock().unwrap();
+                    let b = barrier
+                        .as_mut()
+                        .filter(|b| b.operation == operation && b.stage == "switched")
+                        .ok_or_else(|| reject("quota inspection phase missing or consumed"))?;
+                    b.stage = "inspecting";
+                    (
+                        b.login_ref.clone().ok_or_else(unknown)?,
+                        b.auth_revision.ok_or_else(unknown)?,
+                    )
+                };
+                let before = self.read_active_login(&login.0, &login.1, deadline).await?;
+                let quota_revision = self.account_revision.load(Ordering::Acquire);
+                let response = self
+                    .native
+                    .call_with_timeout(
+                        "account/rateLimits/read",
+                        json!({}),
+                        remaining(deadline).min(Duration::from_secs(5)),
+                    )
+                    .await;
+                let after = self.read_active_login(&login.0, &login.1, deadline).await?;
+                let permission = response
+                    .as_ref()
+                    .ok()
+                    .filter(|v| {
+                        before == after
+                            && before == revision
+                            && self.account_revision.load(Ordering::Acquire) == quota_revision
+                            && (v["accountId"].is_null()
+                                || v["accountId"].as_str() == Some(login.1.as_str()))
+                    })
+                    .and_then(|v| v["ordinaryUsageAllowed"].as_bool());
+                let observed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| unknown())?
+                    .as_millis() as u64;
+                {
+                    let mut barrier = self.cutover.lock().unwrap();
+                    let b = barrier
+                        .as_mut()
+                        .filter(|b| b.operation == operation && b.stage == "inspecting")
+                        .ok_or_else(unknown)?;
+                    b.stage = if permission == Some(false) {
+                        "blocked"
+                    } else {
+                        "inspected"
+                    };
+                    b.auth_revision = Some(after);
+                }
+                Ok(Outcome::Observed(Some(
+                    json!({"ordinary_usage_allowed":permission,"observed_at_ms":observed,"reset_at_ms":null,"source":"codex.account/rateLimits"}),
+                )))
+            }
             "_account.resume" | "_account.restore" => {
                 if name == "_account.restore" {
                     // Lifecycle teardown only: never select or roll credentials back. Match the
                     // current native login against the pre-effect source or confirmed target.
-                    if !matches!(stage, "fenced" | "checking" | "switched") {
+                    if !matches!(
+                        stage,
+                        "fenced" | "checking" | "switched" | "blocked" | "inspected" | "inspecting"
+                    ) {
                         return Err(reject("restore cannot replay an uncertain switch/resume"));
                     }
                     let allowed = p["accounts"]
                         .as_array()
-                        .filter(|v| !v.is_empty() && v.len() <= 2)
+                        .filter(|v| !v.is_empty() && v.len() <= 4)
                         .ok_or_else(|| {
                             Fault::invalid("bounded source/target restore references required")
                         })?;
@@ -509,7 +613,15 @@ impl Runtime {
                         .as_mut()
                         .filter(|b| {
                             b.operation == operation
-                                && matches!(b.stage, "fenced" | "checking" | "switched")
+                                && matches!(
+                                    b.stage,
+                                    "fenced"
+                                        | "checking"
+                                        | "switched"
+                                        | "blocked"
+                                        | "inspected"
+                                        | "inspecting"
+                                )
                         })
                         .ok_or_else(unknown)?
                         .stage = "restoring";
@@ -547,7 +659,7 @@ impl Runtime {
                         e.reset_availability();
                         self.emit(i, &e, vec![e.state_entity()], false);
                     }
-                } else if stage != "switched" {
+                } else if !matches!(stage, "switched" | "blocked" | "inspected" | "inspecting") {
                     return Err(reject(
                         "native account not confirmed or resume already attempted",
                     ));
@@ -558,7 +670,13 @@ impl Runtime {
                     let mut barrier = self.cutover.lock().unwrap();
                     let b = barrier
                         .as_mut()
-                        .filter(|b| b.stage == "switched")
+                        .filter(|b| {
+                            b.operation == operation
+                                && matches!(
+                                    b.stage,
+                                    "switched" | "blocked" | "inspected" | "inspecting"
+                                )
+                        })
                         .ok_or_else(|| reject("resume phase consumed"))?;
                     b.stage = "resuming";
                 }
