@@ -84,7 +84,7 @@ receipts retain `may_transform:"unknown"` rather than claiming no transformation
 
 This first vertical slice projects conversation/tools, bounded consent forms, interrupt, startup metadata and
 turn-scoped availability. It does not claim native-TUI parity, complete native queues, transcript history,
-child/task control, account restart or settings mutation. Native queue stays unknown; the separately named
+child/task control or settings mutation. Native queue stays unknown; the separately named
 vqro input ledger is not native evidence. The private execution-host restart helper enables guarded
 `claude.restart`: default refusal for unknown/running background, explicit background-loss override only,
 observed old exit before exact-session resume, and no adapter input replay. A missing helper never prevents

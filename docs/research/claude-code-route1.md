@@ -82,8 +82,10 @@ always-false choice belong to the calling policy, not this primitive.
 Execution host comes from the core-acknowledged provider registration's `host` (the same authenticated value
 as provider snapshot metadata), never native process `data.agent.host`. A private metadata-only preflight
 `check --handle REF --provider anthropic --kind claude_subscription` is bounded by both the effect deadline
-and35seconds, accepts only bounded `{status:ready}`, and never forwards helper stderr/secrets. Failure leaves
-A untouched. After revalidation, stop A; unknown exit refuses any new exec. Then invoke that same private
+and35seconds, accepts only bounded `{status:ready}`, and never forwards helper stderr/secrets. Failure dispatches
+no owned stop (A may change independently). After revalidation, stop A; only a successfully observed native
+wait status, including signal termination, permits replacement. Wait error/unknown refuses before generation
+reset or new exec and reports restart unknown. Then invoke that same private
 helper prefix with `launch --handle REF --provider anthropic --kind claude_subscription --` followed by
 original controlled native settings/cwd and literal `--resume EXACT_SESSION`. No fork, rescue flag, retry,
 second supervisor, fallback to A or input replay is introduced. The helper, not the bridge, retrieves/sets auth.
@@ -91,8 +93,12 @@ The newer helper/callback is supplied by the accounts stream; an older incompati
 
 Generation checks occur under the observation state lock; old observations/initializers/automatic-response
 failures cannot mutate the replacement epoch. The existing CLI supervisor explicitly waits through an owned
-restart instead of treating its expected old-child exit as final provider termination. Bridge lifetime ending
-cancels helper/init waits and forbids a later replacement. Actual initialization success, not PID allocation,
+restart instead of treating its expected old-child exit as final provider termination. Both stdin-thread and
+signal-task lifetime publication take the EXISTING native admission fence, also held from the last ending
+sample through replacement initialization. Observed lifetime ending forbids later dispatch. A dispatch winner
+may finish its bounded operation before lifetime is published; publication then stops the current owned
+process. This is ordered publication, not a promise of immediate cancellation on physical EOF/signal arrival.
+Actual initialization success, not PID allocation,
 is `started:true`; native same-session readback confirms resume, missing readback stays explicitly unconfirmed,
 and mismatch/refusal is not success. Requested session is never copied into observed session. Configured B
 publishes only known id/provider/kind with `vqro:restart` sources and omits unknown label; it is not authenticated

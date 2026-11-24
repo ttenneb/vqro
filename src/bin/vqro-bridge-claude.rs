@@ -33,15 +33,19 @@ fn fresh() -> Result<String> {
         .map_err(|_| anyhow::anyhow!("cannot allocate provider incarnation"))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
-fn lifetime() -> Result<watch::Receiver<bool>> {
+fn lifetime(shared: &std::sync::Arc<Shared>) -> Result<watch::Receiver<bool>> {
     let (sender, receiver) = watch::channel(false);
+    let weak = std::sync::Arc::downgrade(shared);
     if std::env::var("VQRO_EXTENSION_LIFETIME").as_deref() == Ok("stdin") {
         let sender = sender.clone();
+        let weak = weak.clone();
         std::thread::spawn(move || {
             use std::io::Read;
             let mut bytes = [0u8; 4096];
             while matches!(std::io::stdin().read(&mut bytes),Ok(n) if n>0) {}
-            sender.send_replace(true);
+            if let Some(shared) = weak.upgrade() {
+                shared.end_lifetime_blocking(&sender);
+            }
         });
     }
     #[cfg(unix)]
@@ -51,13 +55,17 @@ fn lifetime() -> Result<watch::Receiver<bool>> {
         let mut interrupt = signal(SignalKind::interrupt())?;
         tokio::spawn(async move {
             tokio::select! {_=term.recv()=>{},_=interrupt.recv()=>{}}
-            sender.send_replace(true);
+            if let Some(shared) = weak.upgrade() {
+                shared.end_lifetime(&sender).await;
+            }
         });
     }
     #[cfg(not(unix))]
     tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;
-        sender.send_replace(true);
+        if let Some(shared) = weak.upgrade() {
+            shared.end_lifetime(&sender).await;
+        }
     });
     Ok(receiver)
 }
@@ -102,8 +110,8 @@ async fn run(args: Args) -> Result<()> {
         .unwrap_or(std::env::current_dir()?)
         .canonicalize()?;
     let argv = launch::controlled(args.native).map_err(anyhow::Error::msg)?;
-    let mut life = lifetime()?;
     let shared = Shared::new(boot, name.clone(), instance.clone());
+    let mut life = lifetime(&shared)?;
     shared.set_lifetime(life.clone());
     let account = launcher_account::parse(std::env::var("VQRO_ACCOUNT").ok().as_deref())
         .map_err(anyhow::Error::msg)?;

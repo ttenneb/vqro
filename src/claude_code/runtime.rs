@@ -23,6 +23,8 @@ pub struct Shared {
     pub changed: Notify,
     outgoing: Notify,
     effects: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    spawn_window: Mutex<Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>>,
     generation: AtomicU64,
     restart_in_progress: std::sync::atomic::AtomicBool,
     viewers: AtomicUsize,
@@ -59,6 +61,9 @@ fn native_failure(error: NativeError) -> Result<Outcome, ProviderError> {
         rejected(error.kind, &error.message)
     }
 }
+fn observed_exit(exit: Option<crate::native_process::Exit>) -> bool {
+    exit.is_some_and(|exit| exit.observed)
+}
 fn uuid() -> Result<String, ProviderError> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes)
@@ -85,6 +90,8 @@ impl Shared {
             changed: Notify::new(),
             outgoing: Notify::new(),
             effects: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            spawn_window: Mutex::new(None),
             generation: AtomicU64::new(1),
             restart_in_progress: std::sync::atomic::AtomicBool::new(false),
             viewers: AtomicUsize::new(0),
@@ -119,6 +126,25 @@ impl Shared {
     pub fn set_lifetime(&self, lifetime: tokio::sync::watch::Receiver<bool>) {
         *self.lifetime.lock().unwrap() = Some(lifetime);
     }
+    fn publish_lifetime(&self, sender: &tokio::sync::watch::Sender<bool>) {
+        sender.send_replace(true);
+        if let Some(native) = self.process() {
+            native.stop();
+        }
+        self.wake();
+    }
+    /// OS stdin thread only. Publication is ordered by the EXISTING native admission fence.
+    /// If dispatch owns admission, it finishes bringing up the process first; publication then
+    /// stops that current owned process. An observed lifetime winner forbids subsequent dispatch.
+    pub fn end_lifetime_blocking(&self, sender: &tokio::sync::watch::Sender<bool>) {
+        let _gate = self.effects.blocking_lock();
+        self.publish_lifetime(sender);
+    }
+    /// Runtime signal task counterpart; never block a runtime worker with blocking_lock.
+    pub async fn end_lifetime(&self, sender: &tokio::sync::watch::Sender<bool>) {
+        let _gate = self.effects.lock().await;
+        self.publish_lifetime(sender);
+    }
     fn ending(&self) -> bool {
         self.lifetime
             .lock()
@@ -149,6 +175,28 @@ impl Shared {
         cwd: &std::path::Path,
         env: &HashMap<String, String>,
     ) -> Result<Process, NativeError> {
+        let _gate = self.effects.lock().await;
+        self.spawn_native_admitted(argv, cwd, env).await
+    }
+    // Restart's invoke holds the SAME admission guard until replacement initialization finishes.
+    async fn spawn_native_admitted(
+        self: &Arc<Self>,
+        argv: &[String],
+        cwd: &std::path::Path,
+        env: &HashMap<String, String>,
+    ) -> Result<Process, NativeError> {
+        if self.ending() {
+            return Err(NativeError {
+                kind: "unavailable",
+                message: "bridge lifetime ended before dispatch".into(),
+                may_have_acted: false,
+            });
+        }
+        #[cfg(test)]
+        if let Some((entered, release)) = self.spawn_window.lock().unwrap().take() {
+            entered.wait();
+            release.wait();
+        }
         if self.spawned.swap(true, Ordering::SeqCst) {
             return Err(NativeError {
                 kind: "conflict",
@@ -317,6 +365,12 @@ impl Shared {
             Ok(gate) => gate,
             Err(_) => return rejected("timeout", "deadline before native dispatch"),
         };
+        if self.ending() {
+            return rejected(
+                "unavailable",
+                "bridge lifetime ended before native admission",
+            );
+        }
         let Some(native) = self.process() else {
             return rejected("unavailable", "native process is not present");
         };
@@ -508,16 +562,17 @@ impl Shared {
             native.stop();
         }
         self.wake();
-        if tokio::time::timeout_at(
-            effect.deadline.min(Instant::now() + Duration::from_secs(5)),
-            native.exited(),
-        )
-        .await
-        .is_err()
-        {
+        if !observed_exit(
+            tokio::time::timeout_at(
+                effect.deadline.min(Instant::now() + Duration::from_secs(5)),
+                native.exited(),
+            )
+            .await
+            .ok(),
+        ) {
             return Err(ProviderError::new(
                 "backend",
-                "old owned exit unconfirmed; no new exec and no retry",
+                "restart unknown: old owned exit unconfirmed; no new exec and no retry",
             ));
         }
         if self.ending() {
@@ -557,7 +612,7 @@ impl Shared {
         }
         let launch = config.launch(&request);
         let next = self
-            .spawn_native(&launch, &config.cwd, &config.environment)
+            .spawn_native_admitted(&launch, &config.cwd, &config.environment)
             .await
             .map_err(|_| {
                 ProviderError::new(
