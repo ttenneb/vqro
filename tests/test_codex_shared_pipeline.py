@@ -10,6 +10,7 @@ from codex_cutover import Cutover, SETTINGS as CONSENT
 from test_codex_cutover import Ext as Native
 from test_account_capacity import NOW
 from vqro_ext import VqroError
+from public_provider_error import provider_error
 
 
 class Pipeline(JournalCore):
@@ -50,7 +51,8 @@ class Pipeline(JournalCore):
                 args=params['args'];native=self.resources[params['resource']]['data']['agent']
                 if (args['caps_rev']!=native['caps']['rev'] or args['epoch']!=native['epoch']
                         or args.get('guard',{}).get('session')!=native['session']['id']):
-                    return {'outcome':'rejected','error':{'kind':'stale','message':'capability revision changed'}}
+                    return provider_error({'outcome':'rejected','kind':'stale'},method,params,
+                                          message='capability revision changed')
                 self.sends.append(copy.deepcopy(params));return {'outcome':'accepted'}
         return super().call(method,params)
 

@@ -373,14 +373,17 @@ class Dispatch:
                     return self.cancel_new_turns(claim, result)
                 try:
                     sent = self.ext.vqro.call('resource.invoke', {'resource': item['resource'], 'op': 'agent.send', 'args': wire})
-                except Exception:
+                except Exception as error:
+                    # Public resource.invoke raises on provider rejection. Only
+                    # authoritative no-effect DATA at this Codex AUTO send site
+                    # permits owner recovery; a kind alone never clears unknown.
+                    data=error.data if isinstance(error,VqroError) else None
+                    if (target['runtime']=='codex' and isinstance(data,dict)
+                            and data.get('outcome')=='rejected' and data.get('kind')=='stale'
+                            and error.kind==data['kind']):
+                        return self.offer_admission(claim,target,restored,result,rejected=old)
                     self.journal.continuation_result(claim, old, observed=False)
                     raise
-                if (target['runtime']=='codex' and isinstance(sent,dict) and sent.get('outcome')=='rejected'
-                        and isinstance(sent.get('error'),dict) and sent['error'].get('kind')=='stale'):
-                    # Native contract: capability/epoch/session PRE-WRITE rejection.
-                    # Preserve the cancelled AUTO delivery and offer one owner turn.
-                    return self.offer_admission(claim,target,restored,result,rejected=old)
                 acknowledged = isinstance(sent, dict) and sent.get('outcome') in ('observed', 'accepted', 'dispatched')
                 self.journal.continuation_result(claim, old, observed=acknowledged)
                 if not acknowledged:

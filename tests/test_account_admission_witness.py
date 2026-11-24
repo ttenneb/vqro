@@ -2,6 +2,7 @@
 import unittest
 import test_account_cutover_dispatch as fixture
 from vqro_ext import VqroError
+from public_provider_error import provider_error
 
 
 class AdmissionWitness(unittest.TestCase):
@@ -51,7 +52,8 @@ class AdmissionWitness(unittest.TestCase):
             if method=='resource.invoke' and params.get('op')=='agent.send':
                 attempts.append(params)
                 if params['args']['caps_rev']!=self.core.resources['r1']['data']['agent']['caps']['rev']:
-                    return {'outcome':'rejected','error':{'kind':'stale','message':'capability revision changed'}}
+                    return provider_error({'outcome':'rejected','kind':'stale'},method,params,
+                                          message='capability revision changed')
             return call(method,params)
         self.dispatch.journal.claim_continuation=changed;self.core.call=native
         self.fixture.execute();token,record=next(iter(self.core.op_entry['value']['claims'].items()))
@@ -67,6 +69,37 @@ class AdmissionWitness(unittest.TestCase):
         self.assertEqual(child['rejected_delivery'],rejected);self.assertEqual(child['state'],'observed')
         with self.assertRaises(VqroError):self.dispatch.confirm_continuation(token)
         self.assertEqual(len(self.core.sends),1);self.assertEqual(self.core.effect_count,1)
+
+    def test_actual_sdk_preserves_authoritative_rejection_data(self):
+        with self.assertRaises(VqroError) as caught:
+            provider_error({'kind':'stale','outcome':'rejected'})
+        error=caught.exception
+        self.assertEqual(error.kind,'stale');self.assertEqual(error.data['outcome'],'rejected')
+        self.assertIs(error.data,error.wire_error['data'])
+
+    def test_kind_alone_or_uncertain_malformed_and_raw_replies_never_rearm(self):
+        variants=(None,{'kind':'stale','outcome':'indeterminate'},
+                  {'kind':'timeout','outcome':'rejected'},['rejected'],
+                  {'kind':'stale'},'raw-rejected','mismatched-kind')
+        for evidence in variants:
+            with self.subTest(evidence=evidence):
+                case=fixture.CutoverDispatch();case.setUp();self.addCleanup(case.doCleanups)
+                call=case.core.call
+                def rejected(method,params=None):
+                    if method=='resource.invoke' and params.get('op')=='agent.send':
+                        if evidence is None:raise VqroError('stale without outcome','stale')
+                        if evidence=='raw-rejected':return {'outcome':'rejected','error':{'kind':'stale'}}
+                        if evidence=='mismatched-kind':
+                            raise VqroError('contradictory error','unavailable',data={'outcome':'rejected','kind':'stale'})
+                        return provider_error(evidence,method,params)
+                    return call(method,params)
+                case.core.call=rejected
+                with self.assertRaises(VqroError):case.execute()
+                token,record=next(iter(case.core.op_entry['value']['claims'].items()))
+                self.assertEqual(record['continuations']['session-1']['state'],'unknown')
+                self.assertIn(token,case.core.op_entry['value']['groups'].values())
+                self.assertFalse(hasattr(case.owner,'offered'))
+                with self.assertRaises(VqroError):case.dispatch.confirm_continuation(token)
 
     def test_manual_original_offer_can_authorize_its_explicit_new_turn(self):
         self.fixture.nonready('offer');self.fixture.execute(automatic=False)
@@ -109,7 +142,8 @@ class AdmissionWitness(unittest.TestCase):
     def test_unknown_submission_never_becomes_an_owner_retry(self):
         call=self.core.call
         def unknown(method,params=None):
-            if method=='resource.invoke' and params.get('op')=='agent.send':return {'outcome':'unknown'}
+            if method=='resource.invoke' and params.get('op')=='agent.send':
+                return provider_error({'outcome':'indeterminate','kind':'unavailable'},method,params)
             return call(method,params)
         self.core.call=unknown
         with self.assertRaises(VqroError):self.fixture.execute()
