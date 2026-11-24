@@ -148,6 +148,24 @@ class CapacityPolicy(unittest.TestCase):
         self.assertEqual(len(self.core.resumes),1);self.assertEqual(self.core.sends,[])
         self.assertEqual(next(iter(self.core.op_entry['value']['claims'].values()))['state'],'unknown')
 
+    def test_latest_pi_destination_read_effort_change_refuses_before_submission(self):
+        self.blocked();self.settings(blocked='auto_restart')
+        original_invoke=self.core.invoke;original_call=self.core.call;destination=[];reads=[]
+        def invoke(name,args=None):
+            result=original_invoke(name,args)
+            if name=='accounts.cutover.pi':destination.append(result['affected'][0]['resource'])
+            return result
+        def call(method,params=None):
+            if method=='resource.list' and destination and params.get('id')==destination[0]:
+                reads.append(True)
+                if len(reads)==2:
+                    self.core.resources[destination[0]]['data']['agent']['session']['model']['effort']='medium'
+            return original_call(method,params)
+        self.core.invoke=invoke;self.core.call=call
+        self.accounts.handle_blocked('old')
+        self.assertEqual(len(reads),2);self.assertEqual(self.core.sends,[])
+        self.assertTrue(any('stale' in message for message,_ in self.core.notices))
+
     def test_fresh_launchers_refuse_resume_or_prompt_argv_before_spawn(self):
         from pi import Pi
         from codex import Codex

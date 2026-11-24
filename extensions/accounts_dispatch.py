@@ -302,6 +302,9 @@ class Dispatch:
                         or policy.configured_id(row) != target['id'] or row.get('available') is not True \
                         or native.get('lifecycle') != 'live' or (confirmed and (native.get('session') or {}).get('id') != old['session']):
                     raise VqroError('resumed destination changed; no continuation submitted', 'stale')
+                if target['runtime']=='pi' and not same_pi_model(original_model,
+                        (native.get('session') or {}).get('model'),target):
+                    raise VqroError('Pi model/alias/API/effort changed at continuation admission; nothing submitted','stale')
                 caps = native.get('caps') or {}; send = caps.get('agent.send') or {}; modes = send.get('modes') or {}
                 mode = 'start' if 'start' in modes else 'admit' if target['runtime'] in ('codex', 'claude') and 'admit' in modes else None
                 if not mode or type(caps.get('rev')) is not int:
